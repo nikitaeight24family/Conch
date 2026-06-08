@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="120" alt="Conch" />
+  <img src="assets/banner.png" alt="Conch" />
 </p>
 
 <h1 align="center">Conch</h1>
