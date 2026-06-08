@@ -1,4 +1,8 @@
-# Conch
+<p align="center">
+  <img src="assets/icon.png" width="120" alt="Conch" />
+</p>
+
+<h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
 [![release](https://img.shields.io/badge/release-v0.1.0--beta-orange.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
