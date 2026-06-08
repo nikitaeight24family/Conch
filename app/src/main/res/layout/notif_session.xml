@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Custom collapsed notification layout for SshAiService. Android's
+    default notification template hides action buttons (the "End"
+    chip we add via NotificationCompat.Action) until the user expands
+    the notification — on Samsung One UI especially, the user has to
+    swipe down a second time to reach the action. That's surprising
+    for a kill-switch. By laying out our own RemoteViews we get the
+    End button into the always-visible compact view, right next to
+    the title.
+
+    The whole thing is wrapped in DecoratedCustomViewStyle on the
+    notification builder, so Android renders this view inside its
+    normal notification chrome (small-icon + app name strip on top).
+    That means we only have to draw the row WE care about: title,
+    body, End button.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="6dp"
+    android:paddingBottom="6dp"
+    android:minHeight="48dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+        <TextView
+            android:id="@+id/notif_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@android:style/TextAppearance.Material.Notification.Title"
+            android:singleLine="true"
+            android:ellipsize="end" />
+        <TextView
+            android:id="@+id/notif_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@android:style/TextAppearance.Material.Notification"
+            android:singleLine="true"
+            android:ellipsize="end" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/notif_end"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:text="End"
+        android:textAllCaps="true"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="?android:attr/colorAccent"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:clickable="true"
+        android:focusable="true" />
+</LinearLayout>

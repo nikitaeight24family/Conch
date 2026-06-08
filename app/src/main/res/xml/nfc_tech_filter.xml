@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    NFC FIDO authenticators (YubiKey 5 NFC, Nitrokey 3 NFC, etc.) all expose
+    ISO-DEP (ISO 14443-4 over NFC-A) — the same tech profile contactless
+    bank cards use. We claim that single tech list so the OS routes a tap
+    to MainActivity for the security-key flow.
+-->
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <tech-list>
+        <tech>android.nfc.tech.IsoDep</tech>
+    </tech-list>
+</resources>

@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# conch-bridge — server-side CLI that lets a Claude / Codex / Gemini
+# session running on this server reach the user's phone (via the live
+# Conch SSH connection) and ask it to do things.
+#
+# Why this exists: the AI agent runs on this server, the data the agent
+# wants (logs, shell output, diagnostics) lives on the phone, and the
+# phone can't accept inbound connections (NAT, mobile networks). So we
+# can't push from server to phone. Instead, the Conch app polls a known
+# directory tree on this server every ~2s and fulfils any requests it
+# finds. This script is the producer side of that protocol.
+#
+# Installed ONLY when the user explicitly taps "Connect phone to server" in a
+# chat (never auto-pushed to every server). Lives at ~/.local/bin/conch-bridge.
+#
+# Usage:
+#   conch-bridge logs [--filter GLOB] [--level V|D|I|W|E] [--lines N] [--since ISO]
+#   conch-bridge logs --tier shizuku             # force system-wide via Shizuku
+#   conch-bridge logs --tier own                 # force own-uid only
+#   conch-bridge shell 'pm list packages'        # run a command at shell uid (Shizuku)
+#   conch-bridge shell 'dumpsys battery'         # adb-shell-equivalent; needs Shizuku granted
+#   conch-bridge ping                            # connectivity check
+#   conch-bridge screenshot                      # request a screen capture
+#
+# Environment:
+#   CONCH_BRIDGE_DIR        Default ~/.conch-bridge. Override for testing.
+#   CONCH_BRIDGE_TIMEOUT_S  Seconds to wait for phone to respond (default 30).
+
+set -euo pipefail
+
+# Bump whenever this script changes — the app compares installed-vs-bundled on
+# the server page and offers Update.
+CONCH_BRIDGE_VERSION="4"
+
+BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
+TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
+INBOX="$BRIDGE_DIR/inbox"
+OUTBOX="$BRIDGE_DIR/outbox"
+
+mkdir -p "$INBOX" "$OUTBOX"
+chmod 700 "$BRIDGE_DIR" "$INBOX" "$OUTBOX"
+
+usage() {
+  sed -n '2,30p' "$0"
+  exit 1
+}
+
+[ $# -ge 1 ] || usage
+CMD=$1; shift
+
+# `shell` takes the REST of the line as the command (it can contain
+# dashes, pipes, quotes), so capture it now and clear $@ so the flag
+# parser below is a no-op for this subcommand.
+SHELL_CMD=""
+if [ "$CMD" = "shell" ]; then
+  SHELL_CMD="$*"
+  set --
+fi
+
+# `version` is local — report the script version, no phone round-trip.
+if [ "$CMD" = "version" ]; then echo "$CONCH_BRIDGE_VERSION"; exit 0; fi
+
+# UUID. Falls back to /proc/sys/kernel/random/uuid; last resort is a
+# date+pid mash.
+gen_id() {
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen
+  elif [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid
+  else printf "%s-%s" "$(date +%s%N)" "$$"
+  fi
+}
+
+# Args parsing — flags can be `--key value` or `--key=value`.
+declare -A ARGS
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --*=*)
+      key=${1%%=*}; key=${key#--}
+      val=${1#*=}
+      ARGS[$key]=$val
+      shift
+      ;;
+    --*)
+      key=${1#--}
+      ARGS[$key]=${2:-}
+      shift 2
+      ;;
+    *)
+      echo "conch-bridge: unexpected argument: $1" >&2
+      usage
+      ;;
+  esac
+done
+
+ID=$(gen_id)
+REQ="$INBOX/$ID.req.json"
+
+build_req_logs() {
+  cat <<EOF
+{
+  "id": "$ID",
+  "command": "logs",
+  "args": {
+    "filter": $(jq_str "${ARGS[filter]:-}"),
+    "level": $(jq_str "${ARGS[level]:-Verbose}"),
+    "lines": ${ARGS[lines]:-2000},
+    "since": $(jq_str "${ARGS[since]:-}"),
+    "tier": $(jq_str "${ARGS[tier]:-}")
+  },
+  "ts": $(date +%s%3N)
+}
+EOF
+}
+
+build_req_ping() {
+  cat <<EOF
+{ "id": "$ID", "command": "ping", "ts": $(date +%s%3N) }
+EOF
+}
+
+build_req_screenshot() {
+  cat <<EOF
+{
+  "id": "$ID",
+  "command": "screenshot",
+  "args": { "region": $(jq_str "${ARGS[region]:-full}") },
+  "ts": $(date +%s%3N)
+}
+EOF
+}
+
+build_req_shell() {
+  cat <<EOF
+{ "id": "$ID", "command": "shell", "args": { "command": $(jq_str "$SHELL_CMD") }, "ts": $(date +%s%3N) }
+EOF
+}
+
+# Quote a string as a JSON value, or `null` if it's empty.
+jq_str() {
+  if [ -z "${1:-}" ]; then echo null; return; fi
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+case "$CMD" in
+  logs)        build_req_logs       > "$REQ" ;;
+  ping)        build_req_ping       > "$REQ" ;;
+  screenshot)  build_req_screenshot > "$REQ" ;;
+  shell)
+    [ -n "$SHELL_CMD" ] || { echo "conch-bridge: shell needs a command, e.g. conch-bridge shell 'pm list packages'" >&2; exit 1; }
+    build_req_shell > "$REQ" ;;
+  *)
+    echo "conch-bridge: unknown subcommand: $CMD" >&2
+    usage
+    ;;
+esac
+
+# SEC-4: append-only audit trail. The bridge is an UNAUTHENTICATED channel —
+# anything that can run this script as $USER can drive the phone — so record
+# every request (when / who / what) to a log. It's append-only: a caller can't
+# quietly rewrite history without leaving a gap in the id sequence, and the
+# phone-side "Run shell from server" kill-switch is the matching control. Strict
+# best-effort: wrapped so a failed log write never fails the request (set -e).
+{
+  AUDIT="$BRIDGE_DIR/audit.log"
+  detail="$SHELL_CMD"
+  if [ -z "$detail" ] && [ "${#ARGS[@]}" -gt 0 ]; then
+    for k in "${!ARGS[@]}"; do detail="$detail $k=${ARGS[$k]}"; done
+  fi
+  printf '%s\t%s\t%s@%s\t%s\t%s\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S%z)" "$ID" \
+    "$(id -un 2>/dev/null || echo '?')" "$(hostname 2>/dev/null || echo '?')" \
+    "$CMD" "$detail" >> "$AUDIT"
+  chmod 600 "$AUDIT"
+} 2>/dev/null || true
+
+# Wait for a NON-EMPTY response (`-s`, not `-f`): the app writes the reply via temp-file + atomic rename, and `-s` also guards against ever catching a 0-byte file mid-write (that race used to make json.load die "Expecting value: line 1 column 1"). Phone polls inbox every ~2s.
+RES="$OUTBOX/$ID.res.json"
+DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
+while [ ! -s "$RES" ]; do
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "conch-bridge: phone didn't respond in ${TIMEOUT_S}s." >&2
+    echo "  - Make sure Conch is open in the foreground on the phone and connected to this server." >&2
+    echo "  - The phone polls every 2s; if Conch is backgrounded, polling pauses." >&2
+    rm -f "$REQ"
+    exit 2
+  fi
+  sleep 0.5
+done
+
+# Parse the response. Print `text` (or `data_path` contents) on stdout;
+# print metadata on stderr in a single line for grepability.
+RES_JSON=$(cat "$RES")
+OK=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))')
+ERR=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")')
+META=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("metadata") or {}))')
+TEXT=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("text") or "")')
+DATA_PATH=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("data_path") or "")')
+
+if [ "$OK" != "True" ]; then
+  echo "conch-bridge: phone reported error: $ERR" >&2
+  rm -f "$RES"
+  exit 3
+fi
+
+if [ -n "$DATA_PATH" ]; then
+  # SECURITY: the response carries a data_path, but we NEVER trust it as a
+  # filesystem path. A compromised phone / MITM on the channel could return
+  # "data_path":"~/.ssh/id_ed25519" (or any deploy-readable file) and this
+  # branch would cat it to the agent AND delete it — a read+DELETE traversal
+  # sink. The data file for THIS request is ALWAYS exactly $OUTBOX/$ID.data
+  # (server-chosen id), so read+remove only that and ignore whatever path the
+  # phone sent. (data_path is treated purely as a "uses a data file" flag.)
+  DF="$OUTBOX/$ID.data"
+  if [ -f "$DF" ]; then
+    cat "$DF"
+    rm -f "$DF"
+  fi
+else
+  printf '%s' "$TEXT"
+fi
+[ -n "$META" ] && echo "[bridge] $META" >&2
+rm -f "$RES"

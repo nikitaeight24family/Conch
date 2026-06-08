@@ -1,0 +1,6 @@
+# Shell scripts and the bundled bridge CLI MUST stay LF-only. A CR in a
+# shebang (`#!/usr/bin/env bash\r`) breaks the script when it runs on the
+# user's server / phone. Windows checkouts must never CRLF-convert these,
+# or a build from a fresh clone would ship a broken conch-bridge.
+*.sh text eol=lf
+app/src/main/assets/conch-bridge text eol=lf

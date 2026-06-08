@@ -1,0 +1,584 @@
+package ai.eight24family.conch.agent.codex
+
+import ai.eight24family.conch.agent.Agent
+import ai.eight24family.conch.agent.AgentMessage
+import ai.eight24family.conch.agent.SlashCommand
+import ai.eight24family.conch.agent.shellEscape
+import ai.eight24family.conch.agent.spec.AgentCliSpec
+import ai.eight24family.conch.agent.spec.AgentExec
+import ai.eight24family.conch.agent.spec.AgentTopbarUi
+import ai.eight24family.conch.agent.spec.ExecInput
+import ai.eight24family.conch.agent.spec.ModelMenuItem
+import ai.eight24family.conch.agent.spec.ModelReasoningInfo
+import ai.eight24family.conch.agent.spec.PtyProbe
+import ai.eight24family.conch.agent.spec.ReasoningLevel
+import ai.eight24family.conch.agent.spec.TopbarModelState
+import ai.eight24family.conch.data.prefs.AgentApprovalMode
+import ai.eight24family.conch.util.SilentlyTry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+/**
+ * Per-CLI spec for **OpenAI Codex CLI** (`codex` binary, npm `@openai/codex`).
+ *
+ * Authority for every flag and event type: OpenAI Codex CLI reference,
+ * non-interactive docs, and discussion #3827, captured in
+ * `docs/cli-research-2026-05.md` §2.
+ *
+ * **Why this was rewritten.** The user reported "model list doesn't load,
+ * resume broken, new chat doesn't start". Root causes from the research:
+ *
+ *  1. The JSON event schema changed in 0.125+ from
+ *     `session_meta`/`response_item`/`event_msg` to
+ *     `thread.started`/`turn.*`/`item.*`. The old parser saw zero events it
+ *     understood → empty chat bubble → "didn't start".
+ *  2. The old build path used `--full-auto` for AUTO mode, which is
+ *     **deprecated** — replaced by `--ask-for-approval never --sandbox
+ *     workspace-write`.
+ *  3. The model discovery was a brittle regex hunt across `codex exec
+ *     --help` output (clap formatting varies); the right source is
+ *     `~/.codex/config.toml` `[profiles.<name>].model` + bundled defaults
+ *     `gpt-5.5 / 5.4 / 5.4-mini / 5.3-codex / 5.3-codex-spark / 5.2`.
+ *
+ * **Headless invocation shape** we build:
+ * ```
+ * printf '%s' "$PROMPT" | codex exec - [resume <SESSION_ID>]
+ *     --json --skip-git-repo-check
+ *     [--ask-for-approval untrusted|never --sandbox read-only|workspace-write
+ *      | --dangerously-bypass-approvals-and-sandbox]
+ *     [--model <name>] -C "$CWD"
+ *     2>&1
+ * ```
+ *
+ * The trailing `-` after `exec` is the documented stdin marker — without it
+ * Codex expects a positional prompt argument and the piped stdin is
+ * ignored. (This was the silent symptom of the user's broken chat: the
+ * pipe contained the prompt but Codex never read it.)
+ */
+object CodexSpec : AgentCliSpec {
+
+    override val agent = Agent.CODEX
+    override val displayName = "Codex CLI"
+    override val cliCommand = "codex"
+    override val npmPackage = "@openai/codex"
+    override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_codex
+
+    override val supportsSubagents = false
+    override val supportsCustomSlashCommands = false  // CLI has /status etc. but no user-authored
+    override val supportsResume = true
+    override val supportsPreSetSessionId = false  // CLI assigns the UUID; we read thread.started.thread_id
+
+    override val memoryFilename = "AGENTS.md"
+    override val memoryGlobalPath = "\$HOME/.codex/AGENTS.md"
+    override val memoryGlobalDisplay = "~/.codex/AGENTS.md"
+
+    override fun buildExecCommand(input: ExecInput): String {
+        val escapedText = shellEscape(input.text)
+        val modelArg = input.model?.takeIf { it.isNotBlank() }
+            ?.let { " --model ${shellEscape(it)}" } ?: ""
+        // Codex's reasoning effort lives behind the generic `-c key=value`
+        // config override. Quote the value so a future enum widening
+        // ("auto"/"adaptive") doesn't accidentally hit shell glob/IFS rules.
+        val reasoningArg = input.reasoningEffort?.takeIf { it.isNotBlank() }
+            ?.let { " -c model_reasoning_effort=${shellEscape(it)}" } ?: ""
+        // Codex's non-deprecated flag set (0.130+):
+        //   SAFE  → ask for everything outside read-only, only read-only sandbox.
+        //           In headless this still doesn't hang because read-only has
+        //           nothing TO approve (no writes possible).
+        //   AUTO  → never ask + workspace-write — model writes inside cwd
+        //           freely, can't touch anything outside. "Auto-edit" semantics.
+        //   YOLO  → bypass approvals AND sandbox (most permissive — Codex's
+        //           equivalent of Claude's --dangerously-skip-permissions).
+        //
+        // The old `--full-auto` flag is deprecated and replaced by this pair
+        // of approval/sandbox flags.
+        val approvalArg = when (input.approvalMode) {
+            AgentApprovalMode.SAFE -> " --ask-for-approval untrusted --sandbox read-only"
+            AgentApprovalMode.AUTO -> " --ask-for-approval never --sandbox workspace-write"
+            AgentApprovalMode.YOLO -> " --dangerously-bypass-approvals-and-sandbox"
+        }
+        // Resume is its own subcommand under `exec`, NOT a `--resume` flag.
+        // `codex exec --resume <id>` errors with "unexpected argument
+        // '--resume' found". Resume id is the `thread_id` from
+        // `thread.started` in the new schema (or `payload.id` from
+        // `session_meta` in the old schema) — the FILENAME UUID is
+        // decorative (openai/codex discussion #3827).
+        return if (input.resumeId != null) {
+            val rid = shellEscape(input.resumeId)
+            "printf '%s' $escapedText | codex exec resume $rid - " +
+                "--json --skip-git-repo-check$approvalArg$modelArg$reasoningArg 2>&1"
+        } else {
+            "printf '%s' $escapedText | codex exec - " +
+                "--json --skip-git-repo-check$approvalArg$modelArg$reasoningArg 2>&1"
+        }
+    }
+
+    override fun parseStreamLine(line: String): List<AgentMessage> =
+        CodexMessageParser.parse(line, turnTag = "")
+
+    override fun parseStreamLine(line: String, turnTag: String): List<AgentMessage> =
+        CodexMessageParser.parse(line, turnTag = turnTag)
+
+    /**
+     * Robust to both old and new schemas. Old wrote first line as
+     * `{"type":"session_meta","payload":{"id":"..."}}`; new writes
+     * `{"type":"thread.started","thread_id":"..."}`. We try both — and
+     * fall back to the UUID baked into the filename if neither is present.
+     */
+    override val listSessionsScript: String? = """
+find ~/.codex -type f -name '*.jsonl' 2>/dev/null | while IFS= read -r f; do
+  [ -f "${'$'}f" ] || continue
+  meta=${'$'}(head -n 1 "${'$'}f" 2>/dev/null)
+  id=${'$'}(printf '%s' "${'$'}meta" | grep -oE '"thread_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+  if [ -z "${'$'}id" ]; then
+    id=${'$'}(printf '%s' "${'$'}meta" | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+  fi
+  if [ -z "${'$'}id" ]; then
+    base="${'$'}{f##*/}"
+    base="${'$'}{base%.jsonl}"
+    id=${'$'}(printf '%s' "${'$'}base" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1)
+    [ -z "${'$'}id" ] && id="${'$'}base"
+  fi
+  mtime=${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || stat -f %m "${'$'}f" 2>/dev/null)
+  size=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
+  # Model extraction — first 20 lines of the session JSONL usually
+  # carry the model id in session_meta (old schema) or turn events
+  # (new schema). Excludes model_provider so 'openai' doesn't leak
+  # as a model name.
+  model=${'$'}(head -n 20 "${'$'}f" 2>/dev/null | grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+  # Reasoning effort extraction — codex writes `"reasoning_effort":"X"`
+  # in the `settings` object of every turn. First-match wins (same as
+  # model). Lets the topbar render the actual effort the chat was
+  # running on, instead of falling back to the user's config.toml
+  # global which may not match.
+  reasoning=${'$'}(head -n 20 "${'$'}f" 2>/dev/null | grep -oE '"reasoning_effort"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+  # Preview candidates: cover both schemas — old user_message events,
+  # old response_item.message role=user, new item.completed/agent_message.
+  # The spec.extractSessionPreview filters synthetic injections client-side.
+  candidates=${'$'}(grep -E '("role":"user")|("type":"item.completed")' "${'$'}f" 2>/dev/null | head -n 8 | tr '\t' ' ' | tr '\n' '\036')
+  # 7-col contract: id, mtime, path, model, reasoning, size, preview.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}id" "${'$'}mtime" "${'$'}f" "${'$'}model" "${'$'}reasoning" "${'$'}size" "${'$'}candidates"
+done | sort -t'	' -k2 -rn | head -500
+""".trimIndent()
+
+    override fun extractSessionPreview(rawPreview: String): String {
+        if (rawPreview.isBlank()) return ""
+        // ASCII Record Separator (U+001E) joins multiple candidate user
+        // lines emitted by listSessionsScript's `tr '\n' '\036'`.
+        val candidates = if (rawPreview.contains('\u001E')) rawPreview.split('\u001E') else listOf(rawPreview)
+        for (c in candidates) {
+            val msgs = CodexMessageParser.parse(c)
+            val userText = msgs.filterIsInstance<AgentMessage.UserText>()
+                .map { it.text }
+                .firstOrNull { it.isNotBlank() && !CodexMessageParser.isSyntheticUserText(it) }
+            if (!userText.isNullOrBlank()) {
+                return userText.replace(Regex("\\s+"), " ").trim().take(140)
+            }
+        }
+        return ""
+    }
+
+    override val statusProbeLines: String = """
+echo "codex_inst=${'$'}(command -v codex >/dev/null 2>&1 && echo y || echo n)"
+echo "codex_ver=${'$'}(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+echo "codex_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @openai/codex version 2>/dev/null | tr -d '\r\n ' || echo '')"
+CM=""
+# Authoritative: codex's OWN verdict. `codex login status` prints "Logged in
+# using ChatGPT" (OAuth) / "Logged in using an API key" / "Not logged in"
+# (exit 1). The CLI knows its real auth shape better than grepping auth.json,
+# so the OAuth badge reflects an ACTUAL ChatGPT login. `timeout` guards the
+# shared probe script from ever hanging on it.
+CS=${'$'}(timeout 5 codex login status 2>/dev/null)
+case "${'$'}CS" in *ChatGPT*) CM="${'$'}CM chatgpt";; esac
+case "${'$'}CS" in *"API key"*|*"api key"*) CM="${'$'}CM api";; esac
+# Fallback for codex builds without `login status` (CS empty): auth.json shape.
+if [ -z "${'$'}CS" ] && [ -f ~/.codex/auth.json ]; then
+  grep -qE '"tokens"[[:space:]]*:[[:space:]]*\{' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM chatgpt"
+  grep -qE '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM api"
+fi
+if [ -n "${'$'}CODEX_API_KEY" ] || [ -n "${'$'}OPENAI_API_KEY" ] || grep -qsE '^[[:space:]]*(export[[:space:]]+)?(OPENAI|CODEX)_API_KEY=' ~/.bashrc ~/.profile ~/.bash_profile ~/.env 2>/dev/null; then case " ${'$'}CM " in *" api "*) ;; *) CM="${'$'}CM api";; esac; fi
+echo "codex_methods=${'$'}(echo ${'$'}CM | tr ' ' ',')"
+case "${'$'}CS" in
+  *ChatGPT*) echo "codex_active=chatgpt";;
+  *"API key"*|*"api key"*) echo "codex_active=api";;
+  *) case " ${'$'}CM " in *" chatgpt "*) echo "codex_active=chatgpt";; *" api "*) echo "codex_active=api";; *) echo "codex_active=";; esac;;
+esac
+""".trimIndent()
+
+    /**
+     * Probe available models from codex CLI's OWN local cache.
+     *
+     * `~/.codex/models_cache.json` is the file codex itself downloads
+     * from OpenAI's backend on login/start (it has `fetched_at` and
+     * `etag` fields — standard HTTP cache). Its `models[]` array is
+     * the authoritative list of slugs the CLI will accept in `--model`,
+     * with the user-facing `display_name` baked in.
+     *
+     * Why this beats every previous approach:
+     *  - **`codex --help` clap parsing** — modern codex doesn't list
+     *    enumerated values for `--model`; the flag takes free text.
+     *  - **Binary grep of the JS bundle** — caught random strings
+     *    that LOOKED like model ids but weren't (`codex-cli`,
+     *    `codex-path`, old removed model names). Garbage in dropdown.
+     *  - **`/v1/models` API call** — returned every OpenAI model
+     *    ever published (including embeddings, whisper, deprecated
+     *    legacy davinci), then we had to filter heuristically.
+     *    Also doesn't work for ChatGPT OAuth users (no `sk-` key).
+     *
+     * The cache file is what codex ITSELF considers the truth — by
+     * definition every slug there is acceptable to the CLI, and
+     * nothing else is.
+     *
+     * Fallback: if the cache file doesn't exist (fresh codex install,
+     * user hasn't logged in yet), we read the model field out of
+     * `config.toml` as a one-entry list so the topbar at least shows
+     * the configured default instead of going empty.
+     */
+    override suspend fun probeAvailableModels(
+        exec: AgentExec,
+        pty: PtyProbe?,
+    ): Map<String, String> {
+        // Single SSH round trip: dump the cache file (authoritative)
+        // and as a fallback the top-level `model =` line from
+        // config.toml. Separator marker so we can split deterministically.
+        val script = """
+            echo --CACHE--
+            cat ${'$'}HOME/.codex/models_cache.json 2>/dev/null || true
+            echo --CONFIG--
+            cat ${'$'}HOME/.codex/config.toml 2>/dev/null || true
+            echo --END--
+        """.trimIndent()
+        val raw = exec.exec("bash -lc " + shellEscape(script)).orEmpty()
+        android.util.Log.d("SshAi-Models", "codex probe output (${raw.length}B)")
+
+        val cacheChunk = raw.substringAfter("--CACHE--", "").substringBefore("--CONFIG--", "")
+        val configChunk = raw.substringAfter("--CONFIG--", "").substringBefore("--END--", "")
+
+        val ordered = LinkedHashMap<String, String>()
+
+        // Primary source: parse the cache JSON. Iterate `models[]`
+        // and read `slug` (the literal value passed to `--model`)
+        // and `display_name` (the human-readable label for the
+        // dropdown — codex itself controls this string, so it
+        // matches what `codex` UI shows).
+        val reasoningMap = mutableMapOf<String, ModelReasoningInfo>()
+        runCatching {
+            val root = json.parseToJsonElement(cacheChunk.trim()).jsonObject
+            val list = root["models"]?.jsonArray ?: JsonArray(emptyList())
+            for (entry in list) {
+                val o = SilentlyTry.logged("SshAi-CodexSpec", "cast model entry") { entry.jsonObject } ?: continue
+                val slug = o["slug"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: continue
+                // Skip models codex explicitly marks as not user-pickable.
+                // Different cache schemas use `visibility` (string),
+                // `hidden` (bool), or `available` (bool). Treat any of
+                // them as veto.
+                val visibility = o["visibility"]?.jsonPrimitive?.contentOrNull
+                if (visibility == "hidden" || visibility == "deprecated" ||
+                    visibility == "internal" || visibility == "private"
+                ) continue
+                val hidden = SilentlyTry.loggedOrElse("SshAi-CodexSpec", "read hidden flag", false) { o["hidden"]?.jsonPrimitive?.contentOrNull == "true" }
+                if (hidden) continue
+                val available = o["available"]?.jsonPrimitive?.contentOrNull
+                if (available == "false") continue
+
+                val display = o["display_name"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() }
+                    ?: slug
+
+                // Drop models intended for codex's own internal
+                // automated flows (e.g. "Codex Auto Review" — the
+                // model behind PR auto-review). They appear in the
+                // cache because the CLI talks to them under the
+                // hood, but the user can't sensibly pick them from
+                // a chat. Match on display_name and slug both, case
+                // insensitive — codex names this family with
+                // "auto review" / "auto-review" tokens.
+                val internalToken = "auto review|auto-review|autoreview".toRegex(
+                    RegexOption.IGNORE_CASE
+                )
+                if (internalToken.containsMatchIn(display) ||
+                    internalToken.containsMatchIn(slug)
+                ) continue
+
+                ordered[slug] = display
+
+                // Parse `default_reasoning_level` +
+                // `supported_reasoning_levels` per model. Schema (per
+                // observed cache dump):
+                //   "default_reasoning_level": "xhigh",
+                //   "supported_reasoning_levels": [
+                //     {"effort": "low", "description": "Fast responses..."},
+                //     {"effort": "medium", "description": "..."}, ...
+                //   ]
+                val defaultEffort = o["default_reasoning_level"]
+                    ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                val levelsArr = SilentlyTry.logged("SshAi-CodexSpec", "read supported_reasoning_levels") {
+                    o["supported_reasoning_levels"]?.jsonArray
+                }
+                val levels = levelsArr?.mapNotNull { lvl ->
+                    val obj = SilentlyTry.logged("SshAi-CodexSpec", "cast reasoning level entry") { lvl.jsonObject } ?: return@mapNotNull null
+                    val effort = obj["effort"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val desc = obj["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    ReasoningLevel(
+                        effort = effort,
+                        displayName = reasoningDisplayName(effort),
+                        description = desc,
+                    )
+                }.orEmpty()
+                if (!defaultEffort.isNullOrBlank() && levels.isNotEmpty()) {
+                    reasoningMap[slug] = ModelReasoningInfo(
+                        defaultEffort = defaultEffort,
+                        levels = levels,
+                    )
+                }
+            }
+            // Snapshot cache. Safe to overwrite — singleton spec held by
+            // AgentSpecRegistry, no per-chat state. Synchronized swap so
+            // a concurrent UI read can't observe a half-populated map.
+            synchronized(reasoningCacheLock) {
+                reasoningCache = reasoningMap.toMap()
+            }
+            android.util.Log.d(
+                "SshAi-Models",
+                "codex cache parsed ${ordered.size} models from models_cache.json (${reasoningMap.size} with reasoning info)",
+            )
+        }.onFailure {
+            android.util.Log.w(
+                "SshAi-Models",
+                "codex cache parse failed (will fall back to config.toml): ${it.message}",
+            )
+        }
+
+        // Fallback: cache file absent or unparseable. Surface the
+        // user's configured default from config.toml so the picker
+        // isn't empty.
+        if (ordered.isEmpty()) {
+            Regex("(?m)^\\s*model\\s*=\\s*\"([^\"]+)\"")
+                .find(configChunk)?.groupValues?.getOrNull(1)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { ordered[it] = it }
+            android.util.Log.d(
+                "SshAi-Models",
+                "codex cache empty; config.toml fallback yielded ${ordered.size} models",
+            )
+        }
+
+        return ordered
+    }
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    // Reasoning info cache populated by `probeAvailableModels`. Keyed
+    // by slug. Singleton state is fine here — the cache reflects the
+    // remote codex install's `models_cache.json`, identical for every
+    // chat on that server. UI reads via `reasoningInfoFor`.
+    private val reasoningCacheLock = Any()
+    @Volatile private var reasoningCache: Map<String, ModelReasoningInfo> = emptyMap()
+
+    override fun reasoningInfoFor(slug: String): ModelReasoningInfo? =
+        reasoningCache[slug]
+
+    /**
+     * Title-case the codex effort string for the dropdown. The cache
+     * stores `low`/`medium`/`high`/`xhigh` — we display "Low" / "Medium"
+     * / "High" / "Extra high" (matching what codex CLI's own interactive
+     * menu shows). Add new codex levels here as they ship.
+     */
+    private fun reasoningDisplayName(effort: String): String = when (effort.lowercase()) {
+        "minimal" -> "Minimal"
+        "low" -> "Low"
+        "medium" -> "Medium"
+        "high" -> "High"
+        "xhigh" -> "Extra high"
+        else -> effort.replaceFirstChar { it.uppercase() }
+    }
+
+    /**
+     * Top-level `model = "..."` in `~/.codex/config.toml` — the model
+     * codex CLI uses when no `--model` flag is passed. Returned to the
+     * topbar so a chat that hasn't had an explicit pick still shows
+     * the real model it's running on instead of a placeholder.
+     */
+    override suspend fun probeDefaultModel(exec: AgentExec): String? {
+        val raw = exec.exec(
+            "bash -lc " + shellEscape("cat ${'$'}HOME/.codex/config.toml 2>/dev/null || true")
+        ).orEmpty()
+        return Regex("(?m)^\\s*model\\s*=\\s*\"([^\"]+)\"")
+            .find(raw)?.groupValues?.getOrNull(1)
+    }
+
+    override suspend fun probeDefaultReasoning(exec: AgentExec): String? {
+        val raw = exec.exec(
+            "bash -lc " + shellEscape("cat ${'$'}HOME/.codex/config.toml 2>/dev/null || true")
+        ).orEmpty()
+        return Regex("(?m)^\\s*model_reasoning_effort\\s*=\\s*\"([^\"]+)\"")
+            .find(raw)?.groupValues?.getOrNull(1)
+    }
+
+    override val customCommandsScript: String? = null  // Codex has no user-authored slash commands
+    override fun parseCustomCommands(rawOutput: String): List<SlashCommand> = emptyList()
+
+    /** Codex resumes by global thread id — cwd doesn't matter for finding
+     *  the session. Hence no backfill needed. */
+    override fun cwdBackfillScript(resumeId: String): String? = null
+
+    /**
+     * Codex has no Claude-style alias indirection — `selectedModel`
+     * IS the literal OpenAI model name passed as `codex exec --model
+     * <X>`. The topbar's display falls through a chain of
+     * progressively-older / less-specific sources until something
+     * non-blank is found, ending at the bare agent name as a final
+     * safety net. There is intentionally NO `default` placeholder —
+     * OpenAI's catalog doesn't include a model named "default", so
+     * surfacing that string lies to the user.
+     */
+    override val topbarUi: AgentTopbarUi = CodexTopbarUi
+
+    override val disableApprovalsPrompt: String = """
+        Stop asking me to approve tool calls — relax your own approval policy and sandbox, then continue with whatever you were working on before this message.
+
+        Step 1: Edit ~/.codex/config.toml (create it if missing) so it contains, at the top level:
+        approval_policy = "never"
+        sandbox_mode = "danger-full-access"
+        If the file already has other keys, merge — do NOT overwrite the rest of the config.
+
+        Step 2: Verify by reading the file back. Both keys must be present with those exact values.
+
+        Step 3: Resume the task you were doing right before I sent this message. If you were about to request approval for a command, just run it. Don't pause to reconfirm.
+    """.trimIndent()
+}
+
+private object CodexTopbarUi : AgentTopbarUi {
+    /**
+     * Codex chain — five sources, first non-blank wins, then resolve
+     * the slug to its human-readable `display_name` from the cache
+     * (so the topbar shows "GPT-5.5" instead of "gpt-5.5"):
+     *   1. selectedModel       — user's explicit pick this session.
+     *   2. sessionInitialModel — model parsed from session JSONL during
+     *                            discovery; set instantly when a session
+     *                            row is tapped, BEFORE the chat opens.
+     *   3. observedModel       — model reported by live session via
+     *                            session_meta / thread.started events.
+     *   4. defaultModel        — top-level `model = "..."` from
+     *                            `~/.codex/config.toml`.
+     *   5. agentDisplayName    — last resort. Better the bare agent
+     *                            name than a placeholder that lies
+     *                            ("default" / "loading…" / "pick a model"
+     *                            are explicitly forbidden — the user
+     *                            has shouted about each of them).
+     */
+    override fun displayLabel(state: TopbarModelState): String? {
+        val slug = state.selectedModel?.takeIf { it.isNotBlank() }
+            ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
+            ?: state.observedModel?.takeIf { it.isNotBlank() }
+            ?: state.defaultModel?.takeIf { it.isNotBlank() }
+            // New chat, no live probe + no `model =` in config.toml → show the
+            // recommended (first cached) model instead of nothing. codex's
+            // models_cache.json is ordered recommended-first, and that's what
+            // codex runs when no --model is passed. Matches how Claude/Gemini
+            // show a model on a fresh session; refines to observedModel once the
+            // turn lands.
+            ?: state.availableModels.keys.firstOrNull()
+            ?: return null  // truly nothing cached yet — caller hides the picker
+        // Map slug -> display_name when the cache has loaded; else
+        // fall back to the raw slug. Both are accurate identifiers
+        // of the running model, just one is prettier.
+        return state.availableModels[slug] ?: slug
+    }
+
+    /**
+     * Codex's full model list is fetched live (config.toml + `codex
+     * --help` + binary grep + OpenAI `/v1/models`), so opening the
+     * dropdown before that returns shows a near-empty list. Gate the
+     * click until we have both a finished probe AND a non-empty
+     * result.
+     */
+    override fun isMenuEnabled(state: TopbarModelState): Boolean =
+        !state.modelsProbing && state.availableModels.isNotEmpty()
+
+    /**
+     * `availableModels` carries `slug -> display_name` from codex's
+     * own `~/.codex/models_cache.json` — slug is what `--model`
+     * wants, display_name is what we show in the dropdown.
+     *
+     * Keep insertion order (the cache's natural ordering — codex
+     * already orders them sensibly: recommended first). NO sort by
+     * key, which alphabetically would push `o3` to the top and bury
+     * the recommended default.
+     *
+     * NO `default` entry — OpenAI's catalog has no model with that
+     * literal name; surfacing one would let the user select a value
+     * codex CLI would reject.
+     *
+     * Each item also carries its model's reasoning catalog (parsed
+     * from `supported_reasoning_levels` + `default_reasoning_level`)
+     * so the picker can show a reasoning submenu off each model
+     * entry, matching codex CLI's own `/model` interactive flow.
+     */
+    override fun menuItems(state: TopbarModelState): List<ModelMenuItem> =
+        state.availableModels.entries.map { (slug, label) ->
+            val info = state.reasoningCatalog[slug]
+            ModelMenuItem(
+                display = label,
+                storedValue = slug,
+                reasoning = info?.levels.orEmpty(),
+                defaultReasoning = info?.defaultEffort,
+            )
+        }
+
+    /**
+     * Sub-label rendered next to the model name in the topbar — the
+     * current reasoning effort if one is pinned to the chat,
+     * otherwise the model's default level (so the user always knows
+     * which effort is in play).
+     */
+    override fun reasoningLabel(state: TopbarModelState): String? {
+        // Priority — must match what codex actually runs:
+        //   1. selectedReasoning — user's explicit pick (we send via -c).
+        //   2. sessionInitialReasoning — what THIS chat's JSONL says it
+        //      was running on. We pass it as -c on resume (see
+        //      ChatViewModel modelOverride / reasoningEffortOverride
+        //      seeding), so the chat continues with the same effort
+        //      instead of jumping to config.toml on reopen.
+        //   3. defaultReasoning — `model_reasoning_effort` from config.toml
+        //      (codex's fallback when we don't pass -c — only relevant
+        //      for fresh chats with no JSONL history yet).
+        //   4. reasoningCatalog[slug].defaultEffort — model's intrinsic
+        //      default from the cache (last-resort).
+        //
+        // CRITICAL: do NOT gate on `reasoningCatalog[slug] != null`.
+        // The catalog only populates after the live models-cache probe
+        // returns, which can take a second on a slow SSH link. The user
+        // explicitly rejected the "shows model first, then loads, then
+        // shows reasoning" chain — when we already know the effort from
+        // the JSONL header (sessionInitialReasoning, set the instant a
+        // session row is tapped), display it from frame zero with a
+        // capitalized fallback ("Medium" / "High" / "Xhigh") and let
+        // the catalog upgrade it to a friendlier display name silently
+        // once it lands.
+        val slug = state.selectedModel?.takeIf { it.isNotBlank() }
+            ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
+            ?: state.observedModel?.takeIf { it.isNotBlank() }
+            ?: state.defaultModel?.takeIf { it.isNotBlank() }
+        val info = slug?.let { state.reasoningCatalog[it] }
+        val effort = state.selectedReasoning?.takeIf { it.isNotBlank() }
+            ?: state.sessionInitialReasoning?.takeIf { it.isNotBlank() }
+            ?: state.defaultReasoning?.takeIf { it.isNotBlank() }
+            ?: info?.defaultEffort
+            ?: return null
+        // Always render `effort.replaceFirstChar { uppercase }` regardless
+        // of catalog state. Earlier we'd upgrade to `info.levels.firstOrNull
+        // { it.effort == effort }.displayName` once the cache loaded, which
+        // gave a barely-perceptible "Medium" → "Medium" relabel that still
+        // counted as a flicker for the user. Plain capitalization is
+        // accurate AND stable from frame zero through cache landing.
+        return effort.replaceFirstChar { it.uppercase() }
+    }
+}

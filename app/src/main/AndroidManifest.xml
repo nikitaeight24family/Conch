@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Held by sshj transport during long reads — see PERMISSION_DECLARATIONS.md -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets the user opt the app out of OEM battery optimisation so the
+         foreground service + SSH sockets aren't killed when they switch
+         to a music app for a moment. Triggers the standard system dialog;
+         does NOT auto-grant. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Haptic feedback during the FIDO touch dialog: ramp-up vibration
+         while the user must keep holding the security key against the
+         phone, plus a single firm pulse synchronised with the success
+         checkmark animation. Without this permission `Vibrator.vibrate`
+         silently no-ops and the user can't tell whether to hold or
+         release. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Hardware security keys.
+         NFC: read FIDO2 authenticators tapped on the back of the phone
+              (YubiKey 5 NFC, Nitrokey 3 NFC, etc).
+         USB host: drive USB-C / USB-OTG security keys plugged into the phone.
+         Both surfaces are optional — `required="false"` means devices
+         without NFC or without USB-host can still install the app and
+         use software keys. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <application
+        android:name=".SshAiApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SshAi"
+        tools:targetApi="34">
+
+        <!--
+            Multi-resume on large screens / split-screen. Android 12+ already
+            opt-in via this meta-data — without it our Activity gets paused
+            when the user pairs us with another app side-by-side, and our
+            SSH session loses its foreground state mid-turn. Tablet & DeX
+            users hit this constantly. Tied to phase 0 of the foldable
+            adaptive workstream.
+        -->
+        <meta-data
+            android:name="android.allow_multiple_resumed_activities"
+            android:value="true" />
+
+        <!--
+            Tablet / foldable / DeX hint. The Play Console reads this and
+            unlocks the "large screens" filter in the catalogue; otherwise
+            our app gets surfaced as "phone-only" even though it adapts.
+            Wire alongside the adaptive scaffolds (phase 1+).
+        -->
+        <meta-data
+            android:name="android.max_aspect"
+            android:value="100" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboardHidden|density|uiMode"
+            android:theme="@style/Theme.SshAi.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+                 NO USB_DEVICE_ATTACHED intent-filter on purpose. With the
+                 permissive @xml/usb_device_filter (it matched EVERY USB device),
+                 Android offered Conch as a handler for ANY device plugged into
+                 the phone's Type-C port — keyboards, drives, anything. A
+                 FIDO-only filter can't be expressed via USB descriptor classes
+                 without brand- locking to specific VID/PIDs (and the FIDO usage
+                 page isn't filterable here). We don't need auto-launch at all:
+                 USB is used ONLY for FIDO keys, and yubikit's
+                 `startUsbDiscovery` (UsbConfiguration.handlePermissions(true),
+                 see SecurityKeyManager.awaitUsb) enumerates the key + requests
+                 USB permission at CONNECT time, inside the touch dialog. So
+                 plugging in any other device never touches Conch.
+            -->
+
+            <!--
+                Intentionally NO TECH_DISCOVERED / NDEF_DISCOVERED filters.
+                yubikit's `startNfcDiscovery` uses `NfcAdapter.enableReaderMode`
+                while the active dialog is open, which intercepts ALL NFC
+                dispatch at runtime regardless of manifest filters. Adding a
+                TECH filter here meant any NFC tap OUTSIDE an open dialog
+                relaunched MainActivity (delivering an unexpected intent), which
+                made the touch flow loop on NFC-keyed users — see v1.0.8
+                first-test feedback. We rely entirely on reader-mode now.
+            -->
+        </activity>
+
+        <service
+            android:name=".service.SshAiService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+            Disable Sentry's auto-init ContentProviders. The SDK ships them
+            so apps with a single hard-coded DSN can wire up with zero code.
+            Our DSN comes from BuildConfig (so debug builds without a DSN
+            don't init at all), which means the auto-init provider would
+            crash on launch with `DSN is required`. We init manually in
+            SshAiApp.onCreate() — guarded by `BuildConfig.SENTRY_DSN.isBlank()`
+            and by the user's opt-out preference.
+        -->
+        <provider
+            android:name="io.sentry.android.core.SentryInitProvider"
+            android:authorities="${applicationId}.SentryInitProvider"
+            tools:node="remove" />
+        <provider
+            android:name="io.sentry.android.core.SentryPerformanceProvider"
+            android:authorities="${applicationId}.SentryPerformanceProvider"
+            tools:node="remove" />
+
+        <!--
+            Shizuku discovery provider. Lets the Shizuku Manager app
+            (moe.shizuku.privileged.api) detect that Conch exists
+            without needing to launch us. Required by the Shizuku API
+            even if we never actively call into it; the provider
+            class is part of `dev.rikka.shizuku:provider` and exports
+            no public surface, just a binder for the manager.
+
+            `multiprocess=false` keeps it on the main process so the
+            Shizuku binder is reused with the rest of the app
+            (foreground service, AgentBridge poller).
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!--
+            Optional: query the Shizuku Manager package (so
+            `getPackageInfo` works without raising
+            `<queries>`-policy issues on Android 11+).
+        -->
+
+        <!-- PiP window header actions (Stop turn). The receiver is
+             private to the app — only PendingIntents we mint ourselves
+             can fire it, so we don't need exported=true. -->
+        <receiver
+            android:name=".PipActionReceiver"
+            android:exported="false" />
+    </application>
+
+    <queries>
+        <!-- Lets us probe whether the Shizuku Manager app is
+             installed without opting into the catch-all
+             QUERY_ALL_PACKAGES permission (which Play frowns at). -->
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+</manifest>

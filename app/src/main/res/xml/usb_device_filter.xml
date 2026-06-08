@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Empty <resources> element = "match every USB device". The OS-side filter
+    is intentionally permissive: any USB-HID device whose interface advertises
+    the FIDO usage page is potentially a security key, but USB descriptor
+    classes here are too coarse to express that, and applying a YubiKey-only
+    VID/PID list would defeat the cross-vendor goal. yubikit's
+    UsbYubiKeyManager performs the real filtering at probe time.
+-->
+<resources>
+    <usb-device />
+</resources>

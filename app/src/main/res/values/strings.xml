@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Conch</string>
+
+    <string name="nav_servers">Servers</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="servers_empty_title">No servers yet</string>
+    <string name="servers_empty_subtitle">Add a server.\nDrive it with Claude, Codex or Gemini.</string>
+    <string name="servers_add">Add server</string>
+
+    <string name="add_server_title">Add server</string>
+    <string name="add_server_name">Name</string>
+    <string name="add_server_host">Host</string>
+    <string name="add_server_port">Port</string>
+    <string name="add_server_user">User</string>
+    <string name="add_server_password">Password</string>
+    <string name="add_server_test">Test connection</string>
+    <string name="add_server_save">Save</string>
+
+    <string name="chat_input_placeholder">Tell the agent what to do…</string>
+    <string name="chat_send">Send</string>
+</resources>

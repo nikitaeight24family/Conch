@@ -1,0 +1,33 @@
+# Android Studio / Gradle
+*.iml
+.gradle/
+.idea/
+.kotlin/
+local.properties
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+
+# Build artefacts
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Signing / secrets — never commit
+*.keystore
+!debug.keystore
+*.jks
+keystore.properties
+
+# Local dev junk
+analysis/
+*.log
+
+# Stray Gradle cache dir — created when `GRADLE_USER_HOME` is mis-typed
+# as a path arg without `=`.
+Gradleuser-home/
+
