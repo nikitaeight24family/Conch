@@ -6,10 +6,19 @@
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
 [![release](https://img.shields.io/badge/release-v0.1.0--beta-orange.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
-[![play store](https://img.shields.io/badge/Play%20Store-coming%20soon-blue.svg)](#install)
+[![play store](https://img.shields.io/badge/Play%20Store-closed%20beta-blue.svg)](https://play.google.com/apps/testing/ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
 > **Your phone, your server, your AI. Build, test, ship — on the train.**
+
+> ### 🧪 Closed beta — testers wanted
+> Conch is in closed testing on Google Play and I'm looking for testers (solo dev — every opt-in genuinely helps). Two taps, keep it as long as you like:
+>
+> 1. **Join the testers group:** https://groups.google.com/g/conch-beta
+> 2. **Opt in to the test:** https://play.google.com/apps/testing/ai.eight24family.conch
+> 3. **Install from Play:** https://play.google.com/store/apps/details?id=ai.eight24family.conch
+>
+> You must join the group first (step 1) or the Play links show "app not available". An Android phone is enough to explore the UI; a server with Claude Code / Codex / Gemini on `$PATH` to use it for real. Bugs and feedback very welcome.
 
 Conch is a mobile-first, AI-native Android client. The phone is the tactile
 interface; your own VPS is where code, builds and tests run; an AI agent
@@ -24,7 +33,9 @@ conch ▌ v0.1.0 Beta
 
 ## Install
 
-- **Play Store** — coming soon (closed test in flight).
+- **Play Store (closed beta)** — [join the testers group](https://groups.google.com/g/conch-beta),
+  then [opt in](https://play.google.com/apps/testing/ai.eight24family.conch) and
+  [install](https://play.google.com/store/apps/details?id=ai.eight24family.conch).
 - **APK** — latest signed build on the
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest)
   page; sideload via Android's "install from unknown sources."
