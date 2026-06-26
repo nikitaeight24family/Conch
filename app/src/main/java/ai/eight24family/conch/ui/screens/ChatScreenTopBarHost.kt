@@ -68,6 +68,7 @@ internal fun ChatTopBarHost(
     val selectedModel by vm.selectedModel.collectAsState()
     val observedModel by vm.observedModel.collectAsState()
     val availableModels by vm.availableModels.collectAsState()
+    val unavailableModels by vm.unavailableModelLabels.collectAsState()
     val modelsProbing by vm.modelsProbing.collectAsState()
     val defaultModel by vm.defaultModel.collectAsState()
     val sessionInitialModel by vm.sessionInitialModel.collectAsState()
@@ -75,19 +76,32 @@ internal fun ChatTopBarHost(
     val reasoningCatalog by vm.reasoningCatalog.collectAsState()
     val defaultReasoning by vm.defaultReasoning.collectAsState()
     val sessionInitialReasoning by vm.sessionInitialReasoning.collectAsState()
+    val observedReasoning by vm.observedReasoning.collectAsState()
     val customCommands by vm.customCommands.collectAsState()
     val approvalMode by vm.approvalMode.collectAsState()
     val showApprovalIcon by vm.showApprovalInChatBar.collectAsState()
 
-    val title = remoteSessions.firstOrNull { it.id == resumeId }
-        ?.preview?.takeIf { it.isNotBlank() }
+    val loadCameBackEmpty by vm.loadCameBackEmpty.collectAsState()
+    // Claude's auto-generated session title (ai-title) — the real title, like the
+    // CLI shows. Preferred over the listing preview / first user message.
+    val observedTitle by vm.observedTitle.collectAsState()
+    val title = observedTitle?.takeIf { it.isNotBlank() }
+        ?: remoteSessions.firstOrNull { it.id == resumeId }
+            ?.preview?.takeIf { it.isNotBlank() }
         ?: messages.firstOrNull { it is AgentMessage.UserText }
             ?.let { (it as AgentMessage.UserText).text }
             ?.lineSequence()
             ?.firstOrNull { it.isNotBlank() }
             ?.trim()
             ?.take(80)
-        ?: if (resumeId != null) "// loading…" else "// new chat"
+        // A resumed session with no cache whose server file is gone/unreachable
+        // must NOT hang on "// loading…" forever. loadCameBackEmpty flips the
+        // fallback to a clear terminal state once the fetch returns empty.
+        ?: when {
+            resumeId == null -> "// new chat"
+            loadCameBackEmpty -> "// session unavailable"
+            else -> "// loading…"
+        }
 
     // Bar, then a thin full-width session-title strip stacked below it.
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -102,6 +116,7 @@ internal fun ChatTopBarHost(
         selectedModel = selectedModel,
         observedModel = observedModel,
         availableModels = availableModels,
+        unavailableModels = unavailableModels,
         modelsProbing = modelsProbing,
         defaultModel = defaultModel,
         sessionInitialModel = sessionInitialModel,
@@ -109,6 +124,7 @@ internal fun ChatTopBarHost(
         reasoningCatalog = reasoningCatalog,
         defaultReasoning = defaultReasoning,
         sessionInitialReasoning = sessionInitialReasoning,
+        observedReasoning = observedReasoning,
         modelMenuOpen = modelMenuOpen,
         onToggleModelMenu = onToggleModelMenu,
         onSelectModel = { m -> vm.setModel(m); onCloseModelMenu() },

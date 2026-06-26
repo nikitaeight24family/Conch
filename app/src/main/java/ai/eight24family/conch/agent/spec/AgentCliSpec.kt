@@ -81,6 +81,29 @@ interface AgentCliSpec {
      */
     val supportsPreSetSessionId: Boolean
 
+    /**
+     * Whether the CLI supports a PERSISTENT bidirectional stream-json
+     * channel (`--input-format stream-json` + control protocol): user
+     * turns written to a long-lived stdin, `control_request`s
+     * (can_use_tool → live permission prompts, AskUserQuestion option
+     * picking, interrupt) answered with `control_response`s. Claude
+     * only today. When true, [buildPersistentCommand] and
+     * [encodeUserTurn] must be implemented.
+     */
+    val supportsControlProtocol: Boolean get() = false
+
+    /**
+     * Build the **inner** shell command for the persistent channel —
+     * like [buildExecCommand] but WITHOUT the prompt (turns arrive via
+     * stdin) and with bidirectional stream-json flags. Null when
+     * [supportsControlProtocol] is false.
+     */
+    fun buildPersistentCommand(input: ExecInput): String? = null
+
+    /** Encode one user turn as a stdin JSON line for the persistent
+     *  channel. Only meaningful when [supportsControlProtocol]. */
+    fun encodeUserTurn(text: String): String = ""
+
     // ──────── Memory ────────
 
     val memoryFilename: String          // "CLAUDE.md", "AGENTS.md", "GEMINI.md"
@@ -250,6 +273,26 @@ interface AgentCliSpec {
      * user's `xhigh` from config.toml.
      */
     suspend fun probeDefaultReasoning(exec: AgentExec): String? = null
+
+    /**
+     * Serialize the probed reasoning catalog for cold-start persistence
+     * (prefs). Null = this agent doesn't persist reasoning — Codex
+     * rebuilds its per-slug catalog from `models_cache.json` on every
+     * probe; Claude persists its uniform per-server effort catalog so a
+     * cold app start doesn't regress to the hardcoded fallback ladder
+     * until the (~8s) live probe lands.
+     */
+    fun serializeReasoningCatalog(catalog: Map<String, ModelReasoningInfo>): String? = null
+
+    /**
+     * Inverse of [serializeReasoningCatalog]: rebuild the per-slug
+     * catalog for the given cached model keys. Default empty = no
+     * hydrate for this agent.
+     */
+    fun deserializeReasoningCatalog(
+        raw: String,
+        modelKeys: Collection<String>,
+    ): Map<String, ModelReasoningInfo> = emptyMap()
 
     // ──────── Slash command discovery ────────
 

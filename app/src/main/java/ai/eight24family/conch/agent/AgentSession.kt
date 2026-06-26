@@ -80,6 +80,15 @@ class AgentSession(
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
+    /**
+     * LIVE reasoning-token counter for the in-flight turn — fed by the
+     * CLI's `system/thinking_tokens` events (estimated_tokens), cleared
+     * to null when the turn ends. Drives the transient «thinking · N
+     * tokens» row above the working spinner; deliberately NOT a chat
+     * message.
+     */
+    val liveThinkingTokens = MutableStateFlow<Long?>(null)
+
     // ─── Cohesive subsystems (see class kdoc) ─────────────────────
     private val historyMod = AgentSessionHistory(scope)
     val history: StateFlow<PersistentList<AgentMessage>> = historyMod.history
@@ -124,11 +133,158 @@ class AgentSession(
         getApprovalMode = { approvalMode },
         loginShell = ::loginShell,
         getAuthPrep = { authPrep },
+        onThinkingTokens = { n -> liveThinkingTokens.value = n },
     )
+
+    /**
+     * Persistent bidirectional channel (Agent SDK transport) for specs
+     * that support the control protocol — live permission prompts,
+     * AskUserQuestion option picking, real mid-turn interrupt. Falls
+     * back to [runner]'s proven one-shot path when the launch fails
+     * (older CLI) — silently, per the auto-fix invariant.
+     */
+    private val persistentStream = AgentSessionPersistentStream(
+        server = server,
+        scope = scope,
+        sshLifecycle = sshLifecycle,
+        history = historyMod,
+        onStateChange = { newState ->
+            val prev = _state.value
+            _state.value = newState
+            if (prev is SessionState.Working && newState is SessionState.Running) {
+                resumeId?.let { rid ->
+                    ai.eight24family.conch.di.ServiceLocator.sessionActivity
+                        .observeLocal(server.id, rid)
+                }
+            }
+        },
+        getState = { _state.value },
+        getResumeId = { resumeId },
+        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        cwdSnapshot = { cwdSnapshot },
+        getModelOverride = { modelOverride },
+        getReasoningOverride = { reasoningEffortOverride },
+        getApprovalMode = { approvalMode },
+        loginShell = ::loginShell,
+        getAuthPrep = { authPrep },
+        onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
+        onThinkingTokens = { n -> liveThinkingTokens.value = n },
+    )
+
+    /**
+     * Codex twin of [persistentStream]: a long-lived `codex app-server`
+     * JSON-RPC channel (thread/turn API). Live approval cards,
+     * request_user_input questions, real turn/interrupt, compaction
+     * items, token-usage counters. Same silent fallback discipline —
+     * launch/handshake failure (old codex) flips [AgentSessionCodexAppServer.broken]
+     * and the session rides the proven `codex exec` one-shot path.
+     * Per CLAUDE.md §3c the gate is EXPLICITLY per-agent.
+     */
+    private val codexAppServer = AgentSessionCodexAppServer(
+        server = server,
+        scope = scope,
+        sshLifecycle = sshLifecycle,
+        history = historyMod,
+        onStateChange = { newState ->
+            val prev = _state.value
+            _state.value = newState
+            if (prev is SessionState.Working && newState is SessionState.Running) {
+                resumeId?.let { rid ->
+                    ai.eight24family.conch.di.ServiceLocator.sessionActivity
+                        .observeLocal(server.id, rid)
+                }
+            }
+        },
+        getState = { _state.value },
+        getResumeId = { resumeId },
+        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        cwdSnapshot = { cwdSnapshot },
+        getModelOverride = { modelOverride },
+        getReasoningOverride = { reasoningEffortOverride },
+        getApprovalMode = { approvalMode },
+        loginShell = ::loginShell,
+        getAuthPrep = { authPrep },
+        onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
+        onThinkingTokens = { n -> liveThinkingTokens.value = n },
+    )
+
+    /**
+     * Gemini twin: a long-lived `gemini --experimental-acp` process
+     * (Agent Client Protocol — the transport gemini's IDE integrations
+     * use). Live permission cards, streamed chunks, real session/cancel.
+     * Same silent [AgentSessionGeminiAcp.broken] fallback to the proven
+     * one-shot `--print` path. Explicit per-agent gate (CLAUDE.md §3c).
+     */
+    private val geminiAcp = AgentSessionGeminiAcp(
+        server = server,
+        scope = scope,
+        sshLifecycle = sshLifecycle,
+        history = historyMod,
+        onStateChange = { newState ->
+            val prev = _state.value
+            _state.value = newState
+            if (prev is SessionState.Working && newState is SessionState.Running) {
+                resumeId?.let { rid ->
+                    ai.eight24family.conch.di.ServiceLocator.sessionActivity
+                        .observeLocal(server.id, rid)
+                }
+            }
+        },
+        getState = { _state.value },
+        getResumeId = { resumeId },
+        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        cwdSnapshot = { cwdSnapshot },
+        getModelOverride = { modelOverride },
+        getApprovalMode = { approvalMode },
+        loginShell = ::loginShell,
+        getAuthPrep = { authPrep },
+        onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
+    )
+
+    /** True while this session's turns ride the persistent control
+     *  channel (spec supports it AND it hasn't broken at launch). */
+    private fun usePersistent(): Boolean =
+        AgentSpecRegistry[server.agent].supportsControlProtocol && !persistentStream.broken
+
+    /** Codex chats ride the app-server channel until it proves broken. */
+    private fun useCodexAppServer(): Boolean =
+        server.agent == Agent.CODEX && !codexAppServer.broken
+
+    /** Gemini chats ride the ACP channel until it proves broken. */
+    private fun useGeminiAcp(): Boolean =
+        server.agent == Agent.GEMINI && !geminiAcp.broken
+
+    /**
+     * Public mirror of [usePersistent] for UI-side heuristics: on the
+     * persistent channels (Claude control protocol, Codex app-server)
+     * the remote CLI process LIVES BETWEEN turns, so pgrep-based "agent
+     * process alive" signals must NOT be interpreted as "a turn is
+     * running" (the spinner would never stop).
+     */
+    fun usesPersistentChannel(): Boolean =
+        usePersistent() || useCodexAppServer() || useGeminiAcp()
 
     private val promptQueue = AgentSessionPromptQueue(
         scope = scope,
-        runOneShot = { runner.runOneShot(it) },
+        runOneShot = { text, imagePaths ->
+            if (usePersistent()) {
+                // Claude persistent channel: images not wired yet (its Read tool
+                // can open the uploaded path from the prose). Codex/Gemini get the
+                // real pixels below.
+                val delivered = persistentStream.runTurn(text)
+                // Launch-level failure → silent permanent fallback to the
+                // one-shot path for this session (auto-fix invariant).
+                if (!delivered) runner.runOneShot(text)
+            } else if (useCodexAppServer()) {
+                val delivered = codexAppServer.runTurn(text, imagePaths)
+                if (!delivered) runner.runOneShot(text)
+            } else if (useGeminiAcp()) {
+                val delivered = geminiAcp.runTurn(text, imagePaths)
+                if (!delivered) runner.runOneShot(text)
+            } else {
+                runner.runOneShot(text)
+            }
+        },
         // The drainer calls this RIGHT BEFORE starting each turn. We add the
         // user's prompt to history HERE, not at send() time, so when two
         // prompts are queued back-to-back the second one appears AFTER the
@@ -347,14 +503,21 @@ class AgentSession(
         return out
     }
 
-    suspend fun send(text: String) {
+    suspend fun send(text: String, imagePaths: List<String> = emptyList()) {
         val tag = "SshAi-Turn"
         android.util.Log.d(
             tag,
-            "send text=${text.length}B agent=${server.agent} resume=$resumeId " +
+            "send text=${text.length}B images=${imagePaths.size} agent=${server.agent} resume=$resumeId " +
                 "state=${_state.value} sshConnected=${sshLifecycle.sshClient?.isConnected} " +
                 "scopeActive=${scope.coroutineContext[kotlinx.coroutines.Job]?.isActive == true}"
         )
+        // The user is sending a NEW message — if a question card is still open
+        // (they chose not to answer it; there may be no "skip" option, esp. on a
+        // read-only mirrored question), auto-dismiss it. For a LIVE one, deny the
+        // pending control so the current turn ends cleanly; either way no Error,
+        // the agent just continues with this message (user, 2026-06-26).
+        cancelPendingQuestions()
+
         // Remember this text so the JSONL tail's replay of the same prompt
         // (claude writes every user turn into the session log) doesn't show
         // up as a duplicate row a few seconds later. The UserText itself is
@@ -375,7 +538,17 @@ class AgentSession(
                 .observeLocal(server.id, rid)
         }
 
-        promptQueue.enqueue(text)
+        promptQueue.enqueue(text, imagePaths)
+    }
+
+    /**
+     * Run a code review (Codex `review/start`) on the current thread. No-op for
+     * non-Codex agents (the `/review` palette entry is gated to Codex anyway).
+     * [baseBranch] blank → review the uncommitted changes ("before I push").
+     */
+    suspend fun startReview(baseBranch: String) {
+        if (server.agent != Agent.CODEX) return
+        codexAppServer.runReview(baseBranch.takeIf { it.isNotBlank() })
     }
 
     /**
@@ -408,6 +581,21 @@ class AgentSession(
         // drainer roll to the next queued prompt would feel weird —
         // the user tapped Stop because they wanted everything to halt.
         promptQueue.clearQueue()
+        if (usePersistent()) {
+            // Real protocol interrupt — the CLI aborts the turn and emits
+            // its result; the stream escalates to a process kill if the
+            // interrupt isn't honored within a grace window.
+            persistentStream.cancelTurn()
+            return
+        }
+        if (useCodexAppServer()) {
+            codexAppServer.cancelTurn()
+            return
+        }
+        if (useGeminiAcp()) {
+            geminiAcp.cancelTurn()
+            return
+        }
         sshLifecycle.cancelCurrent { runner.killZombieRemoteTurn() }
         if (_state.value is SessionState.Working) _state.value = SessionState.Running
     }
@@ -451,6 +639,14 @@ class AgentSession(
         onProgress: (Float) -> Unit = {}
     ): String? = fileTransfer.uploadFile(bytes, displayName, onProgress)
 
+    /** Streaming upload (large files) — see [AgentSessionFileTransfer.uploadStream]. */
+    suspend fun uploadStream(
+        open: () -> java.io.InputStream,
+        total: Long,
+        displayName: String,
+        onProgress: (Float) -> Unit = {}
+    ): String? = fileTransfer.uploadStream(open, total, displayName, onProgress)
+
     suspend fun downloadFile(
         remotePath: String,
         sink: java.io.OutputStream,
@@ -469,18 +665,47 @@ class AgentSession(
         fileTransfer.statRemoteFileSize(remotePath)
 
     /**
-     * Permission round-trip via MCP bridge is not used in per-message mode.
-     * Update bubble state for UI consistency.
+     * Answer a live permission prompt. On the persistent channel this
+     * writes the real `control_response` (allow with the original tool
+     * input / deny with a reason) and the turn continues; on the legacy
+     * one-shot path there is no live process to answer, so only the
+     * bubble state updates.
      */
-    suspend fun respondPermission(requestId: String, allow: Boolean) {
-        val resolution = if (allow)
-            AgentMessage.PermissionRequest.Resolution.ALLOWED
-        else
+    suspend fun respondPermission(requestId: String, decision: PermissionDecision) {
+        // Each channel only answers requests IT owns (own pending map) —
+        // safe to offer to all; at most one writes to its stdin.
+        persistentStream.respondPermission(requestId, decision)
+        codexAppServer.respondPermission(requestId, decision)
+        geminiAcp.respondPermission(requestId, decision)
+        val resolution = if (decision == PermissionDecision.DENY)
             AgentMessage.PermissionRequest.Resolution.DENIED
+        else
+            AgentMessage.PermissionRequest.Resolution.ALLOWED
         historyMod.resolvePermission(requestId, resolution)
     }
 
+    /** Answer an AskUserQuestion card: writes the control_response with
+     *  the chosen labels and freezes the card with the picks. */
+    suspend fun respondQuestion(requestId: String, answers: Map<Int, List<String>>) {
+        persistentStream.respondQuestion(requestId, answers)
+        codexAppServer.respondQuestion(requestId, answers)
+        historyMod.resolveQuestion(requestId, answers)
+    }
+
+    /** User typed instead of answering: dismiss any open question card (live OR
+     *  read-only mirrored) silently, and for a live one end its turn cleanly so
+     *  no Error surfaces. Safe no-op when nothing is open. */
+    suspend fun cancelPendingQuestions() {
+        persistentStream.cancelPendingQuestions()
+        historyMod.cancelUnresolvedQuestions()
+    }
+
     fun close() {
+        // Graceful CLI exit first (stdin EOF → it flushes the session
+        // file), then the channel + pooled-client release.
+        persistentStream.teardownProcess()
+        codexAppServer.teardownProcess()
+        geminiAcp.teardownProcess()
         sshLifecycle.close(promptQueue.drainerJob)
         if (_state.value !is SessionState.Failed) _state.value = SessionState.Closed
     }

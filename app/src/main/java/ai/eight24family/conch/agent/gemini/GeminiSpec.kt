@@ -80,11 +80,7 @@ object GeminiSpec : AgentCliSpec {
         // and piped straight into the CLI — it never crosses back into the app
         // (presence-only credential contract). The no-key + no-OAuth guard keeps
         // OAuth sessions byte-identical to before (refresh_token present ⇒ skip).
-        val loadApiKey =
-            "if [ -z \"\$GEMINI_API_KEY\" ] && [ -z \"\$GOOGLE_API_KEY\" ] && " +
-            "! grep -qs refresh_token \$HOME/.gemini/oauth_creds.json \$HOME/.config/gemini/oauth_creds.json 2>/dev/null; then " +
-            "eval \"\$(grep -hE \"^[[:space:]]*(export[[:space:]]+)?(GEMINI_API_KEY|GOOGLE_API_KEY)=\" " +
-            "\$HOME/.bashrc \$HOME/.profile \$HOME/.bash_profile \$HOME/.env 2>/dev/null | head -10)\" 2>/dev/null; fi; "
+        val loadApiKey = apiKeyPreload
         // `--output-format stream-json` is what gives us JSONL events. The
         // old code used `--output-format json` which emits a single blob at
         // end of turn — no streaming, looked exactly like a hung CLI. PR
@@ -104,6 +100,19 @@ object GeminiSpec : AgentCliSpec {
             " | gemini --skip-trust --output-format stream-json" +
             approvalArg + modelArg + resumeArg + " 2>&1"
     }
+
+    /**
+     * Shell prefix that materialises GEMINI_API_KEY / GOOGLE_API_KEY from
+     * the rc files when they're hidden behind Debian's interactive guard —
+     * shared by [buildExecCommand] AND the ACP launcher
+     * ([ai.eight24family.conch.agent.AgentSessionGeminiAcp]). The value
+     * never crosses back into the app (presence-only credential contract).
+     */
+    internal val apiKeyPreload: String =
+        "if [ -z \"\$GEMINI_API_KEY\" ] && [ -z \"\$GOOGLE_API_KEY\" ] && " +
+        "! grep -qs refresh_token \$HOME/.gemini/oauth_creds.json \$HOME/.config/gemini/oauth_creds.json 2>/dev/null; then " +
+        "eval \"\$(grep -hE \"^[[:space:]]*(export[[:space:]]+)?(GEMINI_API_KEY|GOOGLE_API_KEY)=\" " +
+        "\$HOME/.bashrc \$HOME/.profile \$HOME/.bash_profile \$HOME/.env 2>/dev/null | head -10)\" 2>/dev/null; fi; "
 
     override fun parseStreamLine(line: String): List<AgentMessage> =
         GeminiMessageParser.parse(line)

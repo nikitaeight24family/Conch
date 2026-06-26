@@ -157,17 +157,98 @@ object GeminiMessageParser {
             "result" -> {
                 val status = obj.string("status").orEmpty()
                 val text = obj.string("response") ?: obj.string("result")
-                listOf(AgentMessage.Result(uuid(), status, text))
+                // Per-turn usage line from `stats.models.*.tokens` — same
+                // «tokens · in X · out Y» shape Claude and Codex emit, so
+                // all three agents read alike (user, 2026-06-12).
+                buildList {
+                    add(AgentMessage.Result(uuid(), status, text))
+                    statsNote(obj)?.let { add(it) }
+                }
             }
             // Bare append records from the saved file (user / model turns).
             "user", "gemini", "model", "assistant" -> fileMessage(obj)
-            else -> emptyList()
+            else -> {
+                // UNKNOWN type — never swallow a LIVE stream event (they all
+                // carry `timestamp`); surface it generically. Records from a
+                // SAVED session file (no timestamp — mutation-log noise like
+                // `sessionTitle` snapshots) stay hidden: generic-noting those
+                // would spray rows on every history re-hydration.
+                val t = obj.string("type")
+                if (t.isNullOrBlank() || obj["timestamp"] == null) {
+                    android.util.Log.d("SshAi-GeminiParse", "non-live unknown type=$t (suppressed): ${trimmed.take(200)}")
+                    emptyList()
+                } else listOf(note(genericLabel(t, obj), detail = genericDetail(obj)))
+            }
         }
         } // Tracing.section PARSER_SLOW_PATH
     }
 
     private fun JsonObject.string(key: String): String? =
         SilentlyTry.logged("SshAi-GeminiParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
+
+    /**
+     * Token usage from the `result` event's `stats` block:
+     * `stats.models.<model-id>.tokens = {prompt, candidates, total, cached,
+     * thoughts, tool}`. Summed across models (multi-model turns exist —
+     * flash for tools + pro for the answer). Tolerant: any missing branch
+     * → null → no note, never a crash.
+     */
+    private fun statsNote(obj: JsonObject): AgentMessage? {
+        val models = SilentlyTry.logged("SshAi-GeminiParse", "read stats.models") {
+            obj["stats"]?.jsonObject?.get("models")?.jsonObject
+        } ?: return null
+        var prompt = 0L; var candidates = 0L; var cached = 0L; var thoughts = 0L
+        for ((_, m) in models.entries) {
+            val tok = SilentlyTry.logged("SshAi-GeminiParse", "read model tokens") {
+                (m as? JsonObject)?.get("tokens")?.jsonObject
+            } ?: continue
+            fun n(key: String): Long =
+                (tok[key] as? JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: 0L
+            prompt += n("prompt"); candidates += n("candidates")
+            cached += n("cached"); thoughts += n("thoughts")
+        }
+        if (prompt == 0L && candidates == 0L) return null
+        val parts = listOfNotNull(
+            "in ${k(prompt)}",
+            "out ${k(candidates)}",
+            thoughts.takeIf { it > 0 }?.let { "thinking ${k(it)}" },
+            cached.takeIf { it > 0 }?.let { "cached ${k(it)}" },
+        )
+        return note("tokens · ${parts.joinToString(" · ")}")
+    }
+
+    /** EventNote factory — mirrors ClaudeMessageParser.note. `internal`:
+     *  shared with [GeminiAcpEvents] (same chat surface, ACP transport). */
+    internal fun note(
+        label: String,
+        detail: String? = null,
+        tone: AgentMessage.EventNote.Tone = AgentMessage.EventNote.Tone.DIM,
+        id: String = uuid(),
+    ): AgentMessage = AgentMessage.EventNote(id = id, label = label, detail = detail, tone = tone)
+
+    private val NOISE_KEYS = setOf("type", "session_id", "timestamp")
+
+    /** `type · best-effort summary` for live events we have no tailored
+     *  label for — including types that don't exist yet. */
+    internal fun genericLabel(type: String, obj: JsonObject): String {
+        val text = listOf(
+            "message", "text", "title", "description", "summary",
+            "name", "content", "reason", "status", "state",
+        ).firstNotNullOfOrNull { k -> obj.string(k)?.takeIf { it.isNotBlank() } }
+        return type.replace('_', ' ') + (text?.let { " · ${it.take(100)}" } ?: "")
+    }
+
+    /** Expandable key:value dump of the payload minus envelope noise. */
+    internal fun genericDetail(obj: JsonObject): String? {
+        val parts = obj.entries
+            .filter { it.key !in NOISE_KEYS }
+            .joinToString("\n") { (k, v) -> "$k: ${v.toString().take(300)}" }
+        return parts.ifBlank { null }
+    }
+
+    /** Locale.US — the ru default formats "12,0k" with a comma. */
+    private fun k(n: Long): String =
+        if (n >= 1000) "${"%.1f".format(java.util.Locale.US, n / 1000.0)}k" else n.toString()
 
     /**
      * One message record from a SAVED session file → AgentMessage(s). The file

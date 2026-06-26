@@ -5,6 +5,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
 
 /**
  * Edge-case coverage for [JsonlUtils.trimToLastNewline] — the
@@ -84,5 +85,68 @@ class JsonlUtilsTest {
         val first = JsonlUtils.trimToLastNewline(input)
         val second = JsonlUtils.trimToLastNewline(first)
         assertArrayEquals(first, second)
+    }
+
+    // ───────────────────────── tailSlice ─────────────────────────
+    // The display-windowing primitive: parse only the recent tail of a
+    // huge session so a 20 MB JSONL doesn't freeze chat-open, while the
+    // full file stays cached. Must start on a clean line boundary and
+    // never emit a partial line.
+
+    private fun ByteBuffer.asString(): String {
+        val arr = ByteArray(remaining())
+        duplicate().get(arr)
+        return String(arr, Charsets.UTF_8)
+    }
+
+    @Test
+    fun `tailSlice returns the whole trimmed file when it fits the window`() {
+        val text = "{\"a\":1}\n{\"a\":2}\n"
+        val w = JsonlUtils.tailSlice(ByteBuffer.wrap(text.toByteArray()), 1024)
+        assertEquals(0L, w.droppedBytes)
+        assertTrue(!w.windowed)
+        assertEquals(text, w.slice.asString())
+    }
+
+    @Test
+    fun `tailSlice windows to the last whole lines and drops the partial head`() {
+        val sb = StringBuilder()
+        for (i in 0 until 100) sb.append("{\"i\":").append(i).append("}\n")
+        val full = sb.toString().toByteArray()
+        val w = JsonlUtils.tailSlice(ByteBuffer.wrap(full), 40) // ~ last few lines only
+        assertTrue("should be windowed", w.windowed)
+        val s = w.slice.asString()
+        assertTrue("starts on a clean line boundary: <$s>", s.startsWith("{"))
+        assertTrue("ends with the very last line: <$s>", s.endsWith("{\"i\":99}\n"))
+        // every emitted line is a complete JSON object — no partial head/tail
+        s.split("\n").filter { it.isNotEmpty() }.forEach {
+            assertTrue("complete line: <$it>", it.startsWith("{") && it.endsWith("}"))
+        }
+    }
+
+    @Test
+    fun `tailSlice droppedBytes lands exactly past a newline boundary`() {
+        val sb = StringBuilder()
+        for (i in 0 until 50) sb.append("{\"i\":").append(i).append("}\n")
+        val full = sb.toString().toByteArray()
+        val w = JsonlUtils.tailSlice(ByteBuffer.wrap(full), 30)
+        assertTrue(w.droppedBytes > 0)
+        // the byte right before the window start is a '\n' (window begins
+        // immediately after a complete line — no partial head survives)
+        assertEquals('\n'.code.toByte(), full[(w.droppedBytes - 1).toInt()])
+    }
+
+    @Test
+    fun `tailSlice on an empty buffer is empty`() {
+        val w = JsonlUtils.tailSlice(ByteBuffer.allocate(0), 1024)
+        assertEquals(0, w.slice.remaining())
+        assertEquals(0L, w.droppedBytes)
+    }
+
+    @Test
+    fun `tailSlice with no newline yields nothing complete`() {
+        val w = JsonlUtils.tailSlice(ByteBuffer.wrap("noterminator".toByteArray()), 1024)
+        assertEquals(0, w.slice.remaining())
+        assertEquals(0L, w.droppedBytes)
     }
 }

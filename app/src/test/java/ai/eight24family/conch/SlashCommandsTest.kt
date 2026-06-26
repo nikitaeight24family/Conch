@@ -150,7 +150,7 @@ class SlashCommandsTest {
         // Pinning the public catalog so accidental additions (like restoring
         // /help or /init's old shape) get caught in review.
         val names = SlashCommands.BUILT_IN.map { it.name }.toSet()
-        val expected = setOf("clear", "new", "diff", "init", "memory", "agents", "model")
+        val expected = setOf("clear", "new", "diff", "init", "memory", "agents", "model", "review")
         assertEquals(expected, names)
     }
 

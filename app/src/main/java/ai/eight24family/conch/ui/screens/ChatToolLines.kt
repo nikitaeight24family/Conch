@@ -3,6 +3,9 @@ package ai.eight24family.conch.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.key
@@ -212,6 +215,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ToolUseLine(name: String, input: String) {
     // TodoWrite is the agent's working task list — render it as a
@@ -226,6 +230,10 @@ internal fun ToolUseLine(name: String, input: String) {
     val amber = MaterialTheme.colorScheme.tertiary
     var expanded by remember { mutableStateOf(false) }
     val hasDetails = input.isNotBlank()
+    val bringIntoView = remember { BringIntoViewRequester() }
+    LaunchedEffect(expanded) {
+        if (expanded) { kotlinx.coroutines.delay(50); bringIntoView.bringIntoView() }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -257,6 +265,7 @@ internal fun ToolUseLine(name: String, input: String) {
             }
         }
         if (expanded && hasDetails) {
+          Box(modifier = Modifier.fillMaxWidth().bringIntoViewRequester(bringIntoView)) {
             when (name) {
                 "Edit", "MultiEdit" -> Box(
                     modifier = Modifier
@@ -284,6 +293,7 @@ internal fun ToolUseLine(name: String, input: String) {
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
+          }
         }
     }
 }
@@ -458,7 +468,8 @@ internal fun ToolResultLine(output: String, isError: Boolean) {
 internal fun PermissionLine(
     req: AgentMessage.PermissionRequest,
     onAllow: () -> Unit,
-    onDeny: () -> Unit
+    onDeny: () -> Unit,
+    onAllowSession: () -> Unit = {},
 ) {
     val color = when (req.resolved) {
         AgentMessage.PermissionRequest.Resolution.PENDING -> MaterialTheme.colorScheme.secondary
@@ -495,6 +506,19 @@ internal fun PermissionLine(
                             color = MaterialTheme.colorScheme.tertiary,
                             style = MaterialTheme.typography.labelLarge
                         )
+                    }
+                    // "Always allow this session" — only where the agent's protocol
+                    // grants a session scope (Codex acceptForSession / Gemini
+                    // allow_always). Kills re-tapping the same approval on a phone.
+                    if (req.canAllowSession) {
+                        TextButton(onClick = onAllowSession) {
+                            Text(
+                                "[ always ]",
+                                color = MaterialTheme.colorScheme.tertiary,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
                     }
                     TextButton(onClick = onDeny) {
                         Text(
@@ -562,13 +586,20 @@ internal fun SystemLine(msg: AgentMessage.System) {
 }
 
 @Composable
-internal fun EventLine(label: String, details: String?, color: Color) {
+@OptIn(ExperimentalFoundationApi::class)
+internal fun EventLine(label: String, details: String?, color: Color, onClick: (() -> Unit)? = null) {
     var expanded by remember { mutableStateOf(false) }
     val hasDetails = !details.isNullOrBlank() && details != label
+    val bringIntoView = remember { BringIntoViewRequester() }
+    LaunchedEffect(expanded) {
+        if (expanded) { kotlinx.coroutines.delay(50); bringIntoView.bringIntoView() }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = hasDetails) { expanded = !expanded }
+            .clickable(enabled = hasDetails || onClick != null) {
+                if (onClick != null) onClick() else expanded = !expanded
+            }
             .padding(vertical = 1.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -596,6 +627,7 @@ internal fun EventLine(label: String, details: String?, color: Color) {
                 text = details!!.take(8000),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewRequester(bringIntoView)
                     .padding(start = 18.dp, top = 2.dp, bottom = 2.dp),
                 style = MaterialTheme.typography.bodyMedium,
                 contentPadding = PaddingValues(6.dp)
@@ -646,6 +678,68 @@ internal fun ServiceBusyCard(title: String, body: String?) {
                     body,
                     color = dim,
                     style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Model-unavailable card — Anthropic's "Claude X is currently unavailable"
+ * notice rendered like claude.ai's own UI: clean title, NOT truncated, with
+ * a tappable "Learn more" opening the announcement URL. Used for
+ * [AgentMessage.Error] with `kind="unavailable"`; [details] carries the URL.
+ * Stable id upserts the `result` + `error` copies into ONE card.
+ */
+@Composable
+internal fun ModelUnavailableCard(title: String, url: String?) {
+    val accent = MaterialTheme.colorScheme.tertiary
+    val fg = MaterialTheme.colorScheme.onSurface
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .background(accent.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.CloudOff,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            title,
+            color = fg,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        if (!url.isNullOrBlank()) {
+            Spacer(Modifier.width(10.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { SilentlyTry.fired("SshAi-UI", "open learn-more url") { uriHandler.openUri(url) } }
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    "Learn more",
+                    color = accent,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.width(3.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(14.dp),
                 )
             }
         }

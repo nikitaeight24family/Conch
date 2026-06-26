@@ -65,7 +65,17 @@ internal class AgentSessionRunOneShot(
      *  [ai.eight24family.conch.agent.AuthSelector]). Empty string = no method
      *  chosen = launch unchanged. Defaulted so older call sites are unaffected. */
     private val getAuthPrep: () -> String = { "" },
+    /** Live reasoning-token feed — mirrors AgentSessionPersistentStream. */
+    private val onThinkingTokens: (Long?) -> Unit = {},
 ) {
+    private val thinkingTokensRx = Regex("\"estimated_tokens\"\\s*:\\s*(\\d+)")
+
+    /** Codex equivalent of Claude's `thinking_tokens`: the
+     *  `event_msg/token_count` payload carries cumulative
+     *  `total_token_usage.reasoning_output_tokens`. First match on the
+     *  line IS the cumulative one (`last_token_usage` repeats the key
+     *  later in the same object). */
+    private val codexReasoningTokensRx = Regex("\"reasoning_output_tokens\"\\s*:\\s*(\\d+)")
     /**
      * Monotonic per-session turn counter. Bumped at the start of
      * every `runOneShot`. Passed to the spec's parser as a
@@ -177,6 +187,13 @@ internal class AgentSessionRunOneShot(
                     while (true) {
                         val line = reader.readLine() ?: break
                         if (line.isBlank()) continue
+                        if (line.contains("\"thinking_tokens\"")) {
+                            thinkingTokensRx.find(line)?.groupValues?.get(1)?.toLongOrNull()
+                                ?.let { onThinkingTokens(it) }
+                        } else if (line.contains("\"token_count\"")) {
+                            codexReasoningTokensRx.find(line)?.groupValues?.get(1)?.toLongOrNull()
+                                ?.takeIf { it > 0 }?.let { onThinkingTokens(it) }
+                        }
                         stdoutTail.append(line).append('\n')
                         if (stdoutTail.length > 16_384) {
                             stdoutTail.delete(0, stdoutTail.length - 8_192)
@@ -300,6 +317,7 @@ internal class AgentSessionRunOneShot(
             sshLifecycle.currentSshSession = null
             sshLifecycle.currentTurnCommand = null
             sshLifecycle.userCancelled = false
+            onThinkingTokens(null) // turn over → drop the live thinking row
             // Drain any final buffered streaming updates so the user
             // sees the complete reply the moment the turn is done —
             // without this they'd briefly see the second-to-last

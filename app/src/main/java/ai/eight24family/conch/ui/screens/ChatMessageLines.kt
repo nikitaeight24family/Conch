@@ -54,6 +54,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
@@ -137,6 +138,7 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
 import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
 import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
@@ -235,8 +237,30 @@ internal fun TerminalLine(
     onAllow: () -> Unit,
     onDeny: () -> Unit,
     isStreaming: Boolean = false,
+    /** Commits the user's picks for an [AgentMessage.AskUserQuestion]
+     *  card (question index → chosen option labels). Defaulted so
+     *  read-only surfaces (PiP, history replay) need no wiring. */
+    onAnswerQuestion: (Map<Int, List<String>>) -> Unit = {},
+    /** Tap on the "earlier history hidden" marker → load the full session. */
+    onLoadEarlier: () -> Unit = {},
+    /** "Always allow" on a permission card — only wired where the agent
+     *  supports a session-scoped grant (Codex/Gemini). */
+    onAllowSession: () -> Unit = {},
 ) {
     when (msg) {
+        is AgentMessage.AskUserQuestion -> QuestionCard(msg, onAnswerQuestion)
+        is AgentMessage.EventNote -> EventLine(
+            label = msg.label.take(140),
+            details = msg.detail,
+            color = when (msg.tone) {
+                AgentMessage.EventNote.Tone.WARN -> MaterialTheme.colorScheme.error
+                AgentMessage.EventNote.Tone.INFO -> MaterialTheme.colorScheme.tertiary
+                AgentMessage.EventNote.Tone.DIM -> MaterialTheme.colorScheme.outline
+            },
+            // The history-window marker is tappable — load the full session.
+            onClick = if (msg.id == ai.eight24family.conch.ui.viewmodel.ChatViewModel.HISTORY_WINDOW_MARKER_ID)
+                onLoadEarlier else null,
+        )
         is AgentMessage.UserText -> {
             // Chat exchanges image PATHS, not bytes. Show the picture inline,
             // never the path / "Attached image at:" text.
@@ -269,17 +293,46 @@ internal fun TerminalLine(
                 }
             }
         }
-        is AgentMessage.PermissionRequest -> PermissionLine(msg, onAllow, onDeny)
+        is AgentMessage.PermissionRequest -> PermissionLine(msg, onAllow, onDeny, onAllowSession)
         is AgentMessage.ToolUse -> ToolUseLine(msg.toolName, msg.input)
         is AgentMessage.ToolResult -> ToolResultLine(msg.output, msg.isError)
-        is AgentMessage.System -> {
-            // Skip the per-message session banner Claude emits on every --print
-            // invocation (subtype "init" with model/cwd/version). Useful state
-            // already lives in the TopBar; an extra banner per turn is noise.
-            if (msg.subtype != "init" && (msg.model != null || msg.sessionId != null || msg.cwd != null)) {
-                SystemLine(msg)
+        is AgentMessage.System -> when (msg.subtype) {
+            // Live compaction: animated row while the CLI compacts the
+            // conversation, morphing IN PLACE (same message id, upserted)
+            // into the dim summary divider when compact_boundary lands.
+            // Parity with the CLI's own "Compacting conversation…"
+            // (user request, 2026-06-10).
+            "compacting" -> CompactingRow()
+            "compact_done" -> EventLine(
+                label = msg.raw.take(120),
+                details = null,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // Invisible carriers for the topbar: the session's current model
+            // (OBSERVED_MODEL_ID) and current effort (OBSERVED_REASONING_ID) —
+            // never chat rows.
+            "model_observed" -> Unit
+            "reasoning_observed" -> Unit
+            "ai_title" -> Unit  // invisible carrier for the topbar title
+            // Phone bridge handshake done: the agent's one-token reply is swapped
+            // for this clean centered row (the scary prompt + token never show).
+            "bridge_connected" -> BridgeConnectedRow()
+            // Handshake in flight — clean "connecting phone… N%" row (the % ramps);
+            // all the technical ping/pong/Bash steps are hidden behind it.
+            "bridge_connecting" -> BridgeConnectingRow()
+            // Handshake finished without confirming — quiet "couldn't connect" row
+            // (no eternal spinner, no raw error dump).
+            "bridge_failed" -> BridgeStatusRow("couldn't connect to phone")
+            else -> {
+                // Skip the per-message session banner Claude emits on every
+                // --print invocation (subtype "init" with model/cwd/version).
+                // Useful state already lives in the TopBar; an extra banner
+                // per turn is noise.
+                if (msg.subtype != "init" && (msg.model != null || msg.sessionId != null || msg.cwd != null)) {
+                    SystemLine(msg)
+                }
+                // else: silently drop
             }
-            // else: silently drop
         }
         is AgentMessage.Result -> {
             // `result · success` after every assistant turn is just chrome.
@@ -298,6 +351,11 @@ internal fun TerminalLine(
             // claude.ai-style feedback. See
             // ClaudeMessageParser.matchesOverloaded.
             "overloaded" -> ServiceBusyCard(title = msg.text, body = msg.details)
+            // Anthropic model-unavailable notice (e.g. the dead Fable 5 pin): the app
+            // now handles this itself — forces the chat onto the recommended available
+            // model (Opus) and the topbar shows it — so the scary banner is pure noise
+            // on a chat that's actually going to run fine.
+            "unavailable" -> Unit
             else -> EventLine(
                 label = "! ${msg.text.take(120)}",
                 details = msg.details ?: msg.text,
@@ -528,6 +586,14 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
                  else androidx.compose.ui.graphics.Color(0xFF1F2933)
     val codeFg = if (isLightTheme) MaterialTheme.colorScheme.primary
                  else androidx.compose.ui.graphics.Color(0xFF00E5FF)
+    // Markdown TABLES: a single AnnotatedString can't lay out a grid, so a reply
+    // with a `| … | … |` + `|---|` block rendered as raw pipe-soup. When a table
+    // is present, take the segmented path — plain text via lightMarkdown, tables
+    // as a real bordered grid. the common no-table reply keeps the full path.)
+    if (remember(text) { containsMarkdownTable(text) }) {
+        TabledAssistantLine(text, codeBg, codeFg, isStreaming)
+        return
+    }
     // **Stream-friendly markdown parse: off-thread + debounced.**
     //
     // The old `remember(text) { lightMarkdown(text) }` re-parsed the
@@ -755,7 +821,9 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
     val oversize = remember(text) {
         text.length > 12000 || text.lineSequence().any { it.length > 4000 }
     }
-    Column(
+    // Box (not Column) so the copy button OVERLAYS the bottom-right corner — on
+    // the level of the last line, not its own full-width row.
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
@@ -778,27 +846,182 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
                 {}
             },
         )
-        // Copy-to-clipboard — ASSISTANT messages only. Tool/bash output renders
-        // via ToolUseLine/ToolResultLine and gets NO button. Copies the raw
-        // message text (not the markdown render). Hidden mid-stream so it
-        // copies the finished reply, not a half-token fragment. Android 13+
-        // shows its own "Copied" confirmation, so no extra toast here.
+        // Copy-to-clipboard — ASSISTANT messages only. Copies the raw text (not
+        // the markdown render). Hidden mid-stream so it copies the finished reply.
+        // Overlaid at the bottom-right corner, on the level of the last line — no
+        // backing.
         if (!isStreaming && text.isNotBlank()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+            IconButton(
+                onClick = { clipboard.setText(AnnotatedString(text)) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(22.dp),
             ) {
-                IconButton(
-                    onClick = { clipboard.setText(AnnotatedString(text)) },
-                    modifier = Modifier.size(28.dp),
-                ) {
-                    Icon(
-                        Icons.Filled.ContentCopy,
-                        contentDescription = "Copy message",
-                        tint = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.size(15.dp),
+                Icon(
+                    Icons.Filled.ContentCopy,
+                    contentDescription = "Copy message",
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+    }
+}
+
+// ───────────────────────── Markdown tables ─────────────────────────
+// A single AnnotatedString can't lay out a grid, so a reply with a markdown
+// table is split into segments: plain text (lightMarkdown) + real bordered grids.
+
+private sealed interface MdSeg {
+    data class Txt(val s: String) : MdSeg
+    data class Tbl(val rows: List<List<String>>) : MdSeg
+}
+
+private fun isTableRow(line: String): Boolean {
+    val t = line.trim()
+    return t.startsWith("|") && t.count { it == '|' } >= 2
+}
+
+/** A `|---|:--:|---|` divider row (dashes/colons only). */
+private fun isTableSeparator(line: String): Boolean {
+    val t = line.trim().trim('|').trim()
+    return t.isNotEmpty() && t.contains('-') && t.all { it == '-' || it == ':' || it == '|' || it == ' ' }
+}
+
+/** A ``` or ~~~ fence open/close line. */
+private fun isFenceToggle(line: String): Boolean {
+    val t = line.trimStart()
+    return t.startsWith("```") || t.startsWith("~~~")
+}
+
+/** Split a table row on UNescaped pipes only — a cell may legitimately contain
+ *  a literal pipe written `\|` (GFM), which must NOT create a new column
+ *  (user audit, 2026-06-14). Negative lookbehind for a backslash; then unescape. */
+private val TABLE_CELL_DELIM = Regex("""(?<!\\)\|""")
+
+private fun parseTableRow(line: String): List<String> =
+    line.trim().removePrefix("|").removeSuffix("|")
+        .split(TABLE_CELL_DELIM)
+        .map { it.replace("\\|", "|").trim() }
+
+internal fun containsMarkdownTable(text: String): Boolean {
+    val lines = text.split('\n')
+    var inFence = false
+    for (i in 0 until lines.size - 1) {
+        if (isFenceToggle(lines[i])) { inFence = !inFence; continue }
+        if (inFence) continue   // a |...| block inside ```code``` is NOT a table
+        if (isTableRow(lines[i]) && isTableSeparator(lines[i + 1])) return true
+    }
+    return false
+}
+
+private fun splitMarkdownSegments(text: String): List<MdSeg> {
+    val lines = text.split('\n')
+    val out = mutableListOf<MdSeg>()
+    val buf = StringBuilder()
+    fun flush() {
+        val s = buf.toString().trim('\n')
+        if (s.isNotBlank()) out.add(MdSeg.Txt(s))
+        buf.clear()
+    }
+    var i = 0
+    var inFence = false
+    while (i < lines.size) {
+        // Fence lines (and everything between them) stay verbatim in the text
+        // segment — lightMarkdown renders the whole ```block``` as code. A
+        // table-shaped block inside a fence used to be ripped into a grid with
+        // orphaned backtick lines left behind (user audit, 2026-06-14).
+        if (isFenceToggle(lines[i])) {
+            inFence = !inFence
+            buf.append(lines[i]).append('\n'); i++
+            continue
+        }
+        if (!inFence && isTableRow(lines[i]) && i + 1 < lines.size && isTableSeparator(lines[i + 1])) {
+            flush()
+            val rows = mutableListOf(parseTableRow(lines[i]))   // header
+            i += 2                                              // skip header + separator
+            while (i < lines.size && !isFenceToggle(lines[i]) && isTableRow(lines[i])) {
+                rows.add(parseTableRow(lines[i])); i++
+            }
+            out.add(MdSeg.Tbl(rows))
+        } else {
+            buf.append(lines[i]).append('\n'); i++
+        }
+    }
+    flush()
+    return out
+}
+
+/** Bordered grid — content-sized columns (a "#" column stays narrow), bold
+ *  header. Parity with the CLI's box-drawing tables (user, 2026-06-14). */
+@Composable
+private fun MarkdownTable(rows: List<List<String>>) {
+    if (rows.isEmpty()) return
+    val cols = rows.maxOf { it.size }.coerceAtLeast(1)
+    val weights = remember(rows) {
+        FloatArray(cols) { c -> rows.maxOf { (it.getOrNull(c)?.length ?: 0) }.coerceAtLeast(1).toFloat() }
+    }
+    val border = MaterialTheme.colorScheme.outline
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        rows.forEachIndexed { r, row ->
+            Row(modifier = Modifier.height(IntrinsicSize.Min).fillMaxWidth()) {
+                for (c in 0 until cols) {
+                    Text(
+                        text = row.getOrNull(c).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = if (r == 0) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .weight(weights[c])
+                            .fillMaxHeight()
+                            .border(0.5.dp, border)
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                     )
                 }
+            }
+        }
+    }
+}
+
+/** Assistant reply that contains a markdown table — rendered as segments. */
+@Composable
+private fun TabledAssistantLine(
+    text: String,
+    codeBg: androidx.compose.ui.graphics.Color,
+    codeFg: androidx.compose.ui.graphics.Color,
+    isStreaming: Boolean,
+) {
+    val clipboard = LocalClipboardManager.current
+    val segments = remember(text) { splitMarkdownSegments(text) }
+    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            segments.forEach { seg ->
+                when (seg) {
+                    is MdSeg.Txt -> {
+                        val md = remember(seg.s, codeBg, codeFg) {
+                            lightMarkdown(seg.s, codeBg = codeBg, codeFg = codeFg)
+                        }
+                        Text(
+                            text = md,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    is MdSeg.Tbl -> MarkdownTable(seg.rows)
+                }
+            }
+        }
+        if (!isStreaming && text.isNotBlank()) {
+            IconButton(
+                onClick = { clipboard.setText(AnnotatedString(text)) },
+                modifier = Modifier.align(Alignment.BottomEnd).size(22.dp),
+            ) {
+                Icon(
+                    Icons.Filled.ContentCopy,
+                    contentDescription = "Copy message",
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(14.dp),
+                )
             }
         }
     }
@@ -898,6 +1121,94 @@ internal fun AssistantLineMarkdownLegacy(text: String) {
                 list = MaterialTheme.typography.bodyLarge,
                 ordered = MaterialTheme.typography.bodyLarge,
             )
+        )
+    }
+}
+
+/** Clean centered "phone connected" row — what the chat shows in place of the
+ *  bridge handshake's one-token reply (the prompt + token are hidden upstream).
+ *  English only (UI string). */
+@Composable
+private fun BridgeConnectedRow() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.PhoneAndroid,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(13.dp),
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = "phone connected",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+        )
+    }
+}
+
+/** "connecting phone… N%" — shown while the bridge handshake runs (all its
+ *  technical ping/pong/Bash steps are hidden behind it). The % ramps smoothly to
+ *  ~95% over ~8.5s; the row is replaced by [BridgeConnectedRow] (100%) the moment
+ *  the phone confirms. English only (UI string). */
+@Composable
+private fun BridgeConnectingRow() {
+    val pct = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (pct.value < 95) {
+            kotlinx.coroutines.delay(90)
+            pct.value = pct.value + 1
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.PhoneAndroid,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+            modifier = Modifier.size(13.dp),
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = "connecting phone… ${pct.value}%",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+        )
+    }
+}
+
+/** Quiet centered phone-bridge status (e.g. "couldn't connect to phone"). Muted —
+ *  no raw error, no spinner. English only (UI string). */
+@Composable
+private fun BridgeStatusRow(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.PhoneAndroid,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(13.dp),
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

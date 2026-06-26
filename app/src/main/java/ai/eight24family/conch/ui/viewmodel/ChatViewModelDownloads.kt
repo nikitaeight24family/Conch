@@ -426,7 +426,7 @@ internal class ChatViewModelDownloads(
                 val cv = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Downloads.DISPLAY_NAME, basename2)
                     put(android.provider.MediaStore.Downloads.MIME_TYPE, mimeForName(basename2))
-                    put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/sshai/")
+                    put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/conch/")
                     put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
                 }
                 val resolver = ctx.contentResolver
@@ -451,7 +451,7 @@ internal class ChatViewModelDownloads(
                         }
                         resolver.update(uri, finalize, null, null)
                         resultUri = uri
-                        displayLocation = "Download/sshai/$basename2"
+                        displayLocation = "Download/conch/$basename2"
                     }
                     is AgentSession.DownloadOutcome.Failed -> {
                         SilentlyTry.fired("SshAi-Chat", "delete failed mediastore uri") { resolver.delete(uri, null, null) }

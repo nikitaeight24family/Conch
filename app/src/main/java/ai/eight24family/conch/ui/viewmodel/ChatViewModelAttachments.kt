@@ -131,6 +131,75 @@ internal class ChatViewModelAttachments(
         }
     }
 
+    /**
+     * Large-file variant: the picked content has already been streamed to a
+     * temp [file] in cacheDir (never fully in the phone's heap). We hash it
+     * streaming, dedupe, then stream it up via [AgentSession.uploadStream], and
+     * delete the temp file when done (user 2026-06-14: a 439 MB zip OOM'd the
+     * in-memory [addAttachment] path).
+     */
+    fun addFileAttachment(file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) {
+        if (_attachments.value.size >= MAX_ATTACHMENTS) { file.delete(); return }
+        Telemetry.attachmentUploaded(Telemetry.AttachmentKind.FILE)
+        val attId = UUID.randomUUID().toString()
+        _attachments.update {
+            it + StagedAttachment(
+                id = attId,
+                displayName = displayName,
+                mimeType = mimeType,
+                bytes = ByteArray(0),
+                isImage = false,
+                status = UploadStatus.Uploading(0f),
+                localFile = file,
+                sizeBytes = sizeBytes,
+            )
+        }
+        scope.launch(Dispatchers.IO) {
+            val tag = "SshAi-Upload"
+            try {
+                android.util.Log.d(tag, "addFileAttachment: $displayName ${sizeBytes}B mime=$mimeType (streamed)")
+                val sha = file.inputStream().use { UploadCache.sha256HexStream(it) }
+
+                var waited = 0
+                while (waited < 15_000) {
+                    val sid = currentLocalSessionId()
+                    val sess = if (sid != null) activeSessionFor(sid) else null
+                    if (sess != null && (sess.state.value is SessionState.Running ||
+                            sess.state.value is SessionState.Working)) break
+                    delay(200); waited += 200
+                }
+                val s = currentLocalSessionId()?.let { activeSessionFor(it) }
+                if (s == null) {
+                    updateAttachmentStatus(attId, UploadStatus.Failed("session not ready"))
+                    return@launch
+                }
+
+                val cached = uploadCache.lookup(serverId, sha)
+                if (cached != null && s.checkRemoteFileExists(cached)) {
+                    updateAttachmentStatus(attId, UploadStatus.Uploading(1f))
+                    updateAttachmentStatus(attId, UploadStatus.Ready(cached))
+                    return@launch
+                } else if (cached != null) {
+                    uploadCache.forget(serverId, sha)
+                }
+
+                val path = s.uploadStream({ file.inputStream() }, sizeBytes, displayName) { progress ->
+                    updateAttachmentStatus(attId, UploadStatus.Uploading(progress))
+                }
+                if (path != null) {
+                    uploadCache.record(serverId, sha, path)
+                    updateAttachmentStatus(attId, UploadStatus.Ready(path))
+                } else {
+                    updateAttachmentStatus(attId, UploadStatus.Failed("upload failed"))
+                }
+            } finally {
+                // The temp copy is only a staging buffer — the bytes live on the
+                // server now (or the upload failed). Either way, reclaim the space.
+                ai.eight24family.conch.util.SilentlyTry.fired(tag, "delete temp upload file") { file.delete() }
+            }
+        }
+    }
+
     private fun updateAttachmentStatus(id: String, status: UploadStatus) {
         _attachments.update { list ->
             list.map { if (it.id == id) it.copy(status = status) else it }

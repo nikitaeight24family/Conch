@@ -77,7 +77,7 @@ fun SessionsChatTwoPane(
                 }
             },
             onOpenSubagents = { nav.navigate(Routes.subagents(serverId, agent, chatId = null)) },
-            onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+            onOpenSettings = { navigateTab(nav, Routes.SETTINGS) },
             onOpenKeychain = { nav.navigate(Routes.keychain()) },
             modifier = Modifier.weight(0.35f),
         )
@@ -86,7 +86,7 @@ fun SessionsChatTwoPane(
             serverId = serverId,
             onBack = { nav.popBackStack() },
             onOpenSubagents = { chatId -> nav.navigate(Routes.subagents(serverId, agent, chatId)) },
-            onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+            onOpenSettings = { navigateTab(nav, Routes.SETTINGS) },
             onOpenKeychain = { nav.navigate(Routes.keychain()) },
             onOpenTextViewer = { uri, filename, serverIdArg, remotePath ->
                 nav.navigate(Routes.fileViewer(uri.toString(), filename, serverIdArg, remotePath))

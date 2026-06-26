@@ -15,6 +15,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.flow.drop
 import ai.eight24family.conch.agent.AgentMessage
 import ai.eight24family.conch.ui.viewmodel.ChatViewModel
 import ai.eight24family.conch.util.SilentlyTry
@@ -67,6 +68,10 @@ internal fun rememberChatScrollController(
     messages: List<AgentMessage>,
     vm: ChatViewModel,
     cameFromSearch: Boolean,
+    /** A turn is in flight → the pinned working-status row is showing below the
+     *  list. Toggling it resizes the chat viewport; we re-pin to bottom so the
+     *  last message stays above the row. */
+    working: Boolean = false,
 ): ChatScrollController {
     // Use a plain ScrollState + Column instead of LazyColumn so
     // SelectionContainer can extend selection across messages that are
@@ -99,27 +104,57 @@ internal fun rememberChatScrollController(
     val isAtBottom by remember {
         derivedStateOf {
             val info = lazyListState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            last.index >= info.totalItemsCount - 1
+            if (info.visibleItemsInfo.isEmpty()) return@derivedStateOf true
+            // PIXEL-genuine bottom (nothing left to scroll), not "the last
+            // item intersects the viewport": one CLI reply = ONE LazyColumn
+            // item that is routinely several screens tall, so the old index
+            // check (last.index >= total-1) read "at bottom" while the user
+            // was parked SCREENS above the end inside the tail message —
+            // re-enabling the streaming yank and wiping the reading anchor
+            // on every settle there (2026-06-10).
+            !lazyListState.canScrollForward
         }
     }
     // wasAtBottomSnapshot: the user's INTENT, captured at the end of
     // each settle. Search-opened chats start NOT-at-bottom; normal
     // opens start at-bottom (we scroll there once messages load).
+    // ALSO start NOT-at-bottom when the VM carries a reading anchor — that means
+    // we're re-mounting after a PiP minimize (this controller was disposed by
+    // ChatScreen's PiP short-circuit) and the user was parked mid-history. If we
+    // started at-bottom here, the streaming-follow effect would yank them to the
+    // latest reply, fighting the anchor restore below.
     var wasAtBottomSnapshot by rememberSaveable {
-        mutableStateOf(vm.initialMatchOrdinal < 0 && vm.initialMatchMsgId == null)
+        mutableStateOf(
+            vm.readingAnchorMsgId.value == null &&
+                vm.initialMatchOrdinal < 0 && vm.initialMatchMsgId == null,
+        )
     }
     // Reading anchor: the id (+ pixel offset) of the message the user parked on
-    // when NOT at the bottom. Persisted (rememberSaveable) so a minimize→restore
-    // — or a process-death recreation — returns the chat to EXACTLY where they
-    // were reading instead of snapping to the first message (lost scroll) or
-    // yanking to the latest. Cleared when they're at the bottom.
-    var readingAnchorId by rememberSaveable { mutableStateOf<String?>(null) }
-    var readingAnchorOffset by rememberSaveable { mutableStateOf(0) }
+    // when NOT at the bottom. Seeded FROM THE VM (which outlives this composable)
+    // so a minimize→restore — where the PiP short-circuit DISPOSED this whole
+    // controller, losing its rememberSaveable — still returns the chat to EXACTLY
+    // where they were reading instead of snapping to the first message. Cleared
+    // (in the VM too) when they're at the bottom.
+    var readingAnchorId by rememberSaveable { mutableStateOf(vm.readingAnchorMsgId.value) }
+    var readingAnchorOffset by rememberSaveable { mutableStateOf(vm.readingAnchorOffset.value) }
     LaunchedEffect(Unit) {
         snapshotFlow { lazyListState.isScrollInProgress }
+            // Skip the initial mount emission — it is NOT a settle (the
+            // invariant says the snapshot updates only on true→false
+            // transitions). Without this, every re-mount (rotation / PiP
+            // expand) ran the body against a virgin list at (0,0) or an
+            // unmeasured layout, stomping the restored/VM-seeded
+            // wasAtBottomSnapshot + readingAnchorId AND writing the damage
+            // through to the VM — the anchor-restore effect disarmed
+            // itself and the mount-run streaming-follow yanked the chat to
+            // the bottom.
+            .drop(1)
             .collect { inProgress ->
                 if (!inProgress) {
+                    // Never evaluate a settle against an unmeasured list:
+                    // empty visibleItemsInfo reads as "at bottom" and would
+                    // wipe the anchor.
+                    if (lazyListState.layoutInfo.visibleItemsInfo.isEmpty()) return@collect
                     wasAtBottomSnapshot = isAtBottom
                     if (isAtBottom) {
                         readingAnchorId = null
@@ -131,10 +166,12 @@ internal fun rememberChatScrollController(
                             lazyListState.layoutInfo.visibleItemsInfo.firstOrNull()?.key as? String
                         readingAnchorOffset = lazyListState.firstVisibleItemScrollOffset
                     }
-                    // Mirror to the VM so the PiP window can render the SAME line
-                    // the user parked on (null = they were at the bottom → PiP
-                    // follows the latest). Survives the chat↔PiP swap.
-                    vm.setReadingAnchor(readingAnchorId)
+                    // Mirror to the VM (id + pixel offset) so (a) the PiP window
+                    // renders the SAME line the user parked on and (b) the exact
+                    // position survives the chat→PiP→chat swap that disposes this
+                    // controller. null = they were at the bottom → PiP follows the
+                    // latest, expand lands at the bottom.
+                    vm.setReadingAnchor(readingAnchorId, readingAnchorOffset)
                 }
             }
     }
@@ -303,6 +340,10 @@ internal fun rememberChatScrollController(
             return@LaunchedEffect
         }
         val idx = messages.indexOfFirst { it.id == aid }
+        android.util.Log.d(
+            "SshAi-PiP",
+            "anchor restore: aid=$aid off=$readingAnchorOffset idx=$idx/${messages.size}",
+        )
         if (idx >= 0) {
             lazyListState.scrollToItem(idx, readingAnchorOffset)
             readingAnchorRestored = true
@@ -351,6 +392,16 @@ internal fun rememberChatScrollController(
         messages.size to lastLen
     }
     LaunchedEffect(contentSig) {
+        if (!anchorApplied) return@LaunchedEffect
+        if (messages.isEmpty()) return@LaunchedEffect
+        if (!wasAtBottomSnapshot) return@LaunchedEffect
+        lazyListState.scrollToBottom(messages.size)
+    }
+
+    // Working-row follow: the pinned status row sits just below the list, so when
+    // a turn starts/ends the chat viewport shrinks/grows. Gated on the at-bottom
+    // intent — never yanks someone reading scrollback.
+    LaunchedEffect(working) {
         if (!anchorApplied) return@LaunchedEffect
         if (messages.isEmpty()) return@LaunchedEffect
         if (!wasAtBottomSnapshot) return@LaunchedEffect

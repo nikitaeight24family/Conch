@@ -20,16 +20,21 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import ai.eight24family.conch.agent.AgentMessage
+import ai.eight24family.conch.agent.PermissionDecision
 import ai.eight24family.conch.agent.SessionState
 import ai.eight24family.conch.ui.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
@@ -42,7 +47,7 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun InChatHitsList(
     hits: List<InChatHit>,
-    onPickHit: () -> Unit,
+    onPickHit: (InChatHit) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -50,7 +55,7 @@ internal fun InChatHitsList(
         verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         items(hits, key = { it.msgId + "#" + it.matchStartInSnippet }) { h ->
-            InChatHitRow(hit = h, onTap = onPickHit)
+            InChatHitRow(hit = h, onTap = { onPickHit(h) })
         }
     }
 }
@@ -77,6 +82,10 @@ internal fun ChatMessageList(
     remoteWorking: Boolean,
     vm: ChatViewModel,
 ) {
+    // The working-status row is NOT a list item anymore — it's PINNED above the
+    // prompt bar (see PinnedWorkingStatus in ChatScreen) so it never scrolls away
+    // (user, 2026-06-14). isWorking here only marks the streaming bubble.
+    val isWorking = state is SessionState.Working || remoteWorking
     CompositionLocalProvider(
         LocalSearchHighlight provides highlightSpec,
         LocalMatchAnchor provides matchAnchor,
@@ -94,31 +103,43 @@ internal fun ChatMessageList(
             // parse. Every other (static) line parses synchronously + cached,
             // so it renders formatted on its first frame — no raw-markdown
             // reflow / jitter when the session opens. See AssistantLine.
-            val isWorking = state is SessionState.Working || remoteWorking
             val streamingId = if (isWorking)
                 (messages.lastOrNull() as? AgentMessage.AssistantText)?.id else null
             items(messages, key = { it.id }) { msg ->
                 val onAllow: () -> Unit = {
                     (msg as? AgentMessage.PermissionRequest)?.let {
-                        vm.respondPermission(it.id, it.requestId, true)
+                        vm.respondPermission(it.id, it.requestId, PermissionDecision.ALLOW_ONCE)
                     }
                 }
                 val onDeny: () -> Unit = {
                     (msg as? AgentMessage.PermissionRequest)?.let {
-                        vm.respondPermission(it.id, it.requestId, false)
+                        vm.respondPermission(it.id, it.requestId, PermissionDecision.DENY)
+                    }
+                }
+                val onAllowSession: () -> Unit = {
+                    (msg as? AgentMessage.PermissionRequest)?.let {
+                        vm.respondPermission(it.id, it.requestId, PermissionDecision.ALLOW_SESSION)
+                    }
+                }
+                val onAnswerQuestion: (Map<Int, List<String>>) -> Unit = { answers ->
+                    (msg as? AgentMessage.AskUserQuestion)?.let {
+                        vm.respondQuestion(it.requestId, answers)
                     }
                 }
                 CompositionLocalProvider(LocalCurrentMsgId provides msg.id) {
                     SelectionContainer {
-                        TerminalLine(msg, onAllow, onDeny, isStreaming = msg.id == streamingId)
+                        TerminalLine(
+                            msg, onAllow, onDeny,
+                            isStreaming = msg.id == streamingId,
+                            onAnswerQuestion = onAnswerQuestion,
+                            onLoadEarlier = { vm.loadFullHistory() },
+                            onAllowSession = onAllowSession,
+                        )
                     }
                 }
             }
-            val lastIsAssistantInProgress =
-                messages.lastOrNull() is AgentMessage.AssistantText
-            if (isWorking && !lastIsAssistantInProgress) {
-                item(key = "__thinking__") { AgentThinkingRow() }
-            }
+            // (Working-status row moved OUT of the list — it's pinned above the
+            // prompt bar now, so it holds its place instead of scrolling away.)
         }
     }
 }
@@ -140,7 +161,20 @@ internal fun ScrollToBottomButton(
             val info = lazyListState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
             val total = info.totalItemsCount
-            total > 0 && last != null && last.index < total - 2
+            if (total <= 0 || last == null) {
+                false
+            } else {
+                // Item-index hysteresis (2+ items above the end, no dancing
+                // on minor scrolls) OR pixel distance: the bottom of the
+                // lowest visible item is more than one viewport below the
+                // screen. The second arm covers chats whose tail reply is
+                // several screens tall — one reply = ONE item, so the index
+                // check alone never fired inside it and the button
+                // "disappeared" (2026-06-10).
+                val viewportH = info.viewportEndOffset - info.viewportStartOffset
+                last.index < total - 2 ||
+                    (last.offset + last.size - info.viewportEndOffset) > viewportH
+            }
         }
     }
     val scrollScope = rememberCoroutineScope()

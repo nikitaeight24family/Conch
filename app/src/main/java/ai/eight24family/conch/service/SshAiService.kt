@@ -284,6 +284,31 @@ class SshAiService : Service() {
         return START_STICKY
     }
 
+    // ── Android 15 dataSync time limit ──────────────────────────────
+    // dataSync foreground services get a ~6h cumulative budget while the
+    // app is in the BACKGROUND; at exhaustion the system calls onTimeout
+    // and we MUST stop within seconds — otherwise the OS kills the app
+    // with ForegroundServiceDidNotStopInTimeException (seen in the crash
+    // buffer, 2026-06-10). The budget resets when the app returns to the
+    // foreground; MainActivity.onStart() re-arms the service when there
+    // is still work (active sessions / held connections).
+    //
+    // We deliberately do NOT drop user intent or close sessions here:
+    // the pool + session managers are process-scoped singletons that
+    // survive the service, and the CLI agent keeps working SERVER-side
+    // regardless — reopening the app restores the service and the
+    // usual reconnect paths revive the transports.
+    override fun onTimeout(startId: Int) = handleFgsTimeout("onTimeout($startId)")
+
+    override fun onTimeout(startId: Int, fgsType: Int) =
+        handleFgsTimeout("onTimeout($startId, type=$fgsType)")
+
+    private fun handleFgsTimeout(reason: String) {
+        Log.w("SshAiService", "$reason — dataSync background budget exhausted; stopping gracefully")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onDestroy() {
         SilentlyTry.fired("SshAi-Service", "stop bridge manager") { ServiceLocator.bridgeManager.stop() }
         networkCallback?.let { cb ->
@@ -318,6 +343,17 @@ class SshAiService : Service() {
                 "startForeground denied (likely POST_NOTIFICATIONS revoked); stopping self",
                 e,
             )
+            stopSelf()
+        } catch (e: IllegalStateException) {
+            // ForegroundServiceStartNotAllowedException (API 31+, extends
+            // IllegalStateException): thrown when the dataSync background
+            // budget is already exhausted — the START_STICKY restart after
+            // an onTimeout stop used to CRASH-LOOP here ("Time limit
+            // already exhausted for foreground service type dataSync",
+            // 2026-06-10). Stop quietly; MainActivity.onStart() re-arms
+            // the service when the user returns (foreground resets the
+            // budget).
+            Log.w("SshAiService", "startForeground not allowed (FGS budget/state); stopping self", e)
             stopSelf()
         }
     }

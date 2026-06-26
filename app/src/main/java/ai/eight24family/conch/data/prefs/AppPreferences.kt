@@ -72,11 +72,20 @@ class AppPreferences(private val context: Context) {
     // `model_alias_labels_<AGENT>`.
     // `_v2` bump (2026-05-24) invalidates the stale hardcoded Gemini
     // list (auto/pro/flash/flash-lite) that was being served from the
-    // old key before the dynamic REST-API probe could replace it. Old
-    // keys are abandoned in DataStore; a few bytes of dead storage per
-    // agent, harmless.
+    // old key before the dynamic REST-API probe could replace it.
+    // `_v3` bump (2026-06-10) invalidates labels written by the
+    // regex-ANSI-strip Claude parser, which corrupted display names
+    // ("onnt 4.6") before the terminal-renderer fix. Old keys are
+    // abandoned in DataStore; a few bytes of dead storage per agent,
+    // harmless.
     private fun modelLabelsKeyFor(agent: String) =
-        stringPreferencesKey("model_alias_labels_${agent.uppercase()}_v2")
+        stringPreferencesKey("model_alias_labels_${agent.uppercase()}_v3")
+    // Per-agent reasoning catalog cache (spec-serialized opaque string —
+    // see AgentCliSpec.serializeReasoningCatalog). Lets a cold start show
+    // the server's REAL effort levels instantly instead of the hardcoded
+    // fallback ladder until the live probe lands.
+    private fun reasoningCatalogKeyFor(agent: String) =
+        stringPreferencesKey("agent_reasoning_catalog_${agent.uppercase()}_v1")
     private val userHeldServerIdsKey = stringPreferencesKey("user_held_server_ids")
     private val highRefreshRateKey = booleanPreferencesKey("high_refresh_rate_enabled")
     private val hapticsEnabledKey = booleanPreferencesKey("haptics_enabled")
@@ -153,6 +162,16 @@ class AppPreferences(private val context: Context) {
         if (labels.isEmpty()) return
         val serialized = labels.entries.joinToString("\n") { (k, v) -> "$k=$v" }
         context.dataStore.edit { it[modelLabelsKeyFor(agent)] = serialized }
+    }
+
+    /** Opaque spec-serialized reasoning catalog (see
+     *  `AgentCliSpec.serializeReasoningCatalog`). Empty string = none. */
+    fun reasoningCatalogForAgent(agent: String): Flow<String> =
+        context.dataStore.data.map { p -> p[reasoningCatalogKeyFor(agent)].orEmpty() }
+
+    suspend fun setReasoningCatalogForAgent(agent: String, raw: String) {
+        if (raw.isBlank()) return
+        context.dataStore.edit { it[reasoningCatalogKeyFor(agent)] = raw }
     }
 
     /**
@@ -395,7 +414,7 @@ class AppPreferences(private val context: Context) {
 
     /**
      * User-picked downloads folder, as a SAF tree URI string. When
-     * null, downloads default to `Download/sshai/` via MediaStore
+     * null, downloads default to `Download/conch/` via MediaStore
      * (Q+) or app-private external Downloads (pre-Q).
      *
      * The URI is acquired via `ACTION_OPEN_DOCUMENT_TREE` and we

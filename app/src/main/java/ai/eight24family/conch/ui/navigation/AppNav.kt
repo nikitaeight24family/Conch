@@ -410,7 +410,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                     nav.popBackStack()
                     nav.navigate(Routes.keychainForRegister(sid))
                 },
-                onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                onOpenSettings = { ai.eight24family.conch.ui.window.navigateTab(nav, Routes.SETTINGS) },
                 onOpenChatFromSearch = rememberOpenChatFromSearch(),
                 onOpenTerminal = { sid, name -> nav.navigate(Routes.terminal(sid, name)) },
             )
@@ -441,7 +441,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 onOpenSubagents = {
                     nav.navigate(Routes.subagents(id, agent, chatId = null))
                 },
-                onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                onOpenSettings = { ai.eight24family.conch.ui.window.navigateTab(nav, Routes.SETTINGS) },
                 onOpenKeychain = { nav.navigate(Routes.keychain()) },
                 onOpenChatFromSearch = rememberOpenChatFromSearch(),
                 onOpenTextViewer = { uri, filename, sId, remotePath ->
@@ -515,7 +515,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 onOpenSubagents = { chatId ->
                     nav.navigate(Routes.subagents(id, agent, chatId))
                 },
-                onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                onOpenSettings = { ai.eight24family.conch.ui.window.navigateTab(nav, Routes.SETTINGS) },
                 onOpenKeychain = { nav.navigate(Routes.keychain()) },
                 onOpenTextViewer = { uri, filename, serverId, remotePath ->
                     nav.navigate(Routes.fileViewer(uri.toString(), filename, serverId, remotePath))

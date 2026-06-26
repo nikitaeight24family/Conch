@@ -102,7 +102,29 @@ internal class ChatViewModelSlash(
                 }
             }
             SlashCommandKind.OPEN_MODEL_PICKER -> setModal(ChatModal.ModelHint)
+            SlashCommandKind.REVIEW -> startReview(args)
             SlashCommandKind.CUSTOM -> sendCustom(cmd, args)
+        }
+    }
+
+    /**
+     * Run a Codex code review. `/review` → uncommitted changes ("before I
+     * push"); `/review <base-branch>` → review against that branch. Codex-only
+     * (the CLI's purpose-built reviewer); other agents get a clear hint.
+     */
+    fun startReview(args: String) {
+        val agent = currentAgent()
+        if (agent != Agent.CODEX) {
+            setModal(ChatModal.Unsupported(
+                "review",
+                "Code review is a Codex feature. Switch this server's agent to Codex to use /review."
+            ))
+            return
+        }
+        val s = sessionAccess() ?: return
+        scope.launch {
+            s.startReview(args.trim())
+            postSendUpdate(s.agentSessionId)
         }
     }
 

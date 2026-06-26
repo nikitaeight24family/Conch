@@ -18,6 +18,7 @@ enum class SlashCommandKind {
     OPEN_MEMORY,        // /memory     — also: memory icon in chat topbar
     OPEN_AGENTS,        // /agents     — also: subagents icon in chat topbar
     OPEN_MODEL_PICKER,  // /model      — also: model dropdown in topbar
+    REVIEW,             // /review     — Codex code review (uncommitted, or vs a base branch)
     CUSTOM,             // user-defined custom command files
 }
 
@@ -41,6 +42,7 @@ object SlashCommands {
         SlashCommand("memory", "edit memory file (global + project)",         SlashCommandKind.OPEN_MEMORY),
         SlashCommand("agents", "manage subagents (Claude only)",              SlashCommandKind.OPEN_AGENTS),
         SlashCommand("model",  "switch model (use the topbar dropdown)",      SlashCommandKind.OPEN_MODEL_PICKER),
+        SlashCommand("review", "code review · /review [base-branch] (Codex)", SlashCommandKind.REVIEW, acceptsArgs = true),
     )
 
     /**

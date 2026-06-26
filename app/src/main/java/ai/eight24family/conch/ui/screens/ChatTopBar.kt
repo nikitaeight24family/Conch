@@ -160,6 +160,17 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpOffset
+import kotlin.math.roundToInt
 import ai.eight24family.conch.ui.keyboard.shortcuts
 import ai.eight24family.conch.ui.window.handCursor
 import androidx.compose.ui.platform.LocalContext
@@ -227,6 +238,7 @@ internal fun TerminalTopBar(
     selectedModel: String?,
     observedModel: String?,
     availableModels: Map<String, String>,
+    unavailableModels: Set<String> = emptySet(),
     modelsProbing: Boolean,
     defaultModel: String?,
     sessionInitialModel: String?,
@@ -234,6 +246,7 @@ internal fun TerminalTopBar(
     reasoningCatalog: Map<String, ai.eight24family.conch.agent.spec.ModelReasoningInfo>,
     defaultReasoning: String?,
     sessionInitialReasoning: String?,
+    observedReasoning: String?,
     modelMenuOpen: Boolean,
     onToggleModelMenu: () -> Unit,
     onSelectModel: (String?) -> Unit,
@@ -291,11 +304,13 @@ internal fun TerminalTopBar(
         observedModel = observedModel,
         defaultModel = defaultModel,
         availableModels = availableModels,
+        unavailableModels = unavailableModels,
         modelsProbing = modelsProbing,
         selectedReasoning = selectedReasoning,
         reasoningCatalog = reasoningCatalog,
         defaultReasoning = defaultReasoning,
         sessionInitialReasoning = sessionInitialReasoning,
+        observedReasoning = observedReasoning,
     )
     val displayLabel = topbarUi.displayLabel(topbarState)
     val reasoningSubLabel = topbarUi.reasoningLabel(topbarState)
@@ -308,6 +323,10 @@ internal fun TerminalTopBar(
     // triggered by underlying flow updates while the menu is open.
     var pickerDrillModel by remember { mutableStateOf<ModelMenuItem?>(null) }
     LaunchedEffect(modelMenuOpen) { if (!modelMenuOpen) pickerDrillModel = null }
+    // Window-x of the model chip (the dropdown's anchor) — used to center
+    // the stage-2 effort panel on the SCREEN instead of hanging off the
+    // anchor's left edge.
+    var modelAnchorX by remember { mutableStateOf(0f) }
     // Focus requester for the inline search field — when search opens
     // we want the keyboard up immediately, no extra tap to focus.
     val searchFieldFocus = remember { androidx.compose.ui.focus.FocusRequester() }
@@ -374,7 +393,11 @@ internal fun TerminalTopBar(
                 // centers it at true bar-center (no Row/weights → no left-jump,
                 // no overlap). The server name moved to the navigation slot
                 // (next to the back arrow), where a long name has room.
-                Box {
+                Box(
+                    modifier = Modifier.onGloballyPositioned {
+                        modelAnchorX = it.positionInWindow().x
+                    },
+                ) {
                         if (!displayLabel.isNullOrBlank()) {
                             Column(
                                 modifier = Modifier
@@ -444,7 +467,24 @@ internal fun TerminalTopBar(
                                     .height(34.dp)
                             )
                         }
-                DropdownMenu(expanded = modelMenuOpen, onDismissRequest = onToggleModelMenu) {
+                // Stage 2 panel: full-ish width, centered on the SCREEN.
+                // The popup normally hangs off the anchor's left edge; an
+                // x-offset of (screen−panel)/2 − anchorX recenters it. The
+                // offset is keyed into the popup's position provider, so
+                // flipping stages while open repositions correctly.
+                val effortPanelWidthDp = minOf(LocalConfiguration.current.screenWidthDp - 32, 380)
+                val stage2OffsetX: Dp = if (pickerDrillModel != null) {
+                    with(LocalDensity.current) {
+                        val screenWpx = LocalConfiguration.current.screenWidthDp.dp.toPx()
+                        val panelWpx = effortPanelWidthDp.dp.toPx()
+                        ((screenWpx - panelWpx) / 2f - modelAnchorX).toDp()
+                    }
+                } else 0.dp
+                DropdownMenu(
+                    expanded = modelMenuOpen,
+                    onDismissRequest = onToggleModelMenu,
+                    offset = DpOffset(stage2OffsetX, 0.dp),
+                ) {
                     // Two-stage drill-down picker. Stage 1 lists models
                     // (each row with a `▸` if it has a reasoning submenu);
                     // tapping such a row swaps the menu contents to
@@ -455,23 +495,50 @@ internal fun TerminalTopBar(
                     // Models without a reasoning catalog commit immediately
                     // on first click — single-stage flow for Gemini and
                     // any future spec that doesn't expose reasoning.
-                    val drillModel = pickerDrillModel
+                    // Resolve the drilled model AGAINST THE LIVE menu items:
+                    // the tap snapshots a ModelMenuItem, but the probe can
+                    // land while the menu is open and refresh the reasoning
+                    // catalog — a frozen snapshot kept the effort slider on
+                    // the stale pre-probe levels (2026-06-10: hardcoded
+                    // 4-level ladder shown while the probe had already
+                    // delivered low…ultracode).
+                    val drillModel = pickerDrillModel?.let { snap ->
+                        menuItems.firstOrNull { it.storedValue == snap.storedValue } ?: snap
+                    }
                     if (drillModel == null) {
                         menuItems.forEach { item ->
                             val isSelected = selectedModel == item.storedValue
                             val hasReasoning = item.reasoning.isNotEmpty()
+                            // Unavailable model (CLI flagged "currently
+                            // unavailable", e.g. suspended Fable 5): dim it
+                            // and disable the tap — exactly like the CLI's own
+                            // /model menu (user, 2026-06-13).
+                            val unavailable = !item.available
+                            val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                             DropdownMenuItem(
+                                enabled = !unavailable,
                                 text = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
                                             item.display,
                                             modifier = Modifier.weight(1f),
-                                            color = if (isSelected) MaterialTheme.colorScheme.primary
-                                                    else MaterialTheme.colorScheme.onSurface,
+                                            color = when {
+                                                unavailable -> dim
+                                                isSelected -> MaterialTheme.colorScheme.primary
+                                                else -> MaterialTheme.colorScheme.onSurface
+                                            },
                                             style = MaterialTheme.typography.bodyMedium,
                                             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                                         )
-                                        if (isSelected) {
+                                        if (unavailable) {
+                                            Text(
+                                                "unavailable",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = dim,
+                                                modifier = Modifier.padding(start = 6.dp),
+                                            )
+                                        }
+                                        if (isSelected && !unavailable) {
                                             Icon(
                                                 Icons.Default.Check,
                                                 contentDescription = null,
@@ -479,7 +546,7 @@ internal fun TerminalTopBar(
                                                 modifier = Modifier.padding(start = 6.dp, end = 4.dp)
                                             )
                                         }
-                                        if (hasReasoning) {
+                                        if (hasReasoning && !unavailable) {
                                             // Right-pointing chevron tells the user
                                             // there's a submenu. Using a literal '▸'
                                             // glyph instead of an icon to avoid
@@ -494,6 +561,7 @@ internal fun TerminalTopBar(
                                     }
                                 },
                                 onClick = {
+                                    if (unavailable) return@DropdownMenuItem
                                     if (hasReasoning) {
                                         pickerDrillModel = item
                                     } else {
@@ -503,88 +571,32 @@ internal fun TerminalTopBar(
                             )
                         }
                     } else {
-                        // Stage 2 header — model name + back arrow.
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        "‹",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(end = 8.dp),
-                                    )
-                                    Text(
-                                        drillModel.display,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                }
-                            },
-                            onClick = { pickerDrillModel = null }
-                        )
-                        // Show this model's reasoning levels. The level
-                        // currently in effect (or the model's default if
-                        // nothing is pinned yet) is checkmarked.
+                        // Stage 2 — Claude-style horizontal effort slider
+                        // (Faster ↔ Smarter), driven entirely by the
+                        // model's PROBED reasoning levels. The level in
+                        // effect = explicit pick for this model, else its
+                        // default (which is the server's probed current).
                         val activeEffort = if (selectedModel == drillModel.storedValue) {
                             selectedReasoning?.takeIf { it.isNotBlank() } ?: drillModel.defaultReasoning
                         } else {
                             drillModel.defaultReasoning
                         }
-                        drillModel.reasoning.forEach { level ->
-                            val isCurrent = level.effort == activeEffort
-                            val isDefault = level.effort == drillModel.defaultReasoning
-                            DropdownMenuItem(
-                                text = {
-                                    Column(modifier = Modifier.padding(vertical = 2.dp)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                buildString {
-                                                    append(level.displayName)
-                                                    if (isDefault) append(" (default)")
-                                                },
-                                                modifier = Modifier.weight(1f),
-                                                color = if (isCurrent) MaterialTheme.colorScheme.primary
-                                                        else MaterialTheme.colorScheme.onSurface,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal
-                                            )
-                                            if (isCurrent) {
-                                                Icon(
-                                                    Icons.Default.Check,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.padding(start = 6.dp)
-                                                )
-                                            }
-                                        }
-                                        if (level.description.isNotBlank()) {
-                                            Text(
-                                                level.description,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.outline,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                    }
-                                },
-                                onClick = {
-                                    // Always store the literal level
-                                    // the user tapped — never null out
-                                    // even when it matches the model's
-                                    // intrinsic default. Without the
-                                    // explicit `-c model_reasoning_effort=<X>`
-                                    // flag, codex falls back to the user's
-                                    // config.toml setting (often `xhigh`)
-                                    // which silently overrides the picker.
-                                    // Storing the literal means the UI's
-                                    // claim ("Medium") always matches
-                                    // what's actually sent.
-                                    onSelectModelAndReasoning(drillModel.storedValue, level.effort)
-                                }
-                            )
-                        }
+                        EffortSlider(
+                            modelDisplay = drillModel.display,
+                            levels = drillModel.reasoning,
+                            defaultEffort = drillModel.defaultReasoning,
+                            activeEffort = activeEffort,
+                            panelWidth = effortPanelWidthDp.dp,
+                            onBack = { pickerDrillModel = null },
+                            onPick = { effort ->
+                                // Always store the literal level tapped —
+                                // never null out even when it matches the
+                                // model's default (the CLI would otherwise
+                                // fall back to its config-file effort and
+                                // silently override the picker).
+                                onSelectModelAndReasoning(drillModel.storedValue, effort)
+                            },
+                        )
                     }
                 }
                     }
@@ -893,4 +905,209 @@ internal fun TerminalTopBar(
             }
         }
     )
+}
+
+// ───────────────────────── Effort slider ─────────────────────────
+
+/**
+ * Claude-style `/effort` slider for the model picker's stage 2 — a
+ * horizontal Faster↔Smarter track with one tick per PROBED reasoning
+ * level, a draggable handle, and the active level's name + description.
+ *
+ * Fully data-driven: it renders whatever [levels] the spec's probe
+ * reported (low/medium/high/xhigh/max/ultracode today, anything Anthropic
+ * ships next with zero code changes). NO hardcoded level list lives here —
+ * the previous fixed Low/Medium/High/Max submenu was exactly the
+ * hardcode the user rejected.
+ *
+ * Selection commits on tap of a level label or release of a drag, via
+ * [onPick] with the literal effort string.
+ */
+@Composable
+private fun EffortSlider(
+    modelDisplay: String,
+    levels: List<ai.eight24family.conch.agent.spec.ReasoningLevel>,
+    defaultEffort: String?,
+    activeEffort: String?,
+    panelWidth: Dp,
+    onBack: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    if (levels.isEmpty()) return
+    val n = levels.size
+    val activeIdx = levels.indexOfFirst { it.effort == activeEffort }
+        .let { if (it >= 0) it else levels.indexOfFirst { l -> l.effort == defaultEffort }.coerceAtLeast(0) }
+    // Live index while dragging so the handle tracks the finger before the
+    // pick commits; resets to the real active index on (re)compose.
+    var dragIdx by remember(activeEffort, n) { mutableStateOf(activeIdx) }
+    val accent = MaterialTheme.colorScheme.primary
+    val trackBase = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    val curLevel = levels.getOrNull(dragIdx) ?: levels[activeIdx]
+
+    Column(
+        modifier = Modifier
+            .width(panelWidth)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        // Header: back arrow + model + current level name (accent).
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "‹",
+                style = MaterialTheme.typography.bodyMedium,
+                color = accent,
+                modifier = Modifier
+                    .clickable { onBack() }
+                    .padding(end = 8.dp),
+            )
+            Text(
+                modelDisplay,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                curLevel.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = accent,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        // Faster / Smarter ends.
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "Faster",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "Smarter",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        // The track: line + tick per level + draggable handle. Tap or drag
+        // anywhere snaps to the nearest level.
+        //
+        // FIXED width everywhere below (panelWidth − the Column's 16+16dp
+        // padding), NEVER fillMaxWidth/BoxWithConstraints: DropdownMenu
+        // measures its content with IntrinsicSize, where fillMaxWidth
+        // resolves against an INFINITE max width — laying out at
+        // constraints.maxWidth crashed with "Size(2147483647 x 44) is out
+        // of range" the moment the slider opened (2026-06-10), and
+        // BoxWithConstraints (SubcomposeLayout) can't answer intrinsics
+        // at all.
+        val density = LocalDensity.current
+        val trackWidth = panelWidth - 32.dp
+        val handleR = with(density) { 7.dp.toPx() }
+        val trackWidthPx = with(density) { trackWidth.toPx() }
+        Box(
+            modifier = Modifier
+                .width(trackWidth)
+                .height(22.dp),
+        ) {
+            val widthPx = trackWidthPx
+            fun idxFromX(x: Float): Int =
+                if (n <= 1) 0
+                else ((x - handleR) / (widthPx - 2 * handleR) * (n - 1))
+                    .roundToInt().coerceIn(0, n - 1)
+            androidx.compose.foundation.Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(n, widthPx) {
+                        detectTapGestures { off ->
+                            val idx = idxFromX(off.x)
+                            dragIdx = idx
+                            onPick(levels[idx].effort)
+                        }
+                    }
+                    .pointerInput(n, widthPx) {
+                        detectHorizontalDragGestures(
+                            onDragEnd = { onPick(levels[dragIdx].effort) },
+                        ) { change, _ ->
+                            dragIdx = idxFromX(change.position.x)
+                        }
+                    },
+            ) {
+                val cy = size.height / 2f
+                val x0 = handleR
+                val x1 = size.width - handleR
+                val span = (x1 - x0).coerceAtLeast(1f)
+                fun cx(i: Int): Float = if (n <= 1) x0 else x0 + span * i / (n - 1)
+                val handleX = cx(dragIdx)
+                // Base track.
+                drawLine(trackBase, Offset(x0, cy), Offset(x1, cy), strokeWidth = 3f)
+                // Accent fill up to the handle.
+                drawLine(accent, Offset(x0, cy), Offset(handleX, cy), strokeWidth = 3f)
+                // Ticks.
+                for (i in 0 until n) {
+                    drawCircle(
+                        color = if (i <= dragIdx) accent else trackBase,
+                        radius = 3f,
+                        center = Offset(cx(i), cy),
+                    )
+                }
+                // Handle.
+                drawCircle(accent, radius = handleR, center = Offset(handleX, cy))
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        // Level names centered under THEIR ticks via a custom layout —
+        // equal-weight columns ellipsized long names ("Ultracode" →
+        // "Ultrac…", user report). Here each label keeps its intrinsic
+        // width and borrows neighbouring space; edges clamp into the panel.
+        Layout(
+            content = {
+                levels.forEachIndexed { i, level ->
+                    val isCur = i == dragIdx
+                    Text(
+                        level.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isCur) accent else MaterialTheme.colorScheme.outline,
+                        fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.clickable {
+                            dragIdx = i
+                            onPick(level.effort)
+                        },
+                    )
+                }
+            },
+            // Fixed width — see the track comment: intrinsic passes hand
+            // out infinite max width and laying out at it crashes.
+            modifier = Modifier.width(trackWidth),
+        ) { measurables, _ ->
+            val placeables = measurables.map { it.measure(Constraints()) }
+            val w = trackWidthPx.roundToInt()
+            val h = placeables.maxOf { it.height }
+            layout(w, h) {
+                placeables.forEachIndexed { i, p ->
+                    // Same x-mapping as the track's ticks (handleR insets).
+                    val cx = if (n <= 1) handleR else handleR + (w - 2 * handleR) * i / (n - 1)
+                    val x = (cx - p.width / 2f).roundToInt()
+                        .coerceIn(0, (w - p.width).coerceAtLeast(0))
+                    p.place(x, 0)
+                }
+            }
+        }
+        // Current level's description + default marker.
+        if (curLevel.description.isNotBlank() || curLevel.effort == defaultEffort) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                buildString {
+                    append(curLevel.description)
+                    if (curLevel.effort == defaultEffort) {
+                        if (isNotEmpty()) append(" · ")
+                        append("default")
+                    }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
 }

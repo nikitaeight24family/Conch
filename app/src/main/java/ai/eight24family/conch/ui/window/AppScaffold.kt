@@ -219,7 +219,13 @@ private fun FloatingTabBar(
 /** Standard bottom-tab navigation: single instance per tab, state saved /
  *  restored across switches, popping up to the start so the back stack
  *  doesn't accumulate one entry per tap. */
-private fun navigateTab(nav: NavHostController, route: String) {
+/** Top-level (tab) navigation: pop to the start dest saving the current tab's
+ *  stack, single-top, restore the target tab's saved stack. MUST be used by
+ *  EVERY "jump to a tab" entry point (bottom bar AND in-screen shortcuts like
+ *  chat → Settings) — mixing a raw `nav.navigate(tabRoute)` with this corrupts
+ *  Navigation's saved-state so other tabs (e.g. Agents) then restore the wrong
+ *  destination until app restart (user, 2026-06-26). */
+internal fun navigateTab(nav: NavHostController, route: String) {
     nav.navigate(route) {
         popUpTo(nav.graph.findStartDestination().id) { saveState = true }
         launchSingleTop = true

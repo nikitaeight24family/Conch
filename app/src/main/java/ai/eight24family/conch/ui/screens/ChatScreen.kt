@@ -16,6 +16,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,16 +72,29 @@ fun ChatScreen(
     // 240x180 floating window. The PiP layout only shows the assistant
     // stream + a working dot. Tap the window → system restores
     // full-screen Activity → this branch flips back to the full UI.
+    // Publish THIS chat as the foreground conversation so the PiP overlay (drawn
+    // by MainActivity.Root, which survives the PiP short-circuit below) renders
+    // THIS chat + reading position — not a recency-guessed session whose history
+    // diverges from what's on screen ("PiP shows the wrong message").
+    androidx.compose.runtime.DisposableEffect(vm) {
+        ai.eight24family.conch.ui.window.PipForegroundChat.current.value = vm
+        onDispose {
+            if (ai.eight24family.conch.ui.window.PipForegroundChat.current.value === vm) {
+                ai.eight24family.conch.ui.window.PipForegroundChat.current.value = null
+            }
+        }
+    }
     val adaptiveInfo = ai.eight24family.conch.ui.window.LocalAppWindowAdaptive.current
     if (adaptiveInfo.isInPip) {
-        // Park the PiP on the line the user minimized on (their reading anchor),
-        // not the latest reply. null anchor = they were at the bottom → follow.
-        val pipAnchor by vm.readingAnchorMsgId.collectAsState()
-        ai.eight24family.conch.ui.window.ChatPipView(
-            messages = messages,
-            isWorking = state is ai.eight24family.conch.agent.SessionState.Working,
-            anchorMsgId = pipAnchor,
-            modifier = modifier,
+        // The compact PiP view is drawn by Root as an overlay (so it survives this
+        // short-circuit). Here we just stop composing the full chat (Scaffold /
+        // input / dialogs / watchdogs) into a 240x180 window. The EXACT scroll
+        // position is restored on expand from the VM-persisted reading anchor
+        // (see rememberChatScrollController's VM-seeding), not lost to the first
+        // message.
+        android.util.Log.d(
+            "SshAi-PiP",
+            "ChatScreen short-circuit (inPip) anchor=${vm.readingAnchorMsgId.value} off=${vm.readingAnchorOffset.value}",
         )
         return
     }
@@ -98,6 +112,9 @@ fun ChatScreen(
     androidx.compose.runtime.LaunchedEffect(bridgeStep) {
         if (bridgeStep == ChatViewModel.BridgeStep.NeedSettings) {
             vm.dismissBridge()
+            // Land directly in the Phone-bridge section (the "open Shizuku" button),
+            // not the Settings index — the user came here to enable the bridge.
+            ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory = "bridge"
             onOpenSettings()
         }
     }
@@ -241,6 +258,9 @@ fun ChatScreen(
     // tapping the hit. Drives [LocalSearchHighlight] which the
     // matched message's renderer reads to paint the background.
     var searchHighlight by rememberSaveable { mutableStateOf(vm.initialSearchQuery) }
+    // Message id to scroll to after an in-chat search hit is tapped (set on tap,
+    // consumed by a LaunchedEffect once the chat list is back on screen).
+    var pendingHitMsgId by rememberSaveable { mutableStateOf<String?>(null) }
 
     // All autoscroll/anchor state + effects (LazyListState,
     // wasAtBottomSnapshot, first-scroll pipeline, user-send trigger,
@@ -251,12 +271,32 @@ fun ChatScreen(
         messages = messages,
         vm = vm,
         cameFromSearch = cameFromSearch,
+        // Pinned working-status row toggles with this → re-pin to bottom.
+        working = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking,
     )
     val lazyListState = scrollCtl.lazyListState
     val anchorApplied = scrollCtl.anchorApplied
     val targetOrd = scrollCtl.targetOrd
     val matchCharOffset = scrollCtl.matchCharOffset
     val matchAnchor = scrollCtl.matchAnchor
+
+    // Jump to a tapped in-chat search hit: after search closes and the chat list
+    // is back, scroll to the hit's message (it used to land at the top, user
+    // 2026-06-14). Retries briefly in case `messages` is still settling.
+    LaunchedEffect(pendingHitMsgId, searchQuery) {
+        val target = pendingHitMsgId ?: return@LaunchedEffect
+        if (!searchQuery.isNullOrEmpty()) return@LaunchedEffect  // still in search view
+        repeat(20) {
+            val idx = messages.indexOfFirst { it.id == target }
+            if (idx >= 0) {
+                lazyListState.scrollToItem(idx)
+                pendingHitMsgId = null
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(30)
+        }
+        pendingHitMsgId = null
+    }
 
     ChatTailPollLifecycle(vm = vm)
 
@@ -296,7 +336,14 @@ fun ChatScreen(
                 state = state,
                 remoteWorking = remoteWorking,
                 modelMenuOpen = modelMenuOpen,
-                onToggleModelMenu = { modelMenuOpen = !modelMenuOpen },
+                onToggleModelMenu = {
+                    val opening = !modelMenuOpen
+                    modelMenuOpen = opening
+                    // Tap-to-open → live re-probe of availability (models can
+                    // be suspended mid-session; freshness gate bypassed). The
+                    // cached list shows instantly and refreshes in place.
+                    if (opening) vm.onModelPickerOpened()
+                },
                 onCloseModelMenu = { modelMenuOpen = false },
                 commandMenuOpen = commandMenuOpen,
                 onToggleCommandMenu = { commandMenuOpen = !commandMenuOpen },
@@ -379,7 +426,10 @@ fun ChatScreen(
                         val inChatHits = buildInChatHits(messages, activeQuery)
                         InChatHitsList(
                             hits = inChatHits,
-                            onPickHit = { searchQuery = null },
+                            // Remember which message to jump to, THEN close search —
+                            // a LaunchedEffect scrolls there once the chat list is back
+                            // (used to just close + land at the top, user 2026-06-14).
+                            onPickHit = { hit -> pendingHitMsgId = hit.msgId; searchQuery = null },
                         )
                     } else {
                         // Highlight target = the actual message at
@@ -424,23 +474,27 @@ fun ChatScreen(
                 // raising them —.
                 LaunchedEffect(usageExpanded) {
                     if (usageExpanded && messages.isNotEmpty()) {
-                        // Pin to bottom ONLY if the user was truly at the end.
-                        // Mirror isAtBottom in ChatScreenAutoscroll: compare the
-                        // last visible item against layoutInfo.totalItemsCount-1
-                        // (which counts the optional "__thinking__" row), NOT
-                        // messages.lastIndex-1. The old check was off by 1-3 —
-                        // with the thinking row present while the agent works it
-                        // read "at bottom" even when the user had scrolled up a
-                        // few messages, so opening the panel scrolled them down.
-                        val info = lazyListState.layoutInfo
-                        val atBottom = info.visibleItemsInfo.lastOrNull()
-                            ?.let { it.index >= info.totalItemsCount - 1 } ?: true
+                        // Pin to bottom ONLY if the user was truly at the end —
+                        // PIXEL-genuine (canScrollForward=false), not "the last
+                        // item intersects the viewport": one CLI reply = one
+                        // multi-screen LazyColumn item, so the old index check
+                        // read "at bottom" while the user was parked mid-message
+                        // and opening the panel yanked them down (2026-06-10).
+                        // Unmeasured list (empty visibleItemsInfo) = DON'T move
+                        // the user.
+                        val atBottom = lazyListState.layoutInfo.visibleItemsInfo.isNotEmpty() &&
+                            !lazyListState.canScrollForward
                         if (atBottom) repeat(30) {
                             lazyListState.scrollToBottom(messages.size)
                             kotlinx.coroutines.delay(16)
                         }
                     }
                 }
+
+                // Working-status row PINNED here — directly above the prompt /
+                // usage bar — so it always holds its place instead of scrolling
+                // with the chat.
+                PinnedWorkingStatus(vm = vm, state = state, remoteWorking = remoteWorking)
 
                 // PromptBar lives at the bottom of the content column
                 // (not in Scaffold.bottomBar) so it rises with the
@@ -510,4 +564,37 @@ private fun BridgeUpdateBanner(notice: String, onDismiss: () -> Unit) {
             androidx.compose.material3.Text("dismiss")
         }
     }
+}
+
+/** The live working-status row, PINNED above the prompt/usage bar (NOT a
+ * scrolling list item) so it always holds its place. Renders nothing when
+ * no turn is in flight. */
+@Composable
+private fun PinnedWorkingStatus(
+    vm: ChatViewModel,
+    state: ai.eight24family.conch.agent.SessionState,
+    remoteWorking: Boolean,
+) {
+    val isWorking = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
+    if (!isWorking) return
+    val liveTokens by vm.liveThinkingTokens.collectAsState()
+    val remoteTokens by vm.remoteTokens.collectAsState()
+    val remoteTurnStart by vm.remoteTurnStartMs.collectAsState()
+    val remoteThinking by vm.remoteThinking.collectAsState()
+    val remoteWaiting by vm.remoteWaitingForInput.collectAsState()
+    val activeEffort by vm.activeReasoningEffort.collectAsState()
+    // Local fallback start — used only until the file's turn-start timestamp is
+    // read; keyed on isWorking so it resets per turn.
+    var localStartMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(isWorking) { if (isWorking) localStartMs = System.currentTimeMillis() }
+    // Live thinking_tokens (app-driven) when we have them, else the file-summed
+    // count (mirrored console turn — no live feed).
+    val tokens = (liveTokens ?: 0L).takeIf { it > 0L } ?: remoteTokens.takeIf { it > 0L }
+    WorkingStatusRow(
+        startMs = remoteTurnStart ?: localStartMs,
+        thinkingTokens = tokens,
+        effort = activeEffort,
+        thinking = remoteThinking,
+        waitingForInput = remoteWaiting,
+    )
 }

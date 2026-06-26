@@ -318,6 +318,7 @@ private fun UsageBar(
     onExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
+    bridgeActive: Boolean = false,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val track = MaterialTheme.colorScheme.outline
@@ -359,16 +360,35 @@ private fun UsageBar(
                 .fillMaxWidth()
                 .then(if (expandable) Modifier.clickable { onExpandedChange(!expanded) } else Modifier),
         ) {
-            Text(
-                text = if (usage.label.isEmpty()) " "
-                else usage.label + if (expandable) (if (expanded) "  ⌄" else "  ⌃") else "",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (usage.filled) barColor else track,
-                maxLines = 1,
+            // Label row: small phone glyph at the START when the chat is wired to
+            // the phone (the bridge "connected" indicator the user asked for — a
+            // quiet badge by the limit bar, not a chat banner), the usage label at
+            // the END as before.
+            Row(
                 modifier = Modifier
-                    .align(Alignment.End)
-                    .padding(end = 12.dp, bottom = 2.dp),
-            )
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (bridgeActive) {
+                    Icon(
+                        imageVector = Icons.Filled.PhoneAndroid,
+                        contentDescription = "phone connected",
+                        tint = accent,
+                        modifier = Modifier.size(12.dp),
+                    )
+                } else {
+                    Spacer(Modifier.size(1.dp))
+                }
+                Text(
+                    text = if (usage.label.isEmpty()) " "
+                    else usage.label + if (expandable) (if (expanded) "  ⌄" else "  ⌃") else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (usage.filled) barColor else track,
+                    maxLines = 1,
+                )
+            }
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -501,10 +521,11 @@ private fun UsagePanel(
             if (windows.isNotEmpty()) {
                 if (showedContext) Spacer(Modifier.height(10.dp))
                 windows.forEach { w ->
+                    val wReset = w.resetTextLive(System.currentTimeMillis())
                     UsageMeterRow(
                         label = w.label,
                         labelColor = onSurface,
-                        value = "${w.percent}%" + if (w.resetText.isNotEmpty()) " · resets ${w.resetText}" else "",
+                        value = "${w.percent}%" + if (wReset.isNotEmpty()) " · resets $wReset" else "",
                         valueColor = dim,
                         trailing = null,
                         fraction = w.fraction,
@@ -650,12 +671,14 @@ internal fun PromptBar(
     onUsageExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
+    bridgeActive: Boolean = false,
     uploading: Boolean,
     statusHint: String?,
     enterSends: Boolean,
     attachments: List<StagedAttachment>,
     canAttachMore: Boolean,
     onAddAttachment: (bytes: ByteArray, displayName: String, mimeType: String?) -> Unit,
+    onAddFileAttachment: (file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) -> Unit = { _, _, _, _ -> },
     onRemoveAttachment: (id: String) -> Unit,
     onConnectPhone: () -> Unit,
     onStop: () -> Unit,
@@ -668,14 +691,14 @@ internal fun PromptBar(
         ActivityResultContracts.PickMultipleVisualMedia(maxItems = 10)
     ) { uris ->
         uris.forEach { uri ->
-            ingestUri(ctx, uri, onAddAttachment)
+            ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
         }
     }
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         uris.forEach { uri ->
-            ingestUri(ctx, uri, onAddAttachment)
+            ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
         }
     }
 
@@ -687,7 +710,7 @@ internal fun PromptBar(
         // nearest plan limit (accent fill + "14% · 3h"), or API spend, or
         // degrades to a 1.dp divider when there's nothing to report. Tap →
         // full breakdown (all windows + this chat's spend).
-        UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading)
+        UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, bridgeActive)
 
         // Staged attachments strip
         if (attachments.isNotEmpty()) {
@@ -1076,19 +1099,52 @@ internal fun FileTile(att: StagedAttachment, cyan: androidx.compose.ui.graphics.
 
 // ───────────────────────── Attachment helpers ─────────────────────────
 
+/** Largest file we read fully into RAM (for an inline image preview). Anything
+ *  bigger — or any non-image — is streamed to a temp file instead, so a huge
+ *  attachment never has to fit in the phone's heap (user 2026-06-14). */
+private const val MAX_INMEM_ATTACHMENT_BYTES = 25L * 1024 * 1024
+
 private fun ingestUri(
     ctx: Context,
     uri: Uri,
-    onAddAttachment: (bytes: ByteArray, displayName: String, mimeType: String?) -> Unit
+    onAddAttachment: (bytes: ByteArray, displayName: String, mimeType: String?) -> Unit,
+    onAddFileAttachment: (file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) -> Unit,
 ) {
-    val bytes = SilentlyTry.logged("SshAi-ChatPrompt", "read attachment bytes") {
-        ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-    } ?: return
     val name = queryDisplayName(ctx, uri)
         ?: uri.lastPathSegment?.substringAfterLast('/')
         ?: "file_${System.currentTimeMillis()}"
     val mime = ctx.contentResolver.getType(uri)
-    onAddAttachment(bytes, name, mime)
+    val size = querySize(ctx, uri)
+    val isImage = mime?.startsWith("image/") == true ||
+        name.substringAfterLast('.', "").lowercase() in INGEST_IMAGE_EXTS
+    // Small image → keep in RAM so the chip + inline preview can decode it.
+    // Everything else (large image, any non-image, unknown-but-non-image) →
+    // stream to a temp file in cacheDir, never materialising it in the heap.
+    val keepInMemory = isImage && size in 0..MAX_INMEM_ATTACHMENT_BYTES
+    if (keepInMemory) {
+        val bytes = SilentlyTry.logged("SshAi-ChatPrompt", "read attachment bytes") {
+            ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } ?: return
+        onAddAttachment(bytes, name, mime)
+        return
+    }
+    val dir = java.io.File(ctx.cacheDir, "conch_uploads").apply { mkdirs() }
+    val tmp = java.io.File(dir, "${System.currentTimeMillis()}_${name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)}")
+    val ok = SilentlyTry.logged("SshAi-ChatPrompt", "stream attachment to temp") {
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+            tmp.outputStream().use { out -> input.copyTo(out, 64 * 1024) }
+        } != null
+    } == true
+    if (!ok || !tmp.exists()) { SilentlyTry.fired("SshAi-ChatPrompt", "delete failed temp") { tmp.delete() }; return }
+    onAddFileAttachment(tmp, name, mime, tmp.length())
+}
+
+private val INGEST_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "heif")
+
+private fun querySize(ctx: Context, uri: Uri): Long = SilentlyTry.loggedOrElse("SshAi-ChatPrompt", "query attachment size", -1L) {
+    ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+        if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+    } ?: -1L
 }
 
 private fun queryDisplayName(ctx: Context, uri: Uri): String? = SilentlyTry.logged("SshAi-ChatPrompt", "query attachment display name") {
@@ -1121,6 +1177,7 @@ private fun pasteImageFromClipboard(
         val uri = item.uri ?: continue
         val mime = ctx.contentResolver.getType(uri) ?: continue
         if (!mime.startsWith("image/")) continue
-        ingestUri(ctx, uri, onAddAttachment)
+        // Clipboard images are small → in-memory path; never the streamed one.
+        ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment = { f, _, _, _ -> f.delete() })
     }
 }

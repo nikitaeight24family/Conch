@@ -61,6 +61,17 @@ class MainActivity : ComponentActivity() {
                 ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
             }
         }
+        // Re-arm the foreground service if Android 15's dataSync background
+        // budget (Service.onTimeout, ~6h cumulative) stopped it while work
+        // is still alive. Foregrounding the app RESETS the budget, so this
+        // start always succeeds here; idempotent when already running.
+        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Service", "re-arm foreground service on app start") {
+            val active = ServiceLocator.agentSessions.activeCount.value
+            val held = ServiceLocator.sshConnectionPool.userHeldIds.value
+            if (active > 0 || held.isNotEmpty()) {
+                ai.eight24family.conch.service.SshAiService.start(this)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -203,11 +214,11 @@ class MainActivity : ComponentActivity() {
      */
     private fun cap60Hz() {
         SilentlyTry.fired("SshAi-MainActivity", "cap to 60Hz") {
-            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                display
-            } else {
-                @Suppress("DEPRECATION") windowManager.defaultDisplay
-            } ?: return@fired
+            // ContextCompat path instead of the deprecated
+            // windowManager.defaultDisplay — Play's SDK-35 edge-to-edge
+            // check flags deprecated display-API references in the dex
+            // even behind version gates.
+            val display = androidx.core.content.ContextCompat.getDisplayOrDefault(this)
             val currentMode = display.mode
             // Look for a 60 Hz mode at the same resolution.
             val sixtyMode = display.supportedModes.firstOrNull {
@@ -228,11 +239,9 @@ class MainActivity : ComponentActivity() {
 
     private fun requestHighRefreshRate() {
         SilentlyTry.fired("SshAi-MainActivity", "request high refresh") {
-            val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                display
-            } else {
-                @Suppress("DEPRECATION") windowManager.defaultDisplay
-            } ?: return@fired
+            // Same ContextCompat swap as cap60Hz — no deprecated
+            // defaultDisplay reference in our dex.
+            val display = androidx.core.content.ContextCompat.getDisplayOrDefault(this)
             val currentMode = display.mode
             // Filter to modes that keep our current resolution — never
             // trade pixels for Hz.
@@ -414,26 +423,51 @@ private fun Root(isInPip: Boolean) {
         if (isInPip) {
             val login = ai.eight24family.conch.ui.viewmodel.AgentPickerViewModel
                 .activeLogin.collectAsState().value
-            val session = androidx.compose.runtime.remember {
-                SilentlyTry.logged("SshAi-MainActivity", "find most recently active for PiP") {
-                    ServiceLocator.agentSessions.findMostRecentlyActive()
-                }
-            }
+            // Prefer the chat the user actually has on screen (published by
+            // ChatScreen via PipForegroundChat) so the floating window is the
+            // SAME conversation + reading position they minimized — not a
+            // recency-guessed session whose history may be a different chat.
+            val fgChat = ai.eight24family.conch.ui.window.PipForegroundChat
+                .current.collectAsState().value
             Surface(modifier = Modifier.fillMaxSize()) {
                 if (login != null) {
                     ai.eight24family.conch.ui.screens.PipLoginPanel(login)
-                } else if (session != null) {
-                    ai.eight24family.conch.ui.screens.PipChatScreen(session)
+                } else if (fgChat != null) {
+                    val msgs = fgChat.messages.collectAsState().value
+                    val st = fgChat.state.collectAsState().value
+                    val anchor = fgChat.readingAnchorMsgId.collectAsState().value
+                    android.util.Log.d(
+                        "SshAi-PiP",
+                        "overlay=FOREGROUND msgs=${msgs.size} anchor=$anchor working=${st is ai.eight24family.conch.agent.SessionState.Working}",
+                    )
+                    ai.eight24family.conch.ui.window.ChatPipView(
+                        messages = msgs,
+                        isWorking = st is ai.eight24family.conch.agent.SessionState.Working,
+                        anchorMsgId = anchor,
+                    )
                 } else {
-                    androidx.compose.foundation.layout.Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = androidx.compose.ui.Alignment.Center,
-                    ) {
-                        androidx.compose.material3.Text(
-                            "no active chat",
-                            color = MaterialTheme.colorScheme.outline,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                    // No chat on screen (e.g. PiP entered from the Settings tab
+                    // while a background turn runs) → fall back to the
+                    // most-recently-active session's compact reply view.
+                    val session = androidx.compose.runtime.remember {
+                        SilentlyTry.logged("SshAi-MainActivity", "find most recently active for PiP") {
+                            ServiceLocator.agentSessions.findMostRecentlyActive()
+                        }
+                    }
+                    android.util.Log.d("SshAi-PiP", "overlay=FALLBACK session=${session != null}")
+                    if (session != null) {
+                        ai.eight24family.conch.ui.screens.PipChatScreen(session)
+                    } else {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = androidx.compose.ui.Alignment.Center,
+                        ) {
+                            androidx.compose.material3.Text(
+                                "no active chat",
+                                color = MaterialTheme.colorScheme.outline,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                 }
             }

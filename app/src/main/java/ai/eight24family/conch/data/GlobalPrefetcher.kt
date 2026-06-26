@@ -206,6 +206,19 @@ class GlobalPrefetcher(
         val pooledExec: (suspend (String) -> String?)? = pooledClient?.let { buildPooledExec(it) }
         val viaPool = if (pooledExec != null) " (via pooled SSH)" else ""
 
+        // 0) Model + reasoning catalog warm-up over the pooled client (SK
+        // or held non-SK both land in the pool) — the user opens a chat
+        // onto a READY picker. The chat-open probe skips its heavy PTY
+        // pass while this result is fresh. No pooled client → skip
+        // silently; the chat-open path warms it instead.
+        val catalogClient = pooledClient
+            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+        if (catalogClient != null && !ModelCatalogPrefetcher.isFresh(server.id, agent)) {
+            SilentlyTry.fired(TAG, "model catalog warm-up") {
+                ModelCatalogPrefetcher.probeAndPersist(catalogClient, agent, server.id)
+            }
+        }
+
         // 1) List sessions and update the per-(server, agent) cache.
         val rawList = if (pooledExec != null) {
             discovery.list(agent, pooledExec)

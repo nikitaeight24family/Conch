@@ -97,6 +97,10 @@ data class TopbarModelState(
     /** `alias → human-readable label` map from the spec's
      *  `probeAvailableModels`. Empty until the probe returns. */
     val availableModels: Map<String, String>,
+    /** Model NAMES the running session reported as unavailable (parsed from the
+     *  "<Model> is currently unavailable" banner). The topbar must not advertise
+     *  one of these as the chat's model — mirror the CLI's fallback. */
+    val unavailableModels: Set<String> = emptySet(),
     /** True while [AgentCliSpec.probeAvailableModels] is in flight. */
     val modelsProbing: Boolean,
     /** Per-chat reasoning effort pick. `null` = use the model's
@@ -109,6 +113,12 @@ data class TopbarModelState(
      *  the topbar so a resumed chat shows the effort IT was using,
      *  not whatever config.toml currently has. */
     val sessionInitialReasoning: String? = null,
+    /** Reasoning effort the LIVE session is running at, mirrored from
+     *  the session file (Claude's `ultra_effort_enter` → "ultracode").
+     *  Analogous to [observedModel]: it's "what the session actually
+     *  runs", so it beats the stale PTY probe / config default but
+     *  yields to an explicit user pick ([selectedReasoning]). */
+    val observedReasoning: String? = null,
     /** Per-model reasoning catalog: `slug → list of ReasoningLevel`.
      *  Drives the per-model submenu in the picker. Empty list per
      *  slug means that model doesn't support reasoning switching. */
@@ -143,6 +153,11 @@ data class ModelMenuItem(
     val storedValue: String?,
     val reasoning: List<ReasoningLevel> = emptyList(),
     val defaultReasoning: String? = null,
+    /** False when the agent reports this model currently unavailable
+     *  (e.g. Claude's `/model` row description "Claude Fable 5 is currently
+     *  unavailable …" after an export-control suspension). The picker
+     *  renders it dimmed + non-selectable, matching the CLI's own menu. */
+    val available: Boolean = true,
 )
 
 /**

@@ -19,7 +19,7 @@ Nothing in this list is transmitted to Conch or to a third-party backend. The ap
 
 When you start a chat, the app opens an SSH connection (sshj 0.39) to a server you configured and runs the CLI of your choice (`claude` / `codex` / `gemini`) over that channel. From your server's perspective, the traffic is identical to you running the CLI yourself over `ssh user@host`.
 
-Files and images you attach are uploaded to `/tmp/sshai_uploads/` on the server via SSH `cat > path`. They live there until the server reboots or you delete them.
+Files and images you attach are uploaded to `/tmp/conch_uploads/` on the server via SSH `cat > path`. They live there until the server reboots or you delete them.
 
 Memory editor changes (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`) and subagent files are written to standard locations under `~/.claude` / `~/.codex` / `~/.gemini` on your server, the same paths the CLI itself uses.
 
@@ -34,7 +34,7 @@ A complete, verbatim list lives in the app at **About → Operations & Commands*
 - **Probing — read-only status checks.** `which claude` / `which codex` / `which gemini`, `<cli> --version`, `npm view @openai/codex version`, `npm view @google/gemini-cli version`, `curl -sI https://claude.ai/install.sh`, `stat`, `pgrep`, `ls` / `cat` of the agent's own session files under `~/.claude` / `~/.codex` / `~/.gemini`.
 - **Install / update agents.** `curl -fsSL https://claude.ai/install.sh | bash` (Anthropic's official installer for Claude Code), `npm install -g @openai/codex` / `@google/gemini-cli`, `sudo -n npm install -g <pkg>` retry when the npm prefix needs root (only succeeds if you have passwordless sudo — the app does not handle password prompts), `apt-get`/`dnf`/`pacman`/`apk`/`brew install nodejs npm` as a last-resort bootstrap when npm is missing. Only triggered when you tap **[ install ]** or **[ update ]**.
 - **Run agents.** `claude --print --output-format json [--resume <uuid>] [--model …] [--permission-mode …] "<user-prompt>"`, `codex exec [resume <uuid>] [--ask-for-approval …] [--sandbox …] "<user-prompt>"`, `gemini [--yolo] "<user-prompt>"`. The `<user-prompt>` is exactly the text you typed into the chat — the app does not inject hidden instructions.
-- **File operations.** `cat <path>` to read, `cat > <path>` to write (memory editor save, attachment upload, in-app text-editor save-back), `sha256sum <path>` for download deduplication, `test -f` / `mkdir -p` / `stat` for path checks, `rm /tmp/sshai_uploads/<file>` only when you tap the X next to an attached file in chat.
+- **File operations.** `cat <path>` to read, `cat > <path>` to write (memory editor save, attachment upload, in-app text-editor save-back), `sha256sum <path>` for download deduplication, `test -f` / `mkdir -p` / `stat` for path checks, `rm /tmp/conch_uploads/<file>` only when you tap the X next to an attached file in chat.
 - **Approval / login helpers.** `claude /permission-mode plan|acceptEdits|bypassPermissions` flips the per-server approval mode. Agent OAuth flows pass the code or callback URL you pasted into the corresponding dialog — credentials stay on your server.
 
 **Out of scope — the app does NOT run.** `rm -rf` or any destructive command on system paths. `sudo` with a password prompt. Any command that modifies your shell rc files, cron jobs, or systemd units. Outbound network requests from your server beyond the agent's own update channels.

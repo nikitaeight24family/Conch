@@ -57,6 +57,56 @@ object JsonlUtils {
         return dup.slice()
     }
 
+    /**
+     * Result of [tailSlice]: a zero-copy view of the trailing whole-line
+     * window plus how many leading bytes were dropped (0 ⇒ the whole file
+     * fit — nothing hidden).
+     */
+    class TailWindow(val slice: ByteBuffer, val droppedBytes: Long) {
+        val windowed: Boolean get() = droppedBytes > 0
+    }
+
+    /**
+     * Zero-copy view of (roughly) the LAST [maxBytes] of [buffer], snapped
+     * to whole `\n`-delimited lines: the partial first line at the window's
+     * head is dropped and the trailing partial line (if any) is trimmed.
+     *
+     * For huge session files this is what the chat DISPLAY parses — a 20 MB
+     * workflow JSONL parsed whole froze the open on the Main thread; the
+     * recent ~1-2 MB is all the visible conversation needs. The FULL file
+     * stays cached on disk untouched (search + the tail-sync byte-offset
+     * contract depend on it) — this only bounds what we decode for the UI.
+     *
+     * mmap-backed: O(maxBytes), not O(file). Buffer ≤ [maxBytes] ⇒ behaves
+     * exactly like [trimToLastNewline] (droppedBytes = 0). Empty / no
+     * newline ⇒ empty slice ("nothing complete yet"), same as the trims.
+     */
+    fun tailSlice(buffer: ByteBuffer, maxBytes: Int): TailWindow {
+        val dup = buffer.duplicate().apply { rewind() }
+        val limit = dup.limit()
+        if (limit == 0) return TailWindow(ByteBuffer.allocate(0), 0L)
+        val newline = '\n'.code.toByte()
+        // End boundary: last '\n' (scans back from the end — a few bytes for a
+        // well-formed file, NOT the whole buffer). No newline ⇒ nothing whole.
+        var end = limit - 1
+        while (end >= 0 && dup.get(end) != newline) end--
+        if (end < 0) return TailWindow(ByteBuffer.allocate(0), 0L)
+        val endLimit = end + 1 // inclusive of the last '\n'
+        if (endLimit <= maxBytes) {
+            // Whole (trimmed) file fits the window — no head dropped.
+            dup.limit(endLimit); dup.position(0)
+            return TailWindow(dup.slice(), 0L)
+        }
+        // Start at endLimit-maxBytes, then advance to the next '\n' so the
+        // window begins on a clean line boundary (drop the partial head line).
+        var start = endLimit - maxBytes
+        while (start < endLimit && dup.get(start) != newline) start++
+        start++ // step past the '\n' that closed the partial head line
+        if (start >= endLimit) { dup.limit(endLimit); dup.position(0); return TailWindow(dup.slice(), 0L) }
+        dup.limit(endLimit); dup.position(start)
+        return TailWindow(dup.slice(), start.toLong())
+    }
+
     /** Single-line size cap for [forEachLine]. A JSONL line above this is a
      *  pathological blob (e.g. a 475 MB base64 file embedded in one message)
      *  — allocating it whole OOM-crashed the process. Skipped, not allocated.

@@ -403,7 +403,7 @@ private fun exportAnnotated(
     return bmp
 }
 
-/** Save the annotated bitmap to Downloads/sshai/ and fire the share sheet. */
+/** Save the annotated bitmap to Downloads/conch/ and fire the share sheet. */
 private fun shareBitmap(ctx: android.content.Context, bmp: android.graphics.Bitmap, srcName: String) {
     val base = srcName.substringBeforeLast('.', srcName)
     val name = "${base}_annotated.png"
@@ -411,7 +411,7 @@ private fun shareBitmap(ctx: android.content.Context, bmp: android.graphics.Bitm
         val cv = android.content.ContentValues().apply {
             put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
             put(android.provider.MediaStore.Downloads.MIME_TYPE, "image/png")
-            put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/sshai/")
+            put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/conch/")
         }
         val u = ctx.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
         if (u != null) ctx.contentResolver.openOutputStream(u)?.use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }

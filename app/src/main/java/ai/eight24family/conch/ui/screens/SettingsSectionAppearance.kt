@@ -254,24 +254,20 @@ internal fun SettingsSectionAppearance(vm: SettingsViewModel) {
                 tickN++
             }
         }
+        // ContextCompat.getDisplayOrDefault instead of the deprecated
+        // windowManager.defaultDisplay: Play's SDK-35 edge-to-edge check
+        // flags deprecated window/display API REFERENCES in the dex even
+        // when they're behind a version gate — keep our own code clean.
         val currentHz: Float = remember(tickN, activity) {
             SilentlyTry.loggedOrElse("SshAi-Settings", "read current refresh rate", 0f) {
-                val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    activity?.display
-                } else {
-                    @Suppress("DEPRECATION") activity?.windowManager?.defaultDisplay
-                }
-                display?.refreshRate ?: 0f
+                activity?.let { androidx.core.content.ContextCompat.getDisplayOrDefault(it) }
+                    ?.refreshRate ?: 0f
             }
         }
         val maxHz: Float = remember(activity) {
             SilentlyTry.loggedOrElse("SshAi-Settings", "read max refresh rate", 0f) {
-                val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    activity?.display
-                } else {
-                    @Suppress("DEPRECATION") activity?.windowManager?.defaultDisplay
-                }
-                display?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 0f
+                activity?.let { androidx.core.content.ContextCompat.getDisplayOrDefault(it) }
+                    ?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 0f
             }
         }
         // Hide the toggle entirely on panels that don't support

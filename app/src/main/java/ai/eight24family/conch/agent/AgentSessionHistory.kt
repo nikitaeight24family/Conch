@@ -338,4 +338,45 @@ internal class AgentSessionHistory(
             if (changed) _history.value = builder.build()
         }
     }
+
+    /** Freeze an [AgentMessage.AskUserQuestion] card with the user's
+     *  chosen answers — mirror of [resolvePermission]: in-place copy,
+     *  no id changes, no positional shifts. */
+    fun resolveQuestion(requestId: String, answers: Map<Int, List<String>>) {
+        synchronized(flushLock) {
+            val current = _history.value
+            var changed = false
+            val builder = current.builder()
+            for (i in current.indices) {
+                val m = current[i]
+                if (m is AgentMessage.AskUserQuestion && m.requestId == requestId) {
+                    builder[i] = m.copy(answers = answers)
+                    changed = true
+                }
+            }
+            if (changed) _history.value = builder.build()
+        }
+    }
+
+    /** Freeze EVERY still-unanswered AskUserQuestion card (any requestId, incl.
+     *  read-only mirrored ones whose requestId is empty) — used when the user
+     *  types a NEW message instead of answering: the question is auto-dismissed
+     *  (frozen, options non-tappable) rather than left dangling with an Error.
+     *  Returns true if any card was open. */
+    fun cancelUnresolvedQuestions(): Boolean {
+        synchronized(flushLock) {
+            val current = _history.value
+            var changed = false
+            val builder = current.builder()
+            for (i in current.indices) {
+                val m = current[i]
+                if (m is AgentMessage.AskUserQuestion && m.answers == null) {
+                    builder[i] = m.copy(answers = emptyMap())
+                    changed = true
+                }
+            }
+            if (changed) _history.value = builder.build()
+            return changed
+        }
+    }
 }

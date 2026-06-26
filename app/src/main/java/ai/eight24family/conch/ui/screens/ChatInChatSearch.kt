@@ -132,6 +132,8 @@ internal fun buildInChatHits(messages: List<AgentMessage>, query: String): List<
             is AgentMessage.Error -> "err"
             is AgentMessage.Raw -> "•"
             is AgentMessage.PermissionRequest -> "ask · ${m.toolName}"
+            is AgentMessage.AskUserQuestion -> "ask"
+            is AgentMessage.EventNote -> "event"
             is AgentMessage.Result -> "result"
         }
         out += InChatHit(
@@ -142,7 +144,9 @@ internal fun buildInChatHits(messages: List<AgentMessage>, query: String): List<
             matchLength = query.length,
         )
     }
-    return out
+    // Newest matches first — the user wants the most recent at the top, not
+    // chat order (user, 2026-06-14). `messages` is oldest→newest, so reverse.
+    return out.asReversed()
 }
 
 /** Compact 2-line search-result row, in-chat variant. Matches the
@@ -201,5 +205,8 @@ internal fun chatSearchableBody(m: AgentMessage): String? = when (m) {
     is AgentMessage.Error -> m.text
     is AgentMessage.Raw -> m.text
     is AgentMessage.PermissionRequest -> "${m.toolName} ${m.description}"
+    is AgentMessage.AskUserQuestion ->
+        m.questions.joinToString(" ") { q -> q.question + " " + q.options.joinToString(" ") { it.label } }
+    is AgentMessage.EventNote -> m.label + (m.detail?.let { " $it" } ?: "")
     is AgentMessage.Result -> m.text
 }

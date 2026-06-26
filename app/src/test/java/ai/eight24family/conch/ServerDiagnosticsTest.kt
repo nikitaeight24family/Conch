@@ -175,7 +175,7 @@ class ServerDiagnosticsTest {
     fun `private IP detection — public addresses`() {
         assertFalse(ServerDiagnostics.isPrivateOrLocal("8.8.8.8"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("1.1.1.1"))
-        assertFalse(ServerDiagnostics.isPrivateOrLocal("203.0.113.10"))
+        assertFalse(ServerDiagnostics.isPrivateOrLocal("198.51.100.10"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("2001:db8::1"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("server.example.com"))
     }

@@ -23,7 +23,7 @@ internal fun SettingsSectionFiles(vm: SettingsViewModel) {
 
 /**
  * "Downloads folder" row in Settings. Default path is
- * `Download/sshai/` (MediaStore). Tapping "Choose folder" opens the
+ * `Download/conch/` (MediaStore). Tapping "Choose folder" opens the
  * system `ACTION_OPEN_DOCUMENT_TREE` picker; the resulting tree URI
  * gets a `persistableUriPermission` so it survives app restarts.
  *
@@ -58,7 +58,7 @@ private fun DownloadsFolderRow(vm: SettingsViewModel) {
     SettingsRow(
         icon = Icons.Filled.Folder,
         title = "Downloads folder",
-        subtitle = display ?: "Default: Download/sshai/",
+        subtitle = display ?: "Default: Download/conch/",
         onClick = { launcher.launch(null) },
     ) {
         Icon(

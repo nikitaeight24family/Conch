@@ -180,7 +180,7 @@ fun AboutScreen(
                 Bullet("Claude Code: ~/.claude/projects/.../*.jsonl  +  ~/.claude/CLAUDE.md (memory)  +  ~/.claude/agents/*.md (subagents).")
                 Bullet("Codex: ~/.codex/sessions/.../*.jsonl  +  ~/.codex/AGENTS.md.")
                 Bullet("Gemini: rollouts under ~/.gemini  +  ~/.gemini/GEMINI.md.")
-                Bullet("file uploads land in /tmp/sshai_uploads/ until the server reboots or you delete them.")
+                Bullet("file uploads land in /tmp/conch_uploads/ until the server reboots or you delete them.")
                 Bullet("we read/write these the same paths the CLI itself uses — nothing proprietary.")
             }
 
@@ -291,6 +291,10 @@ fun AboutScreen(
                     }
                 )
             }
+
+            HorizontalDivider(color = outline.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))
+            // Community / source / socials — brand logos only, the link IS the logo.
+            SocialLinksRow()
         }
     }
 }

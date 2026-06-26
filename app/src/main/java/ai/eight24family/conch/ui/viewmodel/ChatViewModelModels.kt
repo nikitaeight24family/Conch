@@ -131,6 +131,50 @@ internal class ChatViewModelModels(
         }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
+    /** Model names the SESSION itself reports as unavailable — parsed reactively
+     *  from the "Claude <Model> is currently unavailable" banner (AgentMessage.Error
+     *  kind="unavailable") in the stream. Reactive so the topbar recomposes the
+     *  instant the banner lands and stops advertising a disabled model (e.g. the
+     *  dead Fable 5 pin) before any /model probe has run. */
+    val unavailableModelLabels: StateFlow<Set<String>> = messages
+        .map { list ->
+            list.asSequence()
+                .filterIsInstance<AgentMessage.Error>()
+                .filter { it.kind == "unavailable" }
+                .mapNotNull {
+                    ai.eight24family.conch.agent.claude.CLAUDE_MODEL_NAME_RX.find(it.text)
+                        ?.value?.trim()?.replace(Regex("\\s+"), " ")
+                }
+                .toSet()
+        }
+        .stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    /**
+     * Reasoning effort the session is actually running at — mirrored from the
+     * session file's effort events (Claude's `ultra_effort_enter` → "ultracode")
+     * the same way [observedModel] mirrors the model. Reads the LATEST so a
+     * mid-session `/effort` change wins. Never a hardcoded default.
+     */
+    val observedReasoning: StateFlow<String?> = messages
+        .map { list ->
+            list.asReversed().asSequence()
+                .filterIsInstance<AgentMessage.System>()
+                .mapNotNull { it.reasoning }
+                .firstOrNull()
+        }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    /** Claude's auto-generated session title (the latest `ai-title`). The topbar
+     *  shows this instead of the first user message. */
+    val observedTitle: StateFlow<String?> = messages
+        .map { list ->
+            list.asReversed().asSequence()
+                .filterIsInstance<AgentMessage.System>()
+                .mapNotNull { it.title }
+                .firstOrNull()
+        }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
     /** Most-recently-reported working dir from any system event. */
     val observedCwd: StateFlow<String?> = messages
         .map { list ->
@@ -161,8 +205,12 @@ internal class ChatViewModelModels(
     private val _defaultReasoning = MutableStateFlow<String?>(null)
     val defaultReasoning: StateFlow<String?> = _defaultReasoning.asStateFlow()
 
-    /** Model parsed out of the session JSONL during the sessions-list discovery pass. */
-    private val _sessionInitialModel = MutableStateFlow(initialSessionModel)
+    /** Model parsed out of the session JSONL during the sessions-list discovery pass.
+     *  Synthetic markers ("<synthetic>" from a STALE cached list row built before
+     *  the grep filter landed) are dropped so the topbar never flashes them. */
+    private val _sessionInitialModel = MutableStateFlow(
+        initialSessionModel?.takeIf { it.isNotBlank() && !it.startsWith("<") }
+    )
     val sessionInitialModel: StateFlow<String?> = _sessionInitialModel.asStateFlow()
 
     /** Reasoning effort parsed from the session's JSONL header. */
@@ -192,6 +240,17 @@ internal class ChatViewModelModels(
                     if (_availableModels.value.isEmpty()) _availableModels.value = legacy
                 }
             }
+            // Reasoning catalog: same cold-start treatment as the labels.
+            // Spec-encoded blob (agent-agnostic here) — without it the
+            // effort slider regresses to the spec's hardcoded fallback
+            // ladder until the live probe lands (~8s).
+            val savedCatalog = ServiceLocator.preferences
+                .reasoningCatalogForAgent(agentNow.name).first()
+            if (savedCatalog.isNotBlank() && _reasoningCatalog.value.isEmpty()) {
+                val cat = AgentSpecRegistry[agentNow]
+                    .deserializeReasoningCatalog(savedCatalog, _availableModels.value.keys)
+                if (cat.isNotEmpty()) _reasoningCatalog.value = cat
+            }
         }
     }
 
@@ -201,10 +260,49 @@ internal class ChatViewModelModels(
      * to show real names rather than aliases. Same call also probes default-model and
      * default-reasoning so the topbar's sub-labels mirror what the CLI actually runs.
      */
-    suspend fun probeAvailableModels(session: AgentSession) {
+    suspend fun probeAvailableModels(session: AgentSession, force: Boolean = false) {
         val tag = "SshAi-Models"
-        val spec = AgentSpecRegistry[currentAgent.value]
+        val agentNow = currentAgent.value
+        val spec = AgentSpecRegistry[agentNow]
         val exec = AgentExec { cmd -> session.execOnLive(cmd) }
+        // [force] = the user tapped the model selector. Availability can
+        // change WHILE connected (Fable 5 export-control suspension hit
+        // mid-session), and a week-old connection would never re-probe on
+        // the freshness gate. A tap means "show me what's available NOW",
+        // so bypass the gate and re-run the live probe (the dropdown shows
+        // the cached list instantly and refreshes when this lands). Guarded
+        // against overlap by [_modelsProbing] at the call site. Startup
+        // warm-up (GlobalPrefetcher → ModelCatalogPrefetcher) may have
+        // probed this (server, agent) minutes ago — opening a chat must NOT
+        // re-run the heavy PTY probe every time. Serve the warmed caches
+        // and fall through to the cheap default probes below.
+        if (!force && ai.eight24family.conch.data.ModelCatalogPrefetcher.isFresh(session.server.id, agentNow)) {
+            android.util.Log.d(tag, "catalog fresh for ${spec.agent}@${session.server.id} — skipping heavy probe")
+            if (_availableModels.value.isEmpty()) {
+                val saved = ServiceLocator.preferences.modelLabelsForAgent(agentNow.name).first()
+                if (saved.isNotEmpty()) _availableModels.value = saved
+            }
+            if (_reasoningCatalog.value.isEmpty()) {
+                // Specs memoise their reasoning info from the warm-up probe
+                // (Claude's effort stash, Codex's models_cache parse) —
+                // rebuild the per-slug catalog from that; prefs blob as the
+                // cross-process fallback.
+                val keys = _availableModels.value.keys
+                val rmap = keys.mapNotNull { slug ->
+                    spec.reasoningInfoFor(slug)?.let { slug to it }
+                }.toMap()
+                if (rmap.isNotEmpty()) {
+                    _reasoningCatalog.value = rmap
+                } else {
+                    val rawCat = ServiceLocator.preferences
+                        .reasoningCatalogForAgent(agentNow.name).first()
+                    if (rawCat.isNotBlank()) {
+                        val cat = spec.deserializeReasoningCatalog(rawCat, keys)
+                        if (cat.isNotEmpty()) _reasoningCatalog.value = cat
+                    }
+                }
+            }
+        } else {
         val pty = PtyProbe { session.probeModelMenu() }
         _modelsProbing.value = true
         val map = try {
@@ -226,9 +324,23 @@ internal class ChatViewModelModels(
                 spec.reasoningInfoFor(slug)?.let { slug to it }
             }.toMap()
             _reasoningCatalog.value = rmap
+            // Persist for cold-start hydrate (specs that opt in return
+            // non-null — Claude's uniform effort catalog; Codex rebuilds
+            // from models_cache.json instead and returns null).
+            spec.serializeReasoningCatalog(rmap)?.let { rawCatalog ->
+                scope.launch {
+                    ServiceLocator.preferences.setReasoningCatalogForAgent(
+                        agentForCache.name, rawCatalog,
+                    )
+                }
+            }
+            // Chat-open probe counts as a warm-up too — keeps the next
+            // chat open (or the sweep) from re-running the PTY pass.
+            ai.eight24family.conch.data.ModelCatalogPrefetcher.markProbed(session.server.id, agentNow)
         } else {
             _availableModels.value = emptyMap()
             _reasoningCatalog.value = emptyMap()
+        }
         }
         val defaultModelValue = runCatching { spec.probeDefaultModel(exec) }
             .onFailure { android.util.Log.w(tag, "default-model probe failed for ${spec.agent}", it) }
@@ -292,7 +404,8 @@ internal class ChatViewModelModels(
     /** Seeds the topbar's model display from the listing-time probe BEFORE startNewChat
      *  triggers history load + SSH open. */
     fun setSessionInitialModel(model: String?) {
-        _sessionInitialModel.value = model
+        // Never the "<synthetic>" marker — only a real model id.
+        _sessionInitialModel.value = model?.takeIf { it.isNotBlank() && !it.startsWith("<") }
     }
 
     fun setSessionInitialReasoning(reasoning: String?) {

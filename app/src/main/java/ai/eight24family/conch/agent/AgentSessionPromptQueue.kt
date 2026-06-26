@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
  */
 internal class AgentSessionPromptQueue(
     private val scope: CoroutineScope,
-    private val runOneShot: suspend (String) -> Unit,
+    private val runOneShot: suspend (String, List<String>) -> Unit,
     /** Called RIGHT BEFORE the drainer launches a prompt's turn (only when
      * This is how chat ordering stays correct when the user sends a second
      * prompt while the agent is still answering the first: the second
@@ -32,7 +32,11 @@ internal class AgentSessionPromptQueue(
     /** A queued prompt + whether its UserText still needs to be added to the
      *  chat at turn-start. `true` for plain [enqueue] sends; `false` for a
      *  redeliver where the row is already visible from a prior run. */
-    private data class QueuedPrompt(val text: String, val emitOnStart: Boolean)
+    private data class QueuedPrompt(
+        val text: String,
+        val imagePaths: List<String>,
+        val emitOnStart: Boolean,
+    )
 
     private val pendingPrompts: ArrayDeque<QueuedPrompt> = ArrayDeque()
     private val queueLock = Any()
@@ -104,10 +108,10 @@ internal class AgentSessionPromptQueue(
      * it). Returns `null` and reuses the existing drainer if one's
      * already in flight.
      */
-    fun enqueue(text: String, emitOnStart: Boolean = true): Job? {
+    fun enqueue(text: String, imagePaths: List<String> = emptyList(), emitOnStart: Boolean = true): Job? {
         val shouldStartDrainer: Boolean
         synchronized(queueLock) {
-            pendingPrompts.addLast(QueuedPrompt(text, emitOnStart))
+            pendingPrompts.addLast(QueuedPrompt(text, imagePaths, emitOnStart))
             shouldStartDrainer = currentMessageJob?.isActive != true
         }
         if (shouldStartDrainer) {
@@ -155,7 +159,7 @@ internal class AgentSessionPromptQueue(
             // prompt was queued mid-turn. Redeliver bypasses this (its row is
             // already on screen).
             if (next.emitOnStart) emitOnTurnStart(next.text)
-            runOneShot(next.text)
+            runOneShot(next.text, next.imagePaths)
         }
     }
 }

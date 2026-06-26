@@ -118,8 +118,23 @@ android {
             // own package row so the two coexist.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            // Verbose diagnostic logging (SshAi-* Logx.d/w) — always ON for
+            // debug builds.
+            buildConfigField("boolean", "VERBOSE_LOGS", "true")
         }
         release {
+            // Verbose diagnostic logging is OFF in release by default — the
+            // Play Store / GitHub artifact ships QUIET. Flip it on for a
+            // dev-iteration build with `-PverboseLogs` when you need the
+            // SshAi-* traces (e.g. `assembleRelease -PfastRelease
+            // -PverboseLogs`). CI / `bundleRelease` never pass it → quiet.
+            // R8 sees the `false` const and strips the gated calls + their
+            // string-building entirely. Routed through [util.Logx]. NOT a
+            // user-facing setting — purely compile-time (user, 2026-06-13).
+            buildConfigField(
+                "boolean", "VERBOSE_LOGS",
+                project.hasProperty("verboseLogs").toString(),
+            )
             // Dev-iteration escape hatch: `-PfastRelease` skips R8/minify +
             // resource shrinking so a release-SIGNED APK builds in ~1 min
             // instead of ~10. Same signing key → installs over a prior
@@ -136,6 +151,17 @@ android {
             val fastRelease = project.hasProperty("fastRelease")
             isMinifyEnabled = !fastRelease
             isShrinkResources = !fastRelease
+            // Bundle native debug symbols (.so → symbol tables + line info)
+            // into the AAB's BUNDLE-METADATA so Play can symbolicate native
+            // crash / ANR stacks. We DO ship native code transitively
+            // (sentry-android-ndk, conscrypt, etc.), so the old "no native
+            // code" assumption was wrong — Play warns on every upload until
+            // this is set. Symbols are NOT shipped to users; Play strips them
+            // for distribution and keeps them only for de-obfuscation.
+            // FULL = function names + file/line; best ANR/crash readability.
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

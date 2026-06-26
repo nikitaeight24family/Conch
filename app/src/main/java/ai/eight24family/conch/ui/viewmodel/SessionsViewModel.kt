@@ -88,6 +88,54 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         _sessions.value = if (tomb.isEmpty()) list else list.filterNot { it.id in tomb }
     }
 
+    /**
+     * Close the delete loop. A swipe-delete tombstones the session locally and
+     * tries to `rm` it on the server — but if no transport was live at that
+     * moment the file lingers on the server, hidden-but-undeleted. So whenever
+     * a listing succeeds over a live channel, re-fire the delete for every
+     * tombstoned id the server STILL reports. ownAll()'s pruneDeletedSessions
+     * then drops the tombstone once the next listing confirms the file is gone.
+     * Best-effort, never throws; runs over the SAME channel that just listed.
+     */
+    private suspend fun reconcileTombstones(raw: List<RemoteSession>, exec: suspend (cmd: String) -> String?) {
+        val tomb = _deletedIds.value
+        if (tomb.isEmpty()) return
+        val stragglers = raw.filter { it.id in tomb }
+        if (stragglers.isEmpty()) return
+        android.util.Log.d("SshAi-Sessions", "reconcile: ${stragglers.size} tombstoned session(s) still on server — deleting")
+        for (s in stragglers) {
+            val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].deleteSessionCommand(s.id, s.path)
+            val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner)
+            SilentlyTry.fired("SshAi-Sessions", "reconcile delete ${s.id.take(8)}") { exec(cmd) }
+        }
+    }
+
+    /** Fire [reconcileTombstones] in the BACKGROUND so it never delays the list
+     *  render — rows are already published (tombstoned ones hidden); the server
+     *  `rm` rides the same live channel a beat later. No-op when nothing is
+     *  tombstoned (the common case), so zero overhead for most users. */
+    private fun scheduleReconcile(raw: List<RemoteSession>, exec: suspend (cmd: String) -> String?) {
+        if (_deletedIds.value.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            SilentlyTry.fired("SshAi-Sessions", "reconcile tombstones") { reconcileTombstones(raw, exec) }
+        }
+    }
+
+    /** A reconcile-exec over a pooled SSHClient (fresh channel per command). */
+    private fun pooledReconcileExec(client: net.schmizz.sshj.SSHClient): suspend (cmd: String) -> String? = { cmd ->
+        withContext(Dispatchers.IO) {
+            SilentlyTry.logged("SshAi-Sessions", "reconcile via pooled client") {
+                val sess = client.startSession()
+                try {
+                    val proc = sess.exec(cmd)
+                    proc.inputStream.readBytes()
+                    proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                    ""
+                } finally { SilentlyTry.fired("SshAi-Sessions", "close reconcile session") { sess.close() } }
+            }
+        }
+    }
+
     /** Background prefetch job — cancelled on each list refresh and on clear. */
     private var prefetchJob: Job? = null
 
@@ -224,6 +272,8 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // Kick prefetch — pool has a live client now so this
             // fires through it, no second touch.
             startPrefetch(server, secrets, list)
+            // Push any pending server-side deletes over this same live client.
+            scheduleReconcile(raw, pooledReconcileExec(client))
         } catch (t: Throwable) {
             android.util.Log.e(tag, "  SK discovery threw", t)
             _error.value = t.message ?: t.javaClass.simpleName
@@ -300,6 +350,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             _lastSyncedAt.value = System.currentTimeMillis()
             cache.save(serverId, agent, _sessions.value)
             startPrefetch(server, secrets, list)
+            scheduleReconcile(raw, pooledReconcileExec(client))
             return true
         } catch (t: Throwable) {
             android.util.Log.w(tag, "  pool path threw", t)
@@ -341,6 +392,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val server = _server.value ?: repo.getById(serverId).also { _server.value = it }
             val secrets = repo.getSecrets(serverId)
             if (server != null) startPrefetch(server, secrets, list)
+            scheduleReconcile(raw) { alive.execOnLive(it) }
             return true
         } catch (t: Throwable) {
             android.util.Log.w(tag, "  reuse path threw", t)
@@ -543,13 +595,20 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             SilentlyTry.fired("SshAi-Sessions", "forget cached session body") {
                 historyCache.forget(session.id)
             }
-            // Server-side delete rides the live pooled client. No pool ⇒ we've
-            // still removed it locally; a missing server delete would only
-            // resurface on the next connected sweep (rare), and the user can
-            // just swipe-delete again.
-            val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            // Server-side delete rides the pooled client. If none is live (deleting
+            // from the sessions list with no open chat, or the connection dropped on
+            // idle/network change), bring it up SILENTLY first — same seamless path
+            // app-start uses (stored key/password, or an SK with an enrolled device
+            // key; no tap). That's why deletes weren't reaching the server. A tap-only
+            // SK with no device key can't connect silently → stays tombstoned (hidden)
+            // and the rm rides the next connected refresh.
+            var pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             if (pooled == null) {
-                android.util.Log.w("SshAi-Sessions", "deleteSession ${session.id.take(8)}: no pool — local-only removal")
+                try { ServiceLocator.sshConnectionPool.connectAllPossibleSilently() } catch (_: Throwable) {}
+                pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            }
+            if (pooled == null) {
+                android.util.Log.w("SshAi-Sessions", "deleteSession ${session.id.take(8)}: no transport — kept tombstoned, rm will ride next connect")
                 return@launch
             }
             val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
@@ -592,7 +651,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ?: "application/octet-stream"
     }
 
-    /** Disk-icon tap on a session row: download its JSONL to Downloads/sshai/,
+    /** Disk-icon tap on a session row: download its JSONL to Downloads/conch/,
      *  then route to Open-here / Other-app / Share (chooser unless remembered).
      *  Re-tap mid-download = no-op; re-tap on Done re-opens the chooser. */
     fun downloadSession(session: RemoteSession) {
@@ -625,7 +684,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val cv = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Downloads.DISPLAY_NAME, basename)
                     put(android.provider.MediaStore.Downloads.MIME_TYPE, mime)
-                    put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/sshai/")
+                    put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/conch/")
                     put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
                 }
                 val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: run {
@@ -640,7 +699,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         resolver.update(uri, android.content.ContentValues().apply {
                             put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
                         }, null, null)
-                        resultUri = uri; displayLocation = "Download/sshai/$basename"
+                        resultUri = uri; displayLocation = "Download/conch/$basename"
                     }
                     is ai.eight24family.conch.agent.AgentSession.DownloadOutcome.Failed -> {
                         SilentlyTry.fired("SshAi-Sessions", "delete failed mediastore") { resolver.delete(uri, null, null) }
@@ -850,6 +909,25 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             _refreshing.value = false
             return
         }
+        // Non-SK (password / plain saved "seamless" key): ride the pool exactly
+        // like the SK path above, so the FIRST listing connects once (held via
+        // user intent) and EVERY later refresh reuses the warm transport. The
+        // old `discovery.list(server, secrets, agent)` path re-did a full
+        // TCP + auth handshake on EVERY listing — the main reason the list was
+        // slow to appear. App-start connectAllPossibleSilently usually has the
+        // client live already, so the common case is just a fresh channel open.
+        var pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+        if (pooled == null) {
+            pooled = SilentlyTry.logged("SshAi-Sessions", "userConnect non-SK for listing") {
+                withContext(Dispatchers.IO) {
+                    ServiceLocator.sshConnectionPool.userConnect(server, secrets, null)
+                }
+            }
+        }
+        if (pooled != null && runDiscoveryViaPooledClient(server, secrets, pooled)) return
+        // Pool unavailable (connect failed) or its channel died mid-list →
+        // last-resort one-shot handshake. No live transport to reconcile over;
+        // any pending server `rm` rides the next successful pooled listing.
         val raw = discovery.list(server, secrets, agent)
         ownAll(raw)
         val list = raw.filter { it.preview.isNotBlank() }

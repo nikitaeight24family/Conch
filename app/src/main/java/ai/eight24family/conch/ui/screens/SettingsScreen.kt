@@ -58,6 +58,15 @@ fun SettingsScreen(
 ) {
     var openCategory by rememberSaveable { mutableStateOf<String?>(null) }
 
+    // Deep-link: a screen (e.g. chat → "Connect phone" with Shizuku off) can ask
+    // us to open straight at a category instead of the index. Consumed once.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory?.let {
+            openCategory = it
+            ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory = null
+        }
+    }
+
     // Intercept the system back gesture / hardware back so it
     // returns to the category index INSTEAD OF popping out of
     // Settings entirely. Topbar back already handled this; system

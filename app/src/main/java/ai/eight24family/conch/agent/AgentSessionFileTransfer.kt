@@ -38,10 +38,25 @@ internal class AgentSessionFileTransfer(
         bytes: ByteArray,
         displayName: String,
         onProgress: (Float) -> Unit = {}
+    ): String? = uploadStream({ java.io.ByteArrayInputStream(bytes) }, bytes.size.toLong(), displayName, onProgress)
+
+    /**
+     * Streaming upload — reads the source in 64 KiB chunks straight to the
+     * server's `cat > file`, so a multi-hundred-MB file never has to live in
+     * the phone's heap (the old [uploadFile] held the whole file as a
+     * `ByteArray` → OutOfMemory on big attachments, user 2026-06-14). [open]
+     * is called ONCE and closed here; [total] drives the progress bar (pass
+     * the file size; <=0 disables progress %).
+     */
+    suspend fun uploadStream(
+        open: () -> java.io.InputStream,
+        total: Long,
+        displayName: String,
+        onProgress: (Float) -> Unit = {}
     ): String? = withContext(Dispatchers.IO) {
         val tag = "SshAi-Upload"
         val t0 = System.currentTimeMillis()
-        android.util.Log.d(tag, "begin name=$displayName size=${bytes.size}B sessionState=${state.value}")
+        android.util.Log.d(tag, "begin name=$displayName size=${total}B sessionState=${state.value}")
 
         val client = sshLifecycle.sshClient
         if (client == null) {
@@ -64,7 +79,7 @@ internal class AgentSessionFileTransfer(
 
         val safe = sanitizeFilename(displayName)
         val filename = "${System.currentTimeMillis()}_$safe"
-        val remoteDir = "/tmp/sshai_uploads"
+        val remoteDir = "/tmp/conch_uploads"
         val remotePath = "$remoteDir/$filename"
 
         android.util.Log.d(tag, "mkdir $remoteDir")
@@ -87,19 +102,22 @@ internal class AgentSessionFileTransfer(
             val cmd = sess.exec(command)
             android.util.Log.d(tag, "exec sent, streaming bytes")
 
-            val total = bytes.size
-            val chunkSize = 64 * 1024
-            var sent = 0
+            val buf = ByteArray(64 * 1024)
+            var sent = 0L
             var lastLogged = 0L
-            while (sent < total) {
-                val len = minOf(chunkSize, total - sent)
-                cmd.outputStream.write(bytes, sent, len)
-                sent += len
-                if (total > 0) onProgress(sent.toFloat() / total)
-                val now = System.currentTimeMillis()
-                if (now - lastLogged > 500) {
-                    android.util.Log.d(tag, "  sent=$sent/$total (${(sent * 100L / total)}%) elapsed=${now - t0}ms")
-                    lastLogged = now
+            open().use { input ->
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    cmd.outputStream.write(buf, 0, n)
+                    sent += n
+                    if (total > 0) onProgress((sent.toFloat() / total).coerceIn(0f, 1f))
+                    val now = System.currentTimeMillis()
+                    if (now - lastLogged > 500) {
+                        val pct = if (total > 0) sent * 100L / total else -1L
+                        android.util.Log.d(tag, "  sent=$sent/$total ($pct%) elapsed=${now - t0}ms")
+                        lastLogged = now
+                    }
                 }
             }
             android.util.Log.d(tag, "stdin write done in ${System.currentTimeMillis() - t0}ms, flushing+EOF")
@@ -230,93 +248,16 @@ internal class AgentSessionFileTransfer(
     }
 
     /**
-     * Allocate a PTY, exec `claude` interactively, type `/model\n`, read the
-     * rendered menu for ~3 seconds, then kill the session. Returns the raw
-     * output (includes ANSI escapes — caller strips). The CLI has no
-     * non-interactive way to dump the model list, so PTY drive is the only
-     * honest path to "what does /model actually say right now".
+     * Capture the `/model` menu + `/effort` slider screens of the live
+     * session's server. Delegates to the standalone PTY driver
+     * [probeClaudeMenuScreens] (shared with the startup catalog warm-up
+     * in ModelCatalogPrefetcher).
      */
-    suspend fun probeModelMenu(): String? = withContext(Dispatchers.IO) {
-        val client = sshLifecycle.sshClient ?: return@withContext null
-        if (!client.isConnected) return@withContext null
-        var sess: Session? = null
-        try {
-            sess = client.startSession()
-            sess.allocateDefaultPTY()
-            val cmd = sess.exec("bash -lc 'claude'")
-
-            val sb = StringBuilder()
-            val buf = ByteArray(8192)
-
-            suspend fun readUntilQuiet(maxMs: Long, quietMs: Long) {
-                val deadline = System.currentTimeMillis() + maxMs
-                var lastByteAt = System.currentTimeMillis()
-                while (System.currentTimeMillis() < deadline) {
-                    if (cmd.inputStream.available() > 0) {
-                        val n = cmd.inputStream.read(buf)
-                        if (n > 0) {
-                            sb.append(String(buf, 0, n, Charsets.UTF_8))
-                            lastByteAt = System.currentTimeMillis()
-                        }
-                    } else {
-                        if (System.currentTimeMillis() - lastByteAt > quietMs) return
-                        delay(50)
-                    }
-                }
-            }
-
-            fun pendingConfirm(): Boolean {
-                val tail = sb.toString().takeLast(1500).lowercase()
-                return tail.contains("trust this folder") ||
-                    tail.contains("safety check") ||
-                    tail.contains("bypass permissions") ||
-                    tail.contains("press enter") ||
-                    tail.contains("enter to confirm") ||
-                    tail.contains("yes,") ||
-                    tail.contains("yes, ")
-            }
-
-            // Phase 1: let claude start and print whatever opening pages it has.
-            readUntilQuiet(maxMs = 5_000, quietMs = 1_200)
-
-            // Phase 1.5: dismiss any confirmation prompts (trust folder,
-            // bypass-permissions warning, one-time release notes, etc).
-            // Keep tapping Enter while the trailing output looks like a
-            // prompt and new output is being generated. Bail after 5 loops.
-            var loops = 0
-            while (pendingConfirm() && loops < 5) {
-                val before = sb.length
-                android.util.Log.d("SshAi-Models", "confirm-prompt loop $loops, sending Enter")
-                cmd.outputStream.write("\r".toByteArray())
-                cmd.outputStream.flush()
-                readUntilQuiet(maxMs = 3_000, quietMs = 800)
-                if (sb.length == before) break  // no progress -> stop
-                loops++
-            }
-
-            // Phase 2: send `/model\n`, then read the menu for up to 4 seconds.
-            cmd.outputStream.write("/model\n".toByteArray())
-            cmd.outputStream.flush()
-
-            readUntilQuiet(maxMs = 4_000, quietMs = 700)
-
-            // Phase 3: tear down — Esc to dismiss menu, then Ctrl+D / Ctrl+C.
-            try {
-                cmd.outputStream.write(byteArrayOf(0x1B))
-                cmd.outputStream.flush()
-                delay(150)
-                cmd.outputStream.write(byteArrayOf(4, 3))
-                cmd.outputStream.flush()
-            } catch (_: Throwable) { /* best effort */ }
-            sb.toString()
-        } catch (t: Throwable) {
-            android.util.Log.w("SshAi-Models", "PTY probe failed: ${t.message}", t)
-            null
-        } finally {
-            SilentlyTry.fired("SshAi-AgentSession", "close PTY probe ssh session") { sess?.close() }
-        }
+    suspend fun probeModelMenu(): String? {
+        val client = sshLifecycle.sshClient ?: return null
+        if (!client.isConnected) return null
+        return probeClaudeMenuScreens(client)
     }
-
     /**
      * Cheap probe: does the file at the given absolute path exist on the
      * server right now? Used by the upload-dedupe path to confirm a cached

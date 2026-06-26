@@ -141,9 +141,18 @@ data class StagedAttachment(
     val id: String,
     val displayName: String,
     val mimeType: String?,
+    /** In-memory content — populated only for images / small files (needed for
+     *  the inline preview). EMPTY for large files, which stream from [localFile]
+     *  instead so they never sit in the phone's heap (user 2026-06-14). */
     val bytes: ByteArray,
     val isImage: Boolean,
     val status: UploadStatus,
+    /** For large (streamed) attachments: a temp file in cacheDir holding the
+     *  picked content. Uploaded by streaming, then deleted. Null for the
+     *  in-memory [bytes] path. */
+    val localFile: java.io.File? = null,
+    /** Byte size (from the picker), for the file-chip label and progress. */
+    val sizeBytes: Long = bytes.size.toLong(),
 )
 
 sealed interface UploadStatus {

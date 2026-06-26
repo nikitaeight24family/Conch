@@ -286,13 +286,31 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val _resumeId = MutableStateFlow<String?>(null)
     val resumeId: StateFlow<String?> = _resumeId.asStateFlow()
 
+    /** True when opening a resumed session found NOTHING to show — no local
+     * cache AND the server file is gone/unreachable (e.g. Claude compacted /
+     * deleted the rollout; `stat` returns nothing). Without this the chat
+     * hangs on "// loading…" FOREVER. Drives a clear "session unavailable"
+     * state instead of an eternal spinner. Reset on every open; */
+    private val _loadCameBackEmpty = MutableStateFlow(false)
+    val loadCameBackEmpty: StateFlow<Boolean> = _loadCameBackEmpty.asStateFlow()
+
     /** Id of the message the user is parked on (first visible) when NOT at the
      *  bottom; null = at the bottom. Pushed from the chat's scroll-settle so the
      *  PiP window can render the SAME line the user minimized on, instead of
      *  jerking to the latest reply. */
     private val _readingAnchorMsgId = MutableStateFlow<String?>(null)
     val readingAnchorMsgId: StateFlow<String?> = _readingAnchorMsgId.asStateFlow()
-    fun setReadingAnchor(msgId: String?) { _readingAnchorMsgId.value = msgId }
+    /** Pixel offset of the anchor message's top above the viewport top, captured
+     *  together with the id. Lives in the VM (not just the composition) so a PiP
+     *  minimize→expand — which DISPOSES the chat's scroll controller and all its
+     *  rememberSaveable state — can restore the EXACT reading position on expand
+     *  instead of snapping to the first message. */
+    private val _readingAnchorOffset = MutableStateFlow(0)
+    val readingAnchorOffset: StateFlow<Int> = _readingAnchorOffset.asStateFlow()
+    fun setReadingAnchor(msgId: String?, offset: Int = 0) {
+        _readingAnchorMsgId.value = msgId
+        _readingAnchorOffset.value = offset
+    }
 
     init {
         // Updatable session cache: the moment a chat learns its resume id (a NEW
@@ -335,13 +353,71 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     private val _messagesBySession = MutableStateFlow<Map<String, List<AgentMessage>>>(emptyMap())
     val messages: StateFlow<List<AgentMessage>> = combine(_localSessionId, _messagesBySession) { id, byId ->
-        if (id == null) emptyList() else byId[id] ?: emptyList()
+        val raw = if (id == null) emptyList() else byId[id] ?: emptyList()
+        hideBridgeHandshake(raw)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Phone-bridge plumbing is invisible: the WHOLE handshake turn — the injected
+     * prompt, the `conch-bridge ping` Bash call, the `pong` result, the agent's task
+     * line — is hidden; only a single clean "phone connected" row remains once the
+     * ready token lands. Range filter: drop everything from the (hidden) handshake
+     * prompt up to & including the ready token, replacing the token with the clean
+     * row. While the handshake is still in flight (no token yet), hide it entirely —
+     * nothing shows until the phone confirms. Filters at DISPLAY time, so it holds
+     * across reconnect/reload regardless of stream-vs-file sourcing. */
+    private fun hideBridgeHandshake(msgs: List<AgentMessage>): List<AgentMessage> {
+        if (msgs.isEmpty()) return msgs
+        val startIdx = msgs.indexOfFirst {
+            it is AgentMessage.UserText &&
+                it.text.trimStart().startsWith("I've connected my phone to this server")
+        }
+        if (startIdx < 0) return msgs   // no bridge handshake in this list
+        val tokenIdx = ((startIdx + 1) until msgs.size).firstOrNull {
+            val m = msgs[it]
+            m is AgentMessage.AssistantText && isBridgeReadyToken(m.text)
+        } ?: -1
+        val out = ArrayList<AgentMessage>(msgs.size)
+        out.addAll(msgs.subList(0, startIdx))            // everything before the handshake
+        if (tokenIdx >= 0) {
+            out += AgentMessage.System(id = msgs[tokenIdx].id, subtype = "bridge_connected", raw = "")
+            out.addAll(msgs.subList(tokenIdx + 1, msgs.size))  // anything after the handshake
+        } else {
+            // No ready token. If the turn already finished (a result/error landed)
+            // the handshake FAILED — show a quiet "couldn't connect" row, not an
+            // eternal spinner. Otherwise it's still in flight → "connecting phone… N%"
+            // (the % ramps in the composable); all technical steps stay hidden.
+            val ended = ((startIdx + 1) until msgs.size).any {
+                val m = msgs[it]
+                m is AgentMessage.Result ||
+                    (m is AgentMessage.Error && m.kind != "unavailable")
+            }
+            out += AgentMessage.System(
+                id = if (ended) "bridge-failed" else "bridge-connecting",
+                subtype = if (ended) "bridge_failed" else "bridge_connecting",
+                raw = "",
+            )
+        }
+        return out
+    }
+
+    private fun isBridgeReadyToken(text: String): Boolean {
+        val body = text.trim().lines().filter { it.isNotBlank() }
+            .joinToString("\n").trim().trim('`', '"', ' ')
+        return body == BRIDGE_READY_TOKEN
+    }
 
     private val _stateBySession = MutableStateFlow<Map<String, SessionState>>(emptyMap())
     val state: StateFlow<SessionState> = combine(_localSessionId, _stateBySession) { id, byId ->
         if (id == null) SessionState.Idle else byId[id] ?: SessionState.Idle
     }.stateIn(viewModelScope, SharingStarted.Eagerly, SessionState.Idle)
+
+    /** Live reasoning-token count of the in-flight turn (null = no
+     *  reasoning running). Renders as a transient row above the spinner. */
+    private val _thinkingTokensBySession = MutableStateFlow<Map<String, Long?>>(emptyMap())
+    val liveThinkingTokens: StateFlow<Long?> =
+        combine(_localSessionId, _thinkingTokensBySession) { id, byId ->
+            if (id == null) null else byId[id]
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _activeAgents = MutableStateFlow<Set<Agent>>(emptySet())
     val activeAgents: StateFlow<Set<Agent>> = _activeAgents.asStateFlow()
@@ -367,6 +443,40 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
     val remoteActive: StateFlow<Long?> get() = tailPollCoord.remoteActive
     val remoteFileOpen: StateFlow<Boolean> get() = tailPollCoord.remoteFileOpen
+
+    /** Epoch-ms start of the in-flight turn (the file's `user`-event timestamp),
+     * or null when idle. The working-status timer syncs to this so a MIRRORED
+     * console turn's elapsed matches the console. */
+    val remoteTurnStartMs: StateFlow<Long?> get() = tailPollCoord.remoteTurnStartMs
+
+    /** True only in the THINKING phase (not mid-tool) — gates the working-row's
+     *  «with X effort» suffix to match the CLI. */
+    val remoteThinking: StateFlow<Boolean> get() = tailPollCoord.remoteThinking
+
+    /** True when a mirrored turn has been "thinking" with the file frozen too
+     *  long — almost certainly blocked on a console-side question. The working
+     *  row shows "answer on the server" instead of a fake spinner. */
+    val remoteWaitingForInput: StateFlow<Boolean> get() = tailPollCoord.remoteWaitingForInput
+
+    /** Cumulative output tokens of the in-flight mirrored turn (from the file's
+     *  assistant usage) — the «↓ N tokens» source when there's no live feed. */
+    val remoteTokens: StateFlow<Long> get() = tailPollCoord.remoteTokens
+
+    /** The reasoning effort the session is actually running at — same resolution
+     *  chain the topbar uses (explicit pick → session mirror → probe). Surfaced
+     *  to the working-status row so it can show "· <effort> effort" like the CLI
+     *  («thinking with xhigh effort»). Raw value (e.g. "xhigh"), matching the
+     *  CLI's lowercase wording. */
+    val activeReasoningEffort: StateFlow<String?> by lazy {
+        kotlinx.coroutines.flow.combine(
+            selectedReasoning, observedReasoning, sessionInitialReasoning, defaultReasoning,
+        ) { sel, obs, init, def ->
+            sel?.takeIf { it.isNotBlank() }
+                ?: obs?.takeIf { it.isNotBlank() }
+                ?: init?.takeIf { it.isNotBlank() }
+                ?: def?.takeIf { it.isNotBlank() }
+        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
+    }
 
     // ──────── Hardware security key touch request ────────
     // Owned by `ChatViewModelSkTouch`. The public API below remains on ChatViewModel
@@ -440,6 +550,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  sessions list draws the phone glyph. Not persisted; the prefs flag is. */
     private val _bridgeActiveThisChat = MutableStateFlow(false)
 
+    /** Drives the small phone glyph beside the usage bar. True ONLY once the server
+     * actually CONFIRMED it can reach the phone — i.e. the bridge handshake replied
+     * with the ready token (rendered as the "bridge_connected" row) — AND SSH is
+     * still live. NOT on the connect TAP (which only SENDS the handshake): the user
+     * saw the glyph before the server ever answered (2026-06-26). No confirmation
+     * (ping failed / no reply) → no glyph. On reopen the confirmed token is in
+     * history, so it stays correct. */
+    val bridgeActive: StateFlow<Boolean> = combine(messages, connected) { msgs, conn ->
+        conn && msgs.any {
+            it is AgentMessage.System && it.subtype == "bridge_connected"
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     /** Paperclip → "Connect phone to server". Shizuku-gated, then branches on
      *  whether the bridge is already on the server (see the section comment). */
     fun connectPhoneToServer() {
@@ -510,21 +633,46 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     private val BRIDGE_HOWTO_PROMPT = """
-        I've connected my phone to this server. You now have a CLI at
-        ~/.local/bin/conch-bridge that talks to my phone over this SSH connection
-        (the Conch app polls a request directory and runs things on the phone via
-        Shizuku at adb-shell level). Use it whenever you need to inspect or act on
-        my phone:
-        • conch-bridge shell '<command>' — run any shell command on the phone
-          (adb-shell level), e.g. conch-bridge shell 'pm list packages' or
-          conch-bridge shell 'dumpsys battery'. stdout comes back on stdout;
-          exit code + stderr are on the bridge's own stderr line.
-        • conch-bridge logs --lines 200 — recent logcat (add --tier shizuku for
-          system-wide).
-        • conch-bridge ping — check the phone is reachable.
-        The phone must stay in the foreground for the bridge to respond (~2s
-        poll). If a command times out, ask me to bring Conch to the foreground.
+        I've connected my phone to this server. There's a CLI at ~/.local/bin/conch-bridge
+        that runs things on my phone over this SSH link (the Conch app polls a request
+        directory ~every 2s and executes via Shizuku at adb-shell level).
+
+        FIRST, run `conch-bridge ping`. Success prints `pong` and exits 0. If it doesn't,
+        triage by EXIT CODE — do not assume the phone is dead:
+          • exit 0  → connected, proceed.
+          • exit 2  → timeout: Conch isn't polling. Ask me to bring the Conch app to the
+            foreground (polling pauses when it's backgrounded), then retry.
+          • exit 3  → phone got the request but reported an error (e.g. Shizuku not
+            granted). Read the `phone reported error:` text on stderr.
+          • any other non-zero, especially exit 1 with little or no output → this is almost
+            certainly a bug in the WRAPPER SCRIPT, not the phone. Re-run
+            `bash -x ~/.local/bin/conch-bridge ping` to find the failing line.
+
+        Commands:
+          • conch-bridge shell '<cmd>' — any adb-shell-level command (e.g. 'pm list packages',
+            'dumpsys battery'). stdout → stdout; exit code + stderr come back on the bridge's
+            own `[bridge] {...}` stderr line.
+          • conch-bridge logs [--lines N] [--filter GLOB] [--level V|D|I|W|E] [--tier shizuku|own]
+            — recent logcat.
+          • conch-bridge screenshot — capture the screen.
+          • conch-bridge ping — connectivity check (expect `pong`).
+
+        The phone must stay in the foreground for the bridge to respond (~2s poll).
+        Use the bridge whenever you need to inspect or act on my phone.
+
+        HANDSHAKE — do this FIRST and exactly: run `conch-bridge ping`. If it prints
+        `pong`, reply with ONLY this token on its own line and NOTHING else:
+        CONCH_BRIDGE_READY
+        The app hides this whole setup exchange and shows a small phone indicator
+        instead, so don't write anything else in that reply — just the token. If
+        ping does NOT succeed, skip the token and tell me plainly what went wrong.
     """.trimIndent()
+
+    /** The agent replies with ONLY this token once the bridge handshake succeeds
+     *  (see BRIDGE_HOWTO_PROMPT). The app hides the prompt + this reply and shows a
+     *  clean "phone connected" row + the usage-bar phone glyph instead of dumping
+     *  the scary prompt and a long connection answer into the chat. */
+    private val BRIDGE_READY_TOKEN = "CONCH_BRIDGE_READY"
 
     init {
         // Persist the phone-wired flag against THIS chat's resume id — the id
@@ -592,7 +740,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * Public mostly so the prompt-bar hint can say "queued — will send
      * when session is up" when there's something in flight.
      */
-    private data class PendingSend(val id: String, val text: String, val queuedAt: Long)
+    private data class PendingSend(
+        val id: String,
+        val text: String,
+        val queuedAt: Long,
+        /** Uploaded image paths to send structurally with this buffered turn. */
+        val imagePaths: List<String> = emptyList(),
+    )
     private val _pending = MutableStateFlow<List<PendingSend>>(emptyList())
     val hasPending: StateFlow<Boolean> = _pending
         .map { it.isNotEmpty() }
@@ -723,6 +877,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             initialSessionReasoning = initialSessionReasoning,
         )
     }
+
     val selectedModel: StateFlow<String?> get() = modelsCoord.selectedModel
     val selectedReasoning: StateFlow<String?> get() = modelsCoord.selectedReasoning
     val reasoningCatalog: StateFlow<Map<String, ai.eight24family.conch.agent.spec.ModelReasoningInfo>>
@@ -764,6 +919,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  recent turn. Single source of truth for "what the agent is actually using right
      *  now"; never lie with a hardcoded fallback. */
     val observedModel: StateFlow<String?> get() = modelsCoord.observedModel
+
+    /** Reasoning effort the session actually runs at, mirrored from the session
+     *  file (e.g. `ultra_effort_enter` → "ultracode"). Topbar effort label
+     *  prefers this over the stale PTY probe — never a hardcoded default. */
+    val observedReasoning: StateFlow<String?> get() = modelsCoord.observedReasoning
+
+    /** Claude's auto-generated session title (`ai-title`) — topbar title source,
+     *  preferred over the first user message. */
+    val observedTitle: StateFlow<String?> get() = modelsCoord.observedTitle
 
     /** Most-recently-reported working dir from any system event. Used by slash
      *  commands like /diff, /init, /memory that operate on the cwd. */
@@ -839,6 +1003,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // ──── Available model display names (probed from claude cli.js) ────
     // All owned by `ChatViewModelModels`.
     val availableModels: StateFlow<Map<String, String>> get() = modelsCoord.availableModels
+    val unavailableModelLabels: StateFlow<Set<String>> get() = modelsCoord.unavailableModelLabels
     val modelsProbing: StateFlow<Boolean> get() = modelsCoord.modelsProbing
     val defaultModel: StateFlow<String?> get() = modelsCoord.defaultModel
     val defaultReasoning: StateFlow<String?> get() = modelsCoord.defaultReasoning
@@ -850,9 +1015,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         modelsCoord.hydrateFromCache()
     }
 
+    // NB: NO auto-switch on model-unavailable. We MIRROR the model the
+    // session actually runs (message.model pickup) and FOLLOW Anthropic if
+    // THEY switch (the next real turn's message.model updates it). We never
+    // IMPOSE a model the agent didn't pick — that both fought the user's
+    // choice and ping-ponged Fable↔Opus. A dead model shows its card + a
+    // greyed picker; the user picks a working one (matches Claude's own UI).
+
     /** Live probe of bundled model display names. Delegates to [modelsCoord]. */
     private suspend fun probeAvailableModels(session: AgentSession) =
         modelsCoord.probeAvailableModels(session)
+
+    /**
+     * The user tapped the model selector. Re-probe availability NOW (force,
+     * bypassing the freshness gate) — models can be suspended mid-session
+     * (Fable 5 export-control) and a long-lived connection would otherwise
+     * show a stale list. The dropdown shows the cached list instantly; this
+     * refreshes it in place when the probe lands. No-op if a probe is
+     * already in flight (overlap guard) or no live session yet. */
+    fun onModelPickerOpened() {
+        if (modelsCoord.modelsProbing.value) return
+        val sid = _localSessionId.value ?: return
+        val s = activeSessions[sid] ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            modelsCoord.probeAvailableModels(s, force = true)
+        }
+    }
 
 
     fun refreshServerStats() = statsCoord.refresh()
@@ -919,7 +1107,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val toFlush = _pending.value
                 _pending.value = emptyList()
                 for (p in toFlush) {
-                    s.send(p.text)
+                    s.send(p.text, p.imagePaths)
                     val newId = s.agentSessionId
                     if (newId != null && _resumeId.value != newId) {
                         _resumeId.value = newId
@@ -995,6 +1183,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (resumeFilePath != null) sessionPathMap[localId] = resumeFilePath
         _activeAgents.update { it + agent }
         _resumeId.value = resumeIdParam
+        _loadCameBackEmpty.value = false
         Telemetry.chatSessionStarted(agent, isResume = resumeIdParam != null)
         // Reconnect carry-over (retry() passes the messages it was showing): paint
         // them immediately so the chat doesn't BLANK while the rebuilt session
@@ -1016,6 +1205,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         var cachedParsed: List<AgentMessage> = emptyList()
         var cachedBytesLen = 0L
         if (resumeIdParam != null) {
+            ai.eight24family.conch.util.Logx.d("SshAi-HistCache") {
+                val (total, uniq, bytes) = ServiceLocator.historyCache.duplicationStats(resumeIdParam)
+                "dup-stats sid=${resumeIdParam.take(8)} lines=$total unique=$uniq " +
+                    "dupes=${total - uniq} bytes=$bytes"
+            }
+        }
+        if (resumeIdParam != null) {
             // `snap.buffer` is the mmap-backed view of the cached JSONL —
             // zero Java-heap copy. `trimToLastNewline(ByteBuffer)` returns
             // a zero-copy slice; `parseJsonl(ByteBuffer)` decodes through
@@ -1026,9 +1222,42 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // so nothing after this block references the mmap region.
             ServiceLocator.historyCache.load(resumeIdParam)?.use { snap ->
                 if (snap.buffer.hasRemaining()) {
-                    val safe = ai.eight24family.conch.util.JsonlUtils.trimToLastNewline(snap.buffer)
-                    cachedParsed = tailPollCoord.parseJsonl(safe, agent)
-                    cachedBytesLen = safe.remaining().toLong()
+                    // cachedBytesLen = the FULL trimmed file length — the tail-poll's
+                    // initialOffset relies on this being TRUE EOF so `tail -c +N`
+                    // resumes exactly. Cheap: trimToLastNewline scans back from the
+                    // END for the last '\n' (a few bytes), NOT the whole file.
+                    cachedBytesLen = ai.eight24family.conch.util.JsonlUtils
+                        .trimToLastNewline(snap.buffer).remaining().toLong()
+                    // DISPLAY parses only the recent TAIL. A 20 MB ultracode-workflow
+                    // JSONL parsed whole FROZE the open — parseJsonl ran on the Main
+                    // thread over all 20 MB and the chat hung on "// loading…" forever
+                    // (user, 2026-06-13). The recent ~2 MB is all the visible
+                    // conversation needs; the FULL file stays cached for search +
+                    // tail-sync. A marker row tells the user earlier turns are hidden
+                    // (honest — never silently "looks like everything loaded").
+                    val win = ai.eight24family.conch.util.JsonlUtils
+                        .tailSlice(snap.buffer, DISPLAY_TAIL_BYTES)
+                    val t0 = System.currentTimeMillis()
+                    val parsed = tailPollCoord.parseJsonl(win.slice, agent)
+                    val parseMs = System.currentTimeMillis() - t0
+                    cachedParsed = if (win.windowed) listOf(historyWindowMarker()) + parsed else parsed
+                    // Timing on the OPEN path — openRemoteSession is NOT launched, so
+                    // this hydrate parse runs on the MAIN thread. If parseMs is high on
+                    // a big session, that's the "loaded slowly" jank → move off Main.
+                    // (Dormant unless -PverboseLogs; enable to measure a slow open.)
+                    ai.eight24family.conch.util.Logx.d("SshAi-Chat") {
+                        "hydrate sid=${resumeIdParam.take(8)} windowed=${win.windowed} dropped=${win.droppedBytes}B " +
+                            "msgs=${parsed.size} parseMs=$parseMs (full ${cachedBytesLen}B)"
+                    }
+                    // INSTANT model on entering the chat. The parsed cache
+                    // carries the session's real model in the latest
+                    // `model_observed` System row; seed it synchronously so
+                    // the topbar is correct from frame zero instead of waiting
+                    // for the live tail-poll to bring a fresh turn.
+                    cachedParsed.asReversed().firstNotNullOfOrNull { msg ->
+                        (msg as? AgentMessage.System)
+                            ?.takeIf { it.subtype == "model_observed" }?.model
+                    }?.let { modelsCoord.setSessionInitialModel(it) }
                     // Don't clobber a larger reconnect carry-over (seedMessages)
                     // with a SMALLER stale cache — that's what wiped the recent
                     // reply + the user's message on a network switch.
@@ -1203,18 +1432,42 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             if (pendingSkSigner != null) markSkOpDone()
             activeSessions[localId] = s
             // Apply the persisted `--model` selection to the freshly-opened session.
-            // Fall back to the session's own model (from JSONL) so a resume of
-            // a chat that ran on gpt-5.3-codex doesn't silently switch to
-            // whatever model the user's config.toml has set globally.
-            s.modelOverride = (selectedModel.value
-                ?: modelsCoord.currentSessionInitialModel())
+            // CLAUDE: pass `--model` ONLY on an explicit user pick. Native `claude
+            // --resume` already keeps the session's model AND does Anthropic's own
+            // fallback when it's unavailable — forcing `--model fable` on a session
+            // whose configured default is the now-suspended Fable 5 hard-failed
+            // every send ("No response requested") and made the user manually
+            // switch, which is NOT native CLI behavior. No pick → no flag → the CLI
+            // does its native thing and sends just work.
+            //
+            // CODEX/GEMINI: keep the session-model fallback — their resume
+            // does NOT reliably preserve the model, so a chat that ran on
+            // gpt-5.3-codex must re-pin it or it silently jumps to the
+            // config.toml global.
+            val isClaude = _currentAgent.value == ai.eight24family.conch.agent.Agent.CLAUDE
+            val unavail = ai.eight24family.conch.agent.claude.claudeUnavailableLabels
+            // For Claude, drop an explicit pick that's gone UNAVAILABLE (e.g. a stale
+            // Fable 5 pick). Then, when there's no usable pick, default to claude's OWN
+            // recommended AVAILABLE model — the FIRST non-greyed row of the live
+            // `/model` menu (claude lists its recommended flagship first). Why we must
+            // pass a model at all: the server's settings.json default can be a
+            // suspended model (Fable 5), and claude does NOT silently fall back for
+            // `--print` sessions — it runs the dead model and EVERY turn errors
+            // "currently unavailable", so the chat AND the Connect-phone handshake
+            // never start (verified: no --model → fable → is_error). This is GENERIC —
+            // when Anthropic ships a new flagship or suspends/restores one, the probe
+            // refreshes availableModels/unavailable and the app follows with ZERO code
+            // changes. NO model name is hardcoded. Explicit available pick still wins.
+            val claudePick = selectedModel.value?.takeIf { it.isNotBlank() }?.takeIf { p ->
+                (modelsCoord.availableModels.value[p] ?: p) !in unavail
+            }
+            val claudeRecommended = modelsCoord.availableModels.value.entries
+                .firstOrNull { (k, label) -> k != "default" && label !in unavail }?.key
+            s.modelOverride = (if (isClaude) (claudePick ?: claudeRecommended)
+                else (selectedModel.value ?: modelsCoord.currentSessionInitialModel()))
                 ?.takeIf { it.isNotBlank() }
-            // Apply persisted reasoning-effort pick. Mirror of modelOverride —
-            // explicit user pick wins; otherwise fall back to whatever effort
-            // the JSONL says this chat was running on (sessionInitialReasoning)
-            // so per-chat reasoning is preserved across reopens.
             s.reasoningEffortOverride = (selectedReasoning.value
-                ?: modelsCoord.currentSessionInitialReasoning())
+                ?: if (isClaude) null else modelsCoord.currentSessionInitialReasoning())
                 ?.takeIf { it.isNotBlank() }
             // Apply persisted approval/sandbox mode.
             s.approvalMode = approvalMode.value
@@ -1251,6 +1504,47 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     seedMessages else cachedParsed
                 s.loadHistory(histSeed)
             } else if (resumeFilePath != null && resumeIdParam != null) {
+                // The display only ever needs the last DISPLAY_TAIL_BYTES (the
+                // full body is still fetched right after, for search + tail-poll
+                // offsets). Best-effort: if the pool isn't live or the tail fetch
+                // misses, we fall straight through to the unchanged full-fetch
+                // below.
+                run {
+                    val tailClient = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@run
+                    val tailCmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(
+                        "tail -c $DISPLAY_TAIL_BYTES -- " + ai.eight24family.conch.agent.shellEscape(resumeFilePath)
+                    )
+                    val tailRaw = withContext(Dispatchers.IO) {
+                        SilentlyTry.logged("SshAi-Chat", "fetch session tail for fast paint") {
+                            val sess = tailClient.startSession()
+                            try {
+                                val proc = sess.exec(tailCmd)
+                                val out = java.io.ByteArrayOutputStream()
+                                proc.inputStream.copyTo(out)
+                                proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
+                                out.toByteArray()
+                            } finally { SilentlyTry.fired("SshAi-Chat", "close tail session") { sess.close() } }
+                        }
+                    }
+                    if (tailRaw == null || tailRaw.isEmpty()) return@run
+                    // `tail -c N` returns exactly N bytes iff the file is larger →
+                    // there ARE earlier turns (show the hidden-history marker) and
+                    // the slab starts mid-line (drop the partial first line).
+                    val windowed = tailRaw.size >= DISPLAY_TAIL_BYTES
+                    val safe = if (windowed) {
+                        val nl = tailRaw.indexOf('\n'.code.toByte())
+                        if (nl in 0 until tailRaw.size - 1) tailRaw.copyOfRange(nl + 1, tailRaw.size) else tailRaw
+                    } else tailPollCoord.trimToLastNewline(tailRaw)
+                    val parsed = tailPollCoord.parseJsonl(safe, agent)
+                    if (parsed.isNotEmpty()) {
+                        val display = if (windowed) listOf(historyWindowMarker()) + parsed else parsed
+                        s.loadHistory(display)
+                        _messagesBySession.update { m ->
+                            if ((m[localId]?.size ?: 0) > display.size) m else m + (localId to display)
+                        }
+                    }
+                }
+                // ── PHASE 2 — full body for the cache (unchanged) ──
                 // No cache yet — fetch the full file. Prefer the
                 // pooled SSHClient (already authenticated, free
                 // channel) over a fresh `ssh.execute` handshake;
@@ -1284,24 +1578,55 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         discovery.fetchSessionContent(server, secrets, resumeFilePath)
                     }
                     if (!raw.isNullOrBlank()) {
-                        val bytes = raw.toByteArray(Charsets.UTF_8)
-                        val safe = tailPollCoord.trimToLastNewline(bytes)
-                        val parsed = tailPollCoord.parseJsonl(safe, agent)
-                        s.loadHistory(parsed)
-                        ServiceLocator.historyCache.save(resumeIdParam, safe)
-                        // Caching the body makes this session searchable — so it
-                        // MUST also get a durable owner, or it becomes a serverless
-                        // orphan in search (server-less row + empty/offline open).
-                        // The prefetch sweep records owners for LISTED sessions; a
-                        // chat opened directly (never swept) only hit this path, so
-                        // record it here too.
-                        ServiceLocator.historyCache.recordOwner(resumeIdParam, server.id, agent, resumeFilePath)
-                        cachedBytesLen = safe.size.toLong()
+                        // Off the Main thread: cache the FULL body, then DISPLAY-parse
+                        // only the recent tail from the mmap. Parsing a 20 MB first-open
+                        // session on Main froze the chat; saving 20 MB on Main would too.
+                        kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            val bytes = raw.toByteArray(Charsets.UTF_8)
+                            val safe = tailPollCoord.trimToLastNewline(bytes)
+                            // FULL body cached first (search + tail-sync byte-offset
+                            // contract depend on the whole file being present).
+                            ServiceLocator.historyCache.save(resumeIdParam, safe)
+                            cachedBytesLen = safe.size.toLong()
+                            // Window the DISPLAY parse off the freshly-saved mmap — never
+                            // decode 20 MB here. Falls back to the byte parse if the
+                            // re-load races (cache should be present, just written).
+                            val parsed = ServiceLocator.historyCache.load(resumeIdParam)?.use { snap ->
+                                val win = ai.eight24family.conch.util.JsonlUtils
+                                    .tailSlice(snap.buffer, DISPLAY_TAIL_BYTES)
+                                val p = tailPollCoord.parseJsonl(win.slice, agent)
+                                if (win.windowed) listOf(historyWindowMarker()) + p else p
+                            } ?: tailPollCoord.parseJsonl(safe, agent)
+                            s.loadHistory(parsed)
+                            // Caching the body makes this session searchable — so it
+                            // MUST also get a durable owner, or it becomes a serverless
+                            // orphan in search (server-less row + empty/offline open).
+                            // The prefetch sweep records owners for LISTED sessions; a
+                            // chat opened directly (never swept) only hit this path, so
+                            // record it here too.
+                            ServiceLocator.historyCache.recordOwner(resumeIdParam, server.id, agent, resumeFilePath)
+                        }
+                    } else {
+                        // No cache AND the server returned nothing — the rollout is
+                        // gone/unreachable (Claude compacts/deletes them; `stat`
+                        // returns nothing). Flag it so the UI shows "session
+                        // unavailable" instead of hanging on "// loading…" forever
+                        // (user, 2026-06-13). The tail-poll keeps running, so if the
+                        // file reappears later, content lands and the flag is moot.
+                        _loadCameBackEmpty.value = true
                     }
+                } else {
+                    // No resolvable server for a resumed session → nothing to fetch.
+                    _loadCameBackEmpty.value = true
                 }
             }
 
             collectorJobs[localId] = viewModelScope.launch {
+                launch {
+                    s.liveThinkingTokens.collect { n ->
+                        _thinkingTokensBySession.update { it + (localId to n) }
+                    }
+                }
                 launch {
                     s.state.collect { st ->
                         _stateBySession.update { it + (localId to st) }
@@ -1314,6 +1639,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         }
                     }
                 }
+                // Track which agent-session id we've already propagated so the
+                // instant-appearance work below runs ONCE per session, not on
+                // every history emit.
+                var propagatedRid: String? = null
                 launch {
                     s.history.collect { list ->
                         // Don't let a fresh chat's first emission (just the welcome
@@ -1325,6 +1654,39 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         // covers its text, then it drops out — no duplicate.
                         _messagesBySession.update { m ->
                             m + (localId to preserveUnsyncedUserText(m[localId].orEmpty(), list))
+                        }
+                        // ── Resume propagation + instant list appearance ── The
+                        // instant the CLI mints this session's id, push it to
+                        // _resumeId so ANY rebuild (reconnect after a mid-turn
+                        // transport drop) RESUMES the same server session instead
+                        // of starting fresh — the root of (every drop spawned a
+                        // new server session). AND upsert the row into
+                        // SessionsCache + record its durable owner NOW, so it
+                        // shows in the per-server session list immediately instead
+                        // of waiting for the next server-listing sweep.
+                        val rid = s.agentSessionId
+                        if (rid != null && rid != propagatedRid) {
+                            propagatedRid = rid
+                            if (_resumeId.value != rid) _resumeId.value = rid
+                            val firstUser = list.firstOrNull { it is AgentMessage.UserText }
+                                ?.let { (it as AgentMessage.UserText).text }
+                                ?.replace('\n', ' ')?.trim()?.take(140).orEmpty()
+                            val nowSec = System.currentTimeMillis() / 1000
+                            val row = ai.eight24family.conch.agent.RemoteSession(
+                                id = rid,
+                                path = sessionPathMap[localId].orEmpty(),
+                                agent = agent,
+                                lastActiveAt = nowSec,
+                                preview = firstUser,
+                                model = observedModel.value ?: sessionInitialModel.value,
+                            )
+                            viewModelScope.launch(Dispatchers.IO) {
+                                ServiceLocator.sessionsCache.upsert(serverId, agent, row)
+                                ServiceLocator.historyCache.recordOwner(
+                                    rid, serverId, agent,
+                                    sessionPathMap[localId], nowSec,
+                                )
+                            }
                         }
                         // Home "N new" badge: while this chat is on-screen, record
                         // how many messages the user has seen. When they leave and
@@ -1473,6 +1835,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
         if (trimmed.isEmpty() && ready.isEmpty()) return
 
+        // Image paths sent STRUCTURALLY to the agent (Codex localImage / Gemini
+        // @-mention) so the model sees the pixels — distinct from the prose path
+        // list in finalText, which is kept for the bubble's inline preview (audit
+        // 2026-06-14). Non-image files stay prose-only (the agent reads them).
+        val imagePaths = ready.filter { it.first.isImage }.map { it.second }
+
         // Show the user's own images INSTANTLY from the bytes we already have
         // (just uploaded) — pre-decode into the inline-image cache so the chat
         // renders them locally: no server round-trip, no spinner.
@@ -1510,7 +1878,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (curState is SessionState.Running || curState is SessionState.Working) {
             // Hot path — session is up, push straight to AgentSession.
             viewModelScope.launch {
-                s.send(finalText)
+                s.send(finalText, imagePaths)
                 val newId = s.agentSessionId
                 if (newId != null && _resumeId.value != newId) {
                     _resumeId.value = newId
@@ -1525,7 +1893,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // there only after `s.send()` runs, just like the hot path —
             // and if the session never comes up, the text returns to the
             // input box via `returnedText` rather than disappearing.
-            val p = PendingSend(UUID.randomUUID().toString(), finalText, System.currentTimeMillis())
+            val p = PendingSend(UUID.randomUUID().toString(), finalText, System.currentTimeMillis(), imagePaths)
             _pending.update { it + p }
             // Persist into the brand-new-chat draft slot (issue #38).
             // If the user pops the chat off the back stack right now,
@@ -1568,6 +1936,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     fun addAttachment(bytes: ByteArray, displayName: String, mimeType: String?) =
         attachmentsCoord.addAttachment(bytes, displayName, mimeType)
+
+    /** Large file already staged to a temp file — streamed up, no in-RAM copy. */
+    fun addFileAttachment(file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) =
+        attachmentsCoord.addFileAttachment(file, displayName, mimeType, sizeBytes)
 
     fun removeAttachment(id: String) = attachmentsCoord.removeAttachment(id)
 
@@ -1628,16 +2000,26 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * windows — weekly, per-model). Auto-picks without asking the auth method:
      * if the limit fetch yields data we're on a plan, else we fall to spend.
      */
-    val usageBar: StateFlow<UsageBarState> = combine(_usage, costStats) { report, cost ->
+    /** Ticks the usage-bar reset countdown live (every 30 s) off the absolute
+     *  reset time, so it counts DOWN without a refetch — user 2026-06-14: the
+     *  bar froze at "49m" while the desktop ticked to 14m because the string was
+     *  baked at fetch time and only refreshed on open / turn-finish. */
+    private val usageTicker = kotlinx.coroutines.flow.flow {
+        while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
+    }
+
+    val usageBar: StateFlow<UsageBarState> = combine(_usage, costStats, usageTicker) { report, cost, _ ->
         val primary = report?.primary
         when {
-            primary != null -> UsageBarState(
-                fill = primary.fraction,
-                label = "${primary.percent}%" +
-                    if (primary.resetText.isNotEmpty()) " · resets ${primary.resetText}" else "",
-                filled = true,
-                severity = primary.usedFraction,
-            )
+            primary != null -> {
+                val reset = primary.resetTextLive(System.currentTimeMillis())
+                UsageBarState(
+                    fill = primary.fraction,
+                    label = "${primary.percent}%" + if (reset.isNotEmpty()) " · resets $reset" else "",
+                    filled = true,
+                    severity = primary.usedFraction,
+                )
+            }
             cost.totalCostUsd > 0.0 ->
                 UsageBarState(label = "$" + String.format(java.util.Locale.US, "%.2f", cost.totalCostUsd))
             (cost.inputTokens + cost.outputTokens) > 0L ->
@@ -1652,21 +2034,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         else -> n.toString()
     }
 
+    private var usageJob: Job? = null
+
     /** Re-read the plan windows from the provider (server-side). Cheap; called
      *  on chat open and when a turn finishes. Shows the cached value instantly
      *  so the bar is never empty on (re)open, and a failed refresh keeps the
-     *  last good value instead of blanking the bar. */
+     *  last good value instead of blanking the bar.
+     *
+     *  The server command itself is fast (~0.3s, ridden over the pooled SSH —
+     *  measured 2026-06-27). The bar felt "slow to update" because the LIVE
+     *  fetch on chat-open silently no-ops when the pooled connection isn't up
+     *  YET (peek == null at that instant) — and then nothing refreshed it until
+     *  the next turn finished. So: if live comes back null, keep retrying
+     *  briefly as the connection comes online, instead of leaving a stale bar. */
     fun refreshUsage() {
         val agent = _currentAgent.value
         // Instant: last good value (warm from the sessions-list prefetch) so the
         // bar is already there on open, not popping in seconds later.
         UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) _usage.value = it }
-        viewModelScope.launch(Dispatchers.IO) {
+        usageJob?.cancel()
+        usageJob = viewModelScope.launch(Dispatchers.IO) {
             // FAST: cheap source paints within a few hundred ms (Codex rollout
             // snapshot with projected resets / Claude's cached value)...
             UsageProbe.fetch(serverId, agent, fast = true)?.let { _usage.value = it }
-            // ...then LIVE refines silently (Codex app-server / Claude curl).
-            UsageProbe.fetch(serverId, agent, fast = false)?.let { _usage.value = it }
+            // ...then LIVE refines. Retry on null (= no warm connection yet) up
+            // to ~9s so the bar fills the moment the transport is ready; succeeds
+            // on the first try in the common case (connection already warm).
+            repeat(6) {
+                UsageProbe.fetch(serverId, agent, fast = false)?.let { _usage.value = it; return@launch }
+                kotlinx.coroutines.delay(1500)
+            }
         }
     }
 
@@ -1699,7 +2096,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             var wasWorking = false
             state.collect { st ->
                 val working = st is SessionState.Working
-                if (wasWorking && !working) refreshUsage()
+                if (wasWorking && !working) {
+                    refreshUsage()
+                    // Anthropic's usage endpoint reflects a just-finished turn
+                    // with a few seconds' lag, so the turn-end read often re-reads
+                    // the OLD number. One delayed re-poll converges the bar quickly
+                    // instead of leaving it frozen until the next turn.
+                    launch(Dispatchers.IO) {
+                        kotlinx.coroutines.delay(6_000)
+                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { _usage.value = it }
+                    }
+                }
                 wasWorking = working
             }
         }
@@ -1726,6 +2133,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid] ?: return
         s.cancelCurrent()
+        // Kill the working verb NOW. The verb shows on state==Working OR the
+        // mirror poll's remoteFileOpen; cancelCurrent handles the app-driven
+        // state, but the poll flag would keep the gerund up until the next tick
+        // re-evaluated the file. Clear it optimistically; the poll re-lights only
+        // on genuine new growth.
+        tailPollCoord.setRemoteFileOpen(false)
     }
 
     /**
@@ -1763,10 +2176,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun saveMemory(scope: MemoryScope, contents: String) = slashCoord.saveMemory(scope, contents)
     private suspend fun probeCustomCommands(session: AgentSession) = slashCoord.probeCustomCommands(session)
 
-    fun respondPermission(messageId: String, requestId: String, allow: Boolean) {
+    fun respondPermission(
+        messageId: String,
+        requestId: String,
+        decision: ai.eight24family.conch.agent.PermissionDecision,
+    ) {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid] ?: return
-        viewModelScope.launch { s.respondPermission(requestId, allow) }
+        viewModelScope.launch { s.respondPermission(requestId, decision) }
+    }
+
+    /** Commit the user's picks for an AskUserQuestion card — routed to the
+     *  live control channel (`control_response`), unblocking the turn. */
+    fun respondQuestion(requestId: String, answers: Map<Int, List<String>>) {
+        val sid = _localSessionId.value ?: return
+        val s = activeSessions[sid] ?: return
+        viewModelScope.launch { s.respondQuestion(requestId, answers) }
     }
 
     fun switchAgent(newAgent: Agent) {
@@ -1903,9 +2328,57 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         reconnectCoord.retryStream(_localSessionId.value)
     }
 
+    /**
+     * Marker row prepended to the DISPLAY list when the session was too big to
+     * render whole and only the recent tail is shown. Honest: the user SEES that
+     * earlier turns are hidden (never a silent "looks like everything loaded").
+     * The full history stays cached on disk; this is display-only. Stable id so
+     * re-hydrates / appends keep exactly one.
+     */
+    private fun historyWindowMarker(): AgentMessage =
+        AgentMessage.EventNote(
+            id = HISTORY_WINDOW_MARKER_ID,
+            label = "↑ earlier history hidden — tap to load all",
+            tone = AgentMessage.EventNote.Tone.DIM,
+        )
+
+    /**
+     * Parse and show the ENTIRE cached session (no display window) — triggered by
+     * tapping [historyWindowMarker]. The auto-open windows to the recent tail for
+     * instant paint; this is the explicit "I want all of it" for reviewing e.g. a
+     * long autonomous /loop run. Off the Main thread; seeds the session history
+     * so the live collector keeps the full list (the marker drops out, no
+     * duplicate).
+     */
+    fun loadFullHistory() {
+        val localId = _localSessionId.value ?: return
+        val resumeId = _resumeId.value ?: return
+        val s = activeSessions[localId] ?: return
+        val agent = sessionAgentMap[localId] ?: _currentAgent.value
+        viewModelScope.launch(Dispatchers.Default) {
+            val full = ServiceLocator.historyCache.load(resumeId)?.use { snap ->
+                tailPollCoord.parseJsonl(
+                    ai.eight24family.conch.util.JsonlUtils.trimToLastNewline(snap.buffer), agent,
+                )
+            }
+            if (!full.isNullOrEmpty()) s.loadHistory(full)
+        }
+    }
+
     companion object {
         /** Public constant — referenced by ChatPromptBar / ChatScreenPromptHost. */
         const val MAX_ATTACHMENTS: Int = 10
+
+        /** How many trailing bytes of a session JSONL the chat DISPLAY parses.
+         *  The full file stays cached; only the visible conversation is bounded.
+         *  ~2 MB covers hundreds of recent turns — enough to always include the
+         *  latest model_observed/effort rows — while keeping the Main-thread
+         *  parse sub-100 ms even on a 20 MB+ ultracode-workflow session. */
+        private const val DISPLAY_TAIL_BYTES: Int = 2 * 1024 * 1024
+
+        /** Stable id for [historyWindowMarker] — internal so the chat row renderer
+         *  can recognise it and wire the tap-to-load-all action. */
+        internal const val HISTORY_WINDOW_MARKER_ID = "history-window-marker"
 
         /** In-memory serverId→name cache so a re-opened chat shows the server
          *  name in the topbar from frame zero instead of an empty slot while

@@ -13,7 +13,7 @@ import java.security.MessageDigest
  *
  * The cache is advisory only: callers MUST verify the remote file still
  * exists (e.g. via `[ -f $path ]`) before relying on a hit, because the
- * server's `/tmp/sshai_uploads/` is wiped on reboot and a user may have
+ * server's `/tmp/conch_uploads/` is wiped on reboot and a user may have
  * deleted the file manually.
  *
  * Stored in its own DataStore file. One entry per file — no bulk JSON re-
@@ -39,14 +39,27 @@ class UploadCache(private val context: Context) {
         stringPreferencesKey("u/$serverId/$sha256")
 
     companion object {
-        fun sha256Hex(bytes: ByteArray): String {
-            val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-            return buildString(digest.size * 2) {
-                for (b in digest) {
-                    val v = b.toInt() and 0xff
-                    append(HEX[v ushr 4])
-                    append(HEX[v and 0x0f])
-                }
+        fun sha256Hex(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
+
+        /** Streaming SHA-256 — hashes [input] in 64 KiB chunks WITHOUT
+         *  materialising the whole file in memory (large attachments). Same
+         *  lowercase-hex format as [sha256Hex]. Caller owns/closes [input]. */
+        fun sha256HexStream(input: java.io.InputStream): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+            return hex(md.digest())
+        }
+
+        private fun hex(digest: ByteArray): String = buildString(digest.size * 2) {
+            for (b in digest) {
+                val v = b.toInt() and 0xff
+                append(HEX[v ushr 4])
+                append(HEX[v and 0x0f])
             }
         }
 

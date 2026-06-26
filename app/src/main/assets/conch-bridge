@@ -28,9 +28,18 @@
 
 set -euo pipefail
 
+# A real COMMAND failure (a command returning non-zero under set -e) lands here
+# and says plainly: this is a bug in THIS wrapper, not the phone, plus how to
+# debug. KNOWN LIMIT (learned the hard way): a `set -u` unbound-variable or a
+# syntax error does NOT fire ERR — it aborts during expansion and only prints to
+# stderr. So the durable protections are the nounset-safe guards below + NEVER
+# masking stderr with `2>/dev/null`; this trap is only a net for the
+# command-failure class, not the bug that once hid for hours.
+trap 'rc=$?; echo "conch-bridge: internal error (exit $rc) near line $LINENO — bug in the wrapper script, not your phone. Re-run \`bash -x $0 ...\` to find the failing line." >&2' ERR
+
 # Bump whenever this script changes — the app compares installed-vs-bundled on
 # the server page and offers Update.
-CONCH_BRIDGE_VERSION="4"
+CONCH_BRIDGE_VERSION="5"
 
 BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
 TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
@@ -159,10 +168,17 @@ esac
 # quietly rewrite history without leaving a gap in the id sequence, and the
 # phone-side "Run shell from server" kill-switch is the matching control. Strict
 # best-effort: wrapped so a failed log write never fails the request (set -e).
-{
+# Run in a SUBSHELL with `|| true` so a best-effort audit-write failure can
+# never fail the real request — but do NOT add `2>/dev/null`: masking stderr
+# here is exactly what hid a fatal `ARGS: unbound variable` for hours. The
+# array-emptiness test uses the nounset-safe `${ARGS[*]+x}` form, because under
+# `set -u` a bare `${#ARGS[@]}` on an empty associative array aborts the shell
+# during expansion (so `|| true` alone wouldn't catch it — the subshell is what
+# contains it).
+(
   AUDIT="$BRIDGE_DIR/audit.log"
   detail="$SHELL_CMD"
-  if [ -z "$detail" ] && [ "${#ARGS[@]}" -gt 0 ]; then
+  if [ -z "$detail" ] && [ "${ARGS[*]+x}" = x ]; then
     for k in "${!ARGS[@]}"; do detail="$detail $k=${ARGS[$k]}"; done
   fi
   printf '%s\t%s\t%s@%s\t%s\t%s\n' \
@@ -170,7 +186,7 @@ esac
     "$(id -un 2>/dev/null || echo '?')" "$(hostname 2>/dev/null || echo '?')" \
     "$CMD" "$detail" >> "$AUDIT"
   chmod 600 "$AUDIT"
-} 2>/dev/null || true
+) || true
 
 # Wait for a NON-EMPTY response (`-s`, not `-f`): the app writes the reply via temp-file + atomic rename, and `-s` also guards against ever catching a 0-byte file mid-write (that race used to make json.load die "Expecting value: line 1 column 1"). Phone polls inbox every ~2s.
 RES="$OUTBOX/$ID.res.json"

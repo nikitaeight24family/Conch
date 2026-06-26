@@ -43,6 +43,7 @@ internal fun ChatPromptHost(
     val usageCost by vm.costStats.collectAsState()
     val contextBreakdown by vm.contextBreakdown.collectAsState()
     val contextLoading by vm.contextLoading.collectAsState()
+    val bridgeActive by vm.bridgeActive.collectAsState()
 
     // Slash-command autocomplete state. Filters built-in + user-defined
     // commands by what's typed after the leading `/` and before any
@@ -76,6 +77,7 @@ internal fun ChatPromptHost(
         },
         contextBreakdown = contextBreakdown,
         contextLoading = contextLoading,
+        bridgeActive = bridgeActive,
         uploading = anyUploading,
         statusHint = run {
             // Suppress "// agent: failed —" / "disconnected" hints when
@@ -101,6 +103,7 @@ internal fun ChatPromptHost(
         attachments = attachments,
         canAttachMore = attachments.size < ChatViewModel.MAX_ATTACHMENTS,
         onAddAttachment = { bytes, name, mime -> vm.addAttachment(bytes, name, mime) },
+        onAddFileAttachment = { file, name, mime, size -> vm.addFileAttachment(file, name, mime, size) },
         onRemoveAttachment = { vm.removeAttachment(it) },
         onConnectPhone = { vm.connectPhoneToServer() },
         onStop = { vm.stopCurrent() },

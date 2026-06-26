@@ -43,7 +43,9 @@ import kotlinx.serialization.json.jsonPrimitive
  *     `turn_context`, `compacted`.
  *
  * **This parser handles both** — top-level `type` decides which branch runs.
- * Unknown shapes are dropped silently. The schema split is THE root cause
+ * Unknown shapes surface as generic [AgentMessage.EventNote] rows (label =
+ * type + best-effort summary, payload in the expandable detail) — NEVER
+ * silently dropped (user, 2026-06-12). The schema split is THE root cause
  * of the user's "new chat doesn't start" report (research §2, bug #4776):
  * the old parser saw `thread.started` and dropped it → empty chat bubble.
  *
@@ -121,12 +123,16 @@ object CodexMessageParser {
             "session_meta" -> parseSessionMeta(obj, trimmed)
             "response_item" -> parseResponseItem(obj, trimmed)
             "event_msg" -> parseEventMsg(obj)
+            // Per-turn launch metadata (cwd / model / approval policy) —
+            // same information the init row already carries.
+            "turn_context" -> emptyList()
+            "compacted" -> listOf(note("context compacted", tone = AgentMessage.EventNote.Tone.INFO))
 
             else -> {
-                // Pre-emptive defence against future schema-drift: drop
-                // unknown event types silently rather than dumping them
-                // raw into the chat. `null` type means malformed → Raw.
-                if (type == null) listOf(AgentMessage.Raw(uuid(), trimmed)) else emptyList()
+                // UNKNOWN top-level type — surface generically, never
+                // swallow. `null` type = malformed → Raw.
+                if (type == null) listOf(AgentMessage.Raw(uuid(), trimmed))
+                else listOf(note(genericLabel(type, obj), detail = genericDetail(obj)))
             }
         }
         } // Tracing.section PARSER_SLOW_PATH
@@ -153,17 +159,19 @@ object CodexMessageParser {
     }
 
     private fun parseTurnCompleted(obj: JsonObject): List<AgentMessage> {
+        // Per-turn usage line — same «tokens · in X · out Y» shape the
+        // Claude result branch emits, so all three agents read alike.
         val usage = SilentlyTry.logged("SshAi-CodexParse", "read usage obj") { obj["usage"]?.jsonObject }
-        val input = usage?.string("input_tokens")
-        val output = usage?.string("output_tokens")
-        val cached = usage?.string("cached_input_tokens")
+        val input = usage?.string("input_tokens")?.toLongOrNull()
+        val output = usage?.string("output_tokens")?.toLongOrNull()
+        val cached = usage?.string("cached_input_tokens")?.toLongOrNull()
         val parts = listOfNotNull(
-            input?.let { "in $it" },
-            output?.let { "out $it" },
-            cached?.let { "cached $it" },
+            input?.let { "in ${k(it)}" },
+            output?.let { "out ${k(it)}" },
+            cached?.takeIf { it > 0 }?.let { "cached ${k(it)}" },
         )
-        val label = if (parts.isEmpty()) "turn complete" else "turn complete · " + parts.joinToString(" · ")
-        return listOf(simpleEvent(label))
+        val label = if (parts.isEmpty()) "turn complete" else "tokens · " + parts.joinToString(" · ")
+        return listOf(note(label))
     }
 
     private fun parseItem(
@@ -203,7 +211,7 @@ object CodexMessageParser {
                 if (isStarted) return emptyList()  // wait for completed text
                 val text = item.string("text").orEmpty()
                 if (text.isBlank()) emptyList()
-                else listOf(AgentMessage.Raw(uuid(), "· thinking · ${text.take(120)}"))
+                else listOf(note("thinking · ${text.take(120)}", detail = text.takeIf { it.length > 120 }))
             }
             "command_execution" -> {
                 val command = item.string("command").orEmpty()
@@ -212,7 +220,9 @@ object CodexMessageParser {
                 val status = item.string("status").orEmpty()
                 val isError = exitCode != null && exitCode != "0"
                 if (isStarted || status == "in_progress") {
-                    listOf(simpleEvent("exec · ${command.take(120)}"))
+                    // Stable id: item.updated re-parses replace the same
+                    // row instead of stacking "exec · …" copies.
+                    listOf(note("exec · ${command.take(120)}", id = "codexevt-exec-$turnTag$itemId"))
                 } else {
                     listOf(
                         AgentMessage.ToolResult(
@@ -235,7 +245,15 @@ object CodexMessageParser {
                 val kind = first?.string("kind")
                 val tail = if (count > 1) " (+${count - 1} more)" else ""
                 val label = listOfNotNull(kind, path).joinToString(" ").ifBlank { "files" }
-                listOf(simpleEvent("$label$tail"))
+                // Full change list in the expandable detail.
+                val all = changes?.mapNotNull { c ->
+                    SilentlyTry.logged("SshAi-CodexParse", "read change row") {
+                        val o = c.jsonObject
+                        listOfNotNull(o.string("kind"), o.string("path")).joinToString(" ")
+                    }
+                }?.filter { it.isNotBlank() }?.joinToString("\n")
+                listOf(note("$label$tail", detail = all?.takeIf { count > 1 },
+                    id = "codexevt-files-$turnTag$itemId"))
             }
             "mcp_tool_call" -> {
                 val server = item.string("server").orEmpty()
@@ -259,20 +277,33 @@ object CodexMessageParser {
             "web_search" -> {
                 val query = item.string("query").orEmpty().take(80)
                 if (query.isBlank()) emptyList()
-                else listOf(simpleEvent("web search · $query"))
+                else listOf(note("web search · $query", id = "codexevt-web-$turnTag$itemId"))
             }
             "todo_list" -> {
                 val items = SilentlyTry.logged("SshAi-CodexParse", "read todo items array") { item["items"]?.jsonArray }
                 val total = items?.size ?: 0
                 val done = items?.count { SilentlyTry.loggedOrElse("SshAi-CodexParse", "check todo completed", false) { it.jsonObject.string("completed") == "true" } } ?: 0
                 if (total == 0) emptyList()
-                else listOf(simpleEvent("todo · $done/$total"))
+                else {
+                    val list = items?.mapNotNull { t ->
+                        SilentlyTry.logged("SshAi-CodexParse", "read todo row") {
+                            val o = t.jsonObject
+                            val mark = if (o.string("completed") == "true") "✓" else "·"
+                            o.string("text")?.let { "$mark $it" }
+                        }
+                    }?.joinToString("\n")
+                    // Stable id: every todo_list update replaces the row
+                    // in place — a live progress widget, not a log spam.
+                    listOf(note("todo · $done/$total", detail = list,
+                        id = "codexevt-todo-$turnTag$itemId"))
+                }
             }
             "error" -> {
                 val msg = item.string("message") ?: item.string("error") ?: "error"
                 listOf(AgentMessage.Error(uuid(), msg))
             }
-            else -> emptyList()
+            // UNKNOWN item type — render generically, never swallow.
+            else -> listOf(note(genericLabel(itemType, item), detail = genericDetail(item)))
         }
     }
 
@@ -327,9 +358,13 @@ object CodexMessageParser {
                         ?.joinToString(" ")
                 }.orEmpty()
                 if (summary.isBlank()) emptyList()
-                else listOf(simpleEvent("thinking · ${summary.take(80)}"))
+                else listOf(note("thinking · ${summary.take(80)}", detail = summary.takeIf { it.length > 80 }))
             }
-            else -> emptyList()
+            // UNKNOWN payload type — render generically, never swallow.
+            else -> {
+                val t = payload.string("type") ?: return emptyList()
+                listOf(note(genericLabel(t, payload), detail = genericDetail(payload)))
+            }
         }
     }
 
@@ -353,15 +388,30 @@ object CodexMessageParser {
         return when (role) {
             "user" -> listOf(AgentMessage.UserText(stableId(rawLine, "u"), text))
             "assistant" -> listOf(AgentMessage.AssistantText(stableId(rawLine, "a"), text))
-            else -> emptyList()
+            // system / developer / tool roles carry injected context
+            // (AGENTS.md, env). Compact note, full text in the detail —
+            // visible but never buries the chat.
+            else -> listOf(note("context · $role", detail = text,
+                id = stableId(rawLine, "ctx")))
         }
     }
 
     private fun parseEventMsg(obj: JsonObject): List<AgentMessage> {
         val payload = SilentlyTry.logged("SshAi-CodexParse", "read event_msg payload") { obj["payload"]?.jsonObject } ?: return emptyList()
-        return when (payload.string("type")) {
+        return when (val ptype = payload.string("type")) {
             "agent_message", "user_message" -> emptyList()   // duplicates response_item.message
-            "task_started" -> listOf(simpleEvent("turn started"))
+            // Token-by-token / chunked delta streams — bookkeeping only,
+            // surfacing each delta would spam a note per chunk. The final
+            // agent_reasoning / agent_message event carries the full text.
+            "agent_message_delta", "agent_reasoning_delta",
+            "agent_reasoning_raw_content_delta", "agent_reasoning_section_break",
+            "exec_command_output_delta", "mcp_tool_call_output_delta" -> emptyList()
+            "agent_reasoning", "agent_reasoning_raw_content" -> {
+                val text = payload.string("text") ?: payload.string("content") ?: ""
+                if (text.isBlank()) emptyList()
+                else listOf(note("thinking · ${text.take(120)}", detail = text.takeIf { it.length > 120 }))
+            }
+            "task_started" -> listOf(note("turn started"))
             "task_complete" -> {
                 val cost = payload.string("cost_usd")
                 val ms = payload.string("duration_ms")?.toLongOrNull()
@@ -369,16 +419,17 @@ object CodexMessageParser {
                     ms?.let { "${it / 1000}s" },
                     cost?.let { "\$$it" }
                 )
-                listOf(simpleEvent("turn complete${if (parts.isEmpty()) "" else " · " + parts.joinToString(" · ")}"))
+                listOf(note("turn complete${if (parts.isEmpty()) "" else " · " + parts.joinToString(" · ")}"))
             }
             "turn_aborted" -> {
                 val reason = payload.string("reason") ?: "interrupted"
-                listOf(simpleEvent("turn aborted · $reason"))
+                listOf(note("turn aborted · $reason", tone = AgentMessage.EventNote.Tone.WARN))
             }
-            "context_compacted" -> listOf(simpleEvent("context compacted"))
+            "context_compacted" -> listOf(note("context compacted", tone = AgentMessage.EventNote.Tone.INFO))
             "exec_command_begin" -> {
                 val cmd = formatCommand(payload["command"]) ?: "shell"
-                listOf(simpleEvent("exec · ${cmd.take(120)}"))
+                listOf(note("exec · ${cmd.take(120)}",
+                    id = "codexevt-exec-${payload.string("call_id") ?: uuid()}"))
             }
             "exec_command_end" -> {
                 val cmd = formatCommand(payload["command"])
@@ -405,24 +456,30 @@ object CodexMessageParser {
                 val name = files.firstOrNull()?.substringAfterLast('/') ?: "file"
                 val tail = if (files.size > 1) " (+${files.size - 1} more)" else ""
                 listOf(
-                    simpleEvent(
-                        if (success) "patched · $name$tail"
-                        else "patch failed · $name$tail"
-                    )
+                    if (success) note("patched · $name$tail", detail = files.joinToString("\n").takeIf { files.size > 1 })
+                    else note("patch failed · $name$tail", tone = AgentMessage.EventNote.Tone.WARN)
                 )
             }
             "collab_agent_spawn_end" -> {
                 val agentName = payload.string("agent_name") ?: "sub-agent"
-                listOf(simpleEvent("spawned · $agentName"))
+                listOf(note("spawned · $agentName"))
             }
-            "collab_close_end" -> listOf(simpleEvent("sub-agent closed"))
+            "collab_close_end" -> listOf(note("sub-agent closed"))
             "collab_waiting_end" -> emptyList()
+            // Live cumulative token counter — TRANSIENT UI state, not a
+            // chat row: AgentSessionRunOneShot regex-feeds it into
+            // liveThinkingTokens (same treatment as Claude's
+            // thinking_tokens event).
             "token_count" -> emptyList()
             "error" -> {
                 val msg = payload.string("message") ?: payload.string("error") ?: "error"
                 listOf(AgentMessage.Error(uuid(), msg))
             }
-            else -> emptyList()
+            // UNKNOWN event type — render generically, never swallow.
+            else -> {
+                if (ptype == null) emptyList()
+                else listOf(note(genericLabel(ptype, payload), detail = genericDetail(payload)))
+            }
         }
     }
 
@@ -463,7 +520,40 @@ object CodexMessageParser {
     private fun JsonObject.string(key: String): String? =
         SilentlyTry.logged("SshAi-CodexParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
-    private fun simpleEvent(label: String): AgentMessage = AgentMessage.Raw(uuid(), "· $label")
+    /** EventNote factory — the visible replacement for the old suppressed
+     *  `simpleEvent` raw lines. Mirrors ClaudeMessageParser.note.
+     *  `internal`: shared with [CodexAppServerEvents] (same chat surface,
+     *  different transport). */
+    internal fun note(
+        label: String,
+        detail: String? = null,
+        tone: AgentMessage.EventNote.Tone = AgentMessage.EventNote.Tone.DIM,
+        id: String = uuid(),
+    ): AgentMessage = AgentMessage.EventNote(id = id, label = label, detail = detail, tone = tone)
+
+    private val NOISE_KEYS = setOf("type", "id", "session_id", "call_id", "timestamp")
+
+    /** `type · best-effort summary` for events with no tailored label —
+     *  including types that don't exist yet. */
+    internal fun genericLabel(type: String, obj: JsonObject): String {
+        val text = listOf(
+            "message", "text", "title", "description", "summary",
+            "name", "content", "reason", "status", "state",
+        ).firstNotNullOfOrNull { k -> obj.string(k)?.takeIf { it.isNotBlank() } }
+        return type.replace('_', ' ').replace('.', ' ') + (text?.let { " · ${it.take(100)}" } ?: "")
+    }
+
+    /** Expandable key:value dump of the payload minus envelope noise. */
+    internal fun genericDetail(obj: JsonObject): String? {
+        val parts = obj.entries
+            .filter { it.key !in NOISE_KEYS }
+            .joinToString("\n") { (k, v) -> "$k: ${v.toString().take(300)}" }
+        return parts.ifBlank { null }
+    }
+
+    /** Locale.US — the ru default formats "12,0k" with a comma. */
+    internal fun k(n: Long): String =
+        if (n >= 1000) "${"%.1f".format(java.util.Locale.US, n / 1000.0)}k" else n.toString()
 
     private fun uuid(): String = ParserHelpers.uuid()
 

@@ -6,8 +6,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Notes
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Shield
@@ -26,7 +24,6 @@ internal fun SettingsSectionAbout(
     onOpenLicenses: () -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
     // Resolve via PackageManager rather than touching BuildConfig
     // directly — keeps this composable agnostic of the
     // `applicationIdSuffix=".debug"` split (BuildConfig.VERSION_NAME
@@ -40,40 +37,6 @@ internal fun SettingsSectionAbout(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        // Telegram community — the "come join us" CTA (channel + chat). Tapping
-        // opens t.me in Telegram / the browser. Paper-plane icon = Telegram.
-        SettingsRow(
-            icon = Icons.AutoMirrored.Filled.Send,
-            title = "Conch on Telegram",
-            subtitle = "News & releases — join the channel",
-            onClick = {
-                SilentlyTry.fired("SshAi-Settings", "open telegram channel") {
-                    uriHandler.openUri("https://t.me/conchapplication")
-                }
-            },
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.OpenInNew,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline,
-            )
-        }
-        SettingsRow(
-            icon = Icons.AutoMirrored.Filled.Send,
-            title = "Community chat",
-            subtitle = "Questions, ideas, feedback — come say hi",
-            onClick = {
-                SilentlyTry.fired("SshAi-Settings", "open telegram chat") {
-                    uriHandler.openUri("https://t.me/conch_chat")
-                }
-            },
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.OpenInNew,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline,
-            )
-        }
         // Version row — read-only display, no chevron.
         SettingsRow(
             icon = Icons.Filled.Info,
@@ -128,5 +91,7 @@ internal fun SettingsSectionAbout(
                 tint = MaterialTheme.colorScheme.outline,
             )
         }
+        // Community / source / socials — brand logos only, at the very bottom.
+        SocialLinksRow()
     }
 }

@@ -24,9 +24,29 @@ data class UsageWindow(
     val label: String,         // "5h" / "Weekly" / "Weekly · Opus"
     val fraction: Float,       // 0f..1f — what the bar DRAWS (used, or remaining for Codex)
     val percent: Int,          // 0..100 — the number shown
-    val resetText: String,     // "3h" / "45m" / "2d" / ""
+    val resetText: String,     // "3h" / "45m" / "2d" / "" — fetch-time fallback
     val usedFraction: Float = 0f, // 0f..1f actually consumed — drives the warning colour
-)
+    /** Absolute reset time (epoch ms) when the provider gives one. Lets the UI
+     *  tick the countdown LIVE instead of freezing the fetch-time string — user
+     *  2026-06-14: app showed "49m" frozen while the desktop ticked to 14m,
+     *  because resetText was computed once at fetch and only refreshed on
+     *  chat-open / turn-finish. */
+    val resetAtEpochMs: Long? = null,
+) {
+    /** "Until reset" recomputed against [nowMs] from the absolute reset time, so
+     *  it counts down without a refetch; falls back to the fetch-time
+     *  [resetText] when no absolute anchor is available. */
+    fun resetTextLive(nowMs: Long): String {
+        val at = resetAtEpochMs ?: return resetText
+        val s = (at - nowMs) / 1000
+        return when {
+            s <= 0 -> "now"
+            s < 3600 -> "${s / 60}m"
+            s < 86_400 -> "${s / 3600}h"
+            else -> "${s / 86_400}d"
+        }
+    }
+}
 
 /** All plan windows for an account. [windows] is ordered with the nearest /
  *  primary window first — that's what the compact bar shows; the tap-to-open
@@ -215,7 +235,8 @@ object UsageProbe {
         val util = Regex("\"utilization\"\\s*:\\s*([0-9.]+)").find(body)
             ?.groupValues?.get(1)?.toFloatOrNull() ?: return null
         val resetsAt = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
-        return window(label, util, isoToDelta(resetsAt))
+        val resetEpochMs = resetsAt?.let { isoToEpoch(it) }?.let { it * 1000 }
+        return window(label, util, isoToDelta(resetsAt), resetAtEpochMs = resetEpochMs)
     }
 
     // ---- Codex: live `codex app-server` account/rateLimits/read (camelCase)
@@ -240,23 +261,28 @@ object UsageProbe {
         val windowSec = Regex("\"window[A-Za-z_]*[Mm]in[a-z]*s?\"\\s*:\\s*([0-9]+)").find(body)
             ?.groupValues?.get(1)?.toLongOrNull()?.let { it * 60 } ?: defaultWindowSec
         // Codex shows what's LEFT (like its /status), not what's used.
-        return window(label, used, codexResetText(body, windowSec), remaining = true)
+        val (rt, resetEpochMs) = codexReset(body, windowSec)
+        return window(label, used, rt, remaining = true, resetAtEpochMs = resetEpochMs)
     }
 
-    /** Reset text for a Codex window. `resetsAt`/`resets_at` may be epoch
-     *  seconds, epoch millis, or an ISO string. Rollout snapshots can be STALE
-     *  (already past their reset → naive delta shows a bogus "now"), so we
-     *  project forward by the fixed window cadence to the NEXT real reset. */
-    private fun codexResetText(body: String, windowSec: Long): String {
+    /** Reset text + absolute reset epoch (ms) for a Codex window.
+     *  `resetsAt`/`resets_at` may be epoch seconds, epoch millis, or an ISO
+     *  string. Rollout snapshots can be STALE (already past their reset → naive
+     *  delta shows a bogus "now"), so we project forward by the fixed window
+     *  cadence to the NEXT real reset, and return THAT as the live anchor. */
+    private fun codexReset(body: String, windowSec: Long): Pair<String, Long?> {
         val now = Instant.now().epochSecond
         val epoch =
             Regex("\"resets_?[Aa]t\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)?.let { isoToEpoch(it) }
                 ?: Regex("\"resets_?[Aa]t\"\\s*:\\s*([0-9]+)").find(body)?.groupValues?.get(1)?.toLongOrNull()
                     ?.let { if (it > 1_000_000_000_000L) it / 1000 else it }
-        if (epoch != null) return secsToText(projectForward(epoch, windowSec, now) - now)
+        if (epoch != null) {
+            val projected = projectForward(epoch, windowSec, now)
+            return secsToText(projected - now) to (projected * 1000)
+        }
         val inSec = Regex("\"resets_?[Ii]n_?[Ss]econds\"\\s*:\\s*([0-9]+)").find(body)
             ?.groupValues?.get(1)?.toLongOrNull()
-        return if (inSec != null) secsToText(inSec) else ""
+        return if (inSec != null) secsToText(inSec) to ((now + inSec) * 1000) else "" to null
     }
 
     /** Smallest reset ≥ now, stepping by [window]. Fixed-cadence windows (5h /
@@ -278,7 +304,13 @@ object UsageProbe {
      *  =1.0). Treat the number as a percent directly. [remaining]=true flips it
      *  to what's LEFT (100−used): Codex's bar counts DOWN from 100% like its own
      *  /status, draining as you spend (Claude keeps showing utilization). */
-    private fun window(label: String, raw: Float, resetText: String, remaining: Boolean = false): UsageWindow {
+    private fun window(
+        label: String,
+        raw: Float,
+        resetText: String,
+        remaining: Boolean = false,
+        resetAtEpochMs: Long? = null,
+    ): UsageWindow {
         val used = raw.coerceIn(0f, 100f)
         val shown = if (remaining) 100f - used else used
         return UsageWindow(
@@ -287,6 +319,7 @@ object UsageProbe {
             percent = shown.roundToInt(),
             resetText = resetText,
             usedFraction = (used / 100f).coerceIn(0f, 1f),
+            resetAtEpochMs = resetAtEpochMs,
         )
     }
 

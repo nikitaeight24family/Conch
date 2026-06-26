@@ -21,7 +21,7 @@ import java.io.File
  *  - Crash reports already ingested by Sentry — those have to be
  *    deleted via Sentry's own data-subject endpoint. Privacy policy
  *    points users at the contact email for that.
- *  - Files we wrote to YOUR servers (`/tmp/sshai_uploads/...`,
+ *  - Files we wrote to YOUR servers (`/tmp/conch_uploads/...`,
  *    memory/subagent files in `~/.claude/...`). Those are on hosts
  *    we don't control after we wrote them.
  *

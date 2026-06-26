@@ -491,6 +491,33 @@ class HistoryCache internal constructor(private val rootDir: File) {
         }
     }
 
+    /**
+     * DIAG (2026-06-13): does this session file hold duplicate COPIES of
+     * the same history (blind-append bloat) rather than one merged log?
+     * Returns (totalLines, uniqueById, bytes). uniqueById ≪ totalLines ⇒
+     * the file is mostly copies → the source of the 1.3 GB. Gated caller
+     * (Logx), bounded by MERGE_MAX_BYTES so it never scans a runaway file.
+     */
+    fun duplicationStats(sessionId: String): Triple<Int, Int, Long> {
+        val f = file(sessionId)
+        if (!f.exists() || f.length() == 0L || f.length() > MERGE_MAX_BYTES) {
+            return Triple(0, 0, f.length().coerceAtLeast(0))
+        }
+        val snap = load(sessionId) ?: return Triple(0, 0, f.length())
+        var total = 0
+        val ids = HashSet<String>()
+        try {
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(snap.buffer) { line ->
+                if (line.isBlank()) return@forEachLine
+                total++
+                ids.add(extractLineId(line) ?: line.hashCode().toString())
+            }
+        } finally {
+            snap.close()
+        }
+        return Triple(total, ids.size, f.length())
+    }
+
     /** Best-effort id extractor for one JSONL line. */
     private fun extractLineId(line: String): String? {
         val pats = listOf(

@@ -51,6 +51,80 @@ object ClaudeMessageParser {
     private const val OVERLOAD_BANNER_ID = "claude-overload-banner"
 
     /**
+     * Stable id shared by the live "Compacting…" row and the final
+     * "context compacted" divider — history.emitMsg upserts by id, so the
+     * animated row morphs into the summary IN PLACE (same trick as the
+     * overload banner). Known limitation: a SECOND compaction within one
+     * chat upserts the previous divider at its old position instead of
+     * appending a new row — acceptable, compaction is rare per chat.
+     */
+    private const val COMPACT_ROW_ID = "claude-compact-row"
+
+    /**
+     * Stable id for the model-unavailable banner ("Claude Fable 5 is
+     * currently unavailable. Learn more: …"). Anthropic ships these for
+     * export-control suspensions / deprecations — IMPORTANT, must NOT be
+     * truncated or buried in a red `! …` line. The CLI may emit it as
+     * both a `result` text AND a top-level `error`; the shared id
+     * collapses them to ONE card via emitMsg's upsert-by-id (kills the
+     * double-render).
+     */
+    private const val UNAVAILABLE_BANNER_ID = "claude-model-unavailable-banner"
+
+    /** Id PREFIX for the non-rendering System row that carries the model the
+     *  session is actually running on (`message.model` from each assistant
+     *  turn). PER-MESSAGE ([prefix]+msgId) so `distinctBy { id }` keeps one
+     *  per turn and `observedModel` (reads the LAST) reflects the LATEST
+     *  model — not the first turn's. Synthetic (never written to the raw
+     *  JSONL cache, so zero storage cost); drives the topbar's session mirror. */
+    private const val OBSERVED_MODEL_ID_PREFIX = "claude-model-"
+
+    /** Stable id for the non-rendering System row that mirrors the session's
+     *  current reasoning effort (only `ultracode` is recorded by Claude — see
+     *  parseAttachment). Stable → one upserting row; `observedReasoning` in the
+     *  VM reads the LAST so a later change wins. */
+    private const val OBSERVED_REASONING_ID = "claude-effort-observed"
+
+    /** Stable id for the non-rendering System row carrying the session's
+     *  auto-generated title (`ai-title`). VM reads the latest for the topbar. */
+    private const val AI_TITLE_ID = "claude-ai-title"
+
+    /** Matches Anthropic's "<model> is currently unavailable" notice. Both
+     *  signals required (the phrase AND a Learn-more / anthropic.com link)
+     *  so a normal reply that merely says "the API is currently unavailable"
+     *  isn't hijacked into the card. The CLI emits this notice as the
+     *  assistant-turn text AND the result text — routing both to the card
+     *  (stable id) collapses the double-render the user hit (2026-06-13). */
+    private fun String.matchesModelUnavailable(): Boolean =
+        contains("is currently unavailable", ignoreCase = true) &&
+        (contains("Learn more", ignoreCase = true) || contains("anthropic.com", ignoreCase = true))
+
+    /** First http(s) URL in the text, stripped of trailing punctuation. */
+    private val URL_RX = Regex("https?://\\S+")
+
+    /**
+     * Build the one-card representation: clean title (everything before
+     * "Learn more" / the URL) + the URL stashed in [AgentMessage.Error.details]
+     * for the clickable "Learn more →" the UI renders. Stable id so the
+     * `result` and `error` copies upsert into a single card.
+     */
+    private fun modelUnavailableCard(rawText: String): AgentMessage {
+        val url = URL_RX.find(rawText)?.value?.trimEnd('.', ',', ')', ']', '"', '\'')
+        var title = rawText
+        val lm = title.indexOf("Learn more", ignoreCase = true)
+        if (lm >= 0) title = title.substring(0, lm)
+        else if (url != null) title = title.replace(url, "")
+        title = title.trim().trimEnd('.', ':', '·', '—', '-').trim()
+        if (title.isBlank()) title = "Model unavailable"
+        return AgentMessage.Error(
+            id = UNAVAILABLE_BANNER_ID,
+            text = "$title.",
+            kind = "unavailable",
+            details = url,
+        )
+    }
+
+    /**
      * True when [this] looks like an upstream Anthropic "overloaded" signal
      * embedded in the CLI's text. The CLI streams the raw upstream blob
      * verbatim — both the structured `overloaded_error` type and the human-
@@ -148,12 +222,25 @@ object ClaudeMessageParser {
         val type = quickType(line) ?: return null
         if (type != "assistant" && type != "user") return null
         val fromAssistant = type == "assistant"
+        // `isMeta:true` user turns are model-directed CONTEXT injected by the CLI —
+        // slash/skill EXPANSIONS (the full "# /loop — …\n## Input" markdown), caveat
+        // headers, task notifications. The interactive TUI hides them; rendering the
+        // raw expansion as a giant user prompt was the bug. Verified marker:
+        // top-level "isMeta":true (real prompts have isMeta:null). Bail to the slow
+        // path for ANY user line that even mentions isMeta — the JSON-aware
+        // parseUser is the single authority on the top-level field, so a whitespace
+        // variant (`"isMeta": true`) or a re-serialized file can't slip a giant fake
+        // user prompt through the fast path (audit, 2026-06-14). A real prompt that
+        // merely contains the text "isMeta" just takes the slow path and renders
+        // correctly — only the rare line pays the cost.
+        if (!fromAssistant && line.contains("\"isMeta\"")) return null
 
         val reader = android.util.JsonReader(java.io.StringReader(line))
         val out = mutableListOf<AgentMessage>()
         try {
             reader.beginObject()
             var msgId: String? = null
+            var model: String? = null
             var contentHandled = false
             while (reader.hasNext()) {
                 when (reader.nextName()) {
@@ -162,6 +249,13 @@ object ClaudeMessageParser {
                         while (reader.hasNext()) {
                             when (reader.nextName()) {
                                 "id" -> msgId = reader.nextString()
+                                // Session's actual model — see parseAssistant.
+                                // Skip synthetic markers ("<synthetic>" etc.).
+                                "model" -> model = SilentlyTry.logged("SshAi-ClaudeParse", "fast model") {
+                                    if (reader.peek() == android.util.JsonToken.STRING)
+                                        reader.nextString()?.takeIf { it.isNotBlank() && !it.startsWith("<") }
+                                    else { reader.skipValue(); null }
+                                }
                                 "content" -> {
                                     val ok = readContent(reader, fromAssistant, msgId, out, line)
                                     if (!ok) return null
@@ -180,6 +274,12 @@ object ClaudeMessageParser {
             // path can decide (Claude's stream-json sometimes emits
             // bookkeeping events under role labels we don't handle here).
             if (!contentHandled) return null
+            // Mirror the session's model into the topbar (non-rendering,
+            // stable id) — same as the slow-path parseAssistant.
+            if (fromAssistant && !model.isNullOrBlank()) {
+                val mid = msgId ?: stableId(line, "amsg")
+                out.add(0, AgentMessage.System(id = OBSERVED_MODEL_ID_PREFIX + mid, subtype = "model_observed", model = model, raw = ""))
+            }
             return out
         } catch (_: Throwable) {
             return null
@@ -300,6 +400,13 @@ object ClaudeMessageParser {
         // (parseUser path, multi-block fallback) derive a content-
         // addressed id from the raw line + block index so re-parsing
         // is idempotent. See Durov-critique #3 in IdUtil.kt.
+        // Model-unavailable notice arriving as the assistant-turn text —
+        // route to the SAME card the result/error branches emit (stable id
+        // dedups the double-render). Tightened matcher avoids false hits.
+        if (fromAssistant && text.matchesModelUnavailable()) {
+            out += modelUnavailableCard(text)
+            return
+        }
         val id = if (msgIdHint != null) {
             "$msgIdHint#$blockIdx"
         } else if (!fromAssistant && isSyntheticUserText(text)) {
@@ -337,6 +444,13 @@ object ClaudeMessageParser {
                 // web "Service is busy" card the user asked for.
                 val subtype = obj.string("subtype").orEmpty()
                 val text = obj.string("result") ?: obj.string("error") ?: obj.string("text")
+                // Model-unavailable notice — render as ONE clean card with a
+                // working "Learn more" link, regardless of is_error, and skip
+                // the plain Result bubble + tokens line that would otherwise
+                // double it (user, 2026-06-13).
+                if (text?.matchesModelUnavailable() == true) {
+                    return listOf(modelUnavailableCard(text))
+                }
                 val isError = obj["is_error"]?.jsonPrimitive?.contentOrNull == "true" ||
                     subtype == "error" || subtype.startsWith("error_")
                 if (isError) {
@@ -358,11 +472,40 @@ object ClaudeMessageParser {
                         )
                     )
                 } else {
-                    listOf(AgentMessage.Result(uuid(), subtype, text))
+                    // Successful turn → ALSO emit a dim per-turn usage line:
+                    // tokens in/out, cost and duration straight from the
+                    // result event.
+                    val usage = SilentlyTry.logged("SshAi-ClaudeParse", "result usage") {
+                        obj["usage"]?.jsonObject
+                    }
+                    val inTok = usage?.get("input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val outTok = usage?.get("output_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val cacheRead = usage?.get("cache_read_input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val cost = obj["total_cost_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                    val durMs = obj["duration_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    // Locale.US: the default (ru) locale renders "12,0k"
+                    // with a comma — broke the label (and the test).
+                    fun k(n: Long): String =
+                        if (n >= 1000) "${"%.1f".format(java.util.Locale.US, n / 1000.0)}k"
+                        else n.toString()
+                    val statParts = listOfNotNull(
+                        inTok?.let { "in ${k(it + (cacheRead ?: 0))}" },
+                        outTok?.let { "out ${k(it)}" },
+                        cost?.takeIf { it > 0 }
+                            ?.let { "$" + "%.4f".format(java.util.Locale.US, it).trimEnd('0').trimEnd('.') },
+                        durMs?.let { "${it / 1000}s" },
+                    )
+                    buildList {
+                        add(AgentMessage.Result(uuid(), subtype, text))
+                        if (statParts.isNotEmpty()) {
+                            add(note("tokens · ${statParts.joinToString(" · ")}"))
+                        }
+                    }
                 }
             }
             "error" -> {
                 val msg = obj.string("message") ?: raw
+                if (msg.matchesModelUnavailable()) return listOf(modelUnavailableCard(msg))
                 val isOverload = msg.matchesOverloaded()
                 listOf(
                     AgentMessage.Error(
@@ -387,19 +530,24 @@ object ClaudeMessageParser {
                 )
             }
             "permission-mode" -> emptyList()  // bookkeeping
-            "file-history-snapshot" -> {
-                val backups = SilentlyTry.logged("SshAi-ClaudeParse", "count file-history backups") {
-                    obj["snapshot"]?.jsonObject?.get("trackedFileBackups")?.jsonObject?.size
-                } ?: 0
-                if (backups > 0) listOf(simpleEvent("file backup · $backups files"))
+            // file backups are internal plumbing — Claude snapshots edited files
+            // so it can undo. The user doesn't act on it and it just clutters the
+            // chat. Hide.
+            "file-history-snapshot" -> emptyList()
+            "last-prompt" -> emptyList()
+            // Claude's auto-generated session title — surface it (non-rendering)
+            // so the topbar shows it instead of the first user message. Mirrors
+            // model_observed: stable id → one upserting row, VM reads the latest.
+            "ai-title" -> {
+                val t = obj.string("aiTitle")?.takeIf { it.isNotBlank() }
+                if (t != null) listOf(AgentMessage.System(id = AI_TITLE_ID, subtype = "ai_title", title = t, raw = ""))
                 else emptyList()
             }
-            "last-prompt" -> emptyList()
             "queue-operation" -> emptyList()  // duplicates the user's prompt — skip
             "attachment" -> parseAttachment(obj, raw)
             "summary" -> {
                 val s = obj.string("summary").orEmpty().take(120)
-                if (s.isBlank()) emptyList() else listOf(simpleEvent("summary · $s"))
+                if (s.isBlank()) emptyList() else listOf(note("summary · $s"))
             }
             else -> emptyList()
         }
@@ -407,8 +555,39 @@ object ClaudeMessageParser {
 
     private fun parseSystem(obj: JsonObject, raw: String): List<AgentMessage> {
         val subtype = obj.string("subtype").orEmpty()
-        // Stream-json `init` event has full session metadata.
-        if (subtype == "init" || obj.contains("model") || obj.contains("session_id")) {
+        // Live compaction signals — the CLI's own TUI shows "Compacting
+        // conversation…" and the user asked for parity (2026-06-10).
+        // `status{status=compacting}` opens the live row; `compact_boundary`
+        // closes it with a summary. Both can carry session_id, so they MUST
+        // be matched BEFORE the init-like branch below (it swallows anything
+        // with model/session_id).
+        if (subtype == "status") {
+            val status = obj.string("status").orEmpty()
+            return if (status == "compacting") listOf(
+                AgentMessage.System(id = COMPACT_ROW_ID, subtype = "compacting", raw = raw)
+            ) else emptyList() // other statuses: no UI yet, and never init-like rows
+        }
+        if (subtype == "compact_boundary") {
+            val meta = SilentlyTry.logged("SshAi-ClaudeParse", "read compact_metadata") {
+                obj["compact_metadata"]?.jsonObject
+            }
+            val trigger = meta?.string("trigger")
+            val preTokens = meta?.get("pre_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+            val label = buildString {
+                append("context compacted")
+                if (!trigger.isNullOrBlank()) append(" · ").append(trigger)
+                if (preTokens != null && preTokens > 0) {
+                    append(" · ").append(preTokens / 1000).append("k tokens")
+                }
+            }
+            return listOf(AgentMessage.System(id = COMPACT_ROW_ID, subtype = "compact_done", raw = label))
+        }
+        // Stream-json `init` event has full session metadata. RESTRICTED to
+        // subtype "init" / blank: EVERY system event carries session_id in
+        // its envelope, so the old `contains("session_id")` shortcut would
+        // swallow the whole subtype table below into init-like rows (caught
+        // by the unknown-subtype test, 2026-06-12).
+        if (subtype == "init" || (subtype.isBlank() && (obj.contains("model") || obj.contains("session_id")))) {
             val toolsArr = SilentlyTry.logged("SshAi-ClaudeParse", "read tools array") { obj["tools"]?.jsonArray }
             return listOf(
                 AgentMessage.System(
@@ -424,11 +603,8 @@ object ClaudeMessageParser {
             )
         }
         return when (subtype) {
-            "turn_duration" -> {
-                val ms = obj["durationMs"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0
-                val msgs = obj["messageCount"]?.jsonPrimitive?.contentOrNull ?: "?"
-                listOf(simpleEvent("turn · ${ms / 1000}s · $msgs msgs"))
-            }
+            // just noise in the chat. Hide.
+            "turn_duration" -> emptyList()
             "api_retry" -> {
                 // CLI retries 529 / 500 / 504 / dropped connections up to 10×
                 // with exponential backoff. WITHOUT a visible signal the user
@@ -446,30 +622,261 @@ object ClaudeMessageParser {
                         )
                     )
                 } else {
-                    listOf(simpleEvent("api retry${if (attempt != null) " · $attempt" else ""}${if (err.isNotBlank()) " · $err" else ""}"))
+                    listOf(note(
+                        "api retry${if (attempt != null) " · $attempt" else ""}${if (err.isNotBlank()) " · ${err.take(80)}" else ""}",
+                        tone = AgentMessage.EventNote.Tone.WARN,
+                    ))
                 }
             }
             "plugin_install" -> {
                 val name = obj.string("name").orEmpty()
                 val status = obj.string("status").orEmpty()
                 if (name.isBlank()) emptyList()
-                else listOf(simpleEvent("plugin · $name${if (status.isNotBlank()) " · $status" else ""}"))
+                else listOf(note("plugin · $name${if (status.isNotBlank()) " · $status" else ""}"))
             }
-            else -> if (subtype.isBlank()) emptyList() else listOf(simpleEvent("system · $subtype"))
+
+            // ── Full system-subtype surface. Field names mined from CLI
+            // 2.1.170's zod wire schemas (offsets ~231.35-231.43M) —
+            // snake_case on the wire except commands[].argumentHint and
+            // mirror_error.key.* (camelCase). firstString fallbacks keep
+            // the labels alive if upstream renames. Progress-ish families
+            // reuse STABLE ids → in-place upserts. UNKNOWN future subtypes
+            // hit the generic else — visible, never swallowed.
+
+            "task_started", "task_progress", "task_updated", "task_notification" -> {
+                val taskKey = firstString(obj, "task_id", "tool_use_id") ?: "task"
+                val patch = SilentlyTry.logged("SshAi-ClaudeParse", "task patch") { obj["patch"]?.jsonObject }
+                val status = firstString(obj, "status")
+                    ?: patch?.let { firstString(it, "status") }
+                    ?: if (subtype == "task_started") "started" else "running"
+                val what = firstString(obj, "summary", "description")
+                    ?: patch?.let { firstString(it, "description", "error") }
+                val lastTool = firstString(obj, "last_tool_name")
+                listOf(note(
+                    "task · $status${what?.let { " · ${it.take(90)}" } ?: ""}" +
+                        (lastTool?.let { " · $it" } ?: ""),
+                    detail = genericDetail(obj),
+                    tone = when (status) {
+                        "failed", "killed" -> AgentMessage.EventNote.Tone.WARN
+                        "completed" -> AgentMessage.EventNote.Tone.INFO
+                        else -> AgentMessage.EventNote.Tone.DIM
+                    },
+                    id = "sysevt-task-$taskKey",
+                ))
+            }
+            "task_summary" -> {
+                val detail = firstString(obj, "detail")
+                if (detail.isNullOrBlank()) emptyList()
+                else listOf(note("task summary · ${detail.take(120)}",
+                    detail = detail, tone = AgentMessage.EventNote.Tone.INFO))
+            }
+
+            // Hook lifecycle — in-place per hook_id.
+            "hook_started", "hook_progress", "hook_response" -> {
+                val hookKey = firstString(obj, "hook_id") ?: "hook"
+                val name = firstString(obj, "hook_name", "hook_event") ?: "hook"
+                val outcome = firstString(obj, "outcome")
+                val phase = when (subtype) {
+                    "hook_started" -> "running"
+                    "hook_progress" -> "running"
+                    else -> outcome ?: "done"
+                }
+                listOf(note(
+                    "hook · $name · $phase",
+                    detail = firstString(obj, "output", "stdout", "stderr") ?: genericDetail(obj),
+                    tone = if (outcome == "error") AgentMessage.EventNote.Tone.WARN
+                    else AgentMessage.EventNote.Tone.DIM,
+                    id = "sysevt-hook-$hookKey",
+                ))
+            }
+            "stop_hook_summary" -> {
+                val count = firstString(obj, "hook_count") ?: "?"
+                val errors = SilentlyTry.logged("SshAi-ClaudeParse", "hook errors") {
+                    obj["hook_errors"]?.jsonArray
+                }?.size ?: 0
+                listOf(note(
+                    "hooks · $count ran" + if (errors > 0) " · $errors error(s)" else "",
+                    detail = genericDetail(obj),
+                    tone = if (errors > 0) AgentMessage.EventNote.Tone.WARN
+                    else AgentMessage.EventNote.Tone.DIM,
+                ))
+            }
+
+            // Live thinking-token counter — TRANSIENT UI state, not a chat
+            // row: the readers feed AgentSession.liveThinkingTokens, the
+            // list shows «thinking · N tokens» above the spinner while the
+            // turn runs and drops it on completion (user, 2026-06-12).
+            "thinking_tokens" -> emptyList()
+
+            // The model silently swapped under the user — they must see it.
+            "model_fallback", "model_refusal_fallback" -> {
+                val from = firstString(obj, "original_model", "from_model")
+                val to = firstString(obj, "fallback_model", "to_model")
+                val trigger = firstString(obj, "trigger")
+                listOf(note(
+                    "model fallback${from?.let { " · $it" } ?: ""}${to?.let { " → $it" } ?: ""}" +
+                        (trigger?.takeIf { it != "refusal" }?.let { " · $it" } ?: "") +
+                        if (subtype == "model_refusal_fallback") " · after refusal" else "",
+                    detail = firstString(obj, "content", "api_refusal_explanation") ?: genericDetail(obj),
+                    tone = AgentMessage.EventNote.Tone.WARN,
+                ))
+            }
+
+            "permission_denied" -> listOf(note(
+                "permission denied · ${firstString(obj, "tool_name") ?: "?"}" +
+                    (firstString(obj, "decision_reason", "message")?.let { " · ${it.take(70)}" } ?: ""),
+                detail = genericDetail(obj),
+                tone = AgentMessage.EventNote.Tone.WARN,
+            ))
+            "permission_retry" -> listOf(note(
+                (firstString(obj, "content") ?: "permission retry").take(140),
+                detail = genericDetail(obj),
+                tone = AgentMessage.EventNote.Tone.WARN,
+            ))
+
+            "api_error", "mirror_error" -> listOf(note(
+                "${subtype.replace('_', ' ')}${firstString(obj, "error", "message")?.let { " · ${it.take(100)}" } ?: ""}",
+                detail = genericDetail(obj),
+                tone = AgentMessage.EventNote.Tone.WARN,
+            ))
+
+            "agents_killed" -> listOf(note(
+                "background agents stopped",
+                tone = AgentMessage.EventNote.Tone.WARN,
+            ))
+
+            // Catch-up digest after the user was away — genuinely useful.
+            "away_summary" -> listOf(note(
+                (firstString(obj, "content") ?: "away summary").take(140),
+                detail = firstString(obj, "content"),
+                tone = AgentMessage.EventNote.Tone.INFO,
+            ))
+            "post_turn_summary" -> listOf(note(
+                (firstString(obj, "status_detail", "status_category") ?: "turn summary").take(140),
+                detail = listOfNotNull(
+                    firstString(obj, "status_category")?.let { "category: $it" },
+                    firstString(obj, "needs_action")?.let { "needs action: $it" },
+                ).joinToString("\n").ifBlank { null },
+                tone = AgentMessage.EventNote.Tone.INFO,
+            ))
+
+            "memory_recall" -> {
+                val n = SilentlyTry.logged("SshAi-ClaudeParse", "memories array") {
+                    obj["memories"]?.jsonArray
+                }?.size ?: 0
+                listOf(note(
+                    "memory · recalled $n",
+                    detail = genericDetail(obj),
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                ))
+            }
+            "memory_saved" -> {
+                val paths = SilentlyTry.logged("SshAi-ClaudeParse", "written paths") {
+                    obj["written_paths"]?.jsonArray
+                }
+                listOf(note(
+                    "memory · saved ${paths?.size ?: 1}",
+                    detail = paths?.joinToString("\n") { it.jsonPrimitive.contentOrNull.orEmpty() },
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                ))
+            }
+
+            "notification" -> listOf(note(
+                (firstString(obj, "text") ?: "notification").take(140),
+                detail = genericDetail(obj),
+                tone = if (firstString(obj, "priority") in setOf("high", "immediate"))
+                    AgentMessage.EventNote.Tone.WARN else AgentMessage.EventNote.Tone.INFO,
+            ))
+            "informational" -> listOf(note(
+                (firstString(obj, "content") ?: "info").take(140),
+                detail = firstString(obj, "content"),
+                tone = if (firstString(obj, "level") == "warning")
+                    AgentMessage.EventNote.Tone.WARN else AgentMessage.EventNote.Tone.INFO,
+            ))
+
+            "scheduled_task_fire" -> listOf(note(
+                "scheduled task · ${(firstString(obj, "content") ?: "fired").take(100)}",
+                detail = firstString(obj, "content"),
+                tone = AgentMessage.EventNote.Tone.INFO,
+            ))
+
+            "elicitation_complete" -> listOf(note(
+                "input received" + (firstString(obj, "mcp_server_name")?.let { " · $it" } ?: ""),
+            ))
+
+            // Same internal plumbing as file-history-snapshot — file snapshots
+            // Claude takes to support undo. Not user-facing; hide (user, 2026-06-14).
+            "file_snapshot" -> emptyList()
+            "commands_changed" -> {
+                val n = SilentlyTry.logged("SshAi-ClaudeParse", "commands array") {
+                    obj["commands"]?.jsonArray
+                }?.size ?: 0
+                listOf(note("commands · $n available"))
+            }
+            "bridge_state" -> listOf(note(
+                "bridge · ${firstString(obj, "state") ?: "?"}" +
+                    (firstString(obj, "detail")?.let { " · ${it.take(80)}" } ?: ""),
+            ))
+            "local_command" -> listOf(note(
+                (firstString(obj, "content") ?: "local command").take(140),
+            ))
+            "session_state_changed" -> listOf(note(
+                "session · ${firstString(obj, "state") ?: "?"}",
+            ))
+
+            // UNKNOWN subtype — render generically, NEVER swallow. A future
+            // CLI release's new event shows up by itself.
+            else -> if (subtype.isBlank()) emptyList()
+            else listOf(note(genericLabel(subtype, obj), detail = genericDetail(obj)))
         }
     }
+
+    /** First non-blank string among [keys] in [obj]. */
+    private fun firstString(obj: JsonObject, vararg keys: String): String? =
+        keys.firstNotNullOfOrNull { k -> obj.string(k)?.takeIf { it.isNotBlank() } }
+
+    private val NOISE_KEYS = setOf(
+        "type", "subtype", "session_id", "uuid", "parent_tool_use_id", "timestamp",
+    )
+
+    /** `subtype · best-effort summary` for events we have no tailored
+     *  label for — including subtypes that don't exist yet. */
+    private fun genericLabel(subtype: String, obj: JsonObject): String {
+        val text = firstString(
+            obj, "message", "text", "title", "description", "summary",
+            "name", "content", "reason", "status", "state",
+        )
+        return subtype.replace('_', ' ') + (text?.let { " · ${it.take(100)}" } ?: "")
+    }
+
+    /** Expandable key:value dump of the payload minus envelope noise. */
+    private fun genericDetail(obj: JsonObject): String? {
+        val parts = obj.entries
+            .filter { it.key !in NOISE_KEYS }
+            .joinToString("\n") { (k, v) -> "$k: ${v.toString().take(300)}" }
+        return parts.ifBlank { null }
+    }
+
+    /** EventNote factory — the visible replacement for the old suppressed
+     *  `simpleEvent` raw lines. */
+    private fun note(
+        label: String,
+        detail: String? = null,
+        tone: AgentMessage.EventNote.Tone = AgentMessage.EventNote.Tone.DIM,
+        id: String = uuid(),
+    ): AgentMessage = AgentMessage.EventNote(id = id, label = label, detail = detail, tone = tone)
 
     private fun parseAttachment(obj: JsonObject, raw: String): List<AgentMessage> {
         val attachment = SilentlyTry.logged("SshAi-ClaudeParse", "read attachment obj") { obj["attachment"]?.jsonObject } ?: return emptyList()
         return when (attachment.string("type")) {
             "task_reminder" -> {
                 val n = attachment["itemCount"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-                if (n == 0) emptyList() else listOf(simpleEvent("task reminder · $n items"))
+                if (n == 0) emptyList() else listOf(note("task reminder · $n items"))
             }
             "skill_listing" -> {
                 val text = attachment.string("content").orEmpty()
                 val count = text.count { it == '\n' }.let { if (it == 0 && text.isNotBlank()) 1 else it }
-                listOf(simpleEvent("skills loaded · $count entries"))
+                listOf(note("skills loaded · $count entries"))
             }
             "deferred_tools_delta" -> {
                 val added = SilentlyTry.logged("SshAi-ClaudeParse", "count addedNames") { attachment["addedNames"]?.jsonArray?.size } ?: 0
@@ -479,21 +886,33 @@ object ClaudeMessageParser {
                     if (removed > 0) "-$removed" else null
                 )
                 if (parts.isEmpty()) emptyList()
-                else listOf(simpleEvent("tools changed · ${parts.joinToString(" ")}"))
+                else listOf(note("tools changed · ${parts.joinToString(" ")}"))
             }
             "queued_command" -> {
                 val text = attachment.string("prompt").orEmpty().take(80)
-                listOf(simpleEvent("queued${if (text.isNotEmpty()) " · $text" else ""}"))
+                listOf(note("queued${if (text.isNotEmpty()) " · $text" else ""}"))
             }
             "edited_text_file" -> {
                 val name = attachment.string("filename").orEmpty().substringAfterLast('/').take(60)
-                listOf(simpleEvent("edited · $name"))
+                listOf(note("edited · $name"))
             }
+            // `/effort ultracode` writes this when the session enters ultracode.
+            // It's the ONLY effort change Claude records in the session file —
+            // the regular levels (low/medium/high/xhigh/max) never appear here
+            // (verified 2026-06-13: grep found only ultra_effort_enter). Mirror
+            // it as a non-rendering System so the topbar shows the effort the
+            // session ACTUALLY runs at, exactly like model_observed mirrors the
+            // model. Stable id → one upserting row.
+            "ultra_effort_enter" -> listOf(
+                AgentMessage.System(
+                    id = OBSERVED_REASONING_ID, subtype = "reasoning_observed",
+                    reasoning = "ultracode", raw = "",
+                )
+            )
             else -> emptyList()
         }
     }
 
-    private fun simpleEvent(label: String): AgentMessage = AgentMessage.Raw(uuid(), "· $label")
 
     private fun parseAssistant(obj: JsonObject, raw: String): List<AgentMessage> {
         val msg = obj["message"]?.jsonObject ?: return emptyList()
@@ -502,10 +921,31 @@ object ClaudeMessageParser {
         // the fast-path msgIdHint=null branch.
         val msgId = msg["id"]?.jsonPrimitive?.contentOrNull ?: stableId(raw, "amsg")
         val content = msg["content"] ?: return emptyList()
-        return parseContentBlocks(content, fromAssistant = true, msgIdHint = msgId, rawLine = raw)
+        val blocks = parseContentBlocks(content, fromAssistant = true, msgIdHint = msgId, rawLine = raw)
+        // PICK UP THE SESSION'S MODEL. Claude stamps the actual model it
+        // auto-picked into every assistant turn's `message.model`. Stable id
+        // → upserts in place (one row, updated if the model ever changes
+        // mid-session); subtype "model_observed" is dropped by
+        // ChatMessageLines so it never shows as a banner. ONLY a real model
+        // id. Claude stamps synthetic events (compaction summaries, injected
+        // context) with `"model":"<synthetic>"` — taking that as the session
+        // model put literal "<synthetic>" in the topbar (user, 2026-06-13).
+        // Skip anything that isn't a concrete model.
+        val model = msg["model"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.isNotBlank() && !it.startsWith("<") }
+            ?: return blocks
+        return buildList {
+            add(AgentMessage.System(id = OBSERVED_MODEL_ID_PREFIX + msgId, subtype = "model_observed", model = model, raw = ""))
+            addAll(blocks)
+        }
     }
 
     private fun parseUser(obj: JsonObject, raw: String): List<AgentMessage> {
+        // Drop CLI-injected meta turns (slash/skill expansions, caveat headers,
+        // task notifications). Verified marker: top-level "isMeta":true; a real
+        // typed prompt has isMeta:null (skill_probe, 2026-06-14). Hidden from chat
+        // (the raw stays in the cache for search) — exactly what the TUI does.
+        if (obj["isMeta"]?.jsonPrimitive?.contentOrNull == "true") return emptyList()
         val msg = obj["message"]?.jsonObject ?: return emptyList()
         val content = msg["content"] ?: return emptyList()
         return parseContentBlocks(content, fromAssistant = false, msgIdHint = null, rawLine = raw)
@@ -584,11 +1024,28 @@ object ClaudeMessageParser {
                     }
                 }
                 "tool_use" -> {
-                    out += AgentMessage.ToolUse(
-                        id = o.string("id") ?: uuid(),
-                        toolName = o.string("name") ?: "tool",
-                        input = o["input"]?.toString().orEmpty()
-                    )
+                    val name = o.string("name") ?: "tool"
+                    val inputObj = SilentlyTry.logged("SshAi-ClaudeParse", "tool_use input obj") { o["input"]?.jsonObject }
+                    // AskUserQuestion in a MIRRORED session lands as a plain tool_use
+                    // in the file (the control_request path only exists when WE drive
+                    // the turn). Render it as the same option card the CLI shows —
+                    // read-only, since the answer can only be given in the CLI session.
+                    val questions = if (name == "AskUserQuestion" && inputObj != null)
+                        ClaudeControlWire.parseAskQuestions(inputObj) else emptyList()
+                    if (questions.isNotEmpty()) {
+                        out += AgentMessage.AskUserQuestion(
+                            id = o.string("id") ?: uuid(),
+                            requestId = "",          // mirror — no control id to answer to
+                            questions = questions,
+                            readOnly = true,
+                        )
+                    } else {
+                        out += AgentMessage.ToolUse(
+                            id = o.string("id") ?: uuid(),
+                            toolName = name,
+                            input = o["input"]?.toString().orEmpty()
+                        )
+                    }
                 }
                 "tool_result" -> {
                     val outputElem = o["content"]

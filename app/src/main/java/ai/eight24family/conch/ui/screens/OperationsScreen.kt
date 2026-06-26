@@ -112,10 +112,10 @@ fun OperationsScreen(onBack: () -> Unit) {
 
             OpSection("File operations") {
                 OpBullet("cat <path> — read file content (download icon, in-chat viewer, memory editor).")
-                OpBullet("cat > <path> — write file content (memory save, attachment upload to /tmp/sshai_uploads/, text-editor save-back).")
+                OpBullet("cat > <path> — write file content (memory save, attachment upload to /tmp/conch_uploads/, text-editor save-back).")
                 OpBullet("test -f / mkdir -p / stat — exist-checks before reads + writes.")
                 OpBullet("sha256sum <path> — content hash for download dedup (downloads cached by SHA, not by name).")
-                OpBullet("rm /tmp/sshai_uploads/<file> — only triggered when you tap the X next to an attached file in chat.")
+                OpBullet("rm /tmp/conch_uploads/<file> — only triggered when you tap the X next to an attached file in chat.")
             }
 
             OpSection("Approval / login helpers") {

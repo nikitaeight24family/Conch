@@ -11,6 +11,38 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.0-beta] — 2026-06-27
+
+### Performance
+- Sessions list reuses the pooled SSH connection for saved-key servers (no
+  fresh handshake on every refresh), and the listing no longer reads whole
+  multi-MB session files end to end.
+- Chat opens paint from the recent tail immediately while the full history
+  loads in the background — huge (90+ MB) sessions no longer block the UI.
+- Usage / limit bar fills as soon as the connection is up and re-checks after
+  a turn, instead of staying stale.
+
+### Changed
+- A chat with no explicit model pick now uses Claude's own recommended
+  available model (no hardcoded names), and never shows or runs a model the
+  plan has suspended.
+- Connecting the phone bridge is now invisible: hidden handshake, a quiet
+  "phone connected" state with a connecting-% indicator and a phone glyph that
+  appears only once the link is confirmed.
+
+### Fixed
+- Session deletes on the phone now propagate to the server even when no
+  connection was live at delete time (silent reconnect + reconcile on sync).
+- New-chat crash; tab corruption after navigating chat → Settings; duplicate
+  AskUserQuestion cards in mirrored sessions; typing over an open question now
+  cancels it cleanly instead of erroring.
+- conch's headless sessions appear in the native `claude --resume` picker.
+
+### Added
+- Codex `/review` slash command.
+
+---
+
 ## [1.0.9] — 2026-05-11
 
 ### Added
