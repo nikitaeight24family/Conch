@@ -1,6 +1,6 @@
-# ssh.ai roadmap
+# Conch roadmap
 
-Product thesis lives in `CLAUDE.md` §11 — **mobile-first, AI-native IDE.
+Product thesis: **mobile-first, AI-native IDE.
 Phone is the tactile interface, the user's own VPS does the work, the
 agent on that VPS does the thinking. No hosted backend.**
 
@@ -18,8 +18,8 @@ scores neither doesn't belong in this file.
 
 | Pri | Item | Notes |
 |---|---|---|
-| P0 | **Play Store launch** | Closed test in flight; store listing + Data Safety form ready in `docs/play-store/`. Privacy policy live. |
-| P0 | **Agent ↔ phone bridge (Shizuku + log capture)** | The category multiplier — turns ssh.ai from "AI you talk to" into "AI that can also OBSERVE." Server CLI `sshai-bridge logs / screenshot / dumpsys` writes requests through the existing pool SSH; phone polls inbox, captures via Shizuku (system-wide) or own-uid fallback, writes back. Spec in CLAUDE.md §11.5. |
+| P0 | **Play Store launch** | Closed test in flight; Store listing + Data Safety form prepared. Privacy policy live. |
+| P0 | **Agent ↔ phone bridge (Shizuku + log capture)** | The category multiplier — turns Conch from "AI you talk to" into "AI that can also OBSERVE." Server CLI `conch-bridge logs / screenshot / dumpsys` writes requests through the existing pool SSH; phone polls inbox, captures via Shizuku (system-wide) or own-uid fallback, writes back. |
 | P0 | **Auto-install APK from chat** | FileProvider + `Intent.ACTION_VIEW` for `application/vnd.android.package-archive`. Closes the dogfooding loop: ship a release from a train without leaving the chat. |
 | P0 | **`debug` `applicationIdSuffix = ".debug"`** | Safety-net so a debug build can sit alongside release for self-update testing. Tiny. |
 

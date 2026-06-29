@@ -49,10 +49,14 @@ data class HomeSessionRow(
      *  the cached body — the messenger-style preview shown dim under the name.
      *  Null when no body cached / nothing extractable. */
     val lastMessage: String? = null,
-    /** This session was wired to the phone (chat → "Connect phone to server").
-     *  Drives the small phone glyph on the row — same flag the per-server list
-     *  reads, surfaced on the unified Home list too. */
-    val phoneConnected: Boolean = false,
+    /** Phone glyph state for this row (NONE/IDLE/LIVE). Same tri-state the
+     *  per-server list and chat title use — colored when the bridge is live,
+     *  dim when the session was wired but is offline now. */
+    val phoneGlyph: ai.eight24family.conch.diagnostics.BridgePresence =
+        ai.eight24family.conch.diagnostics.BridgePresence.NONE,
+    /** Unsent text typed into this chat's input box (a saved draft), or null.
+     *  Shown inline as "Draft: …" in place of the row's preview. */
+    val draftText: String? = null,
 )
 
 /**
@@ -73,12 +77,47 @@ class HomeSessionsViewModel : ViewModel() {
     private val repo = ServiceLocator.serverRepository
     private val cache = ServiceLocator.sessionsCache
     private val prefetcher = ServiceLocator.globalPrefetcher
+    private val agentStatusCache = ServiceLocator.agentStatusCache
 
     val servers: StateFlow<List<Server>> = repo.observeServers()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _rows = MutableStateFlow<List<HomeSessionRow>>(emptyList())
     val rows: StateFlow<List<HomeSessionRow>> = _rows.asStateFlow()
+
+    /**
+     * Per-server set of agents that are BOTH installed AND logged-in — i.e. the
+     * agents you can actually open a chat with (a new session needs both). Drives
+     * the filter chip bar (only usable agents get a chip) AND the "new session"
+     * button's server picker. Refreshed each [reload] from [AgentStatusCache]
+     * (populated by the prefetch sweep's first-contact probe). Empty until the
+     * first probe lands. user:.
+     */
+    private val _usableByServer = MutableStateFlow<Map<String, Set<Agent>>>(emptyMap())
+    val usableByServer: StateFlow<Map<String, Set<Agent>>> = _usableByServer.asStateFlow()
+
+    /** The agent filter the user last picked (null = "All"). IN-MEMORY so a chip
+     *  tap switches the list THIS frame — going through the DataStore flow added a
+     *  round-trip lag during which the old list kept its scroll position, so the
+     *  post-tap scroll-to-top ran on the stale list and the switch "stayed mid-list
+     *  on Claude" (user). Hydrated once from prefs on init and persisted on every
+     *  change, so the choice still survives a restart. */
+    private val _agentFilter = MutableStateFlow<String?>(null)
+    val agentFilter: StateFlow<String?> = _agentFilter.asStateFlow()
+
+    /** True once the user explicitly picked a filter this session — guards the
+     *  async prefs hydration from clobbering a fast early tap. */
+    @Volatile private var filterUserSet = false
+
+    fun setAgentFilter(agentName: String?) {
+        filterUserSet = true
+        _agentFilter.value = agentName // instant — the list switches this frame
+        viewModelScope.launch {
+            SilentlyTry.fired("SshAi-Home", "persist agent filter") {
+                ServiceLocator.preferences.setHomeAgentFilter(agentName)
+            }
+        }
+    }
 
     /** False until the first cache read completes — lets the UI distinguish
      *  "genuinely no sessions" from "haven't loaded yet" (no empty flash). */
@@ -96,6 +135,9 @@ class HomeSessionsViewModel : ViewModel() {
      *  phone glyph on the row. Same prefs set the per-server list reads. */
     @Volatile private var phoneBridge: Set<String> = emptySet()
 
+    /** chatId (resume id) → unsent input draft text — drives the inline "Draft: …". */
+    @Volatile private var draftsByChat: Map<String, String> = emptyMap()
+
     /** Live connection rollup for the home header — connected vs. mid-handshake
      * right now. Drives the "connecting…" line so the user SEES the app
      * auto-connecting from launch on the screen they land on, instead of having
@@ -108,6 +150,14 @@ class HomeSessionsViewModel : ViewModel() {
         // Idempotent + process-scoped — warms every authorized (server,agent)
         // cache so the merged list fills/updates while the user sits here.
         prefetcher.start(viewModelScope)
+        // Seed the agent filter from the persisted choice ONCE (survives restart),
+        // unless the user already tapped a chip before this async read returned.
+        viewModelScope.launch {
+            val persisted = SilentlyTry.nullOnError {
+                ServiceLocator.preferences.homeAgentFilter.first()
+            }
+            if (!filterUserSet) _agentFilter.value = persisted
+        }
         viewModelScope.launch {
             while (true) {
                 reload()
@@ -144,6 +194,11 @@ class HomeSessionsViewModel : ViewModel() {
         // a session is wired (or after a restart re-reads prefs).
         viewModelScope.launch {
             ServiceLocator.preferences.phoneBridgeSessions.collect { phoneBridge = it; reload() }
+        }
+        // Keep the "has draft" set fresh; reload so the hint appears/clears the
+        // moment the user types/sends in a chat.
+        viewModelScope.launch {
+            ServiceLocator.preferences.draftsByChat.collect { draftsByChat = it; reload() }
         }
         // Poll the pool so the home header reflects auto-connect progress live —
         // a server mid-handshake counts as "connecting", a peek-alive one as
@@ -229,7 +284,20 @@ class HomeSessionsViewModel : ViewModel() {
     private suspend fun reload() {
         val list = servers.value.ifEmpty { repo.observeServers().first() }
         val out = ArrayList<HomeSessionRow>()
+        val usable = HashMap<String, Set<Agent>>()
+        // Privileged-capability layer for the 📱 glyph, sampled once per reload: is
+        // Shizuku's binder alive AND granted RIGHT NOW. The channel layer
+        // (BridgeHealth heartbeat) is checked per-server below. Both must be live,
+        // else the glyph over-claims.
+        val shizukuOk = ai.eight24family.conch.diagnostics.ShizukuShell.available()
         for (s in list) {
+            // Agents on THIS server that are installed AND logged-in — the only
+            // ones a chat can be opened with. Read from the status cache (filled
+            // by the prefetch probe); absent/unprobed server → empty set.
+            usable[s.id] = SilentlyTry.loggedOrElse(
+                "SshAi-Home", "load agent status", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
+            ) { agentStatusCache.load(s.id).statuses }
+                .filterValues { it.installed && it.loggedIn }.keys
             for (agent in Agent.entries) {
                 val snap = cache.load(s.id, agent)
                 for (sess in snap.sessions) {
@@ -266,7 +334,9 @@ class HomeSessionsViewModel : ViewModel() {
                     val lastMsg = lastMessageFromBody(sess.id, agent)
                     out += HomeSessionRow(
                         s.id, s.name, s.username, s.host, s.port, rowSess, working, unread, lastActiveMs, lastMsg,
-                        phoneConnected = "${s.id}:${sess.id}" in phoneBridge,
+                        phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
+                            "${s.id}:${sess.id}" in phoneBridge, s.id, shizukuOk),
+                        draftText = draftsByChat[sess.id],
                     )
                 }
             }
@@ -280,6 +350,15 @@ class HomeSessionsViewModel : ViewModel() {
         val seen = out.mapTo(HashSet()) {
             it.serverId + "|" + it.session.agent.name + "|" + it.session.id
         }
+        // Also index cached rows by (server, agent, first-message preview): a
+        // RESUMED chat opened but not yet sent-in has currentResumeId == null, so
+        // its synthetic row keys on the LOCAL id and the id-dedup above MISSES its
+        // cached row → a phantom duplicate. Content-dedup catches that — same
+        // first message on the same server+agent ⇒ same session, skip the
+        // synthetic.
+        val seenPreview = out.mapTo(HashSet()) {
+            it.serverId + "|" + it.session.agent.name + "|" + it.session.preview.trim()
+        }
         for (info in ServiceLocator.agentSessions.active.value) {
             val sess = ServiceLocator.agentSessions.get(info.serverId, info.agent, info.chatSessionId)
                 ?: continue
@@ -292,6 +371,10 @@ class HomeSessionsViewModel : ViewModel() {
             if ("${info.serverId}:$id" in tombstones) continue
             val key = info.serverId + "|" + info.agent.name + "|" + id
             if (key in seen) continue
+            // Same first message on this server+agent as an already-listed (cached)
+            // session ⇒ it's that session opened/resumed, not a new one. Skip the
+            // synthetic row so a resume-without-send never shows as a copy.
+            if ("${info.serverId}|${info.agent.name}|${firstUser.trim()}" in seenPreview) continue
             val server = list.firstOrNull { it.id == info.serverId } ?: continue
             val working = sess.state.value == ai.eight24family.conch.agent.SessionState.Working
             val lastMsg = hist.lastOrNull {
@@ -316,14 +399,29 @@ class HomeSessionsViewModel : ViewModel() {
             out += HomeSessionRow(
                 server.id, server.name, server.username, server.host, server.port,
                 remote, working, 0, lastActiveMs, lastMsg?.takeIf { it != firstUser },
-                phoneConnected = "${info.serverId}:$id" in phoneBridge,
+                phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
+                    "${info.serverId}:$id" in phoneBridge, info.serverId, shizukuOk),
+                draftText = draftsByChat[id],
             )
             seen += key
         }
         out.sortByDescending { it.lastActiveMs }
+        _usableByServer.value = usable
+        // Per-agent row count — logged only when it CHANGES (not every 2.5s tick),
+        // so "where are my codex/gemini sessions" is one logcat line away without
+        // spamming. (They're in the list; the recency sort just buries the older
+        // agent below a burst of recent Claude — hence the filter chips.)
+        val counts = out.groupingBy { it.session.agent.name }.eachCount()
+        if (counts != lastLoggedCounts) {
+            lastLoggedCounts = counts
+            android.util.Log.d("SshAi-Home", "reload: ${out.size} rows by agent=$counts")
+        }
         _rows.value = out
         _loadedOnce.value = true
     }
+
+    /** Last by-agent row counts we logged, so [reload] logs only on change. */
+    @Volatile private var lastLoggedCounts: Map<String, Int> = emptyMap()
 
     /**
      * Delete one session (swipe-to-reveal → Delete, same as the per-agent

@@ -13,6 +13,7 @@ import ai.eight24family.conch.agent.spec.ModelReasoningInfo
 import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.ReasoningLevel
 import ai.eight24family.conch.agent.spec.TopbarModelState
+import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.util.SilentlyTry
 import kotlin.math.abs
@@ -421,7 +422,7 @@ done
      * found" — even though the file exists on disk. We backfill by reading
      * the cwd from the JSONL's first event (every Claude session writes
      * `"cwd":"..."` on its first line), or as a fallback by reverse-slugging
-     * the project-directory name (`-home-user-sshai` → `/home/user/sshai`).
+     * the project-directory name (`-home-user-project` → `/home/user/sshai`).
      */
     override fun cwdBackfillScript(resumeId: String): String {
         val q = shellEscape(resumeId)
@@ -537,6 +538,93 @@ done
 
         Step 3: Resume the task you were doing right before I sent this message. If there was a tool call you were about to ask me to approve, just run it now. Don't second-guess this — just keep going.
     """.trimIndent()
+
+    // ──────── Mirror turn-state ────────
+
+    /**
+     * Project each `user`/`assistant` JSONL line to a 9-field TSV record:
+     * `[type, isMeta, isToolResult, isToolUse, out_tokens, msgId, ts, text(0..160),
+     * stop_reason]`. The text/stop_reason fields carry the DEFINITIVE done signal;
+     * the rest feed the timer + token counter. Robust to string OR array message
+     * content. Never a nested type. (Moved verbatim from the old hardcoded probe.)
+     */
+    override val turnStateRecordJq: String =
+        "select(.type==\"user\" or .type==\"assistant\") | [.type, " +
+            "((.isMeta // false)|tostring), " +
+            "(((.message.content // [])|if type==\"array\" then any(.[]?; .type==\"tool_result\") else false end)|tostring), " +
+            "(((.message.content // [])|if type==\"array\" then any(.[]?; .type==\"tool_use\") else false end)|tostring), " +
+            "((.message.usage.output_tokens // 0)|tostring), (.message.id // \"\"), (.timestamp // \"\"), " +
+            "(((.message.content) | if type==\"array\" then ([.[]? | (.text // \"\")] | join(\" \")) elif type==\"string\" then . else \"\" end | gsub(\"[\\t\\n\\r]\"; \" \")) | .[0:160]), " +
+            "(.message.stop_reason // \"\")] | @tsv"
+
+    /**
+     * DEFINITIVE turn state — second-accurate, NO timeouts (verified empirically
+     * against a live `claude` session 2026-06-27). The LAST MEANINGFUL user/
+     * assistant event says exactly what's up:
+     *   • assistant + terminal stop_reason (end_turn / stop_sequence / max_tokens) → DONE
+     *   • "[Request interrupted by user]" / "No response requested."               → DONE
+     *   • user prompt OR user tool_result (no assistant after)                     → WORKING (thinking)
+     *   • assistant + stop_reason "tool_use"                                       → WORKING (tool running)
+     *   • assistant + no stop_reason yet (mid-stream) → WORKING, cleared only if long-frozen
+     * Empty attachment-carrier user rows / snapshots are ignored (`lm` skips them).
+     * Claude's live AskUserQuestion is NOT here — it never hits the file (held in
+     * the persistent stream's pendingControls), so waitingForUser stays false and
+     * the app detects it separately.
+     */
+    override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
+        val recs = records.filter { it.size >= 7 }
+        if (recs.isEmpty()) return TurnSignals()
+        val lm = recs.lastOrNull {
+            (it.getOrNull(7)?.isNotBlank() == true) || it[2] == "true" || it[3] == "true"
+        }
+        val lmText = lm?.getOrNull(7).orEmpty()
+        val lmStop = lm?.getOrNull(8).orEmpty()
+        val inFlight: Boolean = when {
+            lm == null -> false
+            lm[0] == "user" && lmText.contains("[Request interrupted by user]") -> false
+            lm[0] == "assistant" && lmText.trimStart().startsWith("No response requested") -> false
+            lm[0] == "assistant" && lmStop in TERMINAL_STOP_REASONS -> false
+            lm[0] == "user" -> true
+            lm[0] == "assistant" && lmStop == "tool_use" -> true
+            lm[0] == "assistant" -> // no stop_reason yet → mid-stream; clear only if long-frozen
+                frozenForMs == null || frozenForMs < AWAIT_STALE_MS
+            else -> false
+        }
+        val thinking = inFlight && lm != null && lm[0] == "user" &&
+            !lmText.contains("[Request interrupted by user]")
+        val startIdx = recs.indexOfLast { it[0] == "user" && it[2] != "true" }
+        val turnStartMs = if (startIdx >= 0) recs[startIdx][6].takeIf { it.isNotBlank() }?.let { ts ->
+            SilentlyTry.logged("SshAi-ClaudeSpec", "parse turn-start ts") {
+                java.time.Instant.parse(ts).toEpochMilli()
+            }
+        } else null
+        val tokenStart = if (startIdx >= 0) startIdx + 1 else 0
+        val tokens = recs.drop(tokenStart).filter { it[0] == "assistant" }
+            .withIndex()
+            .groupBy { (i, r) -> r[5].ifBlank { "##idx$i" } }
+            .values.sumOf { g -> g.maxOf { (_, r) -> r[4].toLongOrNull() ?: 0L } }
+        // DEFINITIVE completion: the last meaningful record is an assistant whose
+        // stop_reason is terminal. This is the ONLY safe signal for force-completing
+        // a stuck live turn — unlike `!inFlight`, it never flips true on the 12-min
+        // stale-mid-stream fallback, so a long silent research turn is never killed.
+        val turnComplete = lm != null && lm[0] == "assistant" && lmStop in TERMINAL_STOP_REASONS
+        return TurnSignals(
+            inFlight = inFlight,
+            thinking = thinking,
+            turnStartMs = turnStartMs,
+            tokens = tokens,
+            turnComplete = turnComplete,
+        )
+    }
+
+    /** Assistant `stop_reason` values that mean the TURN IS COMPLETE — the
+     *  definitive, second-accurate "done" signal (no timeout). */
+    private val TERMINAL_STOP_REASONS = setOf("end_turn", "stop_sequence", "max_tokens")
+
+    /** FALLBACK ONLY: last event is an assistant with NO stop_reason yet
+     *  (mid-stream / malformed). Treat as working unless frozen longer than this,
+     *  so a wedged/dead stream still clears. */
+    private val AWAIT_STALE_MS = 12 * 60_000L
 }
 
 /**

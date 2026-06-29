@@ -82,14 +82,25 @@ class AgentBridge(
         pollJob?.cancel()
         pollJob = null
         seenIds.clear()
+        // Poller gone → drop the heartbeat so the 📱 glyph clears instead of
+        // coasting on a stale "alive" stamp.
+        BridgeHealth.clear(serverId)
     }
 
     private suspend fun tick() {
-        val listing = execOnServer(
+        val raw = execOnServer(
             // `-1` = one file per line. `2>/dev/null` swallows the
             // "no such file" error if `inbox/` was just deleted.
             "ls -1 \$HOME/.conch-bridge/inbox/ 2>/dev/null"
-        ).orEmpty()
+        )
+        // Heartbeat = CHANNEL layer only: non-null `ls` ⇒ SSH up AND this poller
+        // running ⇒ the phone is reachable for bridge requests. Shizuku (the
+        // privileged-capability layer) is checked LIVE at glyph-render time, NOT
+        // folded in here — the two are independent (Shizuku can be OOM-killed while
+        // the channel keeps polling), and a live check flips the glyph in ~2s
+        // instead of waiting out this heartbeat's window.
+        if (raw != null) BridgeHealth.markAlive(serverId)
+        val listing = raw.orEmpty()
         val files = listing.split('\n')
             .map { it.trim() }
             .filter { it.endsWith(".req.json") }

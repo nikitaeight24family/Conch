@@ -455,6 +455,17 @@ object ClaudeMessageParser {
                     subtype == "error" || subtype.startsWith("error_")
                 if (isError) {
                     val body = text.orEmpty()
+                    // A user-initiated STOP ends the turn as an `is_error` result
+                    // with NO message (or an explicit "Request interrupted") —
+                    // that's an action the user took, not a failure. Render a
+                    // calm "stopped" note, never a red "! Error". A genuine
+                    // failure always carries a message.
+                    if (body.isBlank() ||
+                        body.contains("Request interrupted", ignoreCase = true) ||
+                        body.contains("interrupted by user", ignoreCase = true)
+                    ) {
+                        return listOf(note("stopped"))
+                    }
                     val isOverload = body.matchesOverloaded()
                     listOf(
                         AgentMessage.Error(
@@ -873,21 +884,11 @@ object ClaudeMessageParser {
                 val n = attachment["itemCount"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
                 if (n == 0) emptyList() else listOf(note("task reminder · $n items"))
             }
-            "skill_listing" -> {
-                val text = attachment.string("content").orEmpty()
-                val count = text.count { it == '\n' }.let { if (it == 0 && text.isNotBlank()) 1 else it }
-                listOf(note("skills loaded · $count entries"))
-            }
-            "deferred_tools_delta" -> {
-                val added = SilentlyTry.logged("SshAi-ClaudeParse", "count addedNames") { attachment["addedNames"]?.jsonArray?.size } ?: 0
-                val removed = SilentlyTry.logged("SshAi-ClaudeParse", "count removedNames") { attachment["removedNames"]?.jsonArray?.size } ?: 0
-                val parts = listOfNotNull(
-                    if (added > 0) "+$added" else null,
-                    if (removed > 0) "-$removed" else null
-                )
-                if (parts.isEmpty()) emptyList()
-                else listOf(note("tools changed · ${parts.joinToString(" ")}"))
-            }
+            // Session-init / tool-registry plumbing — NOT chat content. These fire
+            // on every connect and on every MCP/tool-set change and just clutter
+            // the conversation. Suppress.
+            "skill_listing" -> emptyList()
+            "deferred_tools_delta" -> emptyList()
             "queued_command" -> {
                 val text = attachment.string("prompt").orEmpty().take(80)
                 listOf(note("queued${if (text.isNotEmpty()) " · $text" else ""}"))
@@ -1061,12 +1062,26 @@ object ClaudeMessageParser {
                         }
                         else -> outputElem.toString()
                     }
-                    out += AgentMessage.ToolResult(
-                        id = uuid(),
-                        toolUseId = o.string("tool_use_id") ?: "",
-                        output = outputText,
-                        isError = o.string("is_error") == "true" || o["is_error"]?.toString() == "true"
-                    )
+                    val isErr = o.string("is_error") == "true" || o["is_error"]?.toString() == "true"
+                    // The CLI echoes our OWN deny reason back as an is_error
+                    // tool_result when the user taps Deny (or types past a live
+                    // question). The permission/question card already flipped to
+                    // "Denied" — surfacing this as a red error on top is the scary
+                    // "! Error" the user flagged. Render it as a calm dim note.
+                    if (isErr && (
+                            outputText.contains(ClaudeControlWire.DENY_PERMISSION_REASON) ||
+                            outputText.contains(ClaudeControlWire.DENY_KEPT_GOING_REASON)
+                        )
+                    ) {
+                        out += note("declined")
+                    } else {
+                        out += AgentMessage.ToolResult(
+                            id = uuid(),
+                            toolUseId = o.string("tool_use_id") ?: "",
+                            output = outputText,
+                            isError = isErr,
+                        )
+                    }
                 }
                 "image" -> out += AgentMessage.Raw(uuid(), "· image attached")
             }

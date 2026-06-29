@@ -11,6 +11,7 @@ import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.spec.ModelMenuItem
 import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.TopbarModelState
+import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.util.SilentlyTry
 
@@ -382,6 +383,68 @@ fi
         "If the file already has other keys, merge — keep them intact.\n\n" +
         "Step 2: Verify by reading the file back; the key must be \"yolo\".\n\n" +
         "Step 3: Resume the task you were doing right before I sent this message. If you were about to ask for approval to run a tool, run it now. Don't pause to reconfirm."
+
+    // ──────── Mirror turn-state ────────
+
+    /**
+     * Project each message record to `[type, isoTs, outTokens]`.
+     *
+     * Gemini's session file is NOT an event stream — it interleaves full-array
+     * `{"$set":{messages:[…]}}` snapshots, `{"$set":{lastUpdated:…}}` housekeeping
+     * bumps, and individual top-level message records `{id,timestamp,type,content,
+     * model,tokens,…}` (verified on the server 2026-06-27). Turn-state reads ONLY
+     * the individual records (top-level `.type` ∈ `user`/`gemini`); `$set`/meta/
+     * `info` lines are skipped. A `gemini` reply carries `.tokens.output`.
+     *
+     * The boundary is reliable: Gemini writes the `user` record when the prompt is
+     * sent and the `gemini` record when the reply lands, so the last record's type
+     * IS the live state — last `user` → model working, last `gemini` → done.
+     */
+    override val turnStateRecordJq: String =
+        "select(.type==\"user\" or .type==\"gemini\") | " +
+            "[.type, (.timestamp // \"\"), ((.tokens.output // 0)|tostring)] | @tsv"
+
+    /**
+     * DEFINITIVE Gemini turn state from the last message record — no timeout for
+     * the DONE case (a `gemini` reply means the turn finished), a staleness guard
+     * only for a `user`-last record that never got a reply (abandoned/wedged).
+     * thinking == (awaiting the model). Gemini approvals ride our own channel, not
+     * the file, so waitingForUser stays false.
+     */
+    override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
+        val recs = records.filter { it.isNotEmpty() && (it[0] == "user" || it[0] == "gemini") }
+        if (recs.isEmpty()) return TurnSignals()
+        val last = recs.last()
+        val inFlight = when {
+            last[0] == "gemini" -> false // model replied → turn done
+            last[0] == "user" -> frozenForMs == null || frozenForMs < AWAIT_STALE_MS
+            else -> false
+        }
+        val thinking = inFlight && last[0] == "user"
+        val startIdx = recs.indexOfLast { it[0] == "user" }
+        val turnStartMs = if (inFlight && startIdx >= 0)
+            recs[startIdx].getOrNull(1)?.takeIf { it.isNotBlank() }?.let { ts ->
+                SilentlyTry.logged("SshAi-GeminiSpec", "parse turn-start ts") {
+                    java.time.Instant.parse(ts).toEpochMilli()
+                }
+            } else null
+        // Output tokens of any replies recorded so far this turn (0 while still
+        // awaiting the first reply — the live stream feeds tokens for our own turn).
+        val tokens = if (inFlight && startIdx >= 0)
+            recs.drop(startIdx + 1).filter { it[0] == "gemini" }
+                .sumOf { it.getOrNull(2)?.toLongOrNull() ?: 0L }
+        else 0L
+        return TurnSignals(
+            inFlight = inFlight,
+            thinking = thinking,
+            turnStartMs = turnStartMs,
+            tokens = tokens,
+        )
+    }
+
+    /** FALLBACK ONLY: a `user`-last record with no reply, frozen longer than this,
+     *  is treated as an abandoned/wedged turn (cleared). */
+    private val AWAIT_STALE_MS = 12 * 60_000L
 }
 
 private object GeminiTopbarUi : AgentTopbarUi {

@@ -2,7 +2,9 @@ package ai.eight24family.conch.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,35 +15,49 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material3.Icon
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
+import ai.eight24family.conch.ui.components.PhoneBridgeGlyph
 import ai.eight24family.conch.ui.components.SearchableScaffold
 import ai.eight24family.conch.ui.window.handCursor
 import ai.eight24family.conch.ui.viewmodel.HomeSessionRow
 import ai.eight24family.conch.ui.viewmodel.HomeSessionsViewModel
+import kotlinx.coroutines.launch
 
 /**
  * Unified **Sessions** home — every cached session across all servers ×
@@ -54,6 +70,7 @@ fun HomeSessionsScreen(
     onOpenChat: (serverId: String, agent: Agent, resumeId: String, path: String, model: String?, reasoning: String?) -> Unit,
     onOpenChatFromSearch: (sessionId: String, msgId: String, ordinal: Int, query: String, charOffset: Int) -> Unit = { _, _, _, _, _ -> },
     onAddServer: () -> Unit = {},
+    onNewChat: (serverId: String, agent: Agent) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     vm: HomeSessionsViewModel = viewModel(),
 ) {
@@ -61,23 +78,79 @@ fun HomeSessionsScreen(
     val servers by vm.servers.collectAsState()
     val loadedOnce by vm.loadedOnce.collectAsState()
     val conn by vm.connectivity.collectAsState()
+    val usableByServer by vm.usableByServer.collectAsState()
+    val filterName by vm.agentFilter.collectAsState()
+
+    // Agents you can actually open a chat with = installed AND logged-in on at
+    // least one server (a new session needs both). Enum order (Claude, Codex,
+    // Gemini). This — NOT "agents that have sessions" — drives the chip bar: an
+    // uninstalled / logged-out agent gets no chip, and a lone usable agent hides
+    // the bar entirely.
+    val usableAgents = remember(usableByServer) {
+        Agent.entries.filter { a -> usableByServer.values.any { a in it } }
+    }
+    val barShown = usableAgents.size >= 2
+    // Effective filter: a lone usable agent is forced (no bar); with ≥2 the
+    // persisted pick applies (validated against the usable set; unknown → All);
+    // before the status probe lands (empty) → All so nothing is hidden.
+    val selectedAgent: Agent? = when {
+        usableAgents.size == 1 -> usableAgents[0]
+        barShown -> filterName?.let { n -> usableAgents.firstOrNull { it.name == n } }
+        else -> null
+    }
+    val visibleRows = remember(rows, selectedAgent) {
+        if (selectedAgent == null) rows else rows.filter { it.session.agent == selectedAgent }
+    }
+    // Servers where the focused agent is usable — the "new session" targets.
+    // One → open directly; many → pick from a dropdown.
+    val newChatTargets = remember(servers, usableByServer, selectedAgent) {
+        val a = selectedAgent
+        if (a == null) emptyList()
+        else servers.filter { usableByServer[it.id]?.contains(a) == true }
+    }
+    // New-session targets as (server, agent) pairs. With a focused agent → that
+    // agent's servers. Under "All" (no focus) the FAB STILL starts a chat: offer
+    // every usable (server, agent) pair so a new chat is reachable from All too.
+    val newChatPairs =
+        remember(servers, usableByServer, selectedAgent, newChatTargets) {
+            val a = selectedAgent
+            if (a != null) newChatTargets.map { it to a }
+            else servers.flatMap { s ->
+                Agent.entries.filter { usableByServer[s.id]?.contains(it) == true }.map { s to it }
+            }
+        }
 
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     // Telegram-style: when a new/bumped session becomes #1, keep it in view IF
     // the user is at/near the top — otherwise a freshly-created session lands
     // just above the fold and they'd have to scroll up to find it (the bug).
     // Deep readers (scrolled down) are never yanked. firstVisibleItemIndex <= 1
     // because a single prepend shifts the parked-at-top user from 0 to 1.
-    val topKey = rows.firstOrNull()?.let { it.serverId + "/" + it.session.agent.name + "/" + it.session.id }
+    val topKey = visibleRows.firstOrNull()?.let { it.serverId + "/" + it.session.agent.name + "/" + it.session.id }
     LaunchedEffect(topKey) {
         if (topKey != null && listState.firstVisibleItemIndex <= 1) {
             listState.animateScrollToItem(0)
         }
     }
+    // "Back to top" appears only once you're past the 5th session (deep enough
+    // that scrolling back is a chore), hidden before that.
+    val showToTop by remember { derivedStateOf { listState.firstVisibleItemIndex > 5 } }
+    // Server-picker dropdown for "new session" when >1 server qualifies.
+    var serverMenuOpen by remember { mutableStateOf(false) }
+    // Bumped on every filter-chip tap. The filter switch is synchronous (in-memory),
+    // so when this LaunchedEffect fires the new filter's rows are already laid out —
+    // scrollToItem(0) then lands at the ABSOLUTE top, overriding LazyColumn's
+    // key-based position preservation that otherwise kept the previous filter's
+    // offset.
+    var scrollTopTrigger by remember { mutableStateOf(0) }
+    LaunchedEffect(scrollTopTrigger) {
+        if (scrollTopTrigger > 0) listState.scrollToItem(0)
+    }
 
     SearchableScaffold(
         title = {
-            androidx.compose.foundation.layout.Column {
+            Column {
                 Text(
                     "Conch ▌ sessions",
                     style = MaterialTheme.typography.titleLarge,
@@ -99,42 +172,228 @@ fun HomeSessionsScreen(
         onPickHit = onOpenChatFromSearch,
     ) { padding ->
         ai.eight24family.conch.ui.window.WideContentColumn {
-        when {
-            rows.isNotEmpty() -> {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                    // Bottom inset so the last session scrolls clear of the
-                    // floating glass bar (it overlays the list, not docks).
-                    contentPadding = PaddingValues(top = 2.dp, bottom = 96.dp),
-                ) {
-                    items(rows, key = { it.serverId + "/" + it.session.agent.name + "/" + it.session.id }) { row ->
-                        SwipeToRevealDelete(onDelete = { vm.deleteSession(row) }) {
-                            SessionListItem(row = row, onClick = {
-                                onOpenChat(
-                                    row.serverId,
-                                    row.session.agent,
-                                    row.session.id,
-                                    row.session.path,
-                                    row.session.model,
-                                    row.session.reasoning,
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                when {
+                    rows.isNotEmpty() -> {
+                        Column(Modifier.fillMaxSize()) {
+                            // Filter chips — only when ≥2 agents are usable.
+                            if (barShown) {
+                                AgentFilterChips(
+                                    agents = usableAgents,
+                                    counts = rows.groupingBy { it.session.agent }.eachCount(),
+                                    total = rows.size,
+                                    selected = selectedAgent,
+                                    onSelect = {
+                                        vm.setAgentFilter(it?.name)
+                                        // Bump the trigger → a LaunchedEffect scrolls
+                                        // the list to the very top AFTER the new
+                                        // filter's content is laid out (see below).
+                                        scrollTopTrigger++
+                                    },
                                 )
-                            })
+                            }
+                            if (visibleRows.isEmpty()) {
+                                // A usable agent with no sessions yet — invite one.
+                                Text(
+                                    "// no ${selectedAgent?.displayName ?: ""} sessions yet — tap ＋ to start one",
+                                    color = MaterialTheme.colorScheme.outline,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(20.dp),
+                                )
+                            } else {
+                                LazyColumn(
+                                    state = listState,
+                                    modifier = Modifier.fillMaxSize(),
+                                    // Bottom inset so the last session scrolls clear
+                                    // of the floating glass bar (it overlays the list).
+                                    contentPadding = PaddingValues(top = 2.dp, bottom = 96.dp),
+                                ) {
+                                    items(visibleRows, key = { it.serverId + "/" + it.session.agent.name + "/" + it.session.id }) { row ->
+                                        SwipeToRevealDelete(onDelete = { vm.deleteSession(row) }) {
+                                            SessionListItem(row = row, onClick = {
+                                                onOpenChat(
+                                                    row.serverId,
+                                                    row.session.agent,
+                                                    row.session.id,
+                                                    row.session.path,
+                                                    row.session.model,
+                                                    row.session.reasoning,
+                                                )
+                                            })
+                                        }
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                                    }
+                                }
+                            }
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                    }
+                    // Loaded, but nothing to show → an honest empty state.
+                    loadedOnce -> EmptyHome(
+                        hasServers = servers.isNotEmpty(),
+                        onAddServer = onAddServer,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    // Not loaded yet → keep blank (cache read is near-instant).
+                    else -> Box(Modifier.fillMaxSize())
+                }
+
+                // ── Floating actions, stacked bottom-end above the nav bar ──
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 104.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    if (showToTop) {
+                        SmallFloatingActionButton(
+                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Back to top")
+                        }
+                    }
+                    // New session — shown whenever a chat CAN be started (a focused
+                    // agent's server, OR — under "All" — any usable server×agent
+                    // pair). One target → open directly; many → pick from a menu.
+                    if (newChatPairs.isNotEmpty()) {
+                        val primary = MaterialTheme.colorScheme.primary
+                        // Menu labels: many agents in play (the "All" case) → lead
+                        // with the agent; one agent, many servers → show the server.
+                        val multiAgent = newChatPairs.distinctBy { it.second }.size > 1
+                        val multiServer = newChatPairs.distinctBy { it.first.id }.size > 1
+                        Box {
+                            // Compose-new-chat button: a translucent cyber disc with a
+                            // chat-bubble-＋ glyph — reads as "new conversation", not
+                            // "attach a file" (a bare ＋ looked like add-photo). ~15%
+                            // smaller than the stock 56dp FAB + semi-transparent.
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(primary.copy(alpha = 0.16f), CircleShape)
+                                    .border(1.5.dp, primary.copy(alpha = 0.8f), CircleShape)
+                                    .clip(CircleShape)
+                                    .handCursor()
+                                    .clickable {
+                                        if (newChatPairs.size == 1) {
+                                            onNewChat(newChatPairs[0].first.id, newChatPairs[0].second)
+                                        } else {
+                                            serverMenuOpen = true
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Filled.AddComment,
+                                    contentDescription = "New session",
+                                    tint = primary,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            // >1 target → pick which (server and/or agent).
+                            DropdownMenu(expanded = serverMenuOpen, onDismissRequest = { serverMenuOpen = false }) {
+                                for ((s, a) in newChatPairs) {
+                                    val label = when {
+                                        multiAgent && multiServer -> "${a.displayName} · ${s.name}"
+                                        multiAgent -> a.displayName
+                                        else -> "${s.username}@${s.name}"
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text(label) },
+                                        onClick = {
+                                            serverMenuOpen = false
+                                            onNewChat(s.id, a)
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
-            // Loaded, but nothing to show → an honest empty state.
-            loadedOnce -> EmptyHome(
-                hasServers = servers.isNotEmpty(),
-                onAddServer = onAddServer,
-                modifier = Modifier.fillMaxSize().padding(padding),
+        }
+    }
+}
+
+/** Horizontally-scrollable agent filter: "All" + one chip per USABLE agent
+ *  (installed + logged-in). Lets the user surface Codex/Gemini history that the
+ *  recency sort otherwise buries under a burst of recent Claude activity, and
+ *  keeps the tapped chip in view (LazyRow auto-scrolls to the selection). */
+@Composable
+private fun AgentFilterChips(
+    agents: List<Agent>,
+    counts: Map<Agent, Int>,
+    total: Int,
+    selected: Agent?,
+    onSelect: (Agent?) -> Unit,
+) {
+    val state = rememberLazyListState()
+    // Bring the active chip on-screen — tapping "Codex" when it sits off the
+    // right edge now scrolls it into view. Index 0 = "All", then one per
+    // agent.
+    val selIndex = if (selected == null) 0 else agents.indexOf(selected) + 1
+    LaunchedEffect(selIndex, agents.size) {
+        if (selIndex in 0..agents.size) state.animateScrollToItem(selIndex)
+    }
+    LazyRow(
+        state = state,
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        item {
+            AgentChip("All", total, null, selected == null) { onSelect(null) }
+        }
+        items(agents) { a ->
+            AgentChip(a.displayName, counts[a] ?: 0, AgentSpecRegistry[a].iconRes, selected == a) { onSelect(a) }
+        }
+    }
+}
+
+@Composable
+private fun AgentChip(
+    label: String,
+    count: Int,
+    iconRes: Int?,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val primary = MaterialTheme.colorScheme.primary
+    val dim = MaterialTheme.colorScheme.outline
+    val bg = if (selected) primary.copy(alpha = 0.18f) else Color.Transparent
+    val borderC = if (selected) primary else dim.copy(alpha = 0.5f)
+    val fg = if (selected) primary else MaterialTheme.colorScheme.onSurface
+    Row(
+        modifier = Modifier
+            .background(bg, RoundedCornerShape(50))
+            .border(1.dp, borderC, RoundedCornerShape(50))
+            .handCursor()
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (iconRes != null) {
+            Image(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
             )
-            // Not loaded yet → keep blank (cache read is near-instant).
-            else -> Box(Modifier.fillMaxSize().padding(padding))
         }
-        }
+        Text(
+            label,
+            color = fg,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+        )
+        Text(
+            count.toString(),
+            color = if (selected) primary else dim,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -153,6 +412,9 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
     // last == first == name), so it's never a pointless duplicate.
     val lastMessage = row.lastMessage?.replace('\n', ' ')?.replace('\r', ' ')?.trim()
         ?.takeIf { it.isNotBlank() && it != name }
+    // Unsent draft — shown inline as "Draft: …" IN PLACE of the preview (user
+    // wanted the text itself, not a pencil that just hints "editable").
+    val draft = row.draftText?.replace('\n', ' ')?.replace('\r', ' ')?.trim()?.ifBlank { null }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -218,24 +480,35 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
                         )
                     }
                 }
-                // Phone wired to this session via conch-bridge — small glyph.
-                if (row.phoneConnected) {
-                    Icon(
-                        Icons.Filled.PhoneAndroid,
-                        contentDescription = "phone connected to this session",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(end = 6.dp).size(13.dp),
-                    )
-                }
+                // Phone wired to this session via conch-bridge — tri-state glyph
+                // (colored live / dim offline / absent never), shared with the
+                // per-server list and the chat title.
+                PhoneBridgeGlyph(
+                    row.phoneGlyph,
+                    modifier = Modifier.padding(end = 6.dp),
+                    size = 13.dp,
+                )
                 Text(
                     formatWhen(row.lastActiveMs),
                     color = dim,
                     style = MaterialTheme.typography.labelSmall,
                 )
             }
-            // Last chat message — dim messenger-style preview (all agents). Null
-            // when it would just duplicate the name (1-message session).
-            if (lastMessage != null) {
+            // Subtitle: an unsent DRAFT wins (accent "Draft: …"), else the dim
+            // messenger-style last-message preview (all agents).
+            if (draft != null) {
+                Text(
+                    "Draft: $draft",
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    // Right-aligned: the left edge is for agent replies; the user's
+                    // own (unsent) text reads as "mine" on the right (chat metaphor).
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
+                )
+            } else if (lastMessage != null) {
                 Text(
                     lastMessage,
                     color = dim,

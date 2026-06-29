@@ -1,5 +1,7 @@
 package ai.eight24family.conch.agent
 
+import ai.eight24family.conch.ssh.startStreamSession
+
 import ai.eight24family.conch.agent.gemini.GeminiAcpEvents
 import ai.eight24family.conch.agent.gemini.GeminiAcpWire
 import ai.eight24family.conch.agent.gemini.GeminiAcpWire.str
@@ -191,7 +193,10 @@ internal class AgentSessionGeminiAcp(
 
         val client = sshLifecycle.sshClient ?: return false
         try {
-            val sess = client.startSession()
+            // autoExpand: the long-lived ACP channel is read continuously;
+            // protect it from receive-window starvation under shared-transport
+            // contention (see [startStreamSession]).
+            val sess = client.startStreamSession()
             val modelArg = params.model?.let { " --model " + shellEscape(it) } ?: ""
             val approvalArg = when (params.approval) {
                 ai.eight24family.conch.data.prefs.AgentApprovalMode.SAFE -> " --approval-mode default"

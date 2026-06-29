@@ -353,7 +353,68 @@ interface AgentCliSpec {
      * Caller wraps in `bash -lc '<script>'`.
      */
     fun cwdBackfillScript(resumeId: String): String?
+
+    // ──────── Mirror turn-state (working / done / waiting) ────────
+
+    /**
+     * Server-side `jq` PROGRAM that projects this CLI's session JSONL into ONE
+     * tab-separated record per RELEVANT line, oldest→newest. The field layout is
+     * private to the spec — only [inferTurnState] (same spec) reads it back. The
+     * tail-poll pipes the session file's tail through this to learn, second-
+     * accurate, whether a turn is running — WITHOUT transferring the whole file.
+     *
+     * Null ⇒ this CLI has no file-based turn-state detection (e.g. its sessions
+     * aren't mirrored on disk); the mirror then relies only on the app-driven
+     * `curWorking` flag. Each CLI's JSONL is shaped totally differently (Claude:
+     * `type:user/assistant` + `message.stop_reason`; Codex: `type:event_msg` with
+     * `payload.type:task_started/task_complete`), so this MUST be per-spec — a
+     * Claude-shaped probe matches ZERO lines in a Codex rollout.
+     */
+    val turnStateRecordJq: String? get() = null
+
+    /**
+     * Decide the turn signals from the records [turnStateRecordJq] projected
+     * (oldest→newest) + how long the session file has been frozen ([frozenForMs],
+     * null if unknown). Verdict must be DETERMINISTIC from the file content, not a
+     * timeout (timeouts are at most a last-resort fallback for a malformed tail).
+     * Default (no records / no support) = nothing running.
+     */
+    fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals =
+        TurnSignals()
 }
+
+/**
+ * What the tail-poll needs to know about a mirrored turn's state, derived by the
+ * per-CLI [AgentCliSpec.inferTurnState] from the session file's tail.
+ *
+ *  - [inFlight]       — a turn is actively running (model generating / a tool
+ *                       running / a subagent working). Drives the spinner.
+ *  - [waitingForUser] — the turn is BLOCKED on a human answer that is VISIBLE IN
+ *                       THE FILE (e.g. a Codex approval the file records). Claude's
+ *                       live AskUserQuestion is NOT here — it never hits the file
+ *                       and is detected separately via the persistent stream's
+ *                       pendingControls. Default false.
+ *  - [thinking]       — the model is about to GENERATE (vs running a tool) — drives
+ *                       the «with X effort» suffix.
+ *  - [turnStartMs]    — epoch-ms of the current turn's start (for the elapsed timer).
+ *  - [tokens]         — cumulative output tokens this turn (the «↓ N» counter).
+ *  - [turnComplete]   — the file shows a DEFINITIVE terminal completion (Claude
+ *                       assistant stop_reason ∈ end_turn/stop_sequence/max_tokens;
+ *                       analogous done marker per agent). DISTINCT from `!inFlight`:
+ *                       inFlight also goes false on the 12-min stale-mid-stream
+ *                       fallback and on interrupts, which are NOT clean completions.
+ *                       Use this — never `!inFlight` — to force-complete a STUCK
+ *                       live turn, so a long silent research turn is never torn
+ *                       down at the stale threshold. Default false.
+ */
+data class TurnSignals(
+    val inFlight: Boolean = false,
+    val waitingForUser: Boolean = false,
+    val thinking: Boolean = false,
+    val turnStartMs: Long? = null,
+    val tokens: Long = 0L,
+    val turnComplete: Boolean = false,
+)
 
 /**
  * Inputs to [AgentCliSpec.buildExecCommand]. Carried as a data class because

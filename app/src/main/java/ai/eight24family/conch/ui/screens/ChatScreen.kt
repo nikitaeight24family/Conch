@@ -60,6 +60,19 @@ fun ChatScreen(
     vm: ChatViewModel = viewModel()
 ) {
     var input by rememberSaveable { mutableStateOf("") }
+    // Restore the saved input draft — leaving the chat must never throw away unsent
+    // text. KEYED on the resume id, not the VM: a resumed chat's _resumeId is null
+    // for the first frames, and the draft is stored under the resume id — so
+    // loading on first composition read the WRONG key and missed the draft. Only
+    // when the field is empty, so a typed / rotation-preserved input is never
+    // clobbered.
+    val draftRestoreKey by vm.resumeId.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(draftRestoreKey) {
+        if (input.isBlank()) {
+            val d = vm.loadInputDraft()
+            if (d.isNotBlank()) input = d
+        }
+    }
     val messages by vm.messages.collectAsState()
     val state by vm.state.collectAsState()
     val reconnecting by vm.reconnecting.collectAsState()
@@ -209,6 +222,43 @@ fun ChatScreen(
     // (clean Result OR the user Ctrl+C'd it on the PC) the file's
     // writer count drops to zero and this flips off.
     val remoteWorking by vm.remoteFileOpen.collectAsState()
+
+    // ── Streaming haptics (user-requested) ── While a turn runs: a NEW tool/action
+    // row → finest Tick; a NEW assistant text row → stronger Tap; the turn
+    // finishing → Confirm (double tap-tap). Seeded on the FIRST non-empty history
+    // so opening a chat never buzzes through existing messages; only rows added
+    // during an active turn buzz.
+    val haptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+    val seenHaptic = androidx.compose.runtime.remember(vm) { HashSet<String>() }
+    val hapticSeeded = androidx.compose.runtime.remember(vm) { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(messages) {
+        if (!hapticSeeded.value) {
+            if (messages.isNotEmpty()) {
+                messages.forEach { seenHaptic.add(it.id) }
+                hapticSeeded.value = true
+            }
+            return@LaunchedEffect
+        }
+        val working = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
+        for (m in messages.asReversed()) {
+            if (!seenHaptic.add(m.id)) break // hit an already-seen row → older ones below
+            if (!working) continue
+            when (m) {
+                is ai.eight24family.conch.agent.AgentMessage.ToolUse,
+                is ai.eight24family.conch.agent.AgentMessage.ToolResult ->
+                    haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Tick)
+                is ai.eight24family.conch.agent.AgentMessage.AssistantText ->
+                    haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Tap)
+                else -> {}
+            }
+        }
+    }
+    val prevWorkingHaptic = androidx.compose.runtime.remember(vm) { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(state, remoteWorking) {
+        val w = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
+        if (prevWorkingHaptic.value && !w) haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Confirm)
+        prevWorkingHaptic.value = w
+    }
 
     // If a buffered send timed out (the session never reached Running within
     // the buffer window), the VM emits the original text back here. Drop it
@@ -502,19 +552,20 @@ fun ChatScreen(
                 ChatPromptHost(
                     vm = vm,
                     input = input,
-                    onInputChange = { input = it },
+                    onInputChange = { input = it; vm.saveInputDraft(it) },
                     onSlashAcPick = { cmd ->
                         if (cmd.acceptsArgs) {
                             input = "/${cmd.name} "
                         } else {
                             input = ""
+                            vm.clearInputDraft()
                             vm.dispatchSlash(cmd)
                         }
                     },
                     onSend = {
                         val cmd = input.trim()
                         if (cmd.isNotEmpty() || attachments.isNotEmpty()) {
-                            vm.send(cmd); input = ""
+                            vm.send(cmd); input = ""; vm.clearInputDraft()
                         }
                     },
                     serverId = serverId,

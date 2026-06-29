@@ -1,8 +1,36 @@
 package ai.eight24family.conch.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.SessionState
 import ai.eight24family.conch.agent.SlashCommand
@@ -37,13 +65,13 @@ internal fun ChatPromptHost(
     val reconnecting by vm.reconnecting.collectAsState()
     val reconnectAttempt by vm.reconnectAttempt.collectAsState()
     val hasPending by vm.hasPending.collectAsState()
+    val queuedMessages by vm.queuedMessages.collectAsState()
     val enterSends by vm.enterSends.collectAsState()
     val usageBar by vm.usageBar.collectAsState()
     val usageReport by vm.usageReport.collectAsState()
     val usageCost by vm.costStats.collectAsState()
     val contextBreakdown by vm.contextBreakdown.collectAsState()
     val contextLoading by vm.contextLoading.collectAsState()
-    val bridgeActive by vm.bridgeActive.collectAsState()
 
     // Slash-command autocomplete state. Filters built-in + user-defined
     // commands by what's typed after the leading `/` and before any
@@ -59,6 +87,11 @@ internal fun ChatPromptHost(
             items = acItems,
             onPick = onSlashAcPick,
         )
+    }
+    // Messages typed mid-turn wait here (visible, cancelable) until the current
+    // reply finishes — then they're sent in order.
+    if (queuedMessages.isNotEmpty()) {
+        QueuedMessagesStrip(queued = queuedMessages, onCancel = { vm.cancelQueued(it) })
     }
     PromptBar(
         input = input,
@@ -77,7 +110,6 @@ internal fun ChatPromptHost(
         },
         contextBreakdown = contextBreakdown,
         contextLoading = contextLoading,
-        bridgeActive = bridgeActive,
         uploading = anyUploading,
         statusHint = run {
             // Suppress "// agent: failed —" / "disconnected" hints when
@@ -109,4 +141,79 @@ internal fun ChatPromptHost(
         onStop = { vm.stopCurrent() },
         onSend = onSend,
     )
+}
+
+/**
+ * Visible queue of messages the user sent mid-turn. Each row shows the text +
+ * a ✕ to take it back before it's sent. Drained one-per-turn by the VM once the
+ * current reply finishes (see [ChatViewModel.drainOutbox]).
+ */
+@Composable
+private fun QueuedMessagesStrip(
+    queued: List<ChatViewModel.QueuedMessage>,
+    onCancel: (String) -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        queued.forEach { q ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(accent.copy(alpha = 0.08f))
+                    .border(1.dp, accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                    .padding(start = 10.dp, end = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Schedule,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(15.dp),
+                )
+                // Tiny thumbnails of any attached images (max 4) — the user wanted
+                // the actual little pictures, not a long "Attached image(s) at: …".
+                q.thumbs.take(4).forEach { bytes ->
+                    val bmp: ImageBitmap? = remember(bytes) {
+                        runCatching {
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                        }.getOrNull()
+                    }
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)),
+                        )
+                    }
+                }
+                val label = q.displayText.replace('\n', ' ').trim().ifBlank { null }
+                if (label != null) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                IconButton(onClick = { onCancel(q.id) }, modifier = Modifier.size(34.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Cancel queued message",
+                        tint = accent.copy(alpha = 0.85f),
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
+            }
+        }
+    }
 }

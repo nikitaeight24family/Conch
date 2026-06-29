@@ -700,6 +700,25 @@ class AgentSession(
         historyMod.cancelUnresolvedQuestions()
     }
 
+    /** True iff a live control_request (AskUserQuestion / permission) is pending on
+     *  the persistent stream, i.e. the turn is BLOCKED on the user. The tail-poll's
+     *  turn-state detector reads this for WAITING-FOR-USER (never hits the JSONL). */
+    fun hasPendingControl(): Boolean = persistentStream.hasPendingControl()
+
+    /** The tail-poll detected this session's LIVE turn is stuck: [state] is
+     *  Working but the authoritative session file says the turn ended and is
+     *  frozen. The persistent reader wedged (e.g. a `conch-bridge` loopback tool)
+     *  and never saw `result`. Complete + tear down the wedged persistent reader
+     *  (Claude control channel), then make sure we leave Working regardless of
+     *  channel — the file is authoritative that the turn is done. */
+    fun reconcileStuckTurn() {
+        if (_state.value !is SessionState.Working) return
+        persistentStream.reconcileStuckTurn()
+        // Safety net for channels without an active persistent turn (the clean
+        // path above no-ops): the file proved the turn ended, so don't stay stuck.
+        if (_state.value is SessionState.Working) _state.value = SessionState.Running
+    }
+
     fun close() {
         // Graceful CLI exit first (stdin EOF → it flushes the session
         // file), then the channel + pooled-client release.

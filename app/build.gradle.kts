@@ -77,7 +77,7 @@ android {
         versionCode = computeVersionCode(project)
         // Public launch as an early beta. versionCode stays auto (git commit
         // count) — strictly monotonic, never reset, independent of this label.
-        versionName = "0.1.0 Beta"
+        versionName = "0.2.1 Beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

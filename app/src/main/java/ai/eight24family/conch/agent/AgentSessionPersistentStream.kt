@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.connection.channel.direct.Session
+import ai.eight24family.conch.ssh.startStreamSession
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.UUID
@@ -85,6 +86,12 @@ internal class AgentSessionPersistentStream(
     @Volatile private var launched: LaunchParams? = null
     private var readerJob: Job? = null
 
+    /** Wall-clock of the last stdout line the reader saw. Drives the
+     *  INACTIVITY turn timeout: a research turn that is actively streaming
+     *  (Agent/Task/Workflow subagents) must NEVER be killed on a wall-clock
+     *  deadline — only a genuinely silent channel (wedged process) times out. */
+    @Volatile private var lastReaderActivityMs = System.currentTimeMillis()
+
     /** Serialises every stdin write (turns, control responses). */
     private val writeLock = Any()
 
@@ -100,6 +107,13 @@ internal class AgentSessionPersistentStream(
      *  Needed to echo the ORIGINAL tool input back on allow. */
     private val pendingControls =
         java.util.concurrent.ConcurrentHashMap<String, ClaudeControlWire.ControlRequest>()
+
+    /** True iff a CLI→client control_request (AskUserQuestion / permission) is live
+     *  and blocked on the user. The tail-poll's turn-state detector reads this for
+     *  WAITING-FOR-USER — control_requests are intercepted before the parser and
+     *  NEVER written to the JSONL, so the mirrored file alone can't see a pending
+     *  question. AUTHORITATIVE, no timeout. */
+    fun hasPendingControl(): Boolean = pendingControls.isNotEmpty()
 
     private val reqCounter = AtomicInteger(0)
     private var turnSeq = 0
@@ -130,6 +144,7 @@ internal class AgentSessionPersistentStream(
             }
             val done = CompletableDeferred<Boolean>()
             turnDone = done
+            lastReaderActivityMs = System.currentTimeMillis()
             val line = AgentSpecRegistry[server.agent].encodeUserTurn(text)
             if (!writeLine(line)) {
                 // stdin write failed → process/transport died between
@@ -142,16 +157,35 @@ internal class AgentSessionPersistentStream(
                 return@withContext true
             }
             android.util.Log.d(tag, "turn sent (${text.length}B) resume=${getResumeId()}")
-            val completed = withTimeoutOrNull(TURN_TIMEOUT_MS) { done.await() }
+            // INACTIVITY wait, NOT a wall-clock deadline. A research turn
+            // (Agent/Task/Workflow subagents) legitimately runs for tens of
+            // minutes with the MAIN stream quiet; the old fixed 15-min cap fired
+            // mid-research, interrupted Claude, errored the turn, and — with no
+            // teardown — left an orphaned reader that poisoned every later turn.
+            // Now we keep waiting as long as the reader keeps seeing stdout;
+            // only TRUE silence (a wedged process — a dead transport already
+            // EOFs the reader within a couple of 30s keepalives) trips the
+            // backstop.
+            var completed: Boolean? = null
+            while (true) {
+                completed = withTimeoutOrNull(INACTIVITY_CHECK_MS) { done.await() }
+                if (completed != null) break
+                if (System.currentTimeMillis() - lastReaderActivityMs >= INACTIVITY_TIMEOUT_MS) break
+            }
             if (completed == null) {
-                android.util.Log.w(tag, "turn timed out after ${TURN_TIMEOUT_MS / 60000} min — interrupting")
+                android.util.Log.w(tag, "turn silent ${INACTIVITY_TIMEOUT_MS / 60000} min — interrupting + tearing down")
                 interrupt()
                 history.emitMsg(
                     AgentMessage.Error(
                         UUID.randomUUID().toString(),
-                        "${server.agent.cliCommand} turn timed out",
+                        "${server.agent.cliCommand} turn timed out (no output)",
                     )
                 )
+                // Force a clean process + reader restart on the next send so the
+                // wedged turn's reader can never satisfy (and swallow) a later
+                // turn's completion — that was the "new messages get no reply"
+                // half of the bug. ensureProcess() will relaunch with --resume.
+                teardownProcess()
             } else if (!completed && !sshLifecycle.userCancelled) {
                 // Reader hit EOF mid-turn — process died without a result.
                 android.util.Log.w(tag, "process died mid-turn — marking disconnected")
@@ -228,7 +262,11 @@ internal class AgentSessionPersistentStream(
             ?.let { "cd ${shellEscape(it)} && " } ?: ""
         val full = loginShell(params.authPrep + cdPrefix + inner)
         return try {
-            val sess = client.startSession()
+            // autoExpand channel: this turn stream is read continuously and must
+            // survive reader-thread contention from the conch-bridge loopback
+            // without its receive-window starving to a silent stall (see
+            // [startStreamSession]; TURN-STUCK-RECONCILE-1).
+            val sess = client.startStreamSession()
             val cmd = sess.exec(full)
             procSession = sess
             procCmd = cmd
@@ -318,6 +356,7 @@ internal class AgentSessionPersistentStream(
                 BufferedReader(InputStreamReader(cmd.inputStream, Charsets.UTF_8)).use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
+                        lastReaderActivityMs = System.currentTimeMillis()
                         if (line.isBlank()) continue
                         synchronized(rawTail) {
                             rawTail.addLast(line.take(200))
@@ -473,7 +512,7 @@ internal class AgentSessionPersistentStream(
                     req.inputJson ?: kotlinx.serialization.json.buildJsonObject { },
                 )
             } else {
-                ClaudeControlWire.encodeDeny(requestId, "User denied this action from the mobile client.")
+                ClaudeControlWire.encodeDeny(requestId, ClaudeControlWire.DENY_PERMISSION_REASON)
             }
             respondRaw(requestId, line)
             true
@@ -505,7 +544,7 @@ internal class AgentSessionPersistentStream(
         sshLifecycle.userCancelled = true
         for (rid in ids) {
             pendingControls.remove(rid)
-            respondRaw(rid, ClaudeControlWire.encodeDeny(rid, "User chose to keep going without answering."))
+            respondRaw(rid, ClaudeControlWire.encodeDeny(rid, ClaudeControlWire.DENY_KEPT_GOING_REASON))
         }
     }
 
@@ -568,6 +607,23 @@ internal class AgentSessionPersistentStream(
         }
     }
 
+    /** The tail-poll found our live turn STUCK: the session FILE shows the turn
+     *  ended (a terminal `stop_reason`) and has been frozen past a grace, yet the
+     *  state is still Working — the reader wedged (e.g. a `conch-bridge` loopback
+     *  tool that re-enters this same app stalled stdout delivery) and never saw
+     *  the `result` event, so [turnDone] never fired. Complete the turn as SUCCESS
+     *  (the file's terminal stop_reason PROVES it finished — not a timeout guess)
+     *  BEFORE tearing the wedged reader down, so runTurn takes the clean
+     *  Working→Running path, not the disconnected branch. Tearing down forces the
+     *  NEXT turn to relaunch a fresh reader so the wedge can't poison it. No-op if
+     *  no turn is in flight. */
+    fun reconcileStuckTurn() {
+        val done = turnDone ?: return
+        android.util.Log.w(tag, "live turn stuck — completing from file's terminal stop_reason + teardown")
+        done.complete(true)
+        teardownProcess()
+    }
+
     /** Close stdin (graceful CLI exit: flush session file, then quit),
      *  then the channel. Safe to call repeatedly. */
     fun teardownProcess() {
@@ -587,7 +643,13 @@ internal class AgentSessionPersistentStream(
     }
 
     companion object {
-        private const val TURN_TIMEOUT_MS = 15L * 60 * 1000
+        /** Poll cadence while awaiting a turn's completion (inactivity check). */
+        private const val INACTIVITY_CHECK_MS = 60L * 1000
+        /** A turn is abandoned only after this much stdout SILENCE (channel
+         *  alive but zero output — a wedged process). Deliberately generous:
+         *  long research turns must survive, and a truly dead transport surfaces
+         *  via reader EOF + the 30s SSH keepalive long before this fires. */
+        private const val INACTIVITY_TIMEOUT_MS = 20L * 60 * 1000
 
         /** Exact-key match: `"estimated_tokens":N` (NOT the
          *  `_delta` sibling, whose key string differs). */

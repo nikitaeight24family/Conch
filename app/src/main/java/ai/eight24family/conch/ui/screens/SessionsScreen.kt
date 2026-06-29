@@ -25,10 +25,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Shield
 import ai.eight24family.conch.ui.components.HostInfoSheet
+import ai.eight24family.conch.ui.components.PhoneBridgeGlyph
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -131,6 +131,7 @@ fun SessionsScreen(
     val server by vm.server.collectAsState()
     val sessions by vm.sessions.collectAsState()
     val phoneBridgeIds by vm.phoneBridgeIds.collectAsState()
+    val phoneBridgeLive by vm.phoneBridgeLive.collectAsState()
     val sessionsListState = rememberLazyListState()
     // Keep a newly-created / bumped session in view when the user is at/near the
     // top (same rationale as the unified Home list) — otherwise it lands just
@@ -466,7 +467,9 @@ fun SessionsScreen(
                                 onClick = { onOpenSession(s.id, s.path, s.model, s.reasoning) },
                                 downloadState = downloads[s.id],
                                 onDownload = { vm.downloadSession(s) },
-                                phoneConnected = phoneBridgeIds.contains(s.id),
+                                phonePresence = ai.eight24family.conch.diagnostics
+                                    .bridgePresenceFromLiveState(
+                                        phoneBridgeIds.contains(s.id), phoneBridgeLive),
                             )
                         }
                     }
@@ -575,10 +578,11 @@ internal fun SessionRow(
     onClick: () -> Unit,
     downloadState: ai.eight24family.conch.ui.viewmodel.ChatViewModel.DownloadStatus? = null,
     onDownload: () -> Unit = {},
-    /** This session is wired to the phone (chat → "Connect phone to server").
-     *  Draws a small phone glyph so the user can see at a glance which chats can
-     *  reach the device via conch-bridge. */
-    phoneConnected: Boolean = false,
+    /** Phone glyph state for this row (NONE/IDLE/LIVE): colored when the bridge
+     *  is live, dim when the session was wired but is offline now, absent when
+     *  never wired. Same tri-state the home list and chat title use. */
+    phonePresence: ai.eight24family.conch.diagnostics.BridgePresence =
+        ai.eight24family.conch.diagnostics.BridgePresence.NONE,
 ) {
     val cyan = MaterialTheme.colorScheme.primary
     val magenta = MaterialTheme.colorScheme.secondary
@@ -620,17 +624,14 @@ internal fun SessionRow(
                 maxLines = 2,
                 modifier = Modifier.weight(1f, fill = true)
             )
-            // Phone wired to this session via conch-bridge — small glyph.
-            if (phoneConnected) {
-                Icon(
-                    Icons.Filled.PhoneAndroid,
-                    contentDescription = "phone connected to this session",
-                    tint = cyan,
-                    modifier = Modifier
-                        .padding(end = 4.dp)
-                        .size(15.dp),
-                )
-            }
+            // Phone wired to this session via conch-bridge — tri-state glyph
+            // (colored live / dim offline / absent never), shared with the home
+            // list and chat title.
+            PhoneBridgeGlyph(
+                phonePresence,
+                modifier = Modifier.padding(end = 4.dp),
+                size = 15.dp,
+            )
             // Floppy/disk — download THIS session's JSONL to the phone, then
             // Open here / Other app / Share (same flow as chat file downloads).
             SessionDiskButton(state = downloadState, onClick = onDownload)

@@ -176,6 +176,19 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
+    /** Server-global LIVE layer for the 📱 glyph (PHONE-GLYPH-SHIZUKU-2): the
+     *  channel is polling ([BridgeHealth.isAlive]) AND Shizuku is granted right
+     *  now. All wired sessions on one server share it (keyed by serverId), so the
+     *  row glyph is colored only when truly live, dim otherwise. Re-sampled on a
+     *  2s ticker so it dims/relights without a manual refresh. */
+    val phoneBridgeLive: StateFlow<Boolean> =
+        kotlinx.coroutines.flow.flow { while (true) { emit(Unit); kotlinx.coroutines.delay(2_000) } }
+            .map {
+                ai.eight24family.conch.diagnostics.BridgeHealth.isAlive(serverId) &&
+                    ai.eight24family.conch.diagnostics.ShizukuShell.available()
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     /** Last successful list time — drives a "synced X ago" UI hint. */
     private val _lastSyncedAt = MutableStateFlow<Long?>(null)
     val lastSyncedAt: StateFlow<Long?> = _lastSyncedAt.asStateFlow()

@@ -318,7 +318,6 @@ private fun UsageBar(
     onExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
-    bridgeActive: Boolean = false,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val track = MaterialTheme.colorScheme.outline
@@ -360,10 +359,11 @@ private fun UsageBar(
                 .fillMaxWidth()
                 .then(if (expandable) Modifier.clickable { onExpandedChange(!expanded) } else Modifier),
         ) {
-            // Label row: small phone glyph at the START when the chat is wired to
-            // the phone (the bridge "connected" indicator the user asked for — a
-            // quiet badge by the limit bar, not a chat banner), the usage label at
-            // the END as before.
+            // Label row: usage label at the END. The phone glyph that used to sit
+            // at the START here MOVED to the chat title strip (ChatScreenTopBarHost)
+            // so the chat shows it in the same place the session list does (user,
+            // 2026-06-28). A 1dp spacer keeps the label right-aligned in this
+            // SpaceBetween row.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -371,16 +371,7 @@ private fun UsageBar(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (bridgeActive) {
-                    Icon(
-                        imageVector = Icons.Filled.PhoneAndroid,
-                        contentDescription = "phone connected",
-                        tint = accent,
-                        modifier = Modifier.size(12.dp),
-                    )
-                } else {
-                    Spacer(Modifier.size(1.dp))
-                }
+                Spacer(Modifier.size(1.dp))
                 Text(
                     text = if (usage.label.isEmpty()) " "
                     else usage.label + if (expandable) (if (expanded) "  ⌄" else "  ⌃") else "",
@@ -671,7 +662,6 @@ internal fun PromptBar(
     onUsageExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
-    bridgeActive: Boolean = false,
     uploading: Boolean,
     statusHint: String?,
     enterSends: Boolean,
@@ -710,7 +700,7 @@ internal fun PromptBar(
         // nearest plan limit (accent fill + "14% · 3h"), or API spend, or
         // degrades to a 1.dp divider when there's nothing to report. Tap →
         // full breakdown (all windows + this chat's spend).
-        UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, bridgeActive)
+        UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading)
 
         // Staged attachments strip
         if (attachments.isNotEmpty()) {

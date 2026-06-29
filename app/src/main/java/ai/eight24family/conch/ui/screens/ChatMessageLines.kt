@@ -1159,11 +1159,24 @@ private fun BridgeConnectedRow() {
 @Composable
 private fun BridgeConnectingRow() {
     val pct = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
+    val stalled = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (pct.value < 95) {
             kotlinx.coroutines.delay(90)
             pct.value = pct.value + 1
         }
+        // Ramp done. If this row is STILL on screen ~30 s later it was never
+        // replaced by the "phone connected" row — the handshake stalled (e.g.
+        // the turn died). Flip to a quiet "couldn't connect" instead of sitting
+        // at 95% forever (user, 2026-06-27: "connecting 95%" ghost). A real
+        // success swaps this System row for BridgeConnectedRow, unmounting this
+        // composable and cancelling the timer — so no false "failed".
+        kotlinx.coroutines.delay(30_000)
+        stalled.value = true
+    }
+    if (stalled.value) {
+        BridgeStatusRow("couldn't connect to phone")
+        return
     }
     Row(
         modifier = Modifier

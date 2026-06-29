@@ -36,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -158,11 +160,29 @@ private fun FloatingTabBar(
             .clip(shape)
             .hazeEffect(state = hazeState) {
                 backgroundColor = bg
-                tints = listOf(HazeTint(bg.copy(alpha = 0.40f)))
-                blurRadius = 28.dp
-                noiseFactor = 0f
+                // Lighter tint (was 0.40) so the blurred sessions SHOW THROUGH — a
+                // heavy dark tint over dark content read as a solid capsule, not
+                // glass. Softer blur keeps the content recognisable-through; a
+                // touch of noise gives the frosted grain.
+                tints = listOf(HazeTint(bg.copy(alpha = 0.24f)))
+                blurRadius = 22.dp
+                noiseFactor = 0.07f
             }
-            .border(1.dp, cyan.copy(alpha = 0.30f), shape)
+            // Glass sheen: a bright top highlight fading out, with a faint cyan
+            // glow at the bottom edge — the reflection that makes a translucent
+            // capsule actually READ as glass in a dark theme (where blurred dark
+            // content is otherwise near-uniform).
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        Color.White.copy(alpha = 0.14f),
+                        Color.Transparent,
+                        cyan.copy(alpha = 0.06f),
+                    ),
+                ),
+                shape,
+            )
+            .border(1.dp, cyan.copy(alpha = 0.45f), shape)
             .padding(horizontal = 6.dp, vertical = 5.dp),
     ) {
         // Sliding selected-pill, drawn behind the items.

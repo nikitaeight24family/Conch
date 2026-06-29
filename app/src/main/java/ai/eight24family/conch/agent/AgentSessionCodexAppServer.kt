@@ -1,5 +1,7 @@
 package ai.eight24family.conch.agent
 
+import ai.eight24family.conch.ssh.startStreamSession
+
 import ai.eight24family.conch.agent.codex.CodexAppServerEvents
 import ai.eight24family.conch.agent.codex.CodexAppServerWire
 import ai.eight24family.conch.agent.codex.CodexAppServerWire.str
@@ -267,7 +269,10 @@ internal class AgentSessionCodexAppServer(
 
         val client = sshLifecycle.sshClient ?: return false
         try {
-            val sess = client.startSession()
+            // autoExpand: the long-lived app-server JSON-RPC channel is read
+            // continuously; protect it from receive-window starvation under
+            // shared-transport contention (see [startStreamSession]).
+            val sess = client.startStreamSession()
             // stderr DROPPED — app-server logs there and any line would
             // corrupt the stdout JSONL framing.
             val cmd = sess.exec(loginShell(authPrep + "codex app-server 2>/dev/null"))

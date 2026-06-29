@@ -140,6 +140,15 @@ internal object ClaudeControlWire {
             put("updatedInput", updatedInput)
         })
 
+    /** Deny reason sent when the user taps "Deny" on a permission card. Shared so
+     * [ClaudeMessageParser] recognises the CLI's echoed deny tool_result and
+     * renders it as a CALM "declined" note instead of a scary red error. */
+    const val DENY_PERMISSION_REASON = "User denied this action from the mobile client."
+
+    /** Deny reason sent when the user types a new message instead of answering a
+     *  live AskUserQuestion (cancelPendingQuestions). Same calm-render treatment. */
+    const val DENY_KEPT_GOING_REASON = "User chose to keep going without answering."
+
     /** Deny a `can_use_tool` with a human-readable reason the model sees. */
     fun encodeDeny(requestId: String, message: String): String =
         responseEnvelope(requestId, buildJsonObject {

@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.0--beta-orange.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.1--beta-orange.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
 > **Your phone, your server, your AI. Build, test, ship — on the train.**
@@ -17,7 +17,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.0 Beta
+conch ▌ v0.2.1 Beta
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -27,6 +27,38 @@ conch ▌ v0.2.0 Beta
   <img src="screenshots/conch_03.jpg" width="22%" />
   <img src="screenshots/conch_04.jpg" width="22%" />
 </p>
+
+---
+
+## What's new in 0.2.1-beta
+
+**The phone bridge stops lying, the phone glyph tells the truth, and Stop does what you'd expect.**
+
+### 📱 Phone glyph — three honest states
+- The phone glyph is now **tri-state**: **lit** when the bridge to your phone is
+  actually live, **dimmed** when a session was wired but is offline now, and
+  **absent** when it was never connected. The same glyph shows in the session
+  list and in the chat title (moved next to the session name), so the two can
+  never disagree.
+
+### 🔌 Phone bridge no longer wedges a turn
+- Fixed a stall where, after the agent used the on-device `conch-bridge` tool,
+  the chat could hang on "thinking…" forever even though the reply had already
+  landed. Root cause was an SSH receive-window starvation on the shared
+  connection; the turn stream now keeps its window open, with a file-truth
+  reconcile as a backstop.
+
+### ⏹️ Stop, queue, and errors
+- **Stop now advances the queue**: pressing Stop interrupts the running turn and
+  immediately sends the next message you queued, instead of discarding it.
+  (Use the ✕ on a queued message to drop it instead.)
+- A turn you **stop yourself** now shows a calm "stopped", not a red error.
+- Fixed: a message you sent could **vanish** from the chat while the agent still
+  answered it (a dedup bug that bit large sessions).
+
+### ➕ Small things
+- The **new-session** button now also appears under the "All" tab, not just on a
+  specific agent's tab.
 
 ---
 

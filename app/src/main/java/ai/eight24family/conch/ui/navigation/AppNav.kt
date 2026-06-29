@@ -305,6 +305,9 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 },
                 onOpenChatFromSearch = rememberOpenChatFromSearch(),
                 onAddServer = { nav.navigate(Routes.ADD_SERVER) },
+                // New session = a fresh chat (no resumeId) for the picked agent
+                // on the picked server.
+                onNewChat = { serverId, agent -> nav.navigate(Routes.chat(serverId, agent)) },
             )
         }
         composable(Routes.AGENTS_OVERVIEW) {

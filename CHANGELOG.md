@@ -11,6 +11,34 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.1-beta] — 2026-06-29
+
+### Phone glyph
+- The phone glyph is now tri-state — lit when the bridge is live, dimmed when a
+  session was wired but is offline now, absent when never connected — and shows
+  the same state in the session list and the chat title (moved next to the
+  session name) so the two can't disagree.
+
+### Fixed
+- The chat could hang on "thinking…" forever after the agent used the on-device
+  `conch-bridge` tool, even though the reply had already arrived. Root cause was
+  an SSH receive-window starvation on the shared connection (the turn stream's
+  window was never replenished while bridge traffic shared the transport); the
+  turn stream now auto-expands its window, with a file-truth reconcile as a
+  backstop.
+- A message you sent could vanish from the chat while the agent still answered
+  it — a deduplication bug that surfaced on large sessions.
+- Stopping a turn yourself showed a red error; it now shows a calm "stopped".
+
+### Changed
+- Stop now interrupts the running turn **and** immediately sends the next queued
+  message, instead of discarding the queue. Use the ✕ on a queued message to
+  drop it instead.
+- The new-session button also appears under the "All" tab, not only on a
+  specific agent's tab.
+
+---
+
 ## [0.2.0-beta] — 2026-06-27
 
 ### Performance
@@ -537,13 +565,15 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/sshai/compare/v1.0.9...HEAD
-[1.0.9]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.9
-[1.0.7]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.7
-[1.0.6]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.6
-[1.0.5]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.5
-[1.0.4]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.4
-[1.0.3]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.3
-[1.0.2]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.2
-[1.0.1]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.1
-[1.0.0]: https://github.com/nikitaeight24family/sshai/releases/tag/v1.0.0
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.1-beta...HEAD
+[0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
+[0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta
+[1.0.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.9
+[1.0.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.7
+[1.0.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.6
+[1.0.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.5
+[1.0.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.4
+[1.0.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.3
+[1.0.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.2
+[1.0.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.1
+[1.0.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.0

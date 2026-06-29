@@ -474,7 +474,10 @@ internal fun PermissionLine(
     val color = when (req.resolved) {
         AgentMessage.PermissionRequest.Resolution.PENDING -> MaterialTheme.colorScheme.secondary
         AgentMessage.PermissionRequest.Resolution.ALLOWED -> MaterialTheme.colorScheme.tertiary
-        AgentMessage.PermissionRequest.Resolution.DENIED -> MaterialTheme.colorScheme.error
+        // A user-chosen "deny" is NOT an error — render the resolved card in a
+        // calm dim/neutral colour, not alarming red. The pending "[ deny ]"
+        // button stays accented below; only the RESOLVED state is calmed.
+        AgentMessage.PermissionRequest.Resolution.DENIED -> MaterialTheme.colorScheme.outline
     }
     Column(
         modifier = Modifier

@@ -1,5 +1,7 @@
 package ai.eight24family.conch.agent
 
+import ai.eight24family.conch.ssh.startStreamSession
+
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.domain.Server
@@ -164,7 +166,10 @@ internal class AgentSessionRunOneShot(
         // and a transport failure flips us to Failed → silent auto-reconnect.
         var sess: net.schmizz.sshj.connection.channel.direct.Session? = null
         try {
-            sess = client.startSession()
+            // autoExpand: this turn's stdout stream is read continuously; protect
+            // it from receive-window starvation if a conch-bridge loopback churns
+            // channels on the shared transport mid-turn (see [startStreamSession]).
+            sess = client.startStreamSession()
             sshLifecycle.currentSshSession = sess
             val cmd = sess.exec(cliCmd)
             sshLifecycle.currentTurnCommand = cmd

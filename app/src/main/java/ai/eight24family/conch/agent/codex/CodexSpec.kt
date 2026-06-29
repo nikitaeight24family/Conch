@@ -13,6 +13,7 @@ import ai.eight24family.conch.agent.spec.ModelReasoningInfo
 import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.ReasoningLevel
 import ai.eight24family.conch.agent.spec.TopbarModelState
+import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.serialization.json.Json
@@ -453,6 +454,94 @@ esac
 
         Step 3: Resume the task you were doing right before I sent this message. If you were about to request approval for a command, just run it. Don't pause to reconfirm.
     """.trimIndent()
+
+    // ──────── Mirror turn-state ────────
+
+    /**
+     * Project each turn-boundary / token line to `[marker, isoTs, lastOutTokens]`.
+     *
+     * Codex has NO `stop_reason`; its turns are bracketed by explicit lifecycle
+     * events (verified on the server 2026-06-27, 27 task_started/task_complete
+     * pairs, file ends on task_complete):
+     *   • OLD schema (`type:"event_msg"`): `payload.type` = `task_started`
+     *     (turn begins) … work events … `task_complete` (turn done). Token usage
+     *     rides `token_count` → `payload.info.last_token_usage.output_tokens`
+     *     (per-step; sum since the last start = the turn's output tokens).
+     *   • NEW schema (0.125+, `type:"turn.started"`/`"turn.completed"`/
+     *     `"turn.failed"` at top level): same idea, included for future-proofing —
+     *     no such files exist on the server yet, so token paths there are
+     *     best-effort.
+     * `$m` normalizes both schemas to one marker string. ISO `.timestamp` is
+     * top-level on every line.
+     */
+    override val turnStateRecordJq: String =
+        "(.type) as \$t | (if \$t==\"event_msg\" then (.payload.type // \"\") else \$t end) as \$m | " +
+            "select(\$m==\"task_started\" or \$m==\"task_complete\" or \$m==\"token_count\" or " +
+            "\$m==\"turn.started\" or \$m==\"turn.completed\" or \$m==\"turn.failed\") | " +
+            "[\$m, (.timestamp // \"\"), " +
+            "((.payload.info.last_token_usage.output_tokens // .payload.usage.output_tokens // .usage.output_tokens // 0)|tostring)] | @tsv"
+
+    /**
+     * DEFINITIVE Codex turn state from the lifecycle markers — second-accurate,
+     * no timeout. The LAST start/done boundary in the window decides:
+     *   • last boundary is `task_started`/`turn.started`  → WORKING
+     *   • last boundary is `task_complete`/`turn.*`(done) → DONE
+     *   • NO boundary in the tail window (a turn so long its start scrolled past
+     *     tail -n 400) → the tail is all work events → WORKING, cleared only if
+     *     the file's been frozen unusually long (wedged/dead).
+     * thinking == inFlight (Codex applies effort across the whole turn; there's no
+     * file-visible think-vs-tool split worth gating on). Codex approvals are driven
+     * through our own channel, not the file, so waitingForUser stays false here.
+     */
+    override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
+        val recs = records.filter { it.isNotEmpty() && it[0].isNotBlank() }
+        if (recs.isEmpty()) return TurnSignals()
+        val lastBoundaryIdx = recs.indexOfLast { it[0] in CODEX_START_MARKERS || it[0] in CODEX_DONE_MARKERS }
+        if (lastBoundaryIdx < 0) {
+            // No turn boundary in the tail — a turn long enough to push its
+            // task_started out of the 400-line window. The window is all work
+            // events ⇒ still running, unless frozen past the staleness guard.
+            val working = frozenForMs == null || frozenForMs < AWAIT_STALE_MS
+            val toks = recs.filter { it[0] == "token_count" }
+                .sumOf { it.getOrNull(2)?.toLongOrNull() ?: 0L }
+            return TurnSignals(
+                inFlight = working,
+                thinking = working,
+                turnStartMs = null,
+                tokens = if (working) toks else 0L,
+            )
+        }
+        val inFlight = recs[lastBoundaryIdx][0] in CODEX_START_MARKERS
+        val startIdx = recs.indexOfLast { it[0] in CODEX_START_MARKERS }
+        val turnStartMs = if (inFlight && startIdx >= 0)
+            recs[startIdx].getOrNull(1)?.takeIf { it.isNotBlank() }?.let { ts ->
+                SilentlyTry.logged("SshAi-CodexSpec", "parse turn-start ts") {
+                    java.time.Instant.parse(ts).toEpochMilli()
+                }
+            } else null
+        // Turn output tokens = sum of per-step last_token_usage since the start
+        // (total_token_usage is whole-session cumulative, not per-turn).
+        val tokens = if (inFlight && startIdx >= 0)
+            recs.drop(startIdx + 1).filter { it[0] == "token_count" }
+                .sumOf { it.getOrNull(2)?.toLongOrNull() ?: 0L }
+        else 0L
+        return TurnSignals(
+            inFlight = inFlight,
+            thinking = inFlight,
+            turnStartMs = turnStartMs,
+            tokens = tokens,
+        )
+    }
+
+    /** Markers that OPEN a turn (work begins). */
+    private val CODEX_START_MARKERS = setOf("task_started", "turn.started")
+
+    /** Markers that CLOSE a turn (done / failed). */
+    private val CODEX_DONE_MARKERS = setOf("task_complete", "turn.completed", "turn.failed")
+
+    /** FALLBACK ONLY: no turn boundary visible in the tail window. Treat the
+     *  running-work tail as working unless frozen longer than this. */
+    private val AWAIT_STALE_MS = 12 * 60_000L
 }
 
 private object CodexTopbarUi : AgentTopbarUi {

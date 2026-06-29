@@ -354,7 +354,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val _messagesBySession = MutableStateFlow<Map<String, List<AgentMessage>>>(emptyMap())
     val messages: StateFlow<List<AgentMessage>> = combine(_localSessionId, _messagesBySession) { id, byId ->
         val raw = if (id == null) emptyList() else byId[id] ?: emptyList()
-        hideBridgeHandshake(raw)
+        // Drop Claude Code's internal "No response requested." no-op marker — it's
+        // written after an interrupt or a tool-only / no-op turn and is NOT a real
+        // reply. Plumbing, not conversation.
+        val deNoised = raw.filterNot { m ->
+            m is AgentMessage.AssistantText &&
+                m.text.trim().trimEnd('.').trim() == "No response requested"
+        }
+        hideBridgeHandshake(deNoised)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Phone-bridge plumbing is invisible: the WHOLE handshake turn — the injected
@@ -376,27 +383,18 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val m = msgs[it]
             m is AgentMessage.AssistantText && isBridgeReadyToken(m.text)
         } ?: -1
+        // CRITICAL: do NOT hide the rest of the conversation. The old code dropped
+        // everything after the handshake prompt here → the whole chat vanished and
+        // it showed a FAKE ramping %. Show the real messages untouched; no fake
+        // progress, no eaten history.
+        if (tokenIdx < 0) return msgs
+        // Clean handshake completed (the codeword landed) — collapse the whole
+        // handshake block (prompt → ping/pong → token) to one "phone connected"
+        // row, keeping everything before and after intact.
         val out = ArrayList<AgentMessage>(msgs.size)
-        out.addAll(msgs.subList(0, startIdx))            // everything before the handshake
-        if (tokenIdx >= 0) {
-            out += AgentMessage.System(id = msgs[tokenIdx].id, subtype = "bridge_connected", raw = "")
-            out.addAll(msgs.subList(tokenIdx + 1, msgs.size))  // anything after the handshake
-        } else {
-            // No ready token. If the turn already finished (a result/error landed)
-            // the handshake FAILED — show a quiet "couldn't connect" row, not an
-            // eternal spinner. Otherwise it's still in flight → "connecting phone… N%"
-            // (the % ramps in the composable); all technical steps stay hidden.
-            val ended = ((startIdx + 1) until msgs.size).any {
-                val m = msgs[it]
-                m is AgentMessage.Result ||
-                    (m is AgentMessage.Error && m.kind != "unavailable")
-            }
-            out += AgentMessage.System(
-                id = if (ended) "bridge-failed" else "bridge-connecting",
-                subtype = if (ended) "bridge_failed" else "bridge_connecting",
-                raw = "",
-            )
-        }
+        out.addAll(msgs.subList(0, startIdx))
+        out += AgentMessage.System(id = msgs[tokenIdx].id, subtype = "bridge_connected", raw = "")
+        out.addAll(msgs.subList(tokenIdx + 1, msgs.size))
         return out
     }
 
@@ -439,7 +437,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * `tailPoll(...)` invocation is launched from `startNewChat` further down.
      */
     private val tailPollCoord by lazy {
-        ChatViewModelTailPoll(backgroundedSince = { backgroundedSince })
+        ChatViewModelTailPoll(
+            backgroundedSince = { backgroundedSince },
+            streamLastFedMs = { sid -> lastStreamUpdate[sid] },
+            // The currently-displayed session's live pending question/permission —
+            // authoritative WAITING-FOR-USER signal (never reaches the JSONL).
+            pendingControl = { activeSessions[_localSessionId.value]?.hasPendingControl() ?: false },
+        )
     }
     val remoteActive: StateFlow<Long?> get() = tailPollCoord.remoteActive
     val remoteFileOpen: StateFlow<Boolean> get() = tailPollCoord.remoteFileOpen
@@ -545,23 +549,30 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  user knows code-exec on that host = adb-level control of this phone. */
     private val _bridgeHostWarning = MutableStateFlow<String?>(null)
     val bridgeHostWarning: StateFlow<String?> = _bridgeHostWarning.asStateFlow()
-    /** True once the user wired THIS chat to the phone — a collector then flags
-     *  the chat's resume id into prefs (and re-flags if the id changes) so the
-     *  sessions list draws the phone glyph. Not persisted; the prefs flag is. */
-    private val _bridgeActiveThisChat = MutableStateFlow(false)
+    /** 2s heartbeat so [bridgePresence] re-evaluates [BridgeHealth.isAlive] over
+     *  time and dims once the bridge poller stops (app backgrounded / SSH down). */
+    private val bridgeHealthTicker: kotlinx.coroutines.flow.Flow<Unit> =
+        kotlinx.coroutines.flow.flow { while (true) { emit(Unit); kotlinx.coroutines.delay(2_000) } }
 
-    /** Drives the small phone glyph beside the usage bar. True ONLY once the server
-     * actually CONFIRMED it can reach the phone — i.e. the bridge handshake replied
-     * with the ready token (rendered as the "bridge_connected" row) — AND SSH is
-     * still live. NOT on the connect TAP (which only SENDS the handshake): the user
-     * saw the glyph before the server ever answered (2026-06-26). No confirmation
-     * (ping failed / no reply) → no glyph. On reopen the confirmed token is in
-     * history, so it stays correct. */
-    val bridgeActive: StateFlow<Boolean> = combine(messages, connected) { msgs, conn ->
-        conn && msgs.any {
-            it is AgentMessage.System && it.subtype == "bridge_connected"
-        }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    /** Tri-state 📱 for the chat TITLE strip (NONE/IDLE/LIVE) — same glyph and
+     * logic the session LISTS use, so opening a wired chat shows the phone right
+     * where the list did. Two honest layers (PHONE-GLYPH-SHIZUKU-2): wired → at
+     * least IDLE (dim) and stays even when the phone is offline; LIVE (colored)
+     * only while the channel polls (BridgeHealth) AND Shizuku is granted RIGHT NOW.
+     * `connected` is kept as a recompute trigger so the glyph flips promptly on
+     * connect/disconnect. */
+    val bridgePresence: StateFlow<ai.eight24family.conch.diagnostics.BridgePresence> = combine(
+        connected,
+        _resumeId,
+        ServiceLocator.preferences.phoneBridgeSessions,
+        bridgeHealthTicker,
+    ) { _, rid, wired, _ ->
+        ai.eight24family.conch.diagnostics.bridgePresenceOf(
+            rid != null && "$serverId:$rid" in wired, serverId)
+    }.stateIn(
+        viewModelScope, SharingStarted.Eagerly,
+        ai.eight24family.conch.diagnostics.BridgePresence.NONE,
+    )
 
     /** Paperclip → "Connect phone to server". Shizuku-gated, then branches on
      *  whether the bridge is already on the server (see the section comment). */
@@ -611,7 +622,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     /** Drop the how-to prompt into the chat and mark this session phone-wired. */
     private fun activateBridgeForThisChat() {
-        _bridgeActiveThisChat.value = true
+        // The wired flag is set later, when the bridge handshake CONFIRMS (see the
+        // bridge_connected collector) — not here on the tap, so neither the home
+        // 📱 nor the in-chat glyph lights before the server actually answered.
         send(BRIDGE_HOWTO_PROMPT)
     }
 
@@ -675,14 +688,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val BRIDGE_READY_TOKEN = "CONCH_BRIDGE_READY"
 
     init {
-        // Persist the phone-wired flag against THIS chat's resume id — the id
-        // the sessions list keys its rows on. A brand-new chat has no resume id
-        // until its first turn lands (the how-to prompt we just sent IS that
-        // turn), so flag it the moment it appears, and re-flag if it changes.
+        // Persist the phone-wired flag against THIS chat's resume id (the id the
+        // sessions list keys rows on) — but ONLY once the bridge handshake actually
+        // CONFIRMED (a "bridge_connected" row landed), NOT on the connect tap. This
+        // is what makes the home 📱 honest AND identical to the in-chat glyph (both
+        // = wired && SSH): the list never claims "connected" before the server
+        // answered.
         viewModelScope.launch {
-            combine(_bridgeActiveThisChat, _resumeId) { active, rid -> active to rid }
-                .collect { (active, rid) ->
-                    if (active && rid != null) {
+            combine(
+                messages.map { msgs -> msgs.any { it is AgentMessage.System && it.subtype == "bridge_connected" } },
+                _resumeId,
+            ) { confirmed, rid -> confirmed to rid }
+                .collect { (confirmed, rid) ->
+                    if (confirmed && rid != null) {
                         ServiceLocator.preferences.setPhoneBridgeSession(serverId, rid, true)
                     }
                 }
@@ -751,6 +769,85 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val hasPending: StateFlow<Boolean> = _pending
         .map { it.isNotEmpty() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Messages the user sent WHILE a turn was already running. We hold them HERE
+     * instead of handing them to the CLI immediately — the agent would queue them
+     * internally, invisibly and with no way to take one back. Shown as a visible
+     * queue above the prompt bar (each with a cancel ✕) and sent IN ORDER, one per
+     * turn, by [drainOutbox] the moment the current reply finishes. User:.
+     */
+    data class QueuedMessage(
+        val id: String,
+        /** Full prompt sent to the agent on drain (may include the "Attached
+         *  …at: <path>" prose so the model can read the files). */
+        val text: String,
+        /** Clean user text shown in the queue row (no attach-paths boilerplate). */
+        val displayText: String,
+        val imagePaths: List<String>,
+        /** Raw bytes of attached images, for tiny thumbnails in the queue row. */
+        val thumbs: List<ByteArray>,
+        val queuedAt: Long,
+    )
+    private val _outbox = MutableStateFlow<List<QueuedMessage>>(emptyList())
+    val queuedMessages: StateFlow<List<QueuedMessage>> = _outbox.asStateFlow()
+
+    // ── Per-chat input draft ── Persist whatever the user typed but didn't send,
+    // so leaving the chat never throws it away. Keyed by the chat's resume id
+    // (stable) or its local id for a brand-new chat. Only send/explicit-delete
+    // clears it — never an auto-wipe.
+    private fun draftChatId(): String? = _resumeId.value ?: _localSessionId.value
+    private var draftSaveJob: kotlinx.coroutines.Job? = null
+
+    /** Restore the saved input draft for THIS chat (called once on chat open). */
+    suspend fun loadInputDraft(): String =
+        draftChatId()?.let { id ->
+            SilentlyTry.nullOnError { ServiceLocator.preferences.inputDraftOnce(id) }
+        }.orEmpty()
+
+    /** Persist the current input text (debounced). Never auto-clears. */
+    fun saveInputDraft(text: String) {
+        draftSaveJob?.cancel()
+        draftSaveJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(350)
+            val id = draftChatId() ?: return@launch
+            SilentlyTry.fired("SshAi-Chat", "save input draft") {
+                ServiceLocator.preferences.setInputDraft(id, text)
+            }
+        }
+    }
+
+    /** Drop the input draft — the text was sent / consumed. */
+    fun clearInputDraft() {
+        draftSaveJob?.cancel()
+        viewModelScope.launch {
+            val id = draftChatId() ?: return@launch
+            SilentlyTry.fired("SshAi-Chat", "clear input draft") {
+                ServiceLocator.preferences.setInputDraft(id, "")
+            }
+        }
+    }
+
+    /** Drop a still-queued message before it's sent (the ✕ on its queue row). */
+    fun cancelQueued(id: String) {
+        _outbox.update { lst -> lst.filterNot { it.id == id } }
+    }
+
+    /** Turn finished → send the NEXT queued message (if any). Sending it starts a
+     *  new turn, so the rest stay queued+cancelable and drain one-by-one as each
+     *  turn ends. */
+    private fun drainOutbox(s: AgentSession) {
+        val next = _outbox.value.firstOrNull() ?: return
+        _outbox.update { it.drop(1) }
+        viewModelScope.launch {
+            s.send(next.text, next.imagePaths)
+            val newId = s.agentSessionId
+            if (newId != null && _resumeId.value != newId) {
+                _resumeId.value = newId
+                refreshSessions()
+            }
+        }
+    }
 
     /** Prompts a turn ABORTED on because the SSH transport was dead (set by
      *  [retry] from the dying session's [AgentSession.consumeUndelivered]).
@@ -1714,6 +1811,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     s.state.collect { st ->
                         if (prev is SessionState.Working && st !is SessionState.Working) {
                             tailPollCoord.setRemoteFileOpen(false)
+                            // Turn finished → release the next queued message (sent
+                            // mid-turn, held in the visible cancelable outbox).
+                            drainOutbox(s)
                         }
                         prev = st
                     }
@@ -1868,14 +1968,26 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (finalText.isBlank()) return
 
         val curState = _stateBySession.value[sid] ?: SessionState.Idle
-        // Buffer ONLY while SSH is bootstrapping. Claude itself queues
-        // additional prompts when one is already mid-turn (sending a
-        // second `claude --print --resume <id>` while the first is
-        // still running just lets the agent pick it up after the
-        // current turn — same as typing extra lines into a live
-        // terminal session). So we don't gate on `_remoteFileOpen`
-        // here — let the user "throw a thought in" mid-run.
-        if (curState is SessionState.Running || curState is SessionState.Working) {
+        // A turn is already running → DON'T hand the message to the CLI now: the
+        // agent would queue it internally, invisibly and uncancelably. Hold it in
+        // the VISIBLE outbox (rendered above the prompt bar, each with a cancel ✕)
+        // and let [drainOutbox] send it in order the moment this turn ends.
+        if (curState is SessionState.Working) {
+            _outbox.update {
+                it + QueuedMessage(
+                    id = UUID.randomUUID().toString(),
+                    text = finalText,
+                    displayText = trimmed,
+                    imagePaths = imagePaths,
+                    thumbs = ready.filter { r -> r.first.isImage }.map { r -> r.first.bytes },
+                    queuedAt = System.currentTimeMillis(),
+                )
+            }
+            return
+        }
+        // Buffer ONLY while SSH is bootstrapping; send straight through when the
+        // session is up and idle.
+        if (curState is SessionState.Running) {
             // Hot path — session is up, push straight to AgentSession.
             viewModelScope.launch {
                 s.send(finalText, imagePaths)
@@ -2128,16 +2240,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
-    /** Stop the in-flight agent turn (kills the live exec channel). */
+    /** Stop the in-flight agent turn (kills the live exec channel) and ADVANCE to
+     * the queue: the visible outbox is PRESERVED, so cancelling the turn (which
+     * ends it → Working→Running) fires [drainOutbox] and the next queued message
+     * starts right away. Stop = "halt what's running and go to the queued one".
+     * To DISCARD a queued message instead of running it, use its ✕
+     * ([cancelQueued]) — Stop no longer wipes the queue. */
     fun stopCurrent() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid] ?: return
         s.cancelCurrent()
-        // Kill the working verb NOW. The verb shows on state==Working OR the
-        // mirror poll's remoteFileOpen; cancelCurrent handles the app-driven
-        // state, but the poll flag would keep the gerund up until the next tick
-        // re-evaluated the file. Clear it optimistically; the poll re-lights only
-        // on genuine new growth.
+        // Kill the working verb NOW. The verb shows on state==Working OR the mirror
+        // poll's remoteFileOpen; cancelCurrent handles the app-driven state, but
+        // the poll flag would keep the gerund up until the next tick re-evaluated
+        // the file. Clear it optimistically; the poll re-lights only on genuine new
+        // growth — e.g. the queued message's own turn starting via drainOutbox.
         tailPollCoord.setRemoteFileOpen(false)
     }
 

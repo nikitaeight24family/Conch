@@ -210,6 +210,56 @@ class AppPreferences(private val context: Context) {
 
     suspend fun currentServerIdOnce(): String? = currentServerId.first()
 
+    /**
+     * The agent filter chip the user last selected on the unified Sessions home
+     * (Agent.name, e.g. "CODEX"; null/absent = "All"). Persisted so the choice
+     * survives an app RESTART, not just a rotation (rememberSaveable only covered
+     * process-death restore) — user:.
+     */
+    private val homeAgentFilterKey = stringPreferencesKey("home_agent_filter")
+    val homeAgentFilter: Flow<String?> = context.dataStore.data.map { p ->
+        p[homeAgentFilterKey]?.takeIf { it.isNotBlank() }
+    }
+
+    suspend fun setHomeAgentFilter(agentName: String?) {
+        context.dataStore.edit { p ->
+            if (agentName.isNullOrBlank()) p.remove(homeAgentFilterKey)
+            else p[homeAgentFilterKey] = agentName
+        }
+    }
+
+    // ── Per-chat input drafts ── Unsent text typed into a chat's input box,
+    // keyed by the chat's resume id (or local id for a brand-new chat).
+    // Persisted so LEAVING the chat never loses what the user typed — only the
+    // user clears it (by sending or deleting). The home list reads
+    // [draftedChatIds] to badge "has draft". user:.
+    private fun inputDraftKey(chatId: String) = stringPreferencesKey("input_draft_$chatId")
+
+    fun inputDraft(chatId: String): Flow<String> =
+        context.dataStore.data.map { it[inputDraftKey(chatId)].orEmpty() }
+
+    suspend fun inputDraftOnce(chatId: String): String = inputDraft(chatId).first()
+
+    suspend fun setInputDraft(chatId: String, text: String) {
+        context.dataStore.edit { p ->
+            if (text.isBlank()) p.remove(inputDraftKey(chatId)) else p[inputDraftKey(chatId)] = text
+        }
+    }
+
+    /** All saved input drafts as chatId → text. Drives the home list's inline
+     *  "Draft: …" subtitle (shown in place of the session preview). */
+    val draftsByChat: Flow<Map<String, String>> = context.dataStore.data.map { p ->
+        buildMap {
+            for ((k, v) in p.asMap()) {
+                val n = k.name
+                val t = v as? String
+                if (n.startsWith("input_draft_") && !t.isNullOrBlank()) {
+                    put(n.removePrefix("input_draft_"), t)
+                }
+            }
+        }
+    }
+
     val themeMode: Flow<ThemeMode> = context.dataStore.data.map { p ->
         SilentlyTry.loggedOrElse("SshAi-Prefs", "parse themeMode", ThemeMode.SYSTEM) { ThemeMode.valueOf(p[themeKey] ?: "SYSTEM") }
     }
