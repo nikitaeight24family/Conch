@@ -1174,8 +1174,19 @@ private object ClaudeTopbarUi : AgentTopbarUi {
         }
         fun usable(v: String?): String? = v?.takeIf { it.isNotBlank() }
             ?.takeIf { !isUnavail(resolve(state, it)) }
-        val pick = usable(state.selectedModel)
-            ?: usable(state.observedModel)
+        val sel = usable(state.selectedModel)
+        val obs = usable(state.observedModel)
+        // A running session can be FORCE-SWITCHED mid-turn: Claude's safeguard
+        // fallback swaps the model (e.g. Fable 5 → Opus 4.8 after it flags a
+        // message) and records the NEW model in message.model (observedModel).
+        // When observedModel diverges from the user's pick, the session is
+        // ACTUALLY running the observed model — so the topbar must show THAT, not
+        // the stale pick, or it lies. Compare RESOLVED labels so an alias vs its
+        // resolved id (e.g. "sonnet" ↔ claude-sonnet-4-6) is never mistaken for a
+        // switch. Absent a real observation (obs==null, pre-first-turn) the pick
+        // still wins, so there's no flicker on open.
+        val switched = sel != null && obs != null && resolve(state, obs) != resolve(state, sel)
+        val pick = (if (switched) obs else (sel ?: obs))
             ?: usable(state.sessionInitialModel)
             ?: state.availableModels.entries.firstOrNull { (k, label) ->
                 k != "default" && !isUnavail(label)

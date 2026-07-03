@@ -77,7 +77,7 @@ android {
         versionCode = computeVersionCode(project)
         // Live on Google Play. versionCode stays auto (git commit count) —
         // strictly monotonic, never reset, independent of this label.
-        versionName = "0.2.2"
+        versionName = "0.2.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

@@ -11,6 +11,17 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.3] — 2026-07-03
+
+### Fixed
+- When a Claude session is force-switched mid-turn (its safeguard fallback records
+  a different model in `message.model`), the chat top bar now shows the model that
+  is **actually running** — e.g. Opus 4.8 — instead of the model you originally
+  picked. Before a switch, and when the pick and the running model are the same,
+  your pick still shows (no flicker).
+
+---
+
 ## [0.2.2] — 2026-06-30
 
 Now live on Google Play.
@@ -592,7 +603,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
 [0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta
