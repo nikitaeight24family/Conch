@@ -85,9 +85,16 @@ fun HomeSessionsScreen(
     // least one server (a new session needs both). Enum order (Claude, Codex,
     // Gemini). This — NOT "agents that have sessions" — drives the chip bar: an
     // uninstalled / logged-out agent gets no chip, and a lone usable agent hides
-    // the bar entirely.
-    val usableAgents = remember(usableByServer) {
-        Agent.entries.filter { a -> usableByServer.values.any { a in it } }
+    // the bar entirely. Existing cached sessions must NEVER be hidden because
+    // the live login probe didn't mark an agent usable. A stale/flaky
+    // codex/gemini auth check made ALL their sessions vanish — and with only
+    // Claude "usable" the chip bar disappeared too (size<2), leaving NO way to
+    // reveal them. So an agent that HAS cached sessions also counts toward the
+    // bar/filter. Starting a NEW chat still needs a real login — the
+    // newChatTargets/Pairs below stay strictly probe-gated.
+    val agentsWithSessions = remember(rows) { rows.mapTo(HashSet()) { it.session.agent } }
+    val usableAgents = remember(usableByServer, agentsWithSessions) {
+        Agent.entries.filter { a -> usableByServer.values.any { a in it } || a in agentsWithSessions }
     }
     val barShown = usableAgents.size >= 2
     // Effective filter: a lone usable agent is forced (no bar); with ≥2 the

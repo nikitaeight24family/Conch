@@ -138,6 +138,11 @@ internal fun WorkingStatusRow(
      * misleading "thinking…" spinner with a clear "answer on the server" nudge.
      * */
     waitingForInput: Boolean = false,
+    /** Which CLI this chat drives. The sparkle glyph cycle + the rotating
+     * gerund vocabulary are Claude Code's OWN TUI flair; rendering them for
+     * Codex/Gemini made those agents "look like Claude". Non-Claude agents get a
+     * plain CLI spinner and a neutral "Working" verb instead. */
+    agent: ai.eight24family.conch.agent.Agent = ai.eight24family.conch.agent.Agent.CLAUDE,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
@@ -168,7 +173,9 @@ internal fun WorkingStatusRow(
         }
         return
     }
-    val glyph = WORK_GLYPHS[((now / 250L) % WORK_GLYPHS.size).toInt()]
+    val isClaudeAgent = agent == ai.eight24family.conch.agent.Agent.CLAUDE
+    val glyphs = if (isClaudeAgent) WORK_GLYPHS else WORK_GLYPHS_GENERIC
+    val glyph = glyphs[((now / 250L) % glyphs.size).toInt()]
     // ONE gerund per turn — picked from the turn-start, NOT re-rolled as time
     // passes. startMs is NOT actually constant within a turn: the feeder switches
     // it from the local fallback to the server-parsed prompt timestamp ~one poll
@@ -177,7 +184,9 @@ internal fun WorkingStatusRow(
     // switch) and reset only when the row leaves composition at turn end (audit,
     // 2026-06-14).
     val verbSeed = remember(startMs > 0L) { startMs }
-    val verb = WORK_VERBS[(((verbSeed / 1000L) % WORK_VERBS.size + WORK_VERBS.size) % WORK_VERBS.size).toInt()]
+    val verb = if (isClaudeAgent)
+        WORK_VERBS[(((verbSeed / 1000L) % WORK_VERBS.size + WORK_VERBS.size) % WORK_VERBS.size).toInt()]
+    else "Working"
     // Minutes like the CLI's «(1m13s · …)» — not a raw «104s». Compact (no space
     // inside «1m13s») so the whole line fits one row (user, 2026-06-14).
     val elapsedLabel = if (elapsedS >= 60L) "${elapsedS / 60L}m${elapsedS % 60L}s" else "${elapsedS}s"
@@ -224,6 +233,9 @@ internal fun WorkingStatusRow(
 
 /** Glyph cycle — same family Claude's TUI rotates through. */
 private val WORK_GLYPHS = listOf("✶", "✻", "✽", "✢", "·", "✢", "✽", "✻")
+
+/** Plain CLI spinner for non-Claude agents — deliberately NOT Claude's sparkle. */
+private val WORK_GLYPHS_GENERIC = listOf("|", "/", "-", "\\")
 
 /** Running gerunds — Claude Code's own spinner vocabulary (a subset). */
 private val WORK_VERBS = listOf(

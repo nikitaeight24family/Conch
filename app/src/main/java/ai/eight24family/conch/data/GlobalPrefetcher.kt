@@ -235,12 +235,12 @@ class GlobalPrefetcher(
         historyCache.recordOwners(server.id, agent, rawList)
         // Recover owners for sessions the server DELETED server-side (Claude
         // compaction) but still remembers in ~/.claude/history.jsonl: their rollout
-        // file is gone (so the listing above misses them) yet we cached the body, so
-        // search showed them serverless + opened them ownerless. history.jsonl maps
-        // sessionId→project, proving they lived on THIS server — harvest it and stamp
-        // the durable owner so the next reconcile attributes them. Confirmed root
-        // cause of the user's — those ids are in the server's history.jsonl.
-        // Pooled-exec only — both of the user's servers are SK.
+        // file is gone (so the listing above misses them) yet we cached the body,
+        // so search showed them serverless + opened them ownerless. history.jsonl
+        // maps sessionId→project, proving they lived on THIS server — harvest it
+        // and stamp the durable owner so the next reconcile attributes them.
+        // Confirmed root cause of the user's — those ids are in 824's
+        // history.jsonl. Pooled-exec only — both of the user's servers are SK.
         if (agent == Agent.CLAUDE && pooledExec != null) {
             SilentlyTry.fired(TAG, "harvest claude history.jsonl owners") {
                 val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(

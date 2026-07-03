@@ -75,9 +75,9 @@ android {
         // `-PversionCodeOverride=N` or `VERSION_CODE` env var) takes
         // precedence for hotfixes / re-uploads of an existing tag.
         versionCode = computeVersionCode(project)
-        // Public launch as an early beta. versionCode stays auto (git commit
-        // count) — strictly monotonic, never reset, independent of this label.
-        versionName = "0.2.1 Beta"
+        // Live on Google Play. versionCode stays auto (git commit count) —
+        // strictly monotonic, never reset, independent of this label.
+        versionName = "0.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

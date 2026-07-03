@@ -50,7 +50,7 @@ import ai.eight24family.conch.ui.viewmodel.ServersViewModel
  * add-user / delete live). No connect-on-tap, no long-press menu, no status
  * bottom-sheet — all of that moved onto the detail page so the list stays a
  * dead-simple "pick a server to manage". Rows are sorted by host so a machine's
- * users (user@host, admin@host) sit together.
+ * users (user@x, user@example.com) sit together.
  */
 @Composable
 fun ServersScreen(

@@ -2,7 +2,7 @@
 
 Conch is a native Android client that connects to **your own** SSH servers and runs your chosen AI agent (Claude Code, Codex CLI, or Gemini CLI) on them. Most of the data the app handles never leaves your device or your server. The exceptions — crash reports and feature-usage events — are described below in detail and can be turned off.
 
-This document covers Conch for Android, version 0.1.x, distributed by **Eight 24 Family LLC**.
+This document covers Conch for Android, version 0.2.x, distributed by **Conch Labs**.
 
 ## Data stored on this device
 
@@ -27,7 +27,7 @@ The traffic between the phone and your servers is encrypted by SSH end-to-end. W
 
 ## Shell commands the app runs on your server
 
-The app executes shell commands on the SSH-accessible server you connect to. Every command it issues falls into one of the categories below. None of these run on Eight 24 Family LLC infrastructure or on a third-party backend — they run on **your** server, against **your** credentials, while the app is in the foreground.
+The app executes shell commands on the SSH-accessible server you connect to. Every command it issues falls into one of the categories below. None of these run on Conch Labs infrastructure or on a third-party backend — they run on **your** server, against **your** credentials, while the app is in the foreground.
 
 A complete, verbatim list lives in the app at **About → Operations & Commands**.
 

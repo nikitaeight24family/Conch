@@ -11,6 +11,33 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.2] — 2026-06-30
+
+Now live on Google Play.
+
+### Fixed
+- A phantom copy of a just-sent prompt could pin itself to the bottom of the
+  chat and survive re-entering the session — an offline/reconnect echo appended
+  *after* the reply instead of collapsing onto the optimistic message.
+- Sending a message no longer marks its own session "new" in the sessions list.
+- Codex and Gemini sessions created directly on the server now appear in the
+  list even when the live login check is momentarily unsure; an agent that has
+  sessions is never hidden (and keeps its filter chip). Starting a new chat is
+  still login-gated.
+
+### Changed
+- The working-status indicator is per-agent: Claude keeps its status vocabulary
+  and sparkle glyphs; Codex/Gemini show a plain spinner and "Working".
+- The welcome banner is pinned to the top of every chat.
+- Publisher shown in About is "Conch Labs".
+
+### Hidden noise
+- Codex's "could not find bubblewrap on PATH" degraded-sandbox warning, Claude
+  Code's "Ignoring N permissions.allow entries" startup notice, and Claude's
+  image coordinate-mapping annotation no longer appear as chat messages.
+
+---
+
 ## [0.2.1-beta] — 2026-06-29
 
 ### Phone glyph
@@ -565,7 +592,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.1-beta...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
 [0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta
 [1.0.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.9

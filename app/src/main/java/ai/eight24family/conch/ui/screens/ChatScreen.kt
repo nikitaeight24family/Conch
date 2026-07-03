@@ -634,6 +634,7 @@ private fun PinnedWorkingStatus(
     val remoteThinking by vm.remoteThinking.collectAsState()
     val remoteWaiting by vm.remoteWaitingForInput.collectAsState()
     val activeEffort by vm.activeReasoningEffort.collectAsState()
+    val workingAgent by vm.currentAgent.collectAsState()
     // Local fallback start — used only until the file's turn-start timestamp is
     // read; keyed on isWorking so it resets per turn.
     var localStartMs by remember { mutableStateOf(0L) }
@@ -647,5 +648,6 @@ private fun PinnedWorkingStatus(
         effort = activeEffort,
         thinking = remoteThinking,
         waitingForInput = remoteWaiting,
+        agent = workingAgent,
     )
 }

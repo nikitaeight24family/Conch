@@ -422,7 +422,7 @@ done
      * found" — even though the file exists on disk. We backfill by reading
      * the cwd from the JSONL's first event (every Claude session writes
      * `"cwd":"..."` on its first line), or as a fallback by reverse-slugging
-     * the project-directory name (`-home-user-project` → `/home/user/sshai`).
+     * the project-directory name (`-home-user-sshai` → `/home/user/sshai`).
      */
     override fun cwdBackfillScript(resumeId: String): String {
         val q = shellEscape(resumeId)

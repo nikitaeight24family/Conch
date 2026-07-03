@@ -1,6 +1,6 @@
 **Last updated: 2026-04-30**
 
-These Terms of Service ("Terms") govern your use of **Conch** ("the App"), a mobile client published by **Eight 24 Family LLC** ("we", "us"). By installing or using the App you accept these Terms. If you don't accept them, don't use the App.
+These Terms of Service ("Terms") govern your use of **Conch** ("the App"), a mobile client published by **Conch Labs** ("we", "us"). By installing or using the App you accept these Terms. If you don't accept them, don't use the App.
 
 ## 1. What the App is
 
@@ -31,13 +31,13 @@ The App is provided **"as is"** and **"as available"** without warranties of any
 
 ## 6. Limitation of liability
 
-To the maximum extent permitted by applicable law, **Eight 24 Family LLC** shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to: lost data, lost servers, accidental file deletions caused by an agent we connected to, leaked secrets, downtime, or lost profits — whether based on warranty, contract, tort, or any other legal theory, even if we were advised of the possibility of such damages.
+To the maximum extent permitted by applicable law, **Conch Labs** shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to: lost data, lost servers, accidental file deletions caused by an agent we connected to, leaked secrets, downtime, or lost profits — whether based on warranty, contract, tort, or any other legal theory, even if we were advised of the possibility of such damages.
 
 If a court rejects the disclaimer above, our total liability is capped at **the amount you paid us for the App, or USD $5, whichever is greater**.
 
 ## 7. Indemnity
 
-You agree to indemnify and hold harmless Eight 24 Family LLC from any claim, damage, or expense arising out of (a) your use of the App, (b) your breach of these Terms, (c) actions an AI agent takes on your servers while you were using the App, or (d) your violation of any third party's rights.
+You agree to indemnify and hold harmless Conch Labs from any claim, damage, or expense arising out of (a) your use of the App, (b) your breach of these Terms, (c) actions an AI agent takes on your servers while you were using the App, or (d) your violation of any third party's rights.
 
 ## 8. Termination
 

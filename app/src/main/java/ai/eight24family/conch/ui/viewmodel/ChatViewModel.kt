@@ -356,12 +356,43 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val raw = if (id == null) emptyList() else byId[id] ?: emptyList()
         // Drop Claude Code's internal "No response requested." no-op marker — it's
         // written after an interrupt or a tool-only / no-op turn and is NOT a real
-        // reply. Plumbing, not conversation.
+        // reply. Plumbing, not conversation. Noise filter. CRITICAL: NEVER match a
+        // topical substring against conversation (AssistantText/UserText) — a chat
+        // ABOUT permissions or bubblewrap legitimately contains those words, and a
+        // substring filter wiped most of such a chat (user 2026-06-30). So: plumbing
+        // warnings are matched ONLY on their own non-conversation types
+        // (EventNote/Error), and the one annotation that DOES arrive as a bubble
+        // (Claude's image coordinate hint) is matched by its EXACT shape, which no
+        // real message has.
         val deNoised = raw.filterNot { m ->
-            m is AgentMessage.AssistantText &&
-                m.text.trim().trimEnd('.').trim() == "No response requested"
+            when (m) {
+                is AgentMessage.AssistantText -> {
+                    val t = m.text.trim()
+                    // Claude's internal "No response requested." no-op marker.
+                    t.trimEnd('.').trim() == "No response requested" ||
+                        // Image coordinate-mapping annotation — a hint for the MODEL.
+                        (t.startsWith("[Image:") && t.contains("map to original image", ignoreCase = true))
+                }
+                is AgentMessage.UserText -> {
+                    val t = m.text.trim()
+                    t.startsWith("[Image:") && t.contains("map to original image", ignoreCase = true)
+                }
+                // Plumbing NOTES only — codex's degraded-sandbox bubblewrap warning
+                // and Claude Code's "Ignoring N permissions.allow entries" startup
+                // warning. Matched on the note/error types, never on conversation.
+                is AgentMessage.EventNote ->
+                    m.label.contains("bubblewrap", ignoreCase = true) ||
+                        m.label.contains("permissions.allow entries", ignoreCase = true)
+                is AgentMessage.Error ->
+                    m.text.contains("bubblewrap", ignoreCase = true) ||
+                        m.text.contains("permissions.allow entries", ignoreCase = true)
+                else -> false
+            }
         }
-        hideBridgeHandshake(deNoised)
+        val shown = hideBridgeHandshake(deNoised)
+        // Pure reorder of the one header row; nothing else moves.
+        val wi = shown.indexOfFirst { it is AgentMessage.System && it.subtype == "welcome" }
+        if (wi > 0) listOf(shown[wi]) + shown.filterIndexed { i, _ -> i != wi } else shown
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Phone-bridge plumbing is invisible: the WHOLE handshake turn — the injected
@@ -1190,7 +1221,30 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             "SshAi-Send",
                             "re-delivering ${redeliver.size} prompt(s) dropped on a dead transport",
                         )
-                        redeliver.forEach { s.redeliver(it) }
+                        // The optimistic bubble for an OFFLINE-first-send lives ONLY in
+                        // the display list (_messagesBySession): that send had no
+                        // AgentSession to emit into, and redeliver is echo-free. So the
+                        // prompt is ABSENT from s.history when the JSONL echo lands —
+                        // appendDeduped can't collapse it (shownUserTexts is read from
+                        // s.history) and appendMessages puts the echo AFTER the reply →
+                        // the "phantom" prompt pinned at the bottom that survives a
+                        // re-entry and is replaced by the next send (user, 2026-06-30).
+                        // Skip rows already in history — the reconnect-carry path already
+                        // seeded them via histSeed, and re-adding would revive the
+                        // double. Count-based per body (consume one display row per
+                        // redeliver text) so genuine repeats keep N rows (LEGIT-REPEAT).
+                        val histIds = s.history.value.mapTo(HashSet()) { it.id }
+                        val unsynced = _messagesBySession.value[sid].orEmpty()
+                            .filterIsInstance<AgentMessage.UserText>()
+                            .filter { it.id !in histIds }
+                            .toMutableList()
+                        redeliver.forEach { t ->
+                            unsynced.firstOrNull { it.text.trim() == t.trim() }?.let { row ->
+                                unsynced.remove(row)
+                                s.appendMessages(listOf(row))
+                            }
+                            s.redeliver(t)
+                        }
                         val newId = s.agentSessionId
                         if (newId != null && _resumeId.value != newId) {
                             _resumeId.value = newId
@@ -1790,7 +1844,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         // the agent keeps producing, HomeSessionsViewModel badges
                         // the delta (SessionSeenTracker, keyed by session/resume id).
                         (s.agentSessionId ?: _resumeId.value)?.let { rid ->
-                            ai.eight24family.conch.agent.SessionSeenTracker.markSeen(rid, list.size)
+                            // Baseline on what the user actually SAW (the display list),
+                            // not the raw s.history size — on the offline/redeliver path
+                            // an optimistic prompt the user saw lives in the display
+                            // before its echo reaches s.history, so basing on s.history
+                            // made the echo's later arrival read as a "new message" on
+                            // the home badge for the user's OWN prompt (user, 2026-06-30).
+                            // Keyed to this collector's OWN localId — never the global
+                            // _localSessionId (that was the round-1 cross-session bug).
+                            val seenCount = _messagesBySession.value[localId]?.size ?: list.size
+                            ai.eight24family.conch.agent.SessionSeenTracker.markSeen(rid, seenCount)
                         }
                         // Fresh chunk / new message landed — bump the
                         // watchdog clock and clear any active stall flag

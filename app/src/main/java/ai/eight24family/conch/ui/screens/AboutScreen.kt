@@ -270,7 +270,7 @@ fun AboutScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "Eight 24 Family LLC",
+                    "Conch Labs",
                     color = onSurface,
                     style = MaterialTheme.typography.bodyMedium
                 )

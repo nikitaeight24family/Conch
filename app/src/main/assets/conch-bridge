@@ -220,7 +220,7 @@ fi
 if [ -n "$DATA_PATH" ]; then
   # SECURITY: the response carries a data_path, but we NEVER trust it as a
   # filesystem path. A compromised phone / MITM on the channel could return
-  # "data_path":"~/.ssh/id_ed25519" (or any server-readable file) and this
+  # "data_path":"~/.ssh/id_ed25519" (or any deploy-readable file) and this
   # branch would cat it to the agent AND delete it — a read+DELETE traversal
   # sink. The data file for THIS request is ALWAYS exactly $OUTBOX/$ID.data
   # (server-chosen id), so read+remove only that and ignore whatever path the

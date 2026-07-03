@@ -5,7 +5,8 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.1--beta-orange.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.2-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
 > **Your phone, your server, your AI. Build, test, ship — on the train.**
@@ -17,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.1 Beta
+conch ▌ v0.2.2
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -27,6 +28,54 @@ conch ▌ v0.2.1 Beta
   <img src="screenshots/conch_03.jpg" width="22%" />
   <img src="screenshots/conch_04.jpg" width="22%" />
 </p>
+
+<p align="center">
+  <a href="https://play.google.com/store/apps/details?id=ai.eight24family.conch">
+    <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="64" />
+  </a>
+</p>
+
+---
+
+## Now on Google Play
+
+**Conch is live on Google Play** → **[play.google.com/store/apps/details?id=ai.eight24family.conch](https://play.google.com/store/apps/details?id=ai.eight24family.conch)**
+
+- **Listing** — *Conch — AI agents over SSH*
+- **Tagline** — *Drive Claude Code, Codex and Gemini CLI on your own servers, from your phone.*
+- Install from Play for automatic updates, or sideload the signed APK from
+  [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
+  signed build, your choice.
+
+---
+
+## What's new in 0.2.2
+
+**Chat display gets honest: no phantom messages, Codex/Gemini stop cosplaying Claude, and your server-made sessions actually show up.**
+
+### 💬 Messages
+- Fixed a **phantom copy of your just-sent prompt** that could pin itself to the
+  bottom of the chat and survive re-entering the session — an offline/reconnect
+  echo that landed *after* the reply instead of collapsing onto your message.
+- A message you send **no longer lights the "new" badge** on its own session row.
+
+### 🗂️ Sessions list
+- **Codex and Gemini sessions created directly on the server now appear** in the
+  list, even when the live login check is momentarily unsure. An agent that has
+  sessions always shows up (and gets a filter chip) instead of being hidden with
+  no way to reveal it. Starting a *new* chat still needs a real login.
+
+### 🎨 Per-agent polish
+- The working indicator is **per-agent**: Claude keeps its own status vocabulary;
+  **Codex and Gemini show a plain spinner and "Working"** rather than Claude's
+  wording.
+- The **welcome banner is pinned to the top** of every chat.
+- Internal noise no longer leaks into the conversation: Codex's bubblewrap
+  sandbox warning, a permissions-config startup notice, and Claude's image
+  coordinate-mapping annotation are hidden.
+
+### 🏷️ About
+- Publisher is shown as **Conch Labs**.
 
 ---
 
@@ -104,8 +153,7 @@ and [CHANGELOG](CHANGELOG.md).
 - **APK** — grab the latest signed build from the
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest)
   page and sideload it (enable Android's "install from unknown sources").
-- **Google Play** — Conch is currently in testing on Google Play; a public
-  listing is on the way.
+- **Google Play** — **[Conch is live on Google Play](https://play.google.com/store/apps/details?id=ai.eight24family.conch)**; install from there for automatic updates.
 
 Once installed:
 
@@ -259,8 +307,8 @@ content, no identifiers).
 - **Phone bridge needs Shizuku** and only polls while Conch is in the
   foreground; backgrounded, it pauses (Android background-I/O limits) and
   surfaces a clear timeout.
-- **Google Play** is still in testing — install the signed APK from Releases
-  in the meantime.
+- **Google Play** — Conch is live in production; the signed APK in Releases is
+  the same build, for sideloading if you prefer.
 - **Solo-maintained.** Issues / PRs welcome; expect human-speed responses.
 
 ## License
