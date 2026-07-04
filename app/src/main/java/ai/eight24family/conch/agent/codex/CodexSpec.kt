@@ -387,19 +387,14 @@ esac
         reasoningCache[slug]
 
     /**
-     * Title-case the codex effort string for the dropdown. The cache
-     * stores `low`/`medium`/`high`/`xhigh` — we display "Low" / "Medium"
-     * / "High" / "Extra high" (matching what codex CLI's own interactive
-     * menu shows). Add new codex levels here as they ship.
+     * Dropdown label for a codex effort — the RAW token from codex's own
+     * models_cache.json (`low`/`medium`/`high`/`xhigh`). The cache carries no
+     * display names (only effort + description), so any prettier word here
+     * would be OUR invention — the old "Extra high"/"Low" mapping was exactly
+     * that hardcode. The per-level description from the cache renders
+     * alongside, so the menu stays self-explanatory.
      */
-    private fun reasoningDisplayName(effort: String): String = when (effort.lowercase()) {
-        "minimal" -> "Minimal"
-        "low" -> "Low"
-        "medium" -> "Medium"
-        "high" -> "High"
-        "xhigh" -> "Extra high"
-        else -> effort.replaceFirstChar { it.uppercase() }
-    }
+    private fun reasoningDisplayName(effort: String): String = effort
 
     /**
      * Top-level `model = "..."` in `~/.codex/config.toml` — the model
@@ -618,7 +613,14 @@ private object CodexTopbarUi : AgentTopbarUi {
                 display = label,
                 storedValue = slug,
                 reasoning = info?.levels.orEmpty(),
-                defaultReasoning = info?.defaultEffort,
+                // The picker's "default" marker + no-pick slider position must be what
+                // codex ACTUALLY runs — its config.toml `model_reasoning_effort`
+                // (state.defaultReasoning) — NOT the model's catalog default_reasoning_
+                // _level. GPT-5.5's catalog default is xhigh, but the user's config
+                // pins medium, so the slider sat on xhigh while the CLI ran medium.
+                // Catalog default is the honest fallback ONLY when config has no pin.
+                defaultReasoning = state.defaultReasoning?.takeIf { it.isNotBlank() }
+                    ?: info?.defaultEffort,
             )
         }
 
@@ -662,12 +664,11 @@ private object CodexTopbarUi : AgentTopbarUi {
             ?: state.defaultReasoning?.takeIf { it.isNotBlank() }
             ?: info?.defaultEffort
             ?: return null
-        // Always render `effort.replaceFirstChar { uppercase }` regardless
-        // of catalog state. Earlier we'd upgrade to `info.levels.firstOrNull
-        // { it.effort == effort }.displayName` once the cache loaded, which
-        // gave a barely-perceptible "Medium" → "Medium" relabel that still
-        // counted as a flicker for the user. Plain capitalization is
-        // accurate AND stable from frame zero through cache landing.
-        return effort.replaceFirstChar { it.uppercase() }
+        // Render the RAW effort token exactly as codex's own data spells it
+        // ("xhigh"/"high"/"medium" — models_cache.json supported_reasoning_levels
+        // and the JSONL both carry lowercase tokens). The old capitalization
+        // invented a word the CLI never shows. Raw is accurate AND stable from
+        // frame zero through cache landing (no relabel flicker).
+        return effort
     }
 }

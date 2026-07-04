@@ -971,8 +971,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Unix-millis when ChatScreen went background, null while foreground. */
     @Volatile private var backgroundedSince: Long? = null
     fun setTailBackgrounded(backgrounded: Boolean) {
+        val cameToForeground = !backgrounded && backgroundedSince != null
         _tailBackgrounded.value = backgrounded
         backgroundedSince = if (backgrounded) System.currentTimeMillis() else null
+        // Back to the chat → re-read the plan limit AT ONCE (don't wait for the
+        // 30s foreground tick). The account-wide 5h/weekly window may have moved
+        // while we were away, so the bar the user looks at is current the moment
+        // they return, not a stale snapshot (user, 2026-07-03).
+        if (cameToForeground) refreshUsage()
     }
 
     val enterSends: StateFlow<Boolean> = ServiceLocator.preferences.enterSends
@@ -2283,6 +2289,38 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     }
                 }
                 wasWorking = working
+            }
+        }
+        // Same refresh for a MIRRORED turn (driven from the CLI/another device):
+        // it never flips OUR SessionState.Working, so the watcher above stays
+        // silent and the bar froze at the last app-driven number while the CLI's
+        // own display kept climbing. The tail-poll's remoteFileOpen is the
+        // mirrored-turn "working" signal — refresh on its true→false edge, exactly
+        // like our own turns. Overlap with the watcher above is harmless:
+        // refreshUsage cancels the prior probe job, and the delayed re-poll just
+        // converges the same value.
+        viewModelScope.launch {
+            var wasRemote = false
+            tailPollCoord.remoteFileOpen.collect { remote ->
+                if (wasRemote && !remote) {
+                    refreshUsage()
+                    launch(Dispatchers.IO) {
+                        kotlinx.coroutines.delay(6_000)
+                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { _usage.value = it }
+                    }
+                }
+                wasRemote = remote
+            }
+        }
+        // The 5h/weekly windows are ACCOUNT-WIDE: other sessions, the CLI, other
+        // devices move them even when THIS chat is idle. Refreshing only on
+        // turn-end left the bar frozen at a 2-hour-old number. So poll every 30s
+        // while FOREGROUND (backgroundedSince == null); pause when backgrounded (no
+        // one's looking, and it costs a poll). One ~0.3s server-side exec per tick.
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(30_000)
+                if (backgroundedSince == null) refreshUsage()
             }
         }
         // Prefetch the Claude /context breakdown the moment the chat has a

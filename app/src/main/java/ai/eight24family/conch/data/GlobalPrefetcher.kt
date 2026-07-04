@@ -79,6 +79,44 @@ class GlobalPrefetcher(
                 prev = ids
             }
         }
+        // Periodic RE-LISTING. Re-list every 30s (90s under data saver) over
+        // servers that already have a LIVE pooled client — one cheap exec per
+        // (server, agent), no handshakes, no FIDO touches, no body downloads.
+        // Listing-only, same policy as the sweep.
+        procScope.launch {
+            while (true) {
+                val dataSaver = SilentlyTry.loggedOrElse(TAG, "read data saver pref", false) {
+                    ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
+                }
+                delay(if (dataSaver) 90_000L else 30_000L)
+                SilentlyTry.fired(TAG, "periodic re-list") { relistConnected() }
+            }
+        }
+    }
+
+    /** Listing-only refresh for every server with a live pooled client: updates
+     *  SessionsCache + durable owners so server-created sessions surface without
+     *  an app restart. Never opens a new connection (skip when no pooled client)
+     *  and never downloads bodies — the full sweep handles those. */
+    private suspend fun relistConnected() {
+        val servers = runCatching { repoListAll(repo) }.getOrElse { emptyList() }
+        for (server in servers) {
+            val client = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id) ?: continue
+            val exec = buildPooledExec(client)
+            val agents = SilentlyTry.loggedOrElse(
+                TAG, "load agent status cache", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
+            ) { agentStatusCache.load(server.id).statuses }
+                .filter { it.value.installed && it.value.loggedIn }.keys
+            for (agent in agents) {
+                val rawList = SilentlyTry.logged(TAG, "periodic list ${server.name}/${agent.name}") {
+                    discovery.list(agent, exec)
+                } ?: continue
+                if (rawList.isEmpty()) continue
+                historyCache.recordOwners(server.id, agent, rawList)
+                val list = rawList.filter { it.preview.isNotBlank() }
+                if (list.isNotEmpty()) sessionsCache.save(server.id, agent, list)
+            }
+        }
     }
 
     /** Launch a sweep, cancelling any in-flight/pending one and debouncing

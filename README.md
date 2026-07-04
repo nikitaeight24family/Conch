@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.3-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.4-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.3
+conch ▌ v0.2.4
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,26 @@ conch ▌ v0.2.3
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.2.4
+
+**The usage bar tells the truth in real time, and reasoning-effort stops lying.**
+
+- **Live plan-limit bar.** The 5h / weekly usage bar now refreshes while the chat
+  is on screen (every 30s, turn or idle) and the instant you return to it — the
+  windows are account-wide, so it no longer freezes at a stale number while other
+  sessions or the CLI move the limit. The reset countdown shows hours **and**
+  minutes ("2h40m", not a floored "2h").
+- **Real reasoning-effort.** The effort shown is the raw level the CLI actually
+  uses (`xhigh` / `high` / `medium` / `ultracode`), never an invented label. For
+  Codex the "default" level now follows your `config.toml`
+  `model_reasoning_effort` — what codex really runs — instead of the model's
+  catalog default.
+- **Server-made sessions surface on their own.** The list re-checks connected
+  servers every 30s, so a chat you start directly on the server appears without
+  reopening the app.
 
 ---
 

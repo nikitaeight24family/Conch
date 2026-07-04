@@ -11,6 +11,22 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.4] — 2026-07-03
+
+### Fixed / Changed
+- The plan-limit (5h / weekly) usage bar refreshes while the chat is on screen
+  (every 30s, turn or idle) and immediately on return to it — the windows are
+  account-wide, so it no longer freezes at a stale number while other sessions or
+  the CLI move the limit. Reset countdown shows hours + minutes ("2h40m").
+- Reasoning-effort shows the raw level the CLI uses (`xhigh`/`high`/`medium`/
+  `ultracode`), never an invented label. For Codex the "default" level follows
+  `config.toml` `model_reasoning_effort` (what codex actually runs) instead of the
+  model's catalog default.
+- The sessions list re-checks connected servers every 30s, so a chat started
+  directly on the server appears without reopening the app.
+
+---
+
 ## [0.2.3] — 2026-07-03
 
 ### Fixed
@@ -603,7 +619,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
 [0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta

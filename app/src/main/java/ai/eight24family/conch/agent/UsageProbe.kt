@@ -42,7 +42,14 @@ data class UsageWindow(
         return when {
             s <= 0 -> "now"
             s < 3600 -> "${s / 60}m"
-            s < 86_400 -> "${s / 3600}h"
+            // Hours with the minute remainder ("2h40m", not a floor to "2h") —
+            // the CLI shows the absolute reset time, and a whole-hour floor made
+            // the app look 40 minutes behind it (user, 2026-07-03). Exact-hour
+            // boundaries still render clean ("3h").
+            s < 86_400 -> {
+                val m = (s % 3600) / 60
+                if (m == 0L) "${s / 3600}h" else "${s / 3600}h${m}m"
+            }
             else -> "${s / 86_400}d"
         }
     }

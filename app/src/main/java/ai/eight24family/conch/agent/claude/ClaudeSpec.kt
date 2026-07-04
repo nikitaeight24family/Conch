@@ -1266,7 +1266,9 @@ private object ClaudeTopbarUi : AgentTopbarUi {
             ?: state.sessionInitialReasoning?.takeIf { it.isNotBlank() }
             ?: state.defaultReasoning?.takeIf { it.isNotBlank() }
             ?: info.defaultEffort
-        return info.levels.firstOrNull { it.effort == effort }?.displayName
-            ?: effort.replaceFirstChar { it.uppercase() }
+        // Topbar sub-label mirrors the CLI FOOTER, which prints the raw effort
+        // token («48s · xhigh») — never a capitalized invention. The dropdown
+        // still uses the PROBED menu names; this label is footer-authentic raw.
+        return effort
     }
 }
