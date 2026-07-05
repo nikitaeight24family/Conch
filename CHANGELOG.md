@@ -11,6 +11,24 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.5] — 2026-07-05
+
+### Fixed
+- Fixed a hard crash on the sessions list. A Claude session can exist as more
+  than one rollout file on the server (after a resume or compaction), so a raw
+  listing repeated its id and the id-keyed lists crashed the app on draw
+  ("Key … was already used"). Sessions are now de-duplicated by id at every
+  cache read/write and at the list itself, so a duplicate can neither be stored
+  nor rendered.
+
+### Changed
+- The floating navigation bar now reads as frosted glass on every screen —
+  including Settings and short lists, not only long scrolling chats. Content
+  scrolls beneath it so the blur samples real content instead of blank
+  background, and the capsule no longer renders as a flat solid block.
+
+---
+
 ## [0.2.4] — 2026-07-03
 
 ### Fixed / Changed

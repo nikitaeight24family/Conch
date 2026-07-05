@@ -85,7 +85,14 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  an in-flight listing or a not-yet-landed server `rm` would resurface it. */
     private fun publishSessions(list: List<RemoteSession>) {
         val tomb = _deletedIds.value
-        _sessions.value = if (tomb.isEmpty()) list else list.filterNot { it.id in tomb }
+        // Dedupe by session id — the per-agent list keys its LazyColumn by id and
+        // Compose hard-crashes on a duplicate ("Key … was already used"). One
+        // logical Claude session can list as several rollout files (resume/
+        // compaction), so a raw listing may repeat an id. This is the single
+        // publish choke point, so guarding here covers every feeder. Newest-first
+        // ⇒ keep the first (most recent) file.
+        val unique = list.distinctBy { it.id }
+        _sessions.value = if (tomb.isEmpty()) unique else unique.filterNot { it.id in tomb }
     }
 
     /**

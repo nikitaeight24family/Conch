@@ -70,7 +70,16 @@ class SessionsCache(private val context: Context) {
                 title = title,
             )
         }
-        return Snapshot(sessions, ts)
+        // Dedupe by session id. Claude keeps ONE logical session (same sessionId)
+        // across MULTIPLE rollout files after a resume/compaction, so a listing —
+        // and thus a persisted cache blob written before this guard — can carry the
+        // same id twice. Both the unified home list and the per-agent list key
+        // their LazyColumn by session id, and Compose HARD-CRASHES on a duplicate
+        // key ("Key … was already used"). Collapsing here means even an
+        // already-corrupted on-disk blob renders safely without waiting for a fresh
+        // re-list (the app was crashing on launch, unable to re-list at all).
+        // Listings are newest-first, so distinctBy keeps the most-recent file.
+        return Snapshot(dedupeById(sessions), ts)
     }
 
     /** Upsert a SINGLE session into the cache without waiting for a server
@@ -85,7 +94,12 @@ class SessionsCache(private val context: Context) {
         save(serverId, agent, listOf(session) + cur)
     }
 
-    suspend fun save(serverId: String, agent: Agent, sessions: List<RemoteSession>) {
+    suspend fun save(serverId: String, agent: Agent, rawSessions: List<RemoteSession>) {
+        // Collapse duplicate session ids up front — one logical Claude session can
+        // surface as several rollout files (resume/compaction) so a single listing
+        // may repeat an id. Storing the dup would re-crash the id-keyed lists on the
+        // next load. Newest-first listing ⇒ keep the first (most recent) file.
+        val sessions = dedupeById(rawSessions)
         // Preserve sessions created/active in the last few minutes that THIS
         // listing doesn't include yet. A just-created session lives in the cache
         // via upsert(); a stale in-flight listing that started before it existed
@@ -160,5 +174,15 @@ class SessionsCache(private val context: Context) {
          *  server listing that doesn't yet include it. Generous enough to bridge
          *  the gap until the next SSH listing catches the new rollout file. */
         private const val RECENT_WINDOW_MS = 10 * 60_000L
+
+        /** Collapse rows sharing a session id, keeping the FIRST occurrence. One
+         *  logical Claude session spans several rollout files after a resume/
+         *  compaction, so a raw listing repeats the id; storing or rendering the
+         *  dup hard-crashes the id-keyed LazyColumns ("Key … was already used").
+         *  Listings are newest-first, so "keep first" = keep the most recent file.
+         *  `internal` so it's unit-testable on the plain JVM (SessionsCache itself
+         *  is DataStore-bound and needs Robolectric). */
+        internal fun dedupeById(sessions: List<RemoteSession>): List<RemoteSession> =
+            sessions.distinctBy { it.id }
     }
 }

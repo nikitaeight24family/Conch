@@ -104,10 +104,17 @@ fun SettingsScreen(
         ai.eight24family.conch.ui.window.WideContentColumn {
         Column(
             modifier = Modifier
-                .padding(padding)
+                // Only the TOP inset goes on the scroll CONTAINER — the viewport then
+                // runs edge-to-edge to the screen bottom so content scrolls UNDER the
+                // floating glass bar (the haze samples it → real glass). The bottom
+                // clearance is CONTENT padding (applied AFTER verticalScroll), not
+                // viewport padding: the old `.padding(bottom=96).verticalScroll()`
+                // shrank the viewport, leaving an empty band behind the bar so the
+                // glass sampled blank background and read as solid.
+                .padding(top = padding.calculateTopPadding())
                 .fillMaxHeight()
-                .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 96.dp)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             when (openCategory) {

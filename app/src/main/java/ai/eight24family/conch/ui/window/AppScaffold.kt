@@ -171,18 +171,26 @@ private fun FloatingTabBar(
             // Glass sheen: a bright top highlight fading out, with a faint cyan
             // glow at the bottom edge — the reflection that makes a translucent
             // capsule actually READ as glass in a dark theme (where blurred dark
-            // content is otherwise near-uniform).
+            // content is otherwise near-uniform). Frosted BASE lift — a hair
+            // lighter than the background — so the capsule still reads as glass
+            // over a UNIFORM background (short lists / bottom of scroll) where
+            // the blur has nothing to sample and the tinted-bg fill would
+            // otherwise blend into the bg as a flat solid. Negligible over real
+            // content (the blurred content still shows).
+            .background(Color.White.copy(alpha = 0.05f), shape)
+            // Glass sheen on top: brighter top highlight + a stronger cyan glow at
+            // the base, so the capsule's edges read as glass in a dark theme.
             .background(
                 Brush.verticalGradient(
                     listOf(
-                        Color.White.copy(alpha = 0.14f),
+                        Color.White.copy(alpha = 0.22f),
                         Color.Transparent,
-                        cyan.copy(alpha = 0.06f),
+                        cyan.copy(alpha = 0.10f),
                     ),
                 ),
                 shape,
             )
-            .border(1.dp, cyan.copy(alpha = 0.45f), shape)
+            .border(1.dp, cyan.copy(alpha = 0.55f), shape)
             .padding(horizontal = 6.dp, vertical = 5.dp),
     ) {
         // Sliding selected-pill, drawn behind the items.

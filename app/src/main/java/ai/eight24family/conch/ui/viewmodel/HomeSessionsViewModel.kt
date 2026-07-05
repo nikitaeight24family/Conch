@@ -416,7 +416,14 @@ class HomeSessionsViewModel : ViewModel() {
             lastLoggedCounts = counts
             android.util.Log.d("SshAi-Home", "reload: ${out.size} rows by agent=$counts")
         }
-        _rows.value = out
+        // Final safety net: the home list keys its LazyColumn by
+        // serverId/agent/sessionId and Compose HARD-CRASHES on a duplicate key
+        // ("Key … was already used" — user's crash, v0.2.4). The cache dedupe above
+        // should make this a no-op, but a duplicate server row in `list` or any
+        // future feeder could still double a row — so we guarantee uniqueness at
+        // the single choke point right before the UI. distinctBy keeps the first,
+        // which after the recency sort is the most-recently-active copy.
+        _rows.value = out.distinctBy { it.serverId + "|" + it.session.agent.name + "|" + it.session.id }
         _loadedOnce.value = true
     }
 
