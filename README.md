@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.5-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.6-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.5
+conch ▌ v0.2.6
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,27 @@ conch ▌ v0.2.5
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.2.6
+
+**Sessions load fast and from every agent at once; signing in finally shows progress.**
+
+- **Faster, complete session lists.** Titles now appear almost immediately and from
+  **all agents together** instead of trickling in one agent at a time — the
+  background prefetch lists everything first, then fetches bodies. The slow OAuth
+  liveness check no longer blocks the first listing on a freshly-added server.
+- **Clearer sign-in.** After you paste your login code/URL, the agent row shows
+  **"signing in…"** while the exchange finishes, instead of a stale "[ log in ]"
+  that looked like it was asking you to start over.
+- **Reliable Codex login detection.** A real ChatGPT login is no longer misread as
+  "not logged in" (reads the CLI's status from stdout+stderr, checks the on-disk
+  credential, and trusts the exit code).
+- **Device-key lifetime matches your pick.** Choosing 1/3/7 days now actually mints
+  the key for that long (it used to default to 30 while the selector showed 7), and
+  changing it re-mints immediately so the countdown reflects your choice.
+- **Steadier file uploads** with an honest message if the server can't be reached.
 
 ---
 

@@ -169,9 +169,9 @@ class ServerDetailViewModel(
                 if (skPrimary != null) {
                     // SEAMLESS FIRST: if a device key is enrolled, reconnect
                     // SILENTLY over it — NO physical key tap. A still-valid,
-                    // on-server device key must NEVER re-prompt the physical
-                    // key. Mirrors the picker's refresh path; this connect() was
-                    // the one place that skipped it and always demanded a tap.
+                    // on-server device key must NEVER re-prompt the physical key.
+                    // Mirrors the picker's refresh path; this connect() was the one
+                    // place that skipped it and always demanded a tap.
                     val eph = runCatching {
                         ServiceLocator.sshConnectionPool.userConnectEphemeral(srv)
                     }.getOrNull()
@@ -402,7 +402,20 @@ class ServerDetailViewModel(
     }
 
     fun setSeamlessDays(days: Int) {
-        viewModelScope.launch { prefs.setSeamlessDaysForServer(serverId, days) }
+        viewModelScope.launch {
+            prefs.setSeamlessDaysForServer(serverId, days)
+            // Apply NOW: re-mint the device key so its server-side expiry-time (and
+            // the "expires in …" countdown) reflects the freshly-picked lifetime
+            // instead of waiting for the next reconnect. enrollSeamlessForServer
+            // rewrites only our own authorized_keys line and no-ops when seamless
+            // is off / there's no live connection (it re-mints on the next touch).
+            val srv = server.value ?: withContext(Dispatchers.IO) { repo.getById(serverId) }
+            if (srv != null && seamlessEnabled.value) {
+                pool.enrollSeamlessForServer(srv)
+                delay(1500)
+                refreshDeviceKey()
+            }
+        }
     }
 
     /** Revoke the current device key (strip from server + delete locally). Keeps

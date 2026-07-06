@@ -83,13 +83,21 @@ internal class AgentSessionFileTransfer(
         val remotePath = "$remoteDir/$filename"
 
         android.util.Log.d(tag, "mkdir $remoteDir")
-        val mkOk = sshLifecycle.execOnLive("mkdir -p $remoteDir")
-        if (mkOk == null) {
-            android.util.Log.w(tag, "mkdir failed: execOnLive returned null")
-            history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "Could not create $remoteDir on the server"))
+        // Sentinel distinguishes the two failure modes so the log names the REAL
+        // cause instead of guessing (the dir already exists on the server — the
+        // user's case — so `mkdir -p` is a no-op that succeeds IF the command runs
+        // at all):
+        //   • null           → the SSH command never RAN (live channel exec threw;
+        //                       exception now surfaced in execOnLive's catch).
+        //   • non-null, no OK → the command ran but mkdir/-d failed (real perms).
+        //   • contains OK     → good.
+        val mkRes = sshLifecycle.execOnLive("mkdir -p $remoteDir && [ -d $remoteDir ] && echo SSHAI_MKOK")
+        if (mkRes?.contains("SSHAI_MKOK") != true) {
+            android.util.Log.w(tag, "upload prepare failed: execOnLive=${mkRes?.let { "\"${it.take(120)}\" (ran, but no OK)" } ?: "null (SSH exec did not run — see execOnLive catch)"}")
+            history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "Couldn't prepare the upload on the server — pull down to retry"))
             return@withContext null
         }
-        android.util.Log.d(tag, "mkdir ok: ${mkOk.take(80)}")
+        android.util.Log.d(tag, "mkdir ok")
 
         val command = "cat > ${shellEscape(remotePath)} && echo SSHAI_OK || echo SSHAI_ERR_\$?"
 

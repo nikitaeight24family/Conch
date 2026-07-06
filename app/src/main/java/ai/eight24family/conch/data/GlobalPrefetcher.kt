@@ -199,10 +199,24 @@ class GlobalPrefetcher(
                 }
             }
 
+            // PASS 1 — list every agent FAST (no catalog, no bodies) so the home
+            // list paints ALL agents' session titles together and almost at once,
+            // instead of trickling in per-agent behind each agent's slow catalog /
+            // body work.
+            val listed = LinkedHashMap<Agent, List<ai.eight24family.conch.agent.RemoteSession>>()
             for (agent in authorizedAgents) {
                 if (!scope.isActive) return
-                runCatching { prefetchOne(server, secrets, agent, fetchBodies) }
-                    .onFailure { android.util.Log.w(TAG, "  ${server.name}/${agent.name} failed: ${it.message}") }
+                val l = runCatching { listServerAgent(server, secrets, agent) }
+                    .onFailure { android.util.Log.w(TAG, "  ${server.name}/${agent.name} list failed: ${it.message}") }
+                    .getOrNull()
+                if (l != null) listed[agent] = l
+            }
+            // PASS 2 — the slow part: model-catalog warm-up + JSONL body downloads,
+            // reusing pass-1's listing (no re-list).
+            for (agent in authorizedAgents) {
+                if (!scope.isActive) return
+                runCatching { fetchBodiesAndCatalog(server, secrets, agent, listed[agent].orEmpty(), fetchBodies) }
+                    .onFailure { android.util.Log.w(TAG, "  ${server.name}/${agent.name} bodies failed: ${it.message}") }
                 delay(200)
             }
             delay(500)
@@ -217,68 +231,43 @@ class GlobalPrefetcher(
         ai.eight24family.conch.di.ServiceLocator.searchIndexer.reconcile()
     }
 
-    private suspend fun prefetchOne(server: Server, secrets: ServerSecrets, agent: Agent, fetchBodies: Boolean = true) {
-        // FIDO security-key servers can't open a fresh SSH in the
-        // background (each handshake needs a physical user touch).
-        // Two paths:
-        //
-        //   - The user has already done a tap-to-connect on this
-        //     server (pool has a live client) → ride that connection
-        //     for everything below. No extra touches, no new
-        //     handshakes, just channels.
-        //   - No live pool client → bail; the chat-open path will
-        //     warm caches when the user actually visits.
+    /** FAST listing pass for one (server, agent): list sessions, record durable
+     * owners for ALL of them, harvest Claude's history.jsonl orphans, and cache
+     * the non-blank listing so the home list paints titles immediately. NO model
+     * catalog and NO body downloads — those are the slow part
+     * ([fetchBodiesAndCatalog]), split out on purpose so every agent's titles
+     * surface together and fast instead of trickling in behind each agent's heavy
+     * work. Returns the cached (non-blank) list, or null when an SK server has no
+     * live pooled connection. */
+    private suspend fun listServerAgent(
+        server: Server, secrets: ServerSecrets, agent: Agent,
+    ): List<ai.eight24family.conch.agent.RemoteSession>? {
+        // FIDO servers can't open a fresh SSH in the background (each handshake
+        // needs a physical touch). With a live tap-to-connect client we ride its
+        // channels (no touch); without one, bail — the chat-open path warms it.
         val isSk = secrets.skKeys.isNotEmpty()
         val pooledClient = if (isSk) {
             ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
         } else null
-
         if (isSk && pooledClient == null) {
             android.util.Log.d(TAG, "  ${server.name}/${agent.name}: skipped (SK key, no live connection)")
-            return
+            return null
         }
-
-        // Build an exec lambda: for SK servers with a live pool
-        // client, pipe through it (no auth, no touch). For non-SK,
-        // fall through to the existing fresh-handshake path.
         val pooledExec: (suspend (String) -> String?)? = pooledClient?.let { buildPooledExec(it) }
         val viaPool = if (pooledExec != null) " (via pooled SSH)" else ""
 
-        // 0) Model + reasoning catalog warm-up over the pooled client (SK
-        // or held non-SK both land in the pool) — the user opens a chat
-        // onto a READY picker. The chat-open probe skips its heavy PTY
-        // pass while this result is fresh. No pooled client → skip
-        // silently; the chat-open path warms it instead.
-        val catalogClient = pooledClient
-            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
-        if (catalogClient != null && !ModelCatalogPrefetcher.isFresh(server.id, agent)) {
-            SilentlyTry.fired(TAG, "model catalog warm-up") {
-                ModelCatalogPrefetcher.probeAndPersist(catalogClient, agent, server.id)
-            }
-        }
-
-        // 1) List sessions and update the per-(server, agent) cache.
-        val rawList = if (pooledExec != null) {
-            discovery.list(agent, pooledExec)
-        } else {
-            discovery.list(server, secrets, agent)
-        }
-        // Record the durable owner for EVERY discovered session — including
-        // the preview-blank ones we drop from the SessionsCache list just
-        // below. A search hit can land on any cached session (the body has
-        // searchable text even when the first user turn is blank), so the
-        // owner map must cover the full set or that hit's tap is a silent
-        // no-op. This is the automatic, no-button path: every home-screen
-        // prefetch sweep refreshes ownership for all reachable servers.
+        val rawList = if (pooledExec != null) discovery.list(agent, pooledExec)
+        else discovery.list(server, secrets, agent)
+        // Record the durable owner for EVERY discovered session — including the
+        // preview-blank ones dropped from the SessionsCache list below. A search
+        // hit can land on any cached session (its body has searchable text even
+        // when the first user turn is blank), so the owner map must cover the full
+        // set or that tap is a silent no-op.
         historyCache.recordOwners(server.id, agent, rawList)
         // Recover owners for sessions the server DELETED server-side (Claude
-        // compaction) but still remembers in ~/.claude/history.jsonl: their rollout
-        // file is gone (so the listing above misses them) yet we cached the body,
-        // so search showed them serverless + opened them ownerless. history.jsonl
-        // maps sessionId→project, proving they lived on THIS server — harvest it
-        // and stamp the durable owner so the next reconcile attributes them.
-        // Confirmed root cause of the user's — those ids are in 824's
-        // history.jsonl. Pooled-exec only — both of the user's servers are SK.
+        // compaction) but still remembers in ~/.claude/history.jsonl: it maps
+        // sessionId→project, proving they lived on THIS server, so search can
+        // attribute + open them. Pooled-exec only — both of the user's servers are SK.
         if (agent == Agent.CLAUDE && pooledExec != null) {
             SilentlyTry.fired(TAG, "harvest claude history.jsonl owners") {
                 val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(
@@ -290,21 +279,43 @@ class GlobalPrefetcher(
         val list = rawList.filter { it.preview.isNotBlank() }
         if (list.isEmpty()) {
             android.util.Log.d(TAG, "  ${server.name}/${agent.name}: 0 sessions$viaPool")
-            return
+            return list
         }
         sessionsCache.save(server.id, agent, list)
         android.util.Log.d(TAG, "  ${server.name}/${agent.name}: cached ${list.size} session listing$viaPool")
+        return list
+    }
 
-        // 2) Prefetch JSONL bodies for EVERY session we don't already have on
-        // disk — the user wants the search index to cover ALL chats, not a
-        // recent-N slice. The size==0 filter keeps it incremental: each session
-        // is fetched once, then skipped on later sweeps, so this isn't a
-        // re-download every time. First sweep on a large history is long but
-        // paced (150ms between fetches) and process-scoped, so it finishes
-        // regardless of navigation. Everything above (list → recordOwners →
-        // SessionsCache.save) is the cheap metadata pass that keeps search
-        // navigation correct. The body downloads below are the expensive part —
-        // suppressed under data saver.
+    /** SLOW pass for one (server, agent): model + reasoning catalog warm-up (so a
+     *  chat opens onto a READY picker) and JSONL body downloads for search. Takes
+     *  the [list] already produced + cached by [listServerAgent] so it NEVER
+     *  re-lists. Body downloads are suppressed under data saver. */
+    private suspend fun fetchBodiesAndCatalog(
+        server: Server, secrets: ServerSecrets, agent: Agent,
+        list: List<ai.eight24family.conch.agent.RemoteSession>, fetchBodies: Boolean,
+    ) {
+        val isSk = secrets.skKeys.isNotEmpty()
+        val pooledClient = if (isSk) {
+            ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+        } else null
+        if (isSk && pooledClient == null) return
+        val viaPool = if (pooledClient != null) " (via pooled SSH)" else ""
+
+        // Model + reasoning catalog warm-up — the chat-open probe skips its heavy
+        // PTY pass while this is fresh. No live client → skip; chat-open warms it.
+        val catalogClient = pooledClient
+            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+        if (catalogClient != null && !ModelCatalogPrefetcher.isFresh(server.id, agent)) {
+            SilentlyTry.fired(TAG, "model catalog warm-up") {
+                ModelCatalogPrefetcher.probeAndPersist(catalogClient, agent, server.id)
+            }
+        }
+
+        if (list.isEmpty()) return
+        // Prefetch JSONL bodies for the search index — incremental: each session's
+        // body is fetched once (size==0 filter), then skipped on later sweeps.
+        // Suppressed under data saver (bodies are the MBs; the listing above is the
+        // cheap metadata search navigation depends on).
         if (!fetchBodies) {
             val pending = list.count { historyCache.size(it.id) == 0L }
             if (pending > 0) {
@@ -396,24 +407,36 @@ class GlobalPrefetcher(
         // present-but-revoked OAuth cred so the overview doesn't sit on
         // "checking" or flash a false "OAuth" until a manual refresh. Same merge
         // as AgentPickerViewModelRefresh.kickLiveAuth, applied to the local map.
+        //
+        // Runs ASYNC (procScope), NOT inline: it spawns CLIs to verify tokens and
+        // Gemini's check alone can take ~25s (`timeout 25 gemini …`). Blocking here
+        // held the FIRST session listing on a freshly-added server hostage to that
+        // wait. The fast probe above is already saved, so the caller lists
+        // immediately on installed+loggedIn; this only REFINES the badge (drops a
+        // revoked OAuth) and re-saves — the overview observes the cache and updates
+        // in place. Codex has no live check, so its chatgpt badge is never touched
+        // here (the statusProbe verdict stands).
         val exec = pooledExec ?: return
-        val authok = runCatching { probe.probeLiveAuth(exec) }.getOrDefault(emptyMap())
-        val merged = resolved.mapValues { (agent, st) ->
-            when (authok[agent]) {
-                false -> {
-                    val m = st.methods - setOf("oauth", "chatgpt")
-                    st.copy(
-                        methods = m,
-                        loggedIn = m.isNotEmpty(),
-                        activeMethod = st.activeMethod?.takeIf { it in m } ?: m.singleOrNull(),
-                        liveAuthPending = false,
-                    )
+        procScope.launch {
+            val authok = runCatching { probe.probeLiveAuth(exec) }.getOrDefault(emptyMap())
+            if (authok.isEmpty()) return@launch
+            val merged = resolved.mapValues { (agent, st) ->
+                when (authok[agent]) {
+                    false -> {
+                        val m = st.methods - setOf("oauth", "chatgpt")
+                        st.copy(
+                            methods = m,
+                            loggedIn = m.isNotEmpty(),
+                            activeMethod = st.activeMethod?.takeIf { it in m } ?: m.singleOrNull(),
+                            liveAuthPending = false,
+                        )
+                    }
+                    true -> st.copy(liveAuthPending = false)
+                    else -> if (st.liveAuthPending) st.copy(liveAuthPending = false) else st
                 }
-                true -> st.copy(liveAuthPending = false)
-                else -> if (st.liveAuthPending) st.copy(liveAuthPending = false) else st
             }
+            if (merged != resolved) agentStatusCache.save(server.id, merged)
         }
-        if (merged != resolved) agentStatusCache.save(server.id, merged)
     }
 
     // Claude's ~/.claude/history.jsonl: one JSON object per line, each carrying

@@ -189,19 +189,26 @@ echo "codex_inst=${'$'}(command -v codex >/dev/null 2>&1 && echo y || echo n)"
 echo "codex_ver=${'$'}(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 echo "codex_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @openai/codex version 2>/dev/null | tr -d '\r\n ' || echo '')"
 CM=""
-# Authoritative: codex's OWN verdict. `codex login status` prints "Logged in
-# using ChatGPT" (OAuth) / "Logged in using an API key" / "Not logged in"
-# (exit 1). The CLI knows its real auth shape better than grepping auth.json,
-# so the OAuth badge reflects an ACTUAL ChatGPT login. `timeout` guards the
-# shared probe script from ever hanging on it.
-CS=${'$'}(timeout 5 codex login status 2>/dev/null)
-case "${'$'}CS" in *ChatGPT*) CM="${'$'}CM chatgpt";; esac
-case "${'$'}CS" in *"API key"*|*"api key"*) CM="${'$'}CM api";; esac
-# Fallback for codex builds without `login status` (CS empty): auth.json shape.
-if [ -z "${'$'}CS" ] && [ -f ~/.codex/auth.json ]; then
-  grep -qE '"tokens"[[:space:]]*:[[:space:]]*\{' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM chatgpt"
-  grep -qE '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM api"
+# codex's OWN verdict. `codex login status` prints "Logged in using ChatGPT"
+# (OAuth) / "Logged in using an API key" / "Not logged in", and EXITS 0 when
+# credentials are present (OpenAI docs). 2) auth.json shape checked ALWAYS
+# (not only when the command is silent): login-status wording drifts across
+# versions, so a present tokens{}/api key in the file counts on its own. 3)
+# exit 0 with no parsed method (creds in the OS keychain, not auth.json, and
+# wording we don't recognise) → trust the exit code, default ChatGPT.
+# `timeout` guards the shared probe from hanging.
+CS=${'$'}(timeout 8 codex login status 2>&1); CRC=${'$'}?
+case "${'$'}CS" in *ChatGPT*|*chatgpt*) CM="${'$'}CM chatgpt";; esac
+case "${'$'}CS" in *"API key"*|*"api key"*|*"API-key"*) CM="${'$'}CM api";; esac
+# auth.json shape — always, de-duped so a method already found isn't repeated.
+if [ -f ~/.codex/auth.json ]; then
+  case " ${'$'}CM " in *" chatgpt "*) ;; *) grep -qE '"tokens"[[:space:]]*:' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM chatgpt";; esac
+  case " ${'$'}CM " in *" api "*) ;; *) grep -qE '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"' ~/.codex/auth.json 2>/dev/null && CM="${'$'}CM api";; esac
 fi
+# Logged in (exit 0) but nothing parsed ⇒ creds present in a form we couldn't
+# classify (OS keychain / new wording). Don't render a false "log in": ChatGPT
+# is the OAuth sign-in, the overwhelmingly common case.
+if [ "${'$'}CRC" = "0" ] && [ -z "${'$'}(echo ${'$'}CM | tr -d ' ')" ]; then CM="chatgpt"; fi
 if [ -n "${'$'}CODEX_API_KEY" ] || [ -n "${'$'}OPENAI_API_KEY" ] || grep -qsE '^[[:space:]]*(export[[:space:]]+)?(OPENAI|CODEX)_API_KEY=' ~/.bashrc ~/.profile ~/.bash_profile ~/.env 2>/dev/null; then case " ${'$'}CM " in *" api "*) ;; *) CM="${'$'}CM api";; esac; fi
 echo "codex_methods=${'$'}(echo ${'$'}CM | tr ' ' ',')"
 case "${'$'}CS" in

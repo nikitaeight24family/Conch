@@ -266,7 +266,20 @@ internal class AgentSessionSshLifecycle(
                     )
                     return@withContext str
                 } finally { SilentlyTry.fired("SshAi-AgentSession", "close execOnLive ssh session") { sess.close() } }
-            } catch (_: Exception) { /* fall through */ }
+            } catch (e: Exception) {
+                // Surface WHY the live channel refused the command — this was
+                // swallowed, which hid the real cause of "Couldn't prepare the
+                // upload" (execOnLive → null). Common: sshd MaxSessions reached
+                // (too many concurrent channels on the one pooled transport → sshj
+                // ConnectionException "channel open failure: administratively
+                // prohibited"), or a transport error. Logged loudly + tagged with
+                // the command so the failing op is unambiguous.
+                android.util.Log.w(
+                    "SshAi-AgentSession",
+                    "execOnLive LIVE channel failed (${e.javaClass.simpleName}: ${e.message}) for cmd=${command.take(60)} — falling back to fresh handshake",
+                    e,
+                )
+            }
         }
         // Fallback to a fresh ssh.execute when the persistent channel
         // is gone. CRITICAL: pass `skSigner` along — for FIDO-keyed

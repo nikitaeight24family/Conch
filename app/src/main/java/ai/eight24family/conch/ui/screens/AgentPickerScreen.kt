@@ -498,22 +498,32 @@ internal fun ServerAgentPanel(
                     )
                 }
             }
-            else -> Agent.entries.forEach { agent ->
-                val s = statuses?.get(agent)
-                val rowChecking = !firstProbeDone || (s?.liveAuthPending == true)
-                AgentRow(
-                    agent = agent,
-                    status = if (rowChecking) null else s,
-                    installing = installingSet.contains(agent),
-                    anyInstalling = installingSet.contains(agent),
-                    liveOutput = installOutput[agent],
-                    op = installOp[agent],
-                    checking = rowChecking,
-                    onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
-                    onInstall = { vm.installAgent(agent) },
-                    onLogin = { vm.startLogin(agent) },
-                    onLongClick = { vm.openMethodSheet(agent) },
-                )
+            else -> {
+                // In-flight login (this whole screen shares ONE): once the user
+                // has pasted their code/URL (`submitted`), the OAuth exchange +
+                // credential poll can run for many seconds. Surface that on the
+                // agent's OWN row so it reads "signing in…" instead of a stale
+                // "[ log in ]" that looks like it's asking them to start over
+                // (user, 2026-07-05).
+                val loginNow = vm.loginRequest.collectAsState().value
+                Agent.entries.forEach { agent ->
+                    val s = statuses?.get(agent)
+                    val rowChecking = !firstProbeDone || (s?.liveAuthPending == true)
+                    AgentRow(
+                        agent = agent,
+                        status = if (rowChecking) null else s,
+                        installing = installingSet.contains(agent),
+                        anyInstalling = installingSet.contains(agent),
+                        liveOutput = installOutput[agent],
+                        op = installOp[agent],
+                        checking = rowChecking,
+                        loggingIn = loginNow?.agent == agent && loginNow.submitted,
+                        onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
+                        onInstall = { vm.installAgent(agent) },
+                        onLogin = { vm.startLogin(agent) },
+                        onLongClick = { vm.openMethodSheet(agent) },
+                    )
+                }
             }
         }
     }
@@ -842,6 +852,10 @@ private fun AgentRow(
      *  after a fresh login. Row renders `[ checking ]` and ignores
      *  taps so the user can't open chat against a stale cache. */
     checking: Boolean = false,
+    /** This agent's OAuth login has been submitted and the code/URL exchange
+     *  is running (many seconds). Row shows "signing in…" and its tap is inert
+     *  so it can't read as "start over". */
+    loggingIn: Boolean = false,
     onClick: () -> Unit,
     onInstall: () -> Unit = {},
     onLogin: () -> Unit = {},
@@ -866,7 +880,9 @@ private fun AgentRow(
     // hidden, the row is non-interactive until the fresh probe lands.
     val needsInstall = !checking && status != null && !status.installed
     val needsUpdate = !checking && status != null && status.installed && status.updateAvailable
-    val needsLogin = !checking && status != null && status.installed && !status.updateAvailable && !status.loggedIn
+    // `!loggingIn`: while the exchange is running the row must NOT re-fire the
+    // login flow on tap (that's the "invites me to log in again" confusion).
+    val needsLogin = !checking && !loggingIn && status != null && status.installed && !status.updateAvailable && !status.loggedIn
     val rowClick = when {
         canEnter -> onClick
         (needsInstall || needsUpdate) && !anyInstalling -> onInstall
@@ -916,6 +932,7 @@ private fun AgentRow(
                 installing = installing,
                 op = op,
                 checking = checking,
+                loggingIn = loggingIn,
                 cyan = cyan,
                 amber = amber,
                 dim = dim,
@@ -928,6 +945,7 @@ private fun AgentRow(
         val sub = when {
             installing && liveOutput != null -> "  $liveOutput"
             installing -> "  ${op?.line ?: "installing…"}"
+            loggingIn -> "  signing in… finishing up"
             checking -> "  checking…"
             status == null -> "  …probing"
             !status.installed -> "  not installed"
@@ -1002,11 +1020,15 @@ private fun StatusBadge(
     /** Show `[ checking ]` instead of the cached badge — driven by
      *  the parent's `firstProbeDone` flag during a fresh-login. */
     checking: Boolean = false,
+    /** OAuth code/URL submitted, exchange in flight — show a live "signing in…"
+     *  pill so the long completion window reads as progress, not "[ log in ]". */
+    loggingIn: Boolean = false,
     cyan: Color = MaterialTheme.colorScheme.primary,
     amber: Color = MaterialTheme.colorScheme.tertiary,
     dim: Color = MaterialTheme.colorScheme.outline,
 ) {
     val (label, color) = when {
+        loggingIn -> "[ signing in… ]" to cyan
         checking -> "[ checking ]" to dim
         status == null -> "[ … ]" to dim
         // Gray (dim) — communicates "mid-flight, can't tap right now". The row

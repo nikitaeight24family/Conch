@@ -11,6 +11,31 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.6] — 2026-07-06
+
+### Changed
+- Session lists load much faster and from every agent at once: the background
+  prefetch now lists all authorised agents first (titles appear almost
+  immediately), then fetches bodies in a second pass. The slow OAuth-liveness
+  check runs off the critical path so it no longer delays the first listing on a
+  freshly-added server.
+- After submitting an OAuth code/callback URL, the agent row shows "signing in…"
+  while the exchange completes, instead of a stale "[ log in ]" that read as
+  "start over". Its tap is inert during that window.
+
+### Fixed
+- Codex ChatGPT logins were sometimes misreported as "not logged in": detection
+  now reads `codex login status` from stdout **and** stderr, always checks the
+  on-disk credential shape, and trusts the command's exit code.
+- Device-key lifetime honoured the selector: the key was minted for 30 days while
+  the picker showed 7 (enrollment and the UI disagreed on the default). They now
+  agree, and changing the lifetime re-mints the key immediately so the "expires
+  in…" countdown reflects the chosen value.
+- File-upload preparation now reports an honest, actionable message when the
+  server can't be reached, instead of a misleading "could not create directory".
+
+---
+
 ## [0.2.5] — 2026-07-05
 
 ### Fixed

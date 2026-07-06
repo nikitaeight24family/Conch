@@ -501,12 +501,15 @@ class SshConnectionPool {
         ai.eight24family.conch.di.ServiceLocator.preferences.seamlessServers.first()
     }.contains(serverId)
 
-    // Default 30 (was 7) for away-headroom: with the sliding-expiry refresh on
-    // every connect, an active user never hits it, and an away user now has 30
-    // days before a re-tap. Coerced to the 1-30 the per-server setting allows.
+    // Default MUST match the Settings selector's default (ServerDetailViewModel
+    // .seamlessDays → `?: 7`) or the enrolled key's expiry silently disagrees
+    // with what the UI shows: the selector highlighted "7 days" while the key was
+    // minted at 30 and displayed "expires in 29d" (user, 2026-07-06). Both read
+    // the same `seamlessDaysByServer` pref, so both must default the same when a
+    // server has no explicit pick. Coerced to the 1-30 the setter allows.
     private fun seamlessDaysFor(serverId: String): Int = (runBlocking {
         ai.eight24family.conch.di.ServiceLocator.preferences.seamlessDaysByServer.first()
-    }[serverId] ?: 30).coerceIn(1, 30)
+    }[serverId] ?: 7).coerceIn(1, 30)
 
     /**
      * Connect/reconnect a held SK server SILENTLY via its hardware device key
