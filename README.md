@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.6-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.8-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.6
+conch ▌ v0.2.8
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,41 @@ conch ▌ v0.2.6
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.2.8
+
+**Long chats stay in order, and the usage bar tells the truth about limits.**
+
+- **No more scrambled chats after a long session.** Your first message no longer
+  jumps to the bottom, and the top bar keeps showing the model that's actually
+  answering (it used to silently flip to "Sonnet 5"). Under the hood: the app now
+  tells its own harmless housekeeping rewrites apart from a real Claude
+  compaction, so it re-adopts the server's history verbatim instead of shuffling
+  it — and the reading position you left off at is preserved.
+- **Honest usage-limit reset.** When you hit a rate limit, the bar shows the real
+  reset time straight from the CLI's own message ("resets 8:30pm") instead of a
+  stuck "resets now" that never ticked. It works even for `setup-token` logins,
+  where the usage endpoint can't report the reset — a fresh sign-in or a switched
+  account clears it automatically.
+
+---
+
+## What's new in 0.2.7
+
+**Honest agent status, a smoother sign-in, and live limits everywhere.**
+
+- **Signing in is one clean, animated flow.** Paste your code and it's picked up
+  automatically; the window verifies your subscription inside and goes straight to
+  "ready" — no leftover refresh spinner, no name prompt.
+- **Claude shows its real status everywhere** — ready, no subscription, or sign-in
+  expired — instead of a misleading "ready" on a dead login.
+- **The usage/limit bar works for more sign-in types** (including `setup-token`
+  logins), reading the limit from the account's own rate-limit signals.
+- **Pull down on the Agents tab to refresh.**
+- **Updating a server-installed CLI now works reliably**, even when a user
+  `~/.npmrc` prefix would otherwise misdirect the install.
 
 ---
 

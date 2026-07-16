@@ -201,6 +201,15 @@ for f in ~/.claude/projects/*/*.jsonl; do
   case "${'$'}{f##*/}" in agent-*) continue;; esac
   head -n 40 "${'$'}f" 2>/dev/null | grep -q '"entrypoint":"sdk-cli"' || continue
   printf '%s\n' "${'$'}CONCH_INUSE" | grep -qxF "${'$'}f" && continue
+  # Skip HOT files — modified within the last minute is almost certainly the
+  # session the user is actively in (every turn appends to it), and the /proc
+  # guard misses it because our own tail-poll reader holds NO fd (it re-execs
+  # tail each poll). Rewriting a live file (sed shrinks it 4 bytes/tag + mv
+  # swaps the inode) makes that poll misread the shrink as a compaction and
+  # scramble the chat. This rewrite only needs to happen once the session is
+  # IDLE (it just makes it show in `claude --resume`), so deferring on a hot
+  # file is harmless — the next refresh converts it once cold.
+  [ -n "${'$'}(find "${'$'}f" -mmin -1 2>/dev/null)" ] && continue
   ctmp="${'$'}f.conchtmp"
   sed 's/"entrypoint":"sdk-cli"/"entrypoint":"cli"/g' "${'$'}f" > "${'$'}ctmp" 2>/dev/null && mv "${'$'}ctmp" "${'$'}f" 2>/dev/null || rm -f "${'$'}ctmp" 2>/dev/null
 done
@@ -439,6 +448,14 @@ case " ${'$'}CM " in
         fi
       fi
     fi
+    # Plan tier for the limits sheet header — only knowable from a 200 profile
+    # (an inference-only setup-token 403s above and never reaches here, so its
+    # tier stays unknown and the sheet just omits it).
+    PLAN=
+    if [ "${'$'}mx" = y ]; then PLAN=Max; elif [ "${'$'}pr" = y ]; then PLAN=Pro; fi
+    [ -z "${'$'}PLAN" ] && { [ "${'$'}ST" = TRIAL_ACTIVE ] || [ "${'$'}ST" = TRIAL_START ]; } && PLAN="Pro trial"
+    [ -z "${'$'}PLAN" ] && [ "${'$'}ST" = NO_SUBSCRIPTION ] && PLAN=Free
+    [ -n "${'$'}PLAN" ] && echo "claude_plan=${'$'}PLAN"
     echo "claude_run_state=${'$'}ST"
     [ -n "${'$'}DA" ] && echo "claude_run_data=${'$'}DA"
   ) ;;
@@ -1295,9 +1312,23 @@ private object ClaudeTopbarUi : AgentTopbarUi {
         val switched = sel != null && obs != null && resolve(state, obs) != resolve(state, sel)
         val pick = (if (switched) obs else (sel ?: obs))
             ?: usable(state.sessionInitialModel)
-            ?: state.availableModels.entries.firstOrNull { (k, label) ->
-                k != "default" && !isUnavail(label)
-            }?.key
+            // NEVER invent the arbitrary first map entry (which is "sonnet" →
+            // "Sonnet 5") when NOTHING is known. A transient state wipe (e.g. a
+            // false-positive compaction briefly clearing observedModel) leaves all
+            // three sources null — returning null makes the topbar HOLD its last
+            // label instead of lying "Sonnet 5". The recommended-model substitution
+            // below fires ONLY when a model was genuinely REPORTED but is
+            // unavailable (e.g. suspended Fable 5) — gated strictly on `reported!=
+            // null`.
+            ?: run {
+                val reported = sequenceOf(
+                    state.selectedModel, state.observedModel, state.sessionInitialModel,
+                ).firstOrNull { !it.isNullOrBlank() } ?: return null
+                @Suppress("UNUSED_EXPRESSION") reported
+                state.availableModels.entries.firstOrNull { (k, label) ->
+                    k != "default" && !isUnavail(label)
+                }?.key
+            }
             ?: return null
         return resolve(state, pick)
     }

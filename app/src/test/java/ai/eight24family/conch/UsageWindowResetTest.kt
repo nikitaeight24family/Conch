@@ -17,7 +17,10 @@ class UsageWindowResetTest {
         assertEquals("14m", win(now + 14 * 60_000L).resetTextLive(now))
         assertEquals("3h", win(now + 3 * 3600_000L).resetTextLive(now))
         assertEquals("2d", win(now + 2 * 86_400_000L).resetTextLive(now))
-        assertEquals("now", win(now - 5_000L).resetTextLive(now))   // already past → "now"
+        // Already past → EMPTY, not a lying "now". A stale reset the account is still
+        // sitting on (rate-limited, no turn finishing to refetch) must not read
+        // "resets now" forever.
+        assertEquals("", win(now - 5_000L).resetTextLive(now))
     }
 
     @Test

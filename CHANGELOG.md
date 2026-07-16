@@ -11,6 +11,44 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.8] — 2026-07-16
+
+### Fixed
+- Long chats no longer get scrambled. After a lengthy session the first message
+  could jump to the bottom and the top bar could silently flip to "Sonnet 5". The
+  app now distinguishes its own harmless session-file housekeeping rewrites from a
+  real Claude compaction (by line-id containment), re-adopting the server history
+  verbatim on a benign shrink instead of running a lossy reorder — and it keeps
+  the reading position you left off at. The top-bar model label is never invented
+  when no model has been reported.
+- The usage-limit bar now shows the real reset time. When you hit a rate limit it
+  reads the reset straight from the CLI's own message ("resets 8:30pm") instead of
+  freezing on a stale "resets now". This works for `setup-token` logins whose
+  usage endpoint can't report the reset; a fresh sign-in or switched account
+  clears it automatically, and a past reset renders blank rather than a false
+  "now".
+
+---
+
+## [0.2.7] — 2026-07-16
+
+### Changed
+- Signing in is one clean, animated flow: the pasted code is picked up
+  automatically, the window verifies your subscription inside and goes straight to
+  "ready" — no leftover refresh spinner and no account-name prompt (auto-captured
+  as "Account N", renamable later).
+- Claude reports its real status on every surface — ready, no subscription, or
+  sign-in expired — instead of a misleading "ready" on a dead login.
+- The usage/limit bar works for more sign-in types, including `setup-token`
+  logins, reading the limit from the account's own rate-limit signals.
+- The Agents tab supports pull-to-refresh.
+
+### Fixed
+- Updating a server-installed CLI works reliably even when a user `~/.npmrc`
+  prefix would otherwise misdirect the install out of its real location.
+
+---
+
 ## [0.2.6] — 2026-07-06
 
 ### Changed
@@ -662,7 +700,11 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
+[0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
+[0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6
+[0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
 [0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2

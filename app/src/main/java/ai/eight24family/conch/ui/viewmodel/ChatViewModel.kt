@@ -289,11 +289,33 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ServiceLocator.agentStatusCache.observeStatuses(serverId),
         ) { agent, statuses ->
             val st = statuses[agent]
-            st?.claudeState?.takeIf { it.isBlocked }?.lineWith(st.claudeStateData)
+            // For rate-limit states the datum is an ISO `resets_at` — render it as
+            // a LOCAL clock time ("10:30 AM") in the user's own zone, not a raw
+            // ISO or the CLI's foreign-zone string (user 2026-07-16).
+            val data = st?.claudeStateData
+            val display = if (data != null &&
+                (st.claudeState == ai.eight24family.conch.agent.ClaudeRunState.RATE_LIMITED ||
+                    st.claudeState == ai.eight24family.conch.agent.ClaudeRunState.NEAR_LIMIT)
+            ) {
+                ai.eight24family.conch.agent.parseIsoInstant(data)
+                    ?.let { ai.eight24family.conch.agent.usageResetClock(it) } ?: data
+            } else data
+            st?.claudeState?.takeIf { it.isBlocked }?.lineWith(display)
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val codeBlocked: StateFlow<Boolean> =
         claudeBlockLine.map { it != null }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** The current Claude account's plan tier ("Max"/"Pro"/"Pro trial"/"Free")
+     *  for the limits-sheet header, or null when unknowable (inference-only
+     *  setup-token, non-Claude agent). */
+    val claudePlan: StateFlow<String?> =
+        kotlinx.coroutines.flow.combine(
+            _currentAgent,
+            ServiceLocator.agentStatusCache.observeStatuses(serverId),
+        ) { agent, statuses ->
+            if (agent != Agent.CLAUDE) null else statuses[agent]?.claudePlan
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Local id of the AgentSession we're currently displaying. Public so
      *  other screens (subagents browser) can re-attach to the live SSH
@@ -2207,6 +2229,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** The whole report (all windows) for the tap-to-open limits sheet. */
     val usageReport: StateFlow<UsageReport?> = _usage.asStateFlow()
 
+    /** Reset epoch (ms) the CLI itself reported when this account got
+     *  rate-limited ("resets 8:30pm"). Authoritative when the server-side probe
+     *  can't read the reset (inference-only tokens 403 the usage endpoint), so
+     *  the bar shows the real reset instead of a stale "resets now". Set by the
+     *  message watcher below; self-expires once past; a fresh <100% probe
+     *  overrides it (account switched / limit cleared) — see [usageBar]. */
+    private val _cliLimitReset = MutableStateFlow<Long?>(null)
+
     /**
      * The thin bar above the chat input (replaces the old static divider).
      * Shows the NEAREST plan window (accent fill + "14% · 3h"); else the API
@@ -2223,14 +2253,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
     }
 
-    val usageBar: StateFlow<UsageBarState> = combine(_usage, costStats, usageTicker) { report, cost, _ ->
+    val usageBar: StateFlow<UsageBarState> = combine(_usage, costStats, _cliLimitReset, usageTicker) { report, cost, cliReset, _ ->
+        val now = System.currentTimeMillis()
         val primary = report?.primary
+        // Authoritative CLI reset: when the account is rate-limited and the
+        // server-side probe can't read the reset (inference-only token 403s the
+        // usage endpoint), honour the reset the CLI printed ("resets 8:30pm").
+        // A fresh probe proving we're back UNDER 100% (switched account / limit
+        // cleared) overrides it, so a stale limit can't stick past its lift.
+        val probeSaysClear = primary != null && primary.percent < 100
+        if (cliReset != null && cliReset > now && !probeSaysClear) {
+            // Rate-limited: show the reset as a LOCAL clock time ("resets 10:30 AM")
+            // in the user's own zone — not the CLI's foreign-zone "8:30pm".
+            val clock = ai.eight24family.conch.agent.usageResetClock(cliReset)
+            return@combine UsageBarState(
+                fill = 1f,
+                label = "100% · $clock",
+                filled = true,
+                severity = 1f,
+            )
+        }
         when {
             primary != null -> {
-                val reset = primary.resetTextLive(System.currentTimeMillis())
+                // At/over the limit → absolute local clock (when does it lift?);
+                // below it → a live countdown ("how long until my window rolls").
+                val reset =
+                    if (primary.percent >= 100) primary.resetAtEpochMs?.let { ai.eight24family.conch.agent.usageResetClock(it) }.orEmpty()
+                    else primary.resetTextLive(now)
                 UsageBarState(
                     fill = primary.fraction,
-                    label = "${primary.percent}%" + if (reset.isNotEmpty()) " · resets $reset" else "",
+                    label = "${primary.percent}%" + if (reset.isNotEmpty()) " · $reset" else "",
                     filled = true,
                     severity = primary.usedFraction,
                 )
@@ -2306,6 +2358,42 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     init {
+        // Feed the usage bar the CLI's OWN rate-limit reset ("resets 8:30pm").
+        // When an inference-only account is limited, the server-side probe can't
+        // read the reset (usage endpoint 403s on scope user:inference), so the
+        // bar would decay to a lying "resets now". The CLI prints the truth in
+        // its turn output — parse it off the terminal Result/Error message. Only
+        // Result/Error (a turn's failure text) are scanned, never assistant
+        // replies, so a reply that merely mentions "resets 5pm" can't false-trip.
+        viewModelScope.launch {
+            messages.collect { msgs ->
+                if (_currentAgent.value != Agent.CLAUDE) return@collect
+                val now = System.currentTimeMillis()
+                val zone = java.time.ZoneId.systemDefault()
+                // Only the last few messages: a rate-limit Result/Error is the
+                // turn's TERMINAL event, so it lives at the tail. Scanning the
+                // tail (not all history) means an OLD limit that the user has
+                // since moved past doesn't keep re-arming the bar.
+                val reset = msgs.asReversed().asSequence().take(3).mapNotNull { m ->
+                    val t = when (m) {
+                        is AgentMessage.Result -> m.text
+                        is AgentMessage.Error -> m.text
+                        else -> null
+                    }
+                    ai.eight24family.conch.agent.RateLimitReset.parse(t, now, zone)
+                }.firstOrNull { it > now }
+                val last = msgs.lastOrNull()
+                when {
+                    reset != null -> _cliLimitReset.value = reset
+                    // Forward progress past the limit — the user sent again or the
+                    // agent replied — so we're no longer sitting on that failure.
+                    // Drop it (a re-hit re-arms it) so a fresh turn / switched
+                    // account isn't painted as still-limited.
+                    last is AgentMessage.UserText || last is AgentMessage.AssistantText ->
+                        _cliLimitReset.value = null
+                }
+            }
+        }
         // Refresh the usage bar every time a turn finishes (Working → not).
         viewModelScope.launch {
             var wasWorking = false

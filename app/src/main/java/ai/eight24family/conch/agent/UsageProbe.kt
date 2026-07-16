@@ -32,27 +32,67 @@ data class UsageWindow(
      *  because resetText was computed once at fetch and only refreshed on
      *  chat-open / turn-finish. */
     val resetAtEpochMs: Long? = null,
+    /** True for a per-model window (the "second layer": Opus/Sonnet/Fable
+     *  weekly caps) vs an aggregate (5-hour / weekly all-models). Lets the sheet
+     *  group the per-model rows under their own subheader. */
+    val perModel: Boolean = false,
 ) {
     /** "Until reset" recomputed against [nowMs] from the absolute reset time, so
      *  it counts down without a refetch; falls back to the fetch-time
      *  [resetText] when no absolute anchor is available. */
     fun resetTextLive(nowMs: Long): String {
         val at = resetAtEpochMs ?: return resetText
-        val s = (at - nowMs) / 1000
-        return when {
-            s <= 0 -> "now"
-            s < 3600 -> "${s / 60}m"
-            // Hours with the minute remainder ("2h40m", not a floor to "2h") —
-            // the CLI shows the absolute reset time, and a whole-hour floor made
-            // the app look 40 minutes behind it (user, 2026-07-03). Exact-hour
-            // boundaries still render clean ("3h").
-            s < 86_400 -> {
-                val m = (s % 3600) / 60
-                if (m == 0L) "${s / 3600}h" else "${s / 3600}h${m}m"
-            }
-            else -> "${s / 86_400}d"
-        }
+        return usageCountdownText((at - nowMs) / 1000)
     }
+}
+
+/** The reset moment as an absolute clock time IN THE DEVICE'S OWN TIMEZONE
+ * ("10:30 AM"). The CLI reports the reset in its server's zone ("resets 8:30pm
+ * (America/Los_Angeles)"), which reads as a wrong time to a user in another
+ * zone. We hold the absolute epoch, so we render it in the user's local zone and
+ * the confusion goes away. */
+fun usageResetClock(
+    epochMs: Long,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: java.util.Locale = java.util.Locale.US,
+): String {
+    val reset = java.time.Instant.ofEpochMilli(epochMs).atZone(zone)
+    val today = java.time.ZonedDateTime.now(zone).toLocalDate()
+    // A weekly reset lands DAYS away, so a bare "12:00 AM" is ambiguous. Name
+    // the weekday when it isn't today: "Sat 12:00 AM". Same-day (5-hour)
+    // stays clean.
+    val pattern = if (reset.toLocalDate() == today) "h:mm a" else "EEE h:mm a"
+    return java.time.format.DateTimeFormatter.ofPattern(pattern, locale).format(reset)
+}
+
+/** Parse an ISO-8601 instant (the usage endpoint's `resets_at`, or the CLI's
+ *  own timestamp) to epoch millis; null if it isn't a parseable instant. */
+fun parseIsoInstant(iso: String?): Long? {
+    if (iso.isNullOrBlank()) return null
+    return runCatching { java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli() }.getOrNull()
+        ?: runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull()
+        ?: runCatching { java.time.ZonedDateTime.parse(iso).toInstant().toEpochMilli() }.getOrNull()
+}
+
+/** Human "time until" for a countdown of [secs] seconds: "45m", "2h40m", "3d".
+ * EMPTY once the moment is here/past — the bar then shows the bare percent
+ * instead of a lying "resets now". A stale reset that never ticks past is the
+ * common rate-limited case: the account stays at 100%, no turn finishes to
+ * trigger a refetch, and the probe can't read a fresh reset for an
+ * inference-only token anyway. Shared by [UsageWindow.resetTextLive] and the
+ * usage bar's CLI-reset path. */
+fun usageCountdownText(secs: Long): String = when {
+    secs <= 0 -> ""
+    secs < 3600 -> "${secs / 60}m"
+    // Hours with the minute remainder ("2h40m", not a floor to "2h") — the CLI
+    // shows the absolute reset time, and a whole-hour floor made the app look
+    // 40 minutes behind it (user, 2026-07-03). Exact-hour boundaries still
+    // render clean ("3h").
+    secs < 86_400 -> {
+        val m = (secs % 3600) / 60
+        if (m == 0L) "${secs / 3600}h" else "${secs / 3600}h${m}m"
+    }
+    else -> "${secs / 86_400}d"
 }
 
 /** All plan windows for an account. [windows] is ordered with the nearest /
@@ -64,6 +104,12 @@ data class UsageReport(
     /** Claude's `extra_usage` overage spend in USD (beyond the plan), if the
      *  account reports it. Null for Codex/Gemini and API-key mode. */
     val extraUsedUsd: Double? = null,
+    /** Plan tier label ("Max"/"Pro") for the limits-sheet header, read from the
+     *  same 200 profile as the usage — so it's exactly as fresh as the windows
+     *  the user is looking at (a separate status probe may not have run yet in
+     *  this chat). Null for an inference-only setup-token (profile 403s),
+     *  Codex/Gemini, API-key mode. */
+    val plan: String? = null,
 ) {
     val primary: UsageWindow? get() = windows.firstOrNull()
 }
@@ -221,12 +267,60 @@ object UsageProbe {
         }
     }
 
-    // ---- Claude: api/oauth/usage → five_hour, seven_day, per-model weeklies ----
-    private fun parseClaude(json: String): List<UsageWindow> = buildList {
-        claudeWindow(json, "five_hour", "5-hour limit")?.let { add(it) }
-        claudeWindow(json, "seven_day", "Weekly · all models")?.let { add(it) }
-        claudeWindow(json, "seven_day_opus", "Opus only")?.let { add(it) }
-        claudeWindow(json, "seven_day_sonnet", "Sonnet only")?.let { add(it) }
+    // ---- Claude: api/oauth/usage — DYNAMIC. Anthropic returns a flat map of
+    //      rate windows: five_hour, seven_day, and a per-model "second layer"
+    //      (seven_day_opus, seven_day_sonnet, and — as new models ship —
+    //      seven_day_fable, five_hour_opus, …). We parse EVERY window object the
+    //      endpoint hands back instead of a hardcoded four, so a new model's cap
+    //      (Fable 5 today, whatever ships next) surfaces on its own instead of
+    //      being silently dropped (user 2026-07-16). ----
+    internal fun parseClaude(json: String): List<UsageWindow> {
+        // Any FLAT object carrying "utilization" is a rate window, wherever it
+        // sits (top-level or nested under a per-model container) — [^{}] keeps
+        // the match to a single leaf object. `extra_usage` (used_credits, no
+        // utilization) and non-window objects are skipped by that check.
+        val re = Regex("\"([a-z][a-z0-9_]*)\"\\s*:\\s*\\{([^{}]*?\"utilization\"[^{}]*?)\\}")
+        val seen = HashSet<String>()
+        return re.findAll(json).mapNotNull { m ->
+            val key = m.groupValues[1]
+            if (key == "extra_usage" || !seen.add(key)) return@mapNotNull null
+            val body = m.groupValues[2]
+            val util = Regex("\"utilization\"\\s*:\\s*([0-9.]+)").find(body)
+                ?.groupValues?.get(1)?.toFloatOrNull() ?: return@mapNotNull null
+            val resetsAt = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
+            val resetEpochMs = resetsAt?.let { isoToEpoch(it) }?.let { it * 1000 }
+            val perModel = key != "five_hour" && key != "seven_day" &&
+                (key.startsWith("five_hour_") || key.startsWith("seven_day_"))
+            key to window(
+                claudeWindowLabel(key), util, isoToDelta(resetsAt),
+                resetAtEpochMs = resetEpochMs, perModel = perModel,
+            )
+        }.sortedBy { claudeWindowOrder(it.first) }.map { it.second }.toList()
+    }
+
+    /** Human label for a usage-window key. Known windows get a curated name;
+     *  any `five_hour_<model>` / `seven_day_<model>` (opus/sonnet/fable/…) is
+     *  derived generically, so an unseen model still reads cleanly. */
+    private fun claudeWindowLabel(key: String): String = when {
+        key == "five_hour" -> "5-hour · all models"
+        key == "seven_day" -> "Weekly · all models"
+        key.startsWith("seven_day_") -> "${modelLabel(key.removePrefix("seven_day_"))} · weekly"
+        key.startsWith("five_hour_") -> "${modelLabel(key.removePrefix("five_hour_"))} · 5-hour"
+        else -> key.replace('_', ' ').replaceFirstChar { it.uppercase() }
+    }
+
+    /** "opus" → "Opus", "claude_fable" → "Claude Fable". */
+    private fun modelLabel(m: String): String =
+        m.split('_').joinToString(" ") { p -> p.replaceFirstChar { it.uppercase() } }
+
+    /** Display order: the two aggregate windows first (5-hour, then weekly),
+     *  then the per-model "second layer" grouped after. */
+    private fun claudeWindowOrder(key: String): Int = when {
+        key == "five_hour" -> 0
+        key == "seven_day" -> 1
+        key.startsWith("five_hour_") -> 2
+        key.startsWith("seven_day_") -> 3
+        else -> 4
     }
 
     /** Claude's usage endpoint also carries an `extra_usage` block — the
@@ -235,15 +329,6 @@ object UsageProbe {
     private fun parseClaudeExtra(json: String): Double? {
         val body = Regex("\"extra_usage\"\\s*:\\s*\\{([^{}]*)\\}").find(json)?.groupValues?.get(1) ?: return null
         return Regex("\"used_?credits\"\\s*:\\s*([0-9.]+)").find(body)?.groupValues?.get(1)?.toDoubleOrNull()
-    }
-
-    private fun claudeWindow(json: String, key: String, label: String): UsageWindow? {
-        val body = Regex("\"$key\"\\s*:\\s*\\{([^{}]*)\\}").find(json)?.groupValues?.get(1) ?: return null
-        val util = Regex("\"utilization\"\\s*:\\s*([0-9.]+)").find(body)
-            ?.groupValues?.get(1)?.toFloatOrNull() ?: return null
-        val resetsAt = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
-        val resetEpochMs = resetsAt?.let { isoToEpoch(it) }?.let { it * 1000 }
-        return window(label, util, isoToDelta(resetsAt), resetAtEpochMs = resetEpochMs)
     }
 
     // ---- Codex: live `codex app-server` account/rateLimits/read (camelCase)
@@ -317,6 +402,7 @@ object UsageProbe {
         resetText: String,
         remaining: Boolean = false,
         resetAtEpochMs: Long? = null,
+        perModel: Boolean = false,
     ): UsageWindow {
         val used = raw.coerceIn(0f, 100f)
         val shown = if (remaining) 100f - used else used
@@ -327,6 +413,7 @@ object UsageProbe {
             resetText = resetText,
             usedFraction = (used / 100f).coerceIn(0f, 1f),
             resetAtEpochMs = resetAtEpochMs,
+            perModel = perModel,
         )
     }
 
@@ -395,16 +482,26 @@ object UsageProbe {
           -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" \
           -H "anthropic-version: 2023-06-01" -H "User-Agent: ${'$'}UA" -H "content-type: application/json" \
           -d "${'$'}BODY" "https://api.anthropic.com/v1/messages" 2>/dev/null | tr -d '\r')
-        hv(){ printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}1:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1; }
         pct(){ awk -v v="${'$'}1" 'BEGIN{ if(v=="") exit; printf "%.2f", v*100 }'; }
         iso(){ [ -n "${'$'}1" ] && { date -u -d "@${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; }; }
-        U5=${'$'}(pct "${'$'}(hv 5h-utilization)"); R5=${'$'}(hv 5h-reset)
-        U7=${'$'}(pct "${'$'}(hv 7d-utilization)"); R7=${'$'}(hv 7d-reset)
-        [ -z "${'$'}U5" ] && exit 0
-        OUT="{\"five_hour\":{\"utilization\":${'$'}{U5:-0},\"resets_at\":\"${'$'}(iso "${'$'}R5")\"}"
-        [ -n "${'$'}U7" ] && OUT="${'$'}OUT,\"seven_day\":{\"utilization\":${'$'}U7,\"resets_at\":\"${'$'}(iso "${'$'}R7")\"}"
-        OUT="${'$'}OUT}"
-        printf '%s' "${'$'}OUT"
+        # DYNAMIC — emit EVERY unified rate window the headers carry, not just
+        # 5h/7d, so a subscribed account's per-model caps (7d-opus, 7d-fable, …)
+        # ride through too. Header window name → the usage-endpoint JSON key the
+        # dynamic parser labels: 5h→five_hour, 7d→seven_day, 5h-<m>→five_hour_<m>,
+        # 7d-<m>→seven_day_<m>.
+        norm(){ case "${'$'}1" in 5h) echo five_hour;; 7d) echo seven_day;; 5h-*) echo "five_hour_${'$'}{1#5h-}";; 7d-*) echo "seven_day_${'$'}{1#7d-}";; *) printf '%s' "${'$'}1" | tr - _;; esac; }
+        WINS=${'$'}(printf '%s' "${'$'}H" | grep -ioE '^anthropic-ratelimit-unified-[a-z0-9-]+-utilization:' | sed -E 's/^anthropic-ratelimit-unified-(.*)-utilization:.*/\1/i')
+        OUT=; SEP=
+        for w in ${'$'}WINS; do
+          uv=${'$'}(printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}w-utilization:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1)
+          up=${'$'}(pct "${'$'}uv"); [ -z "${'$'}up" ] && continue
+          rv=${'$'}(printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}w-reset:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1)
+          k=${'$'}(norm "${'$'}w")
+          OUT="${'$'}OUT${'$'}SEP\"${'$'}k\":{\"utilization\":${'$'}up,\"resets_at\":\"${'$'}(iso "${'$'}rv")\"}"
+          SEP=,
+        done
+        [ -z "${'$'}OUT" ] && exit 0
+        printf '{%s}' "${'$'}OUT"
     """.trimIndent()
 
     // Claude /context breakdown — run on a THROWAWAY COPY of the chat's session

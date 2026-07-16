@@ -78,6 +78,7 @@ internal fun ChatPromptHost(
     val codeBlocked = codeBlockText != null
     val contextBreakdown by vm.contextBreakdown.collectAsState()
     val contextLoading by vm.contextLoading.collectAsState()
+    val claudePlan by vm.claudePlan.collectAsState()
 
     // Slash-command autocomplete state. Filters built-in + user-defined
     // commands by what's typed after the leading `/` and before any
@@ -118,6 +119,7 @@ internal fun ChatPromptHost(
         },
         contextBreakdown = contextBreakdown,
         contextLoading = contextLoading,
+        claudePlan = claudePlan,
         uploading = anyUploading,
         statusHint = run {
             // Suppress "// agent: failed —" / "disconnected" hints when

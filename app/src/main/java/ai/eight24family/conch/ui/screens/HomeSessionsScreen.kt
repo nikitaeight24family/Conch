@@ -271,11 +271,10 @@ fun HomeSessionsScreen(
                         val multiAgent = newChatPairs.distinctBy { it.second }.size > 1
                         val multiServer = newChatPairs.distinctBy { it.first.id }.size > 1
                         Box {
-                            // Compose-new-chat button: a translucent cyber disc with
-                            // a chat-bubble-＋ glyph — reads as "new conversation",
-                            // not "attach a file" (a bare ＋ looked like add-photo).
-                            // ~15% smaller than the stock 56dp FAB +
-                            // semi-transparent.
+                            // Compose-new-chat button: a translucent cyber disc with a
+                            // chat-bubble-＋ glyph — reads as "new conversation", not
+                            // "attach a file" (a bare ＋ looked like add-photo). ~15%
+                            // smaller than the stock 56dp FAB + semi-transparent.
                             Box(
                                 modifier = Modifier
                                     .size(48.dp)

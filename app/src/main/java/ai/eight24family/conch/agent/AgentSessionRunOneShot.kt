@@ -522,6 +522,15 @@ internal class AgentSessionRunOneShot(
                 else -> "${agent.cliCommand} exited with code $exit"
             }
         }
+        if (agent == Agent.CLAUDE && looksLikeRateLimit(stdoutTail)) {
+            // Preserve the CLI's OWN reset ("resets 8:30pm") in the message — it's
+            // honest (not a bare "exited with code 1") AND the usage-bar watcher
+            // reads the reset back out of this text (see RateLimitReset). Falls to
+            // a plain limit line when the CLI didn't print a parseable time.
+            val phrase = ai.eight24family.conch.agent.RateLimitReset.resetPhrase(stdoutTail)
+            return "Usage limit reached" + (phrase?.let { " — $it" } ?: "") +
+                ". Switch model or account, or wait."
+        }
         // Default — generic exit message.
         return "${agent.cliCommand} exited with code $exit"
     }

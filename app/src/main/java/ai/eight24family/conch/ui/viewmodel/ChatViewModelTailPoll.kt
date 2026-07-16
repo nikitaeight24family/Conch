@@ -177,13 +177,25 @@ internal class ChatViewModelTailPoll(
                 )
             } else {
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
-                val merged = cache.mergeServer(sessionId, serverFull)
-                if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
-                lastOffset = preSize.toLong()
-                android.util.Log.i(
-                    "SshAi-Tail",
-                    "compact merged sid=${sessionId.take(8)} mergedBytes=${merged?.size ?: -1} newOffset=$lastOffset",
-                )
+                // Same benign-shrink guard as the mid-poll branch: a rewrite that
+                // kept every id (our sdk-cli→cli entrypoint fix) must re-adopt the
+                // server verbatim, NOT run the lossy/offset-desyncing mergeServer.
+                if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
+                    cache.save(sessionId, serverFull)
+                    lastOffset = serverFull.size.toLong()
+                    android.util.Log.i(
+                        "SshAi-Tail",
+                        "shrink open sid=${sessionId.take(8)} — benign rewrite, re-adopted server verbatim (${serverFull.size}B)",
+                    )
+                } else {
+                    val merged = cache.mergeServer(sessionId, serverFull)
+                    if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
+                    lastOffset = preSize.toLong()
+                    android.util.Log.i(
+                        "SshAi-Tail",
+                        "compact merged sid=${sessionId.take(8)} mergedBytes=${merged?.size ?: -1} newOffset=$lastOffset",
+                    )
+                }
             }
         }
 
@@ -276,16 +288,36 @@ internal class ChatViewModelTailPoll(
                 idleTicks++
                 continue
             }
-            // Mid-poll compact detection — same merge-not-wipe policy as the catch-up pass.
+            // Mid-poll SHRINK. A file that got SMALLER is EITHER a real Claude
+            // auto-compaction (old turns dropped) OR a benign rewrite that kept all
+            // content — most often our OWN listSessionsScript flipping
+            // "entrypoint":"sdk-cli"→"cli" (−4 bytes/tag). Blindly running the
+            // keep-local mergeServer on the benign case is what corrupted the chat:
+            // it dedups on the BARE message.id (collapsing a turn's thinking/
+            // tool_use lines), emits local-order-first, and desyncs cache length
+            // from the server offset — surfacing later as "first message at the
+            // bottom" + the topbar model flipping to the first map entry (Sonnet).
+            // So distinguish by id-set containment: server still has every local id
+            // ⇒ NOT a compaction ⇒ re-adopt server verbatim (authoritative +
+            // complete, cache bytes == server bytes → offset invariant restored).
             if (size < lastOffset) {
-                android.util.Log.w(
-                    "SshAi-Tail",
-                    "compact mid-poll sid=${sessionId.take(8)} cachedOffset=$lastOffset serverSize=$size — merging cache only",
-                )
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
-                val merged = cache.mergeServer(sessionId, serverFull)
-                if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
-                lastOffset = size
+                if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
+                    android.util.Log.i(
+                        "SshAi-Tail",
+                        "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — benign rewrite, re-adopting server verbatim",
+                    )
+                    cache.save(sessionId, serverFull)
+                    lastOffset = serverFull.size.toLong()
+                } else {
+                    android.util.Log.w(
+                        "SshAi-Tail",
+                        "compact mid-poll sid=${sessionId.take(8)} cachedOffset=$lastOffset serverSize=$size — real compaction, merging keep-local",
+                    )
+                    val merged = cache.mergeServer(sessionId, serverFull)
+                    if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
+                    lastOffset = size
+                }
                 idleTicks = 0
                 lastSeenWorking = curWorking
                 lastCurWorking = curWorking

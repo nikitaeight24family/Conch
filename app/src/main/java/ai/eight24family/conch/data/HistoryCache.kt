@@ -460,34 +460,75 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 }
             }
             if (localBuffer == null || localLen == 0) return serverBytes
-            val seenIds = HashSet<String>()
-            val seenHash = HashSet<Int>()
-            val out = StringBuilder(localLen + serverBytes.size)
-            fun ingestLine(line: String) {
-                if (line.isBlank()) return
-                val id = extractLineId(line)
-                if (id != null) {
-                    if (!seenIds.add(id)) return
-                } else {
-                    if (!seenHash.add(line.hashCode())) return
-                }
-                out.append(line).append('\n')
-            }
-            // Stream both inputs line-by-line. Decoding the local (mmap)
-            // buffer whole would allocate a CharBuffer sized to the ENTIRE
-            // session (~57 MB for a 28 MB chat) — the same single allocation
-            // that OOM-killed chat-open + indexing once "load all" started
-            // caching big sessions (2026-05-29). forEachLine dups+rewinds
-            // internally, so the caller's buffer position is untouched.
-            // serverBytes is the freshly-fetched tail delta; wrap it so it
-            // takes the same bounded path.
-            ai.eight24family.conch.util.JsonlUtils.forEachLine(localBuffer) { ingestLine(it) }
+            // This path runs ONLY for a REAL compaction (server genuinely dropped
+            // ids — the benign entrypoint-rewrite shrink is caught upstream by
+            // serverContainsAllLocal and re-adopts the server verbatim). Keep the
+            // dropped turns in CHRONOLOGICAL, LOSSLESS order: 1. local lines the
+            // server no longer has = the OLDEST (dropped) turns → emitted first,
+            // in local order; 2. then the server file verbatim = the
+            // post-compaction truth (summary + recent), in server order. Dedup on
+            // a PER-LINE key: the top-level `uuid` (unique per physical line), NOT
+            // the bare message.id. One assistant turn writes its thinking /
+            // tool_use / text blocks as SEPARATE lines that SHARE a message.id —
+            // an id key collapsed a turn to its first block and DROPPED the rest
+            // (the old lossy merge). uuid never collapses them. Streams
+            // line-by-line (forEachLine dups+rewinds) so the mmap'd local is never
+            // decoded whole — the 57MB CharBuffer OOM guard (2026-05-29).
+            fun key(line: String): String =
+                extractLineUuid(line) ?: extractLineId(line) ?: line.hashCode().toString()
+            val serverKeys = HashSet<String>()
             ai.eight24family.conch.util.JsonlUtils.forEachLine(
                 java.nio.ByteBuffer.wrap(serverBytes)
-            ) { ingestLine(it) }
+            ) { if (it.isNotBlank()) serverKeys.add(key(it)) }
+            val emitted = HashSet<String>()
+            val out = StringBuilder(localLen + serverBytes.size)
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(localBuffer) { line ->
+                if (line.isBlank()) return@forEachLine
+                val k = key(line)
+                if (k in serverKeys) return@forEachLine  // present in server → emit from server below
+                if (emitted.add(k)) out.append(line).append('\n')
+            }
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(
+                java.nio.ByteBuffer.wrap(serverBytes)
+            ) { line ->
+                if (line.isBlank()) return@forEachLine
+                if (emitted.add(key(line))) out.append(line).append('\n')
+            }
             return out.toString().toByteArray(Charsets.UTF_8)
         } finally {
             localSnap?.close()
+        }
+    }
+
+    /**
+     * True iff EVERY extractable line-id in the local cache is also present in
+     * [serverBytes]. Used to tell a REAL Claude auto-compaction (server genuinely
+     * dropped old turns → containment fails) apart from a benign file shrink that
+     * kept all content — e.g. our own `sdk-cli`→`cli` entrypoint rewrite in
+     * listSessionsScript (−4 bytes/tag), or a plain re-fetch. On the benign case
+     * the caller must NOT run the lossy, offset-desyncing [mergeServer]; it should
+     * re-adopt the server bytes verbatim (server is authoritative + complete).
+     * Bounded by [MERGE_MAX_BYTES] and streamed line-by-line (RAM-flat); returns
+     * false (→ conservative merge path) when local is absent or too large to scan.
+     */
+    fun serverContainsAllLocal(sessionId: String, serverBytes: ByteArray): Boolean {
+        val localSnap = load(sessionId) ?: return false
+        try {
+            val localBuffer = localSnap.buffer ?: return false
+            if (localBuffer.remaining() > MERGE_MAX_BYTES) return false
+            val serverIds = HashSet<String>()
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(java.nio.ByteBuffer.wrap(serverBytes)) { line ->
+                extractLineId(line)?.let { serverIds.add(it) }
+            }
+            var allPresent = true
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(localBuffer) { line ->
+                if (!allPresent) return@forEachLine
+                val id = extractLineId(line) ?: return@forEachLine
+                if (id !in serverIds) allPresent = false
+            }
+            return allPresent
+        } finally {
+            localSnap.close()
         }
     }
 
@@ -517,6 +558,15 @@ class HistoryCache internal constructor(private val rootDir: File) {
         }
         return Triple(total, ids.size, f.length())
     }
+
+    /** Per-PHYSICAL-LINE key: Claude stamps every rollout line with a unique
+     *  top-level `uuid` (thinking / tool_use / text blocks of one assistant turn
+     *  are separate lines with the SAME message.id but DISTINCT uuids). Used by
+     *  the compaction merge so it never collapses a turn's blocks. First `uuid`
+     *  match = the line's own (Claude writes it early, before any nested body). */
+    private val uuidRe = Regex("\"uuid\"\\s*:\\s*\"([^\"]+)\"")
+    private fun extractLineUuid(line: String): String? =
+        uuidRe.find(line)?.groupValues?.get(1)
 
     /** Best-effort id extractor for one JSONL line. */
     private fun extractLineId(line: String): String? {

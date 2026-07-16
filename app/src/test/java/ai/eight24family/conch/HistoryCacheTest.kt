@@ -3,6 +3,7 @@ package ai.eight24family.conch
 import ai.eight24family.conch.data.HistoryCache
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -157,5 +158,76 @@ class HistoryCacheTest {
         // to the parser.
         cache.save("s", ByteArray(0))
         assertNull(cache.load("s"))
+    }
+
+    // ── serverContainsAllLocal: the benign-shrink vs real-compaction test that
+    //    keeps our own `sdk-cli`→`cli` entrypoint rewrite from being mistaken for
+    //    a compaction (which corrupted chat order + the topbar model). ──
+
+    @Test
+    fun `entrypoint rewrite (sdk-cli to cli) is NOT a compaction`() {
+        // Same three turns, same uuids — only the entrypoint value shrank. The
+        // server still holds every local id → this is our own rewrite, not a
+        // Claude compaction → the caller must re-adopt the server verbatim.
+        val local = (
+            """{"uuid":"a1","entrypoint":"sdk-cli","message":{"id":"msg_1"}}""" + "\n" +
+                """{"uuid":"b2","entrypoint":"sdk-cli","message":{"id":"msg_2"}}""" + "\n" +
+                """{"uuid":"c3","entrypoint":"sdk-cli","message":{"id":"msg_3"}}""" + "\n"
+            ).toByteArray()
+        val server = String(local).replace("\"sdk-cli\"", "\"cli\"").toByteArray()
+        assertTrue("server is 12 bytes SHORTER", server.size < local.size)
+        cache.save("sess", local)
+        assertTrue(
+            "entrypoint rewrite keeps all ids → NOT a compaction",
+            cache.serverContainsAllLocal("sess", server),
+        )
+    }
+
+    @Test
+    fun `real-compaction merge keeps dropped turns chronologically + all blocks`() {
+        // local: two OLD turns (a1,b2) + one recent turn whose thinking & tool_use
+        // blocks are SEPARATE lines sharing message.id msg_3 but distinct uuids.
+        val local = (
+            """{"uuid":"a1","message":{"id":"msg_1","content":"old-1"}}""" + "\n" +
+                """{"uuid":"b2","message":{"id":"msg_2","content":"old-2"}}""" + "\n" +
+                """{"uuid":"c3a","message":{"id":"msg_3","type":"thinking"}}""" + "\n" +
+                """{"uuid":"c3b","message":{"id":"msg_3","type":"tool_use"}}""" + "\n"
+            ).toByteArray()
+        // server (post-compaction): summary replaces old turns; recent turn kept whole.
+        val server = (
+            """{"uuid":"sum","message":{"id":"msg_summary","content":"summary"}}""" + "\n" +
+                """{"uuid":"c3a","message":{"id":"msg_3","type":"thinking"}}""" + "\n" +
+                """{"uuid":"c3b","message":{"id":"msg_3","type":"tool_use"}}""" + "\n"
+            ).toByteArray()
+        cache.save("sess", local)
+        val merged = cache.mergeServer("sess", server)!!
+        val lines = String(merged).trim().split("\n")
+        val uuids = lines.map { Regex("\"uuid\":\"([^\"]+)\"").find(it)!!.groupValues[1] }
+        // Chronological: dropped-old turns FIRST (a1,b2), then the server truth.
+        assertEquals(listOf("a1", "b2", "sum", "c3a", "c3b"), uuids)
+        // BOTH blocks of msg_3 survive (uuid key, not the collapsing message.id).
+        assertTrue("thinking block kept", uuids.contains("c3a"))
+        assertTrue("tool_use block kept", uuids.contains("c3b"))
+    }
+
+    @Test
+    fun `real compaction (server dropped old turns) IS a compaction`() {
+        // The server file genuinely lost the first turn's ids → containment
+        // fails → the caller falls through to the keep-local merge.
+        val local = (
+            """{"uuid":"a1","message":{"id":"msg_1"}}""" + "\n" +
+                """{"uuid":"b2","message":{"id":"msg_2"}}""" + "\n" +
+                """{"uuid":"c3","message":{"id":"msg_3"}}""" + "\n"
+            ).toByteArray()
+        // Compaction replaced msg_1/msg_2 with a summary and kept only msg_3.
+        val server = (
+            """{"uuid":"sum","message":{"id":"msg_summary"}}""" + "\n" +
+                """{"uuid":"c3","message":{"id":"msg_3"}}""" + "\n"
+            ).toByteArray()
+        cache.save("sess", local)
+        assertFalse(
+            "server dropped msg_1/msg_2 → this IS a real compaction",
+            cache.serverContainsAllLocal("sess", server),
+        )
     }
 }

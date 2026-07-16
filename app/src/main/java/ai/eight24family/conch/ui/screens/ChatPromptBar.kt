@@ -349,11 +349,13 @@ private fun UsageBar(
     onExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
+    claudePlan: String? = null,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val track = MaterialTheme.colorScheme.outline
     val expandable = (report?.windows?.isNotEmpty() == true) ||
-        cost.totalCostUsd > 0.0 || (cost.inputTokens + cost.outputTokens) > 0L
+        cost.totalCostUsd > 0.0 || (cost.inputTokens + cost.outputTokens) > 0L ||
+        claudePlan != null
 
     Column(Modifier.fillMaxWidth()) {
         // Detail panel — FIRST child, so it grows ABOVE the thin bar and pushes
@@ -363,7 +365,7 @@ private fun UsageBar(
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut(),
         ) {
-            UsagePanel(report, cost, contextBreakdown, contextLoading)
+            UsagePanel(report, cost, contextBreakdown, contextLoading, claudePlan)
         }
 
         // Collapsed bar — ALWAYS rendered at a CONSTANT height, so it reserves
@@ -440,6 +442,7 @@ private fun UsagePanel(
     cost: CostStats,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
+    plan: String? = null,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val outline = MaterialTheme.colorScheme.outline
@@ -451,7 +454,30 @@ private fun UsagePanel(
 
     Column(Modifier.fillMaxWidth()) {
         HorizontalDivider(color = outline.copy(alpha = 0.3f))
-        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+
+            // Plan tier header — "which subscription am I on" the moment the
+            // limits panel opens (user 2026-07-16). Prefer the report's plan
+            // (read with the usage, so it's present whenever the windows are)
+            // over the status-cache value (a separate probe that may not have run
+            // in this chat yet). Only when known: an inference-only setup-token
+            // can't report its plan (profile 403s), so we omit it rather than guess.
+            val planLabel = report?.plan ?: plan
+            if (!planLabel.isNullOrBlank()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        "plan",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = dim,
+                    )
+                    Text(
+                        "Claude $planLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = accent,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+            }
 
             // Context window — the live `/context` summary (segs[0]) is a FIXED
             // toggle row. Tapping it unfolds the per-category breakdown
@@ -541,13 +567,35 @@ private fun UsagePanel(
             // "Plan usage" header: two words for a whole row of wasted space,
             // and the row labels already say what they are.
             if (windows.isNotEmpty()) {
-                if (showedContext) Spacer(Modifier.height(10.dp))
+                if (showedContext) Spacer(Modifier.height(6.dp))
+                var perModelHeaderShown = false
                 windows.forEach { w ->
-                    val wReset = w.resetTextLive(System.currentTimeMillis())
+                    // Split the "second layer" out under its own subheader — the
+                    // aggregate 5-hour / weekly caps first, then each model's own
+                    // weekly cap (Opus / Sonnet / Fable / …) grouped below.
+                    if (w.perModel && !perModelHeaderShown) {
+                        perModelHeaderShown = true
+                        Spacer(Modifier.height(6.dp))
+                        Text("per model", style = MaterialTheme.typography.labelSmall, color = dim)
+                        Spacer(Modifier.height(2.dp))
+                    }
+                    val now = System.currentTimeMillis()
+                    // Local clock ("10:30 AM", the user's own zone) + a live
+                    // countdown ("6h") — the clock answers "when does it lift?"
+                    // without the CLI's foreign-zone confusion, the countdown
+                    // answers "how long?".
+                    val countdown = w.resetTextLive(now)
+                    val clock = w.resetAtEpochMs?.let { ai.eight24family.conch.agent.usageResetClock(it) }
+                    val resetStr = when {
+                        clock != null && countdown.isNotEmpty() -> " · $clock ($countdown)"
+                        clock != null -> " · $clock"
+                        countdown.isNotEmpty() -> " · $countdown"
+                        else -> ""
+                    }
                     UsageMeterRow(
                         label = w.label,
                         labelColor = onSurface,
-                        value = "${w.percent}%" + if (wReset.isNotEmpty()) " · resets $wReset" else "",
+                        value = "${w.percent}%$resetStr",
                         valueColor = dim,
                         trailing = null,
                         fraction = w.fraction,
@@ -561,18 +609,18 @@ private fun UsagePanel(
             // alongside the plan windows. Shown even at $0.00 (the account
             // exposes it and the user wants it visible).
             report?.extraUsedUsd?.let { extra ->
-                if (windows.isNotEmpty() || showedContext) Spacer(Modifier.height(10.dp))
+                if (windows.isNotEmpty() || showedContext) Spacer(Modifier.height(6.dp))
                 // Dim, matching the other rows — not the bold/bright usageStatRow.
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "Extra usage",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = dim,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
                         "$" + String.format(java.util.Locale.US, "%.2f", extra) + " spent",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = dim,
                     )
                 }
@@ -581,7 +629,7 @@ private fun UsagePanel(
             // API-key mode (no plan windows) → show this chat's spend instead.
             if (windows.isEmpty() && hasCost) {
                 if (showedContext) Spacer(Modifier.height(16.dp))
-                Text("This chat", style = MaterialTheme.typography.bodyMedium, color = dim)
+                Text("This chat", style = MaterialTheme.typography.bodySmall, color = dim)
                 Spacer(Modifier.height(6.dp))
                 if (cost.totalCostUsd > 0.0) {
                     usageStatRow("Cost", "$" + String.format(java.util.Locale.US, "%.2f", cost.totalCostUsd))
@@ -617,28 +665,28 @@ private fun UsageMeterRow(
         Modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-            .padding(vertical = 6.dp),
+            .padding(vertical = 3.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 label,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 color = labelColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Text(value, style = MaterialTheme.typography.bodyMedium, color = valueColor, maxLines = 1)
+            Text(value, style = MaterialTheme.typography.bodySmall, color = valueColor, maxLines = 1)
             if (trailing != null) {
                 Spacer(Modifier.width(6.dp))
-                Text(trailing, style = MaterialTheme.typography.bodyMedium, color = valueColor)
+                Text(trailing, style = MaterialTheme.typography.bodySmall, color = valueColor)
             }
         }
-        Spacer(Modifier.height(7.dp))
+        Spacer(Modifier.height(4.dp))
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(4.dp)
+                .height(3.dp)
                 .clip(RoundedCornerShape(2.dp))
                 .background(track.copy(alpha = 0.3f)),
         ) {
@@ -660,13 +708,13 @@ private fun usageStatRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             label,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.weight(1f),
         )
         Text(
             value,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurface,
         )
@@ -700,6 +748,7 @@ internal fun PromptBar(
     onUsageExpandedChange: (Boolean) -> Unit,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
+    claudePlan: String? = null,
     uploading: Boolean,
     statusHint: String?,
     enterSends: Boolean,
@@ -744,7 +793,7 @@ internal fun PromptBar(
         // with an honest warning — the dead subscription must read as dead here
         // too, not just on the agent-picker row.
         if (codeBlocked) CodeBlockedBanner(codeBlockText ?: "This account can't run Claude Code right now.")
-        else UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading)
+        else UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, claudePlan)
 
         // Staged attachments strip
         if (attachments.isNotEmpty()) {

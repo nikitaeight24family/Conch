@@ -58,6 +58,11 @@ data class AgentStatus(
     /** Small datum for a data-bearing [claudeState] (trial days-left, usage reset
      *  time). Folded into the display via [ClaudeRunState.lineWith]. */
     val claudeStateData: String? = null,
+    /** Claude ONLY: the account's plan tier as a display label ("Max", "Pro",
+     *  "Pro trial", "Free") for the limits-sheet header — from the 200 profile.
+     *  null when unknowable (inference-only setup-token 403s the profile, Codex,
+     *  Gemini, api-key mode). */
+    val claudePlan: String? = null,
 ) {
     val ready: Boolean get() = installed && loggedIn && !updateAvailable && claudeState?.isBlocked != true
 
@@ -285,6 +290,7 @@ class AgentStatusProbe(private val ssh: SshClient) {
                 // only for Claude in OAuth mode; absent ⇒ null (not applicable).
                 claudeState = ClaudeRunState.fromToken(kv["${tag}_run_state"]),
                 claudeStateData = kv["${tag}_run_data"]?.trim()?.takeIf { it.isNotEmpty() },
+                claudePlan = kv["${tag}_plan"]?.trim()?.takeIf { it.isNotEmpty() },
             )
         }
     }
