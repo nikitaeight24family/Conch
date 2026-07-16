@@ -48,9 +48,9 @@ fun PipLoginPanel(login: LoginRequest) {
     val message = when {
         login.submitted -> "Finishing sign-in…"
         login.awaitingPaste && login.callbackMode ->
-            "Copy the URL your browser landed on, then tap to return and paste it."
+            "Copy the URL your browser landed on, then tap here — it's picked up automatically."
         login.awaitingPaste ->
-            "Copy the code from your browser, then tap to return and paste it."
+            "Tap Copy in the browser, then tap here — the code is picked up automatically."
         login.url != null -> "Sign in in your browser — then tap to return."
         else -> login.rawTail.ifBlank { "Starting…" }
     }

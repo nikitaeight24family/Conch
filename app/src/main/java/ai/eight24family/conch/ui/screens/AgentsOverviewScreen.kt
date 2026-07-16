@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
@@ -35,6 +36,7 @@ import ai.eight24family.conch.ui.viewmodel.AgentsOverviewViewModel
  * reinvented rows. Tapping a server header opens the full-screen picker (which
  * adds search + pull-to-refresh over the very same panel).
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AgentsOverviewScreen(
     /** A READY agent row was tapped → open its chat. Install / update / login /
@@ -51,6 +53,8 @@ fun AgentsOverviewScreen(
 ) {
     val entries by vm.entries.collectAsState()
     val loadedOnce by vm.loadedOnce.collectAsState()
+    val refreshing by vm.refreshing.collectAsState()
+    val refreshTick by vm.refreshTick.collectAsState()
 
     SearchableScaffold(
         title = {
@@ -64,29 +68,41 @@ fun AgentsOverviewScreen(
         onPickHit = onOpenChatFromSearch,
     ) { padding ->
         ai.eight24family.conch.ui.window.WideContentColumn {
-        if (entries.isEmpty() && loadedOnce) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopStart) {
-                Text(
-                    "// no servers configured",
-                    color = MaterialTheme.colorScheme.outline,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(24.dp),
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
-            ) {
-                items(entries, key = { it.server.id }) { entry ->
-                    ServerSection(
-                        entry = entry,
-                        onOpenChat = onOpenChat,
-                        onManageServer = onManageServer,
-                        onOpenKeychainForDiscover = onOpenKeychainForDiscover,
-                        onOpenKeychainForRegister = onOpenKeychainForRegister,
+        // Pull-to-refresh over the WHOLE tab — every swipe re-probes all servers'
+        // agent rows (each ServerSection turns [refreshTick] into a userTriggered
+        // refresh on its own panel VM). The default circular indicator gives the
+        // gesture visible feedback; LazyColumn provides the nested-scroll the
+        // gesture hooks even when the list is short.
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = { vm.refreshAll() },
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
+            if (entries.isEmpty() && loadedOnce) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
+                    Text(
+                        "// no servers configured",
+                        color = MaterialTheme.colorScheme.outline,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(24.dp),
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+                ) {
+                    items(entries, key = { it.server.id }) { entry ->
+                        ServerSection(
+                            entry = entry,
+                            refreshTick = refreshTick,
+                            onOpenChat = onOpenChat,
+                            onManageServer = onManageServer,
+                            onOpenKeychainForDiscover = onOpenKeychainForDiscover,
+                            onOpenKeychainForRegister = onOpenKeychainForRegister,
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                    }
                 }
             }
         }
@@ -102,6 +118,10 @@ fun AgentsOverviewScreen(
 @Composable
 private fun ServerSection(
     entry: AgentsOverviewViewModel.Entry,
+    /** Bumped by the tab's pull-to-refresh → this panel re-probes (userTriggered).
+     *  0 = initial composition; the panel VM already probes on its own init, so
+     *  we skip it and only react to real swipes. */
+    refreshTick: Int,
     onOpenChat: (serverId: String, agent: Agent) -> Unit,
     onManageServer: (serverId: String) -> Unit,
     onOpenKeychainForDiscover: (serverId: String) -> Unit,
@@ -117,6 +137,31 @@ private fun ServerSection(
         key = entry.server.id,
         factory = AgentPickerViewModel.factory(entry.server.id, browse = true),
     )
+    // Tab pull-to-refresh → re-probe THIS server's panel. Skip tick 0 (initial
+    // composition — the VM already probes on init); only real swipes re-fire.
+    // Gate on `connected`: a live server re-probes through the pool (no touch),
+    // but firing userTriggered on a DISCONNECTED SK server would pop a FIDO
+    // touch prompt — and a tab-wide pull hits EVERY panel, so ungated it would
+    // cascade N simultaneous key prompts. Disconnected servers keep their cache
+    // and refresh when the user actually opens/connects them.
+    androidx.compose.runtime.LaunchedEffect(refreshTick) {
+        // showBar=false: the tab's own pull indicator is the gesture feedback —
+        // N panels each flashing their "refreshing…" bar is noise. The per-server
+        // spinner next to the connection dot shows which panel is still probing.
+        if (refreshTick > 0 && entry.connected) panelVm.refresh(userTriggered = true, showBar = false)
+    }
+    // Entering the tab (or a server coming online while it's open) SILENTLY
+    // re-probes a stale panel. The panel VM outlives tab visits (keyed
+    // viewModel), so without this the tab re-opened onto frozen cache: no
+    // spinner, no re-check — a server logged out elsewhere kept showing "[
+    // ready ]" forever. Age-gated so flipping between tabs doesn't hammer
+    // the server with probes.
+    androidx.compose.runtime.LaunchedEffect(entry.connected) {
+        if (!entry.connected) return@LaunchedEffect
+        if (panelVm.probing.value) return@LaunchedEffect  // VM init's own probe is running
+        val age = System.currentTimeMillis() - (panelVm.lastCheckedAt.value ?: 0L)
+        if (age > 5_000) panelVm.refresh(userTriggered = true, showBar = false)
+    }
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Row(
             modifier = Modifier
@@ -142,6 +187,17 @@ private fun ServerSection(
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+            // Background probe in flight → a small quiet spinner NEXT TO the
+            // connection dot (the user's asked-for affordance). Never a bar,
+            // never blocks taps — rows stay interactive off the cached status.
+            val panelProbing by panelVm.probing.collectAsState()
+            if (panelProbing) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 8.dp).size(11.dp),
+                    strokeWidth = 1.5.dp,
+                    color = dim,
                 )
             }
             ConnectionDot(connected = entry.connected)

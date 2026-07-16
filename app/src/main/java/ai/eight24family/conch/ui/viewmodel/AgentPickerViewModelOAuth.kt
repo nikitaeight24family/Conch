@@ -41,6 +41,16 @@ import kotlinx.coroutines.launch
  *    "cannot find module", etc.) trigger silent reinstall + re-launch.
  *    The user never sees the underlying error — just "Repairing…".
  */
+/** Append one concrete step to the login dialog's `\n`-joined step trail (the
+ *  small log shown under the "signing in" spinner). Dedups a repeat of the last
+ *  step and keeps only the last few so it never grows into a wall of text.
+ *  Shared with [AgentPickerViewModel.onLoginSuccess] (same package). */
+internal fun appendLoginStep(trail: String, step: String): String {
+    val lines = trail.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+    if (lines.lastOrNull() != step) lines.add(step)
+    return lines.takeLast(4).joinToString("\n")
+}
+
 internal class AgentPickerViewModelOAuth(
     private val scope: CoroutineScope,
     private val serverId: String,
@@ -53,9 +63,10 @@ internal class AgentPickerViewModelOAuth(
     private val doInstall: suspend (Agent, Boolean) -> Unit,
     /** Shell-escape helper shared with the API-key path. */
     private val shellEscape: (String) -> String,
-    /** Fired after a successful OAuth login (drives the add-account name
-     *  prompt when an "add account" was in progress). */
-    private val onLoginSuccess: (Agent) -> Unit = {},
+    /** Fired after a successful OAuth login. SUSPEND — it captures the account
+     *  and AWAITS the run-state (subscription) probe, so the completion below can
+     *  hold the "signing in" animation up until the row is ready before closing. */
+    private val onLoginSuccess: suspend (Agent) -> Unit = {},
 ) {
 
     /** Live stdin of the in-flight login process — used by
@@ -119,6 +130,14 @@ internal class AgentPickerViewModelOAuth(
             // CLI's stdout — the finally then skips its cleanup so the
             // dialog stays up during the silent reinstall + relaunch.
             var recovering = false
+            // Set when the read loop ended with NO real login (channel died / no
+            // credential) — the finally then KEEPS the error dialog up and never
+            // calls onLoginSuccess, so a phantom account is never saved.
+            var loginFailed = false
+            // Claude setup-token success signal: the OAuth token was captured from
+            // stdout. Declared out here so the completion gate (after the read
+            // loop / session block) can see it.
+            var tokenSaved = false
             try {
                 val cmd = when (agent) {
                     // setup-token, NOT /login. /login is a TUI slash-command
@@ -171,6 +190,19 @@ internal class AgentPickerViewModelOAuth(
                     "[ -s \"\$HOME/.nvm/nvm.sh\" ] && . \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; "
                 val fullCmd = "bash -lc " + shellEscape(loginShellPrefix + cmd)
                 android.util.Log.d(tag, "login($agent) — running with PTY: $fullCmd")
+                // Baseline = the server's clock NOW. Two guards ride on it: (1) the
+                // creds poller ignores a pre-existing (already-logged-in) file, and
+                // (2) at completion we REFUSE to save an account unless a fresh
+                // credential landed — so a proc that just DIES (channel dropped, no
+                // URL shown) is never mistaken for a successful sign-in.
+                val loginSince = SilentlyTry.loggedOrElse(tag, "auth baseline time", 0L) {
+                    pooled.startSession().use { s ->
+                        val p = s.exec("date +%s")
+                        val out = p.inputStream.bufferedReader().readText().trim()
+                        p.join(5, java.util.concurrent.TimeUnit.SECONDS)
+                        out.toLongOrNull() ?: 0L
+                    }
+                }.takeIf { it > 0L } ?: (System.currentTimeMillis() / 1000)
                 pooled.startSession().use { sess ->
                     // PTY is mandatory — without this every TUI just
                     // shuts up (isatty(stdout) == false → bail).
@@ -201,10 +233,12 @@ internal class AgentPickerViewModelOAuth(
                     val reader = proc.inputStream.bufferedReader()
                     val recent = ArrayDeque<String>()
                     val fullBuf = StringBuilder()
-                    // Conservative URL match: stops at whitespace, quote,
-                    // angle bracket, or backtick — everything else (incl.
-                    // `&`, `=`, `?`, `%`) is fair game in OAuth URLs.
-                    val urlRe = Regex("""https?://[^\s'"<>`]+""")
+                    // Conservative URL match (FALLBACK only — the primary source
+                    // is the OSC-8 target, see osc8UrlRe below). Stops at
+                    // whitespace, quote, angle bracket, backtick — AND at `]`,
+                    // BEL, ESC so a leftover OSC-8 closer / escape can't glue onto
+                    // the URL. Everything else (`&`, `=`, `?`, `%`) is fair game.
+                    val urlRe = Regex("https?://[^\\s'\"<>`\\]]+")
                     val codeRe = Regex("""\b[A-Z0-9]{4}-[A-Z0-9]{4,8}\b""")
                     // OOB paste-prompt detection. Claude's `setup-token`
                     // prints "Paste code here if prompted:" once the
@@ -242,14 +276,40 @@ internal class AgentPickerViewModelOAuth(
                     //
                     // Source: https://code.claude.com/docs/en/authentication
                     val claudeTokenRe = Regex("""sk-ant-oat01-[A-Za-z0-9_\-]+""")
-                    var tokenSaved = false
-                    // Strip CSI / SGR ANSI escapes so color codes don't
-                    // glue onto URLs. Matches `\x1b[...m` and similar.
-                    val ansiRe = Regex("""\[[0-?]*[ -/]*[@-~]""")
+                    // COMPREHENSIVE terminal-escape stripper. Claude's
+                    // `setup-token` renders via ink: SGR colours, cursor-motion
+                    // CSI (it lays words out with `ESC[NG` column jumps INSTEAD of
+                    // spaces), a Unicode spinner, AND OSC-8 hyperlinks
+                    // (`ESC]8;id=…;<URL>BEL<visible>ESC]8;;BEL`). The old CSI-only
+                    // regex left the `]8;…` and bare ESC as literal garbage in the
+                    // dialog and let the URL match hoover up BOTH the target and
+                    // the width-clipped visible copy (the "horrible log" the user
+                    // saw). Alternation order = longest/most-specific first: OSC
+                    // (BEL- or ST-terminated), CSI, charset designators, any other
+                    // 2-char ESC, then stray control bytes (TAB/newline kept).
+                    val esc = Char(27).toString()
+                    val bel = Char(7).toString()
+                    val termEscapeRe = Regex(
+                        esc + "\\][^" + bel + esc + "]*(?:" + bel + "|" + esc + "\\\\)" +
+                            "|" + esc + "\\[[0-?]*[ -/]*[@-~]" +
+                            "|" + esc + "[()*+][0-9A-Za-z]" +
+                            "|" + esc + "[0-~]" +
+                            "|[\\x00-\\x08\\x0B-\\x1F\\x7F]"
+                    )
+                    // The OAuth URL lives, verbatim and COMPLETE, as the OSC-8
+                    // hyperlink TARGET. Cleanest source - the on-screen visible text
+                    // is only a width-clipped fragment that changes every frame.
+                    val osc8UrlRe = Regex(esc + "\\]8;[^;]*;(https?://[^" + bel + esc + "]+)")
+                    // Spinner-frame / decoration-only lines (a lone glyph, a bare
+                    // `>` prompt caret, punctuation) — kept OUT of the rawTail we
+                    // show, so the dialog's status line isn't a flickering glyph.
+                    val noiseLineRe = Regex("^[^\\p{L}\\p{N}]{0,3}$")
+                    // `loginSince` is captured above the session block (visible to
+                    // both the poller here and the completion check after the loop).
                     val pollJob = launch {
                         while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
                             delay(3_000)
-                            val authed = checkAuthOnly(pooled, agent)
+                            val authed = checkAuthOnly(pooled, agent, loginSince)
                             if (authed) {
                                 android.util.Log.d(tag, "login($agent) — credentials detected, closing")
                                 SilentlyTry.fired("SshAi-AgentPicker", "close login proc on auth") { proc.close() }
@@ -258,12 +318,34 @@ internal class AgentPickerViewModelOAuth(
                         }
                     }
                     while (true) {
-                        val rawLine = try { reader.readLine() } catch (_: Throwable) { null }
-                        if (rawLine == null) break
-                        val line = ansiRe.replace(rawLine, "").trim()
+                        val rawLine = try { reader.readLine() } catch (e: Throwable) {
+                            android.util.Log.w(tag, "login($agent) read threw: ${e.javaClass.simpleName}: ${e.message}"); null
+                        }
+                        if (rawLine == null) {
+                            // The login CLI's stdout hit EOF — it EXITED (or the SSH
+                            // exec channel died). For a paste-flow login (Claude
+                            // setup-token) this happening BEFORE the user pastes is
+                            // the "Login session ended / submit does nothing" bug.
+                            // Log why so it isn't invisible: the CLI stays alive on a
+                            // real PTY, so an early EOF means the channel/proc was
+                            // killed under us (pooled-transport activity, not the CLI).
+                            android.util.Log.w(
+                                tag,
+                                "login($agent) read loop EOF — proc exited (exitStatus=${
+                                    runCatching { proc.exitStatus }.getOrNull()
+                                }), tokenSaved=$tokenSaved awaitingPaste=${loginRequestMut.value?.awaitingPaste}",
+                            )
+                            break
+                        }
+                        val line = termEscapeRe.replace(rawLine, "").trim()
                         if (line.isEmpty()) continue
-                        recent.addLast(line)
-                        if (recent.size > 20) recent.removeFirst()
+                        // Spinner-frame / decoration-only lines stay OUT of the
+                        // rawTail we SHOW (they'd flicker as a lone glyph), but they
+                        // still flow through URL / paste / token detection below.
+                        if (!noiseLineRe.matches(line)) {
+                            recent.addLast(line)
+                            if (recent.size > 20) recent.removeFirst()
+                        }
                         // Accumulate buffer for URL search **with a \n
                         // separator between lines**. Without it, the URL
                         // regex `[^\s'"<>]+` ran past the URL boundary and
@@ -312,10 +394,15 @@ internal class AgentPickerViewModelOAuth(
                             if (tok != null) {
                                 tokenSaved = true
                                 android.util.Log.d(tag, "login(CLAUDE) — token captured (${tok.length}B, head=${tok.take(20)}…)")
-                                loginRequestMut.value = loginRequestMut.value?.copy(
-                                    rawTail = "Saving token to server…",
-                                    awaitingPaste = false,
-                                )
+                                loginRequestMut.value = loginRequestMut.value?.let { cur ->
+                                    cur.copy(
+                                        // Append to the step trail (small log in the
+                                        // dialog), don't replace it.
+                                        rawTail = appendLoginStep(cur.rawTail, "Saving sign-in to server"),
+                                        submitted = true,
+                                        awaitingPaste = false,
+                                    )
+                                }
                                 // Persist to ~/.profile. Single-quoted
                                 // to survive any special chars in the
                                 // token (there shouldn't be any —
@@ -337,11 +424,14 @@ internal class AgentPickerViewModelOAuth(
                                 break
                             }
                         }
-                        // Find URL in the accumulated buffer. Take the
-                        // longest match so a longer URL printed later
-                        // wins over an earlier partial.
-                        val urlMatch = urlRe.findAll(fullBuf)
-                            .maxByOrNull { it.value.length }?.value
+                        // URL extraction. PRIMARY source: the OSC-8 hyperlink
+                        // TARGET on the RAW line (`ESC]8;id=…;<URL>BEL`) — that's
+                        // the complete, verbatim URL. The on-screen visible text is
+                        // only a width-clipped fragment (and duplicated per frame),
+                        // so the buffer regex is a FALLBACK for CLIs that don't emit
+                        // OSC-8 (take the longest match there).
+                        val urlMatch = osc8UrlRe.find(rawLine)?.groupValues?.getOrNull(1)
+                            ?: urlRe.findAll(fullBuf).maxByOrNull { it.value.length }?.value
                         val code = codeRe.find(line)?.value
                         // Once the CLI prints a paste-prompt we flip
                         // `awaitingPaste = true` permanently for this
@@ -397,15 +487,46 @@ internal class AgentPickerViewModelOAuth(
                     startOAuthLogin(agent)
                     return@launch
                 }
-                refresh(false)
-                onLoginSuccess(agent)
+                // A real login, or NOTHING. The read loop also ends when the CLI
+                // exited WITHOUT logging in (channel dropped, no URL shown, no cred
+                // written). Treating THAT as success saved a phantom "not logged in"
+                // account and jumped straight to "name this account" (user,
+                // 2026-07-16). Success = a token was captured (Claude setup-token)
+                // OR a FRESH credential file landed (post-login-start).
+                val loggedInForReal = tokenSaved || checkAuthOnly(pooled, agent, loginSince)
+                if (loggedInForReal) {
+                    // Keep the login window UP in a clean "signing in" animation (NOT
+                    // the raw server log) while onLoginSuccess captures the account
+                    // and AWAITS the run-state (subscription) probe. Only after that
+                    // returns does the finally close the window — so it vanishes
+                    // straight into [ ready ]/[ no subscription ] with NO post-close
+                    // refresh spinner and NO stale-"login" flicker (user, 2026-07-16:;
+                    // and the parallel full refresh() that used to race it is gone).
+                    loginRequestMut.value = (loginRequestMut.value
+                        ?: AgentPickerViewModel.LoginRequest(agent, null, null, "")).copy(
+                        awaitingPaste = false, submitted = true, fatalError = null,
+                    )
+                    onLoginSuccess(agent)
+                } else {
+                    loginFailed = true
+                    android.util.Log.w(tag, "login($agent) — proc ended with NO fresh credential; NOT a login, not saving an account")
+                    loginRequestMut.value = (loginRequestMut.value
+                        ?: AgentPickerViewModel.LoginRequest(agent, null, null, "")).copy(
+                        awaitingPaste = false,
+                        submitted = false,
+                        fatalError = "Sign-in didn't complete — nothing was saved. The login window closed before an account was signed in. Tap Cancel and try again.",
+                    )
+                }
             } catch (t: Throwable) {
                 android.util.Log.w(tag, "login($agent) threw: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 if (!recovering) {
-                    loginRequestMut.value = null
+                    // Stdin is always torn down (the proc is gone either way).
                     SilentlyTry.fired("SshAi-AgentPicker", "close login stdin (finally)") { loginProcStdin?.close() }
                     loginProcStdin = null
+                    // But keep the dialog UP on a real failure so the user sees why
+                    // (fatalError + Cancel); only clear it on success.
+                    if (!loginFailed) loginRequestMut.value = null
                 }
             }
         }
@@ -687,11 +808,21 @@ internal class AgentPickerViewModelOAuth(
         val tag = "SshAi-AgentPicker"
         android.util.Log.d(tag, "submitOAuthCode — entry, codeLen=${code.trim().length}, stdin=${if (loginProcStdin == null) "NULL" else "live"}")
         val stdin = loginProcStdin ?: run {
-            // Login process / its stdin is gone — DON'T silently drop the code.
-            // Surface it so the user knows to restart instead of staring at a
-            // dead dialog.
+            val cur = loginRequestMut.value
+            // A LATE second submit is harmless, not an error: the clipboard
+            // auto-grab can fire on return-from-browser right after a manual
+            // paste already delivered the code and the proc closed. If the login
+            // already completed (dialog gone) or is mid-exchange (submitted),
+            // just ignore it — do NOT flash "Login session ended" over a
+            // succeeding sign-in.
+            if (cur == null || cur.submitted) {
+                android.util.Log.d(tag, "submitOAuthCode — stdin null but login already done/submitted; ignoring late duplicate")
+                return
+            }
+            // Genuinely early death (proc gone before any submit) — surface it so
+            // the user knows to restart instead of staring at a dead dialog.
             android.util.Log.w(tag, "submitOAuthCode — loginProcStdin is NULL, code not delivered")
-            loginRequestMut.value = loginRequestMut.value?.copy(
+            loginRequestMut.value = cur.copy(
                 rawTail = "Login session ended — tap Cancel and sign in again.",
             )
             return
@@ -700,15 +831,22 @@ internal class AgentPickerViewModelOAuth(
         scope.launch(Dispatchers.IO) {
             // Strip all whitespace — OAuth codes are base64url/opaque,
             // never have legitimate whitespace, but copy/paste from
-            // mobile browsers loves to inject \r\n.
-            val clean = code.replace(Regex("\\s+"), "")
+            // mobile browsers loves to inject \r\n. Also cut a trailing
+            // copy-artifact URL: Claude's code page shows `<code>#<state>`
+            // and users often over-select into the `https://claude.com/…`
+            // link right after it (user, 2026-07-16 pasted exactly that).
+            // A real code never contains a URL scheme, so this is safe.
+            val clean = code.trim()
+                .substringBefore("https://").substringBefore("http://")
+                .replace(Regex("\\s+"), "")
             android.util.Log.d(tag, "submitOAuthCode — ${clean.length}B, head8=${clean.take(8)}")
             val cur = loginRequestMut.value
             if (cur != null) {
                 loginRequestMut.value = cur.copy(
                     awaitingPaste = false,
                     submitted = true,
-                    rawTail = "Exchanging code for token…",
+                    // Start the step trail fresh — first "signing in" step.
+                    rawTail = "Exchanging code for token",
                 )
             }
             // **Type byte-by-byte with a tiny delay between chars.**
@@ -754,20 +892,32 @@ internal class AgentPickerViewModelOAuth(
         }
     }
 
-    private suspend fun checkAuthOnly(client: net.schmizz.sshj.SSHClient, agent: Agent): Boolean {
+    private suspend fun checkAuthOnly(client: net.schmizz.sshj.SSHClient, agent: Agent, sinceEpoch: Long = 0L): Boolean {
         // This poller backs the OAUTH login flow ONLY, so success means the
         // OAUTH credential specifically appeared. It MUST NOT count a
-        // pre-existing api-key as "done" — doing so aborts the OAuth flow
-        // before the user ever sees the auth URL. (The actual bug: a Gemini
-        // GEMINI_API_KEY/GOOGLE_API_KEY visible to the login shell made this
-        // fire "credentials detected" ~8 s in and proc.close()'d the CLI before
-        // it printed the OAuth URL → the login window just closed, no link.)
-        // The api-key path has its own entry point (AgentPickerViewModelApiKey).
+        // pre-existing credential as "done" — doing so aborts the OAuth flow
+        // before the user ever sees the auth URL. Two historical bugs from this:
+        // (1) a Gemini GEMINI_API_KEY visible to the login shell fired ~8s in and
+        // closed the CLI before it printed the URL; (2) a Claude/Codex server that
+        // was ALREADY logged in (a live ~/.claude/.credentials.json — e.g. an
+        // account with a dead subscription) made the very first poll succeed, so
+        // the login spun briefly then jumped straight to "name this account"
+        // without ever showing the auth link (user, 2026-07-16).
+        // Fix: for the file-based agents, require the credential to be FRESHER than
+        // [sinceEpoch] (login start), so a pre-existing file can never count.
         val checks = when (agent) {
-            // claude setup-token writes no file — it prints a token we persist
-            // as CLAUDE_CODE_OAUTH_TOKEN in ~/.profile (seen by `bash -lc`).
-            Agent.CLAUDE -> "test -f ~/.claude/.credentials.json -o -f ~/.claude/credentials.json -o -n \"\$CLAUDE_CODE_OAUTH_TOKEN\""
-            Agent.CODEX -> "test -f ~/.codex/auth.json"
+            // claude setup-token writes no creds file (success is the token we
+            // capture from stdout), so this only ever guards against a stale
+            // pre-existing file — require a fresh (post-login-start) write.
+            Agent.CLAUDE ->
+                "for f in ~/.claude/.credentials.json ~/.claude/credentials.json; do " +
+                    "[ -f \"\$f\" ] || continue; " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0); " +
+                    "[ \"\$m\" -gt $sinceEpoch ] && exit 0; done; exit 1"
+            Agent.CODEX ->
+                "f=~/.codex/auth.json; [ -f \"\$f\" ] && " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0) && " +
+                    "[ \"\$m\" -gt $sinceEpoch ]"
             // Gemini: success only when oauth_creds.json carries a refresh_token
             // with a NON-EMPTY value (a bare `"refresh_token"` key — null/""
             // skeleton — would still race the CLI's write). NO api-key fallback

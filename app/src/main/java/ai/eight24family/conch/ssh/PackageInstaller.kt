@@ -22,7 +22,11 @@ class PackageInstaller(private val ssh: SshClient) {
         packages: List<String>
     ): Result<String> {
         val pkgs = packages.joinToString(" ")
-        val cmd = if (env.hasSudo) "sudo -n npm install -g $pkgs" else "npm install -g $pkgs"
+        // `--userconfig=/dev/null` on the sudo path: a user ~/.npmrc with
+        // `prefix=~/.local` (a common unprivileged-global-install setup) would
+        // otherwise leak into the ROOT install and misdirect it out of the
+        // system prefix, so the package never lands where it's expected.
+        val cmd = if (env.hasSudo) "sudo -n npm install -g $pkgs --userconfig=/dev/null" else "npm install -g $pkgs"
         return ssh.execute(server, secrets, cmd)
     }
 

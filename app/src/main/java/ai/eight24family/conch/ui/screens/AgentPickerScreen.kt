@@ -521,6 +521,7 @@ internal fun ServerAgentPanel(
                         onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
                         onInstall = { vm.installAgent(agent) },
                         onLogin = { vm.startLogin(agent) },
+                        onUseApiKey = { vm.switchToApiKey(agent) },
                         onLongClick = { vm.openMethodSheet(agent) },
                     )
                 }
@@ -586,14 +587,9 @@ internal fun ServerAgentPanel(
             onDismiss = { vm.closeMethodSheet() },
         )
     }
-    val namePrompt = vm.captureNamePrompt.collectAsState().value
-    if (namePrompt != null) {
-        AccountNameDialog(
-            defaultName = namePrompt.second,
-            onSave = { vm.confirmCaptureName(namePrompt.first, it) },
-            onCancel = { vm.cancelCaptureName() },
-        )
-    }
+    // (No "name this account" dialog — a fresh login auto-captures as the next
+    // ordinal and the row goes straight to ready; renaming is on-demand via the
+    // pencil. See AgentPickerViewModel.onLoginSuccess.)
     val renamePrompt = vm.renamePrompt.collectAsState().value
     if (renamePrompt != null) {
         AccountNameDialog(
@@ -859,6 +855,9 @@ private fun AgentRow(
     onClick: () -> Unit,
     onInstall: () -> Unit = {},
     onLogin: () -> Unit = {},
+    /** Logged in but the Claude subscription has NO Claude Code access — tap
+     *  routes here (open the API-key entry, the remedy the CLI itself suggests). */
+    onUseApiKey: () -> Unit = {},
     onLongClick: () -> Unit = {},
 ) {
     val cyan = MaterialTheme.colorScheme.primary
@@ -866,10 +865,28 @@ private fun AgentRow(
     val dim = MaterialTheme.colorScheme.outline
     val fg = MaterialTheme.colorScheme.onSurface
 
-    // Block entry to chat until: installed, no update available, logged in.
-    // `[ update ]` button replaces entry — user must update first.
+    // Logged in (OAuth) but the account is in a BLOCK Claude-Code run-state (no
+    // subscription / trial ended / payment due / login expired / rate limited …).
+    // NOT "log in" (re-auth won't fix most). There are SEVERAL remedies (subscribe,
+    // ask admin, add an API key, switch to another logged-in account, wait) — so a
+    // tap must NOT force the API-key dialog. It opens the account/method sheet
+    // where the user picks; the sub-line + badge already state the reason.
+    val runBlocked = !checking && status != null && status.installed &&
+        !status.updateAvailable && status.loggedIn && status.claudeState?.isBlocked == true
+
+    // Block entry to chat until: installed, no update available, logged in, AND the
+    // account can actually run a turn (else it dies on the CLI's refusal).
     val canEnter = !checking &&
-        status?.installed == true && status.loggedIn && !status.updateAvailable
+        status?.installed == true && status.loggedIn && !status.updateAvailable &&
+        status.claudeState?.isBlocked != true
+
+    // Don't assert "ready" — show a small "checking subscription…" until it
+    // resolves. Once ANY probe determines it, the cache PRESERVES that verdict
+    // (AgentStatusCache.save), so this only ever shows in the brief first-probe
+    // window, never as a stuck false "ready".
+    val runStatePending = !checking && agent == Agent.CLAUDE && status != null &&
+        status.installed && !status.updateAvailable && status.loggedIn &&
+        "oauth" in status.methods && status.claudeState == null
 
     // Row-level click priorities:
     //   - install → not installed
@@ -882,15 +899,19 @@ private fun AgentRow(
     val needsUpdate = !checking && status != null && status.installed && status.updateAvailable
     // `!loggingIn`: while the exchange is running the row must NOT re-fire the
     // login flow on tap (that's the "invites me to log in again" confusion).
-    val needsLogin = !checking && !loggingIn && status != null && status.installed && !status.updateAvailable && !status.loggedIn
+    val needsLogin = !checking && !loggingIn && status != null && status.installed && !status.updateAvailable && !status.loggedIn && status?.claudeState?.isBlocked != true
     val rowClick = when {
         canEnter -> onClick
         (needsInstall || needsUpdate) && !anyInstalling -> onInstall
+        // Blocked run-state → open the account/method sheet (switch account, add
+        // an API key, re-login …), NOT a forced API-key dialog.
+        runBlocked -> onLongClick
         needsLogin -> onLogin
         else -> ({})
     }
     val rowEnabled = canEnter ||
         ((needsInstall || needsUpdate) && !anyInstalling) ||
+        runBlocked ||
         needsLogin
     Column(
         modifier = Modifier
@@ -933,6 +954,7 @@ private fun AgentRow(
                 op = op,
                 checking = checking,
                 loggingIn = loggingIn,
+                runStatePending = runStatePending,
                 cyan = cyan,
                 amber = amber,
                 dim = dim,
@@ -952,6 +974,14 @@ private fun AgentRow(
             status.updateAvailable ->
                 "  ${status.installedVersion ?: "?"} → ${status.latestVersion ?: "?"} · update before opening"
             !status.loggedIn -> "  not logged in — tap to start OAuth"
+            // Claude run-state (no subscription / trial / payment / rate limit /
+            // login expired …) — the enum's own honest line + datum. Covers BLOCK
+            // and WARN; OK/UNKNOWN have an empty line and fall through to "ready".
+            status.claudeState?.line?.isNotEmpty() == true ->
+                "  " + (status.claudeState?.lineWith(status.claudeStateData) ?: "")
+            // Run-state (subscription) not yet determined — honest "still
+            // checking" instead of a premature "ready".
+            runStatePending -> "  checking subscription…"
             else -> "  ready · ${status.installedVersion ?: ""}"
         }
         Text(
@@ -1023,6 +1053,9 @@ private fun StatusBadge(
     /** OAuth code/URL submitted, exchange in flight — show a live "signing in…"
      *  pill so the long completion window reads as progress, not "[ log in ]". */
     loggingIn: Boolean = false,
+    /** Claude OAuth account whose run-state (subscription / limits) isn't known
+     *  yet — show a dim "[ … ]" working pill, not a premature cyan "[ ready ]". */
+    runStatePending: Boolean = false,
     cyan: Color = MaterialTheme.colorScheme.primary,
     amber: Color = MaterialTheme.colorScheme.tertiary,
     dim: Color = MaterialTheme.colorScheme.outline,
@@ -1045,6 +1078,12 @@ private fun StatusBadge(
         !status.installed -> "[ install ]" to cyan
         status.updateAvailable -> "[ update ]" to amber
         !status.loggedIn -> "[ log in ]" to amber
+        // Logged in, but the account is in a BLOCK run-state (no subscription /
+        // trial ended / payment due / login expired / rate limited …) — a real
+        // dead-end, not a login prompt. The enum supplies the honest short badge.
+        status.claudeState?.isBlocked == true -> "[ ${status.claudeState?.badge ?: ""} ]" to amber
+        // Run-state not yet determined → dim working pill, not a false "ready".
+        runStatePending -> "[ … ]" to dim
         else -> "[ ready ]" to cyan
     }
     Surface(
@@ -1142,6 +1181,57 @@ private fun LoginDialog(
     val fg = MaterialTheme.colorScheme.onSurface
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     var pasted by remember { mutableStateOf("") }
+    // **CLIPBOARD AUTO-GRAB.** A full zero-touch intercept of the OAuth code is
+    // impossible: the redirect lands on the PROVIDER's domain (platform.claude.com
+    // / localhost-on-the-server), which our app can't claim via App Links, and a
+    // WebView would break "Sign in with Google" (disallowed_useragent). The next
+    // best thing: the user taps Copy on the provider's callback page, returns to
+    // the app (one tap — PiP keeps us floating over the browser), and we read the
+    // clipboard on that return, validate the shape, and SUBMIT AUTOMATICALLY — no
+    // manual paste, no submit tap. Guards: only after the user actually LEFT the
+    // app (ON_PAUSE seen — never on first open, where the clipboard may hold a
+    // stale code), only while a paste is awaited, strict per-mode validation, and
+    // same-clip dedup so a failed exchange isn't hammered in a loop.
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var leftApp by remember { mutableStateOf(false) }
+    var resumeTick by remember { mutableStateOf(0) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> leftApp = true
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME ->
+                    if (leftApp) { leftApp = false; resumeTick++ }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    var lastAutoClip by remember { mutableStateOf("") }
+    LaunchedEffect(resumeTick) {
+        if (resumeTick == 0) return@LaunchedEffect
+        if (!request.awaitingPaste || request.submitted || request.fatalError != null) return@LaunchedEffect
+        // Clipboard access needs window focus (Android 10+) — give it a beat.
+        kotlinx.coroutines.delay(450)
+        val clip = clipboard.getText()?.text?.trim().orEmpty()
+        if (clip.isEmpty() || clip == lastAutoClip) return@LaunchedEffect
+        val valid = if (request.callbackMode) {
+            // Callback URL the browser landed on (Codex/Gemini localhost pattern).
+            clip.startsWith("http") && clip.contains("code=")
+        } else {
+            // Claude OOB code: `<code>#<state>`, both base64url. The submit
+            // handler re-sanitizes (whitespace / glued URL tail).
+            Regex("[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{16,}").containsMatchIn(clip)
+        }
+        if (!valid) return@LaunchedEffect
+        lastAutoClip = clip
+        android.util.Log.d(
+            "SshAi-AgentPicker",
+            "LoginDialog clipboard auto-grab — len=${clip.length} callbackMode=${request.callbackMode}",
+        )
+        pasted = ""
+        onSubmitCode(clip)
+    }
     androidx.compose.ui.window.Dialog(onDismissRequest = onCancel) {
         Surface(
             color = MaterialTheme.colorScheme.background,
@@ -1190,21 +1280,49 @@ private fun LoginDialog(
                 // status line until the credentials file appears (or
                 // the CLI errors out and the dialog gets dismissed).
                 if (request.submitted) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Clean animation + a CONCRETE live status: the big line is the
+                    // ONE thing happening right now (exchanging code / saving /
+                    // checking subscription), the small dim log below is the trail
+                    // of finished steps (✓). NOT the raw server dump. rawTail
+                    // carries a `\n`-joined trail.
+                    val steps = request.rawTail.lineSequence()
+                        .map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                    val current = steps.lastOrNull() ?: "Signing in…"
+                    val done = if (steps.size > 1) steps.dropLast(1) else emptyList()
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp).padding(end = 8.dp),
-                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(26.dp),
+                            strokeWidth = 2.5.dp,
                             color = cyan,
                         )
                         Text(
-                            // rawTail gets updated to "Completing
-                            // sign-in…" / "Exchanging code for token…"
-                            // by the submit handlers, so use it.
-                            request.rawTail.takeIf { it.isNotBlank() }
-                                ?: "Completing sign-in…",
-                            color = muted,
-                            style = MaterialTheme.typography.bodyMedium,
+                            current,
+                            color = fg,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         )
+                        if (done.isNotEmpty()) {
+                            Column(
+                                horizontalAlignment = Alignment.Start,
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                done.forEach { s ->
+                                    Text(
+                                        "✓ $s",
+                                        color = muted.copy(alpha = 0.55f),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
                     }
                 } else {
                     if (request.url != null) {
@@ -1290,11 +1408,11 @@ private fun LoginDialog(
                         else -> "http://localhost:…/callback?code=…"
                     }
                     val (label, placeholder, button) = if (request.callbackMode) Triple(
-                        "${if (request.url != null) "2" else "1"}. After sign-in your browser will show \"Connection refused\" — that's expected. Copy the URL from the address bar and paste it here:",
+                        "${if (request.url != null) "2" else "1"}. After sign-in your browser will show \"Connection refused\" — that's expected. Copy the URL from the address bar and come back — it's picked up automatically (or paste it here):",
                         callbackPlaceholder,
                         "[ finish sign-in ]",
                     ) else Triple(
-                        "${if (request.url != null) "2" else "1"}. Paste the code from the browser:",
+                        "${if (request.url != null) "2" else "1"}. Tap Copy on the page and come back — the code is picked up automatically (or paste it here):",
                         "Authorization code",
                         "[ submit code ]",
                     )
@@ -1331,24 +1449,15 @@ private fun LoginDialog(
                         Text(button, style = MaterialTheme.typography.labelLarge)
                     }
                 }
-                // Pre-submit: noisy CLI tail + reassurance hint. Once
-                // the user has submitted, both are removed — the
-                // "Completing sign-in…" spinner above is the only
-                // status indicator we need.
+                // Pre-submit: a short reassurance hint ONLY — never the raw CLI
+                // tail (user: no server log in the window). Once submitted, the
+                // clean "Signing in…" animation above is the whole story.
                 if (!request.submitted) {
                     Text(
-                        request.rawTail.lineSequence().lastOrNull().orEmpty(),
-                        color = muted.copy(alpha = 0.6f),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    )
-                    Text(
                         if (request.awaitingPaste)
-                            "After submitting, the dialog will close once the token is saved on the server."
+                            "Copy the code and come back — it's picked up and submitted automatically."
                         else
-                            "Dialog will close automatically once you've completed sign-in in the browser.",
+                            "This window closes on its own once you've signed in.",
                         color = muted,
                         style = MaterialTheme.typography.bodySmall,
                     )

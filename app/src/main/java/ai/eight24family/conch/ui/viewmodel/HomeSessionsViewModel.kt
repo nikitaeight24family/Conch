@@ -57,6 +57,14 @@ data class HomeSessionRow(
     /** Unsent text typed into this chat's input box (a saved draft), or null.
      *  Shown inline as "Draft: …" in place of the row's preview. */
     val draftText: String? = null,
+    /** This session's agent is in a BLOCK Claude run-state (no subscription /
+     *  trial ended / rate limited / login expired …). The row shows a [codeBadge]
+     *  marker so the blocked state is visible in the session list too, not only in
+     *  the agent picker / chat. */
+    val codeBlocked: Boolean = false,
+    /** Short badge for the blocked state (e.g. "no subscription", "rate limited"),
+     *  or null when not blocked. */
+    val codeBadge: String? = null,
 )
 
 /**
@@ -294,11 +302,17 @@ class HomeSessionsViewModel : ViewModel() {
             // Agents on THIS server that are installed AND logged-in — the only
             // ones a chat can be opened with. Read from the status cache (filled
             // by the prefetch probe); absent/unprobed server → empty set.
-            usable[s.id] = SilentlyTry.loggedOrElse(
+            val srvStatuses = SilentlyTry.loggedOrElse(
                 "SshAi-Home", "load agent status", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
             ) { agentStatusCache.load(s.id).statuses }
-                .filterValues { it.installed && it.loggedIn }.keys
+            // "Usable" excludes an agent in a BLOCK run-state — logged in but can't
+            // actually run a turn, so it must NOT count as a new-chat target (else
+            // the FAB offers a doomed chat).
+            usable[s.id] = srvStatuses
+                .filterValues { it.installed && it.loggedIn && it.claudeState?.isBlocked != true }.keys
             for (agent in Agent.entries) {
+                val agentState = srvStatuses[agent]?.claudeState
+                val agentBlocked = agentState?.isBlocked == true
                 val snap = cache.load(s.id, agent)
                 for (sess in snap.sessions) {
                     // User-deleted → never show, even if the prefetcher just
@@ -337,6 +351,8 @@ class HomeSessionsViewModel : ViewModel() {
                         phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
                             "${s.id}:${sess.id}" in phoneBridge, s.id, shizukuOk),
                         draftText = draftsByChat[sess.id],
+                        codeBlocked = agentBlocked,
+                        codeBadge = if (agentBlocked) agentState?.badge else null,
                     )
                 }
             }

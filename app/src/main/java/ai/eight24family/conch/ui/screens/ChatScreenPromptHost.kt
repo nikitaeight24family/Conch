@@ -70,6 +70,12 @@ internal fun ChatPromptHost(
     val usageBar by vm.usageBar.collectAsState()
     val usageReport by vm.usageReport.collectAsState()
     val usageCost by vm.costStats.collectAsState()
+    // Current agent in a BLOCK Claude run-state (no subscription / trial ended /
+    // rate limited / login expired …) → the whole prompt bar reflects it: the
+    // specific reason as a banner instead of the (meaningless, stale) usage bar,
+    // and send disabled. Same truth as the agent-picker row + session list.
+    val codeBlockText by vm.claudeBlockLine.collectAsState()
+    val codeBlocked = codeBlockText != null
     val contextBreakdown by vm.contextBreakdown.collectAsState()
     val contextLoading by vm.contextLoading.collectAsState()
 
@@ -96,7 +102,9 @@ internal fun ChatPromptHost(
     PromptBar(
         input = input,
         onInputChange = onInputChange,
-        canSend = !anyUploading,
+        canSend = !anyUploading && !codeBlocked,
+        codeBlocked = codeBlocked,
+        codeBlockText = codeBlockText,
         working = state is SessionState.Working || remoteWorking,
         usage = usageBar,
         usageReport = usageReport,

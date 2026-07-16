@@ -49,6 +49,17 @@ class CredentialVault(
         Agent.CLAUDE -> "ANTHROPIC_API_KEY"
     }
 
+    /** SECOND live mechanism for Claude OAuth: a `claude setup-token` login
+     * writes NO credentials file — the token lives as an `export
+     * CLAUDE_CODE_OAUTH_TOKEN=…` line in ~/.profile (our login flow persists
+     * it there; the CLI reads the same var). Every slot operation must treat
+     * the Claude OAuth credential as (file AND/OR env line): ignoring the env
+     * half left the server LOGGED IN after "remove account". */
+    private val oauthEnvVar: String? = when (agent) {
+        Agent.CLAUDE -> "CLAUDE_CODE_OAUTH_TOKEN"
+        else -> null
+    }
+
     private val slotsDir = "\$HOME/.sshai-auth/${agent.name.lowercase()}/slots"
 
     /** List saved accounts. Each prints as one TAB-joined line:
@@ -101,8 +112,22 @@ class CredentialVault(
                 "mkdir -p \"$dir\" && printf '%s\\n' \"\$LINE\" > \"$dir/cred\" && " +
                 "printf 'method=api\\nlabel=%s\\ncreated=%s\\nmasked=%s\\n' ${sh(label)} \"\$(date +%s)\" \"\$MASK\" > \"$dir/meta\" && echo OK"
         } else {
-            "[ -f \"$liveCred\" ] || { echo NOLIVE; exit 0; }; " +
-                "mkdir -p \"$dir\" && cp \"$liveCred\" \"$dir/cred\" && " +
+            // OAuth: the live credential may be a FILE, an ENV LINE (Claude
+            // setup-token), or both. Capture whichever exists; NOLIVE only when
+            // neither does. The file half is captured only when it actually
+            // CARRIES a token (a dead file with empty values is not an account).
+            val fileGate = if (agent == Agent.CLAUDE)
+                "[ -f \"$liveCred\" ] && grep -qE '\"(access_?[Tt]oken|refresh_?[Tt]oken)\"[[:space:]]*:[[:space:]]*\"[^\"]+\"' \"$liveCred\" 2>/dev/null"
+            else
+                "[ -f \"$liveCred\" ]"
+            val envCapture = oauthEnvVar?.let {
+                "LINE=\$(grep -hE \"^[[:space:]]*export[[:space:]]+$it=\" \$HOME/.profile 2>/dev/null | tail -1); " +
+                    "[ -n \"\$LINE\" ] && printf '%s\\n' \"\$LINE\" > \"$dir/credenv\" && HAVE=y; "
+            } ?: ""
+            "HAVE=n; mkdir -p \"$dir\"; " +
+                "if $fileGate; then cp \"$liveCred\" \"$dir/cred\" && HAVE=y; fi; " +
+                envCapture +
+                "[ \"\$HAVE\" = y ] || { rm -rf \"$dir\"; echo NOLIVE; exit 0; }; " +
                 "printf 'method=%s\\nlabel=%s\\ncreated=%s\\n' ${sh(method)} ${sh(label)} \"\$(date +%s)\" > \"$dir/meta\" && echo OK"
         }
         val ok = SilentlyTry.logged(TAG, "capture live -> slot") { exec("bash -lc " + sh(script)) }
@@ -117,13 +142,20 @@ class CredentialVault(
         val out = SilentlyTry.logged(TAG, "activate slot") {
             exec(
                 "bash -lc " + sh(
-                    "[ -f \"$dir/cred\" ] || { echo NOSLOT; exit 0; }; " +
+                    "[ -f \"$dir/cred\" ] || [ -f \"$dir/credenv\" ] || { echo NOSLOT; exit 0; }; " +
                         "M=\$(sed -nE 's/^method=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
                         "if [ \"\$M\" = api ]; then " +
                         "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; " +
                         "  cat \"$dir/cred\" >> \$HOME/.profile; " +
                         "else " +
-                        "  mkdir -p \"\$(dirname \"$liveCred\")\" && cp \"$dir/cred\" \"$liveCred\"; " +
+                        // Make live state EXACTLY the slot's content, across BOTH
+                        // mechanisms — a leftover env token would shadow the file
+                        // for the CLI, silently keeping the previous account active.
+                        (oauthEnvVar?.let {
+                            "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; " +
+                                "  [ -f \"$dir/credenv\" ] && cat \"$dir/credenv\" >> \$HOME/.profile; "
+                        } ?: "") +
+                        "  if [ -f \"$dir/cred\" ]; then mkdir -p \"\$(dirname \"$liveCred\")\" && cp \"$dir/cred\" \"$liveCred\"; else rm -f \"$liveCred\"; fi; " +
                         "fi; echo OK"
                 )
             )
@@ -137,9 +169,16 @@ class CredentialVault(
         val safeId = slotId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val dir = "$slotsDir/$safeId"
         val clear = if (clearLiveIfActive) {
+            // Real log-out = wipe EVERY live mechanism this method can use. For
+            // Claude OAuth that's the credentials file AND the setup-token env
+            // line — leaving the env line kept the server logged in after the
+            // last account was removed (probe then honestly said "ready" while
+            // the sheet said "No accounts").
             "M=\$(sed -nE 's/^method=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
                 "if [ \"\$M\" = api ]; then sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; " +
-                "else rm -f \"$liveCred\"; fi; "
+                "else rm -f \"$liveCred\"; " +
+                (oauthEnvVar?.let { "sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; " } ?: "") +
+                "fi; "
         } else ""
         val out = SilentlyTry.logged(TAG, "remove slot") {
             exec("bash -lc " + sh(clear + "rm -rf \"$dir\"; echo OK"))

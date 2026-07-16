@@ -276,6 +276,25 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val _currentAgent = MutableStateFlow(initialAgent ?: Agent.CLAUDE)
     val currentAgent: StateFlow<Agent> = _currentAgent.asStateFlow()
 
+    /** The current agent's Claude run-state block LINE (the specific honest reason
+     *  a turn won't run — "No active Claude subscription…", "trial ended", "Usage
+     *  limit reached — resets …", "sign-in expired" …), or null when it can run.
+     *  Reactive off the status cache so the chat reflects it the instant a probe
+     *  detects it. A blocked account must look blocked on EVERY surface — this
+     *  drives the chat banner text, the disabled send, and the hidden (meaningless)
+     *  usage bar, not just the agent-picker row. */
+    val claudeBlockLine: StateFlow<String?> =
+        kotlinx.coroutines.flow.combine(
+            _currentAgent,
+            ServiceLocator.agentStatusCache.observeStatuses(serverId),
+        ) { agent, statuses ->
+            val st = statuses[agent]
+            st?.claudeState?.takeIf { it.isBlocked }?.lineWith(st.claudeStateData)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val codeBlocked: StateFlow<Boolean> =
+        claudeBlockLine.map { it != null }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     /** Local id of the AgentSession we're currently displaying. Public so
      *  other screens (subagents browser) can re-attach to the live SSH
      *  session via `ServiceLocator.agentSessions.get(...)`. */
@@ -1957,6 +1976,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     fun send(text: String) {
+        claudeBlockLine.value?.let { why ->
+            // Blocked run-state (no subscription / trial ended / rate limited /
+            // login expired …): the turn would just fail, so refuse and say WHY
+            // in-chat with the specific reason. The UI also disables send + shows a
+            // banner — this is the guard for the keyboard-action path and any
+            // programmatic send.
+            _localSessionId.value?.let { sid ->
+                _messagesBySession.update { m ->
+                    m + (sid to ((m[sid] ?: emptyList()) + AgentMessage.Error(
+                        UUID.randomUUID().toString(), why.trim(),
+                    )))
+                }
+            }
+            return
+        }
         val sid = _localSessionId.value ?: run {
             android.util.Log.w("SshAi-Send", "VM.send DROP: _localSessionId is null")
             return

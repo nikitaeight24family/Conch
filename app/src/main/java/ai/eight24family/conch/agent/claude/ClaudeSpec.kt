@@ -319,12 +319,24 @@ echo "claude_ver=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\
 # is the cleanest server-side check; gated on npm being present.
 echo "claude_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @anthropic-ai/claude-code version 2>/dev/null | tr -d '\r\n ' || echo '')"
 CM=""
-# OAuth = credentials file that actually CARRIES the token, not a bare `-f`.
-# Claude writes `{"claudeAiOauth":{"accessToken":..,"refreshToken":..}}`; an
-# empty/partial file (login killed mid-exchange) used to read as "logged in"
-# forever. Grep the key NAMES (never the values) — same fix Gemini already has
-# for refresh_token. CLAUDE_CODE_OAUTH_TOKEN env is the headless OAuth variant.
-if grep -qsE '"(claudeAiOauth|refreshToken|accessToken)"' ~/.claude/.credentials.json ~/.claude/credentials.json 2>/dev/null || [ -n "${'$'}CLAUDE_CODE_OAUTH_TOKEN" ]; then CM="${'$'}CM oauth"; fi
+# OAuth = a credentials file that actually CARRIES a usable token — NOT merely
+# the presence of the key names. A dead / logged-out session leaves the file with
+# the `claudeAiOauth` keys but EMPTY values (accessToken:"", refreshToken: "",
+# expiresAt:0). That is NOT a login — the CLI refuses ("OAuth session expired and
+# could not be refreshed") — so it must read as "not logged in", never a phantom
+# OAuth account with a "login expired" badge. Require a NON-EMPTY access OR
+# refresh token value (either suffices — the CLI silently renews an empty access
+# token from a live refresh token). Never read/emit the value itself, only its
+# presence. CLAUDE_CODE_OAUTH_TOKEN env is the headless variant.
+claude_oauth_live() {
+  for f in ~/.claude/.credentials.json ~/.claude/credentials.json ~/.config/claude/.credentials.json; do
+    [ -f "${'$'}f" ] || continue
+    grep -qE '"(access_?[Tt]oken|refresh_?[Tt]oken)"[[:space:]]*:[[:space:]]*"[^"]+"' "${'$'}f" 2>/dev/null && return 0
+  done
+  [ -n "${'$'}CLAUDE_CODE_OAUTH_TOKEN" ] && return 0
+  return 1
+}
+if claude_oauth_live; then CM="${'$'}CM oauth"; fi
 if [ -n "${'$'}ANTHROPIC_API_KEY" ] || grep -qsE '^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_API_KEY=' ~/.bashrc ~/.profile ~/.bash_profile ~/.env 2>/dev/null; then CM="${'$'}CM api"; fi
 if [ -n "${'$'}ANTHROPIC_AUTH_TOKEN" ] || grep -qsE '^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_AUTH_TOKEN=' ~/.bashrc ~/.profile ~/.bash_profile ~/.env 2>/dev/null; then CM="${'$'}CM bearer"; fi
 if [ "${'$'}CLAUDE_CODE_USE_VERTEX" = "1" ] || [ -n "${'$'}ANTHROPIC_VERTEX_PROJECT_ID" ]; then CM="${'$'}CM vertex"; fi
@@ -334,8 +346,103 @@ if [ "${'$'}CLAUDE_CODE_USE_BEDROCK" = "1" ]; then echo "claude_active=bedrock"
 elif [ "${'$'}CLAUDE_CODE_USE_VERTEX" = "1" ] || [ -n "${'$'}ANTHROPIC_VERTEX_PROJECT_ID" ]; then echo "claude_active=vertex"
 elif [ -n "${'$'}ANTHROPIC_AUTH_TOKEN" ]; then echo "claude_active=bearer"
 elif [ -n "${'$'}ANTHROPIC_API_KEY" ]; then echo "claude_active=api"
-elif grep -qsE '"(claudeAiOauth|refreshToken|accessToken)"' ~/.claude/.credentials.json ~/.claude/credentials.json 2>/dev/null || [ -n "${'$'}CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "claude_active=oauth"
+elif claude_oauth_live; then echo "claude_active=oauth"
 else echo "claude_active="; fi
+# Claude Code RUN-STATE — OAuth mode only (an API key path always works, so we
+# don't gate it). A present OAuth cred does NOT mean a turn will run: the account
+# can be in many states (no subscription, trial ended/not-started, payment due,
+# login expired, rate limited) that the CLI refuses turns on. Detected SERVER-SIDE
+# from Anthropic's oauth/profile (+usage) — token never leaves the box. Classifier
+# validated live against a lapsed-subscription account. jq is NOT assumed (pure
+# sed/grep). Runs in a subshell so its vars/`exit` can't leak into the shared
+# probe. Emits `claude_run_state=<NAME>` (+ optional `claude_run_data`) →
+# AgentStatus.claudeState. Full taxonomy: reference_claude_code_run_states.
+case " ${'$'}CM " in
+  *" oauth "*) (
+    CRED="${'$'}HOME/.claude/.credentials.json"; [ -f "${'$'}CRED" ] || CRED="${'$'}HOME/.config/claude/.credentials.json"
+    TOK=${'$'}(sed -n -E 's/.*"access_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}CRED" 2>/dev/null | head -1)
+    # A `claude setup-token` login lives in CLAUDE_CODE_OAUTH_TOKEN (we persist it
+    # to ~/.profile; the CLI reads the same var) — it writes NO credentials file,
+    # so a dead/empty credentials.json can sit right next to a perfectly live env
+    # token. File token first (the CLI's refresh cycle keeps it current), env as
+    # fallback — otherwise a fresh setup-token login probes as "login expired"
+    # off the stale file while claude itself runs fine.
+    [ -z "${'$'}TOK" ] && TOK="${'$'}CLAUDE_CODE_OAUTH_TOKEN"
+    if [ -z "${'$'}TOK" ]; then
+      # Empty access token. This is a DEAD credential, not "logged in & ready":
+      # the file can carry the claudeAiOauth KEYS with empty VALUES + expiresAt:0
+      # after a session dies (methods-detection still sees the keys → shows oauth,
+      # but no turn can run). No refresh token either ⇒ unrefreshable ⇒ the CLI
+      # itself refuses with "OAuth session expired and could not be refreshed" →
+      # TOKEN_EXPIRED (re-login on the server). A refresh token PRESENT ⇒ the CLI
+      # renews silently on next use, so we can't judge the subscription from here
+      # without consuming/rotating it (unsafe in a status probe) → UNKNOWN (don't
+      # block; the turn / live-auth surfaces the truth). Previously this whole
+      # branch just `exit 0`ed → no run_state → a dead session read as "ready".
+      RTOK=${'$'}(sed -n -E 's/.*"refresh_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}CRED" 2>/dev/null | head -1)
+      if [ -z "${'$'}RTOK" ]; then echo "claude_run_state=TOKEN_EXPIRED"; else echo "claude_run_state=UNKNOWN"; fi
+      exit 0
+    fi
+    VER=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
+    prof=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/profile" 2>/dev/null)
+    PC=${'$'}(printf '%s' "${'$'}prof" | sed -n 's/^HTTP://p' | tail -1)
+    PJ=${'$'}(printf '%s' "${'$'}prof" | sed '${'$'}d')
+    # profile 200 itself proves the token is live (validate is 405 on GET).
+    # 401 = auth dead. 403 needs the BODY: a `claude setup-token` login mints an
+    # INFERENCE-ONLY token (authorize URL literally has scope=user:inference), so
+    # profile/usage answer 403 permission_error "does not meet scope requirement"
+    # while the token is perfectly LIVE and turns run (verified: claude -p exit 0
+    # on exactly this state). That's OK — the subscription simply can't be
+    # pre-checked with it; the turn surfaces any problem. Any OTHER 403 = auth dead.
+    if [ "${'$'}PC" = "401" ]; then echo "claude_run_state=TOKEN_EXPIRED"; exit 0; fi
+    if [ "${'$'}PC" = "403" ]; then
+      if printf '%s' "${'$'}PJ" | grep -qE 'permission_error|scope requirement'; then echo "claude_run_state=OK"; else echo "claude_run_state=TOKEN_EXPIRED"; fi
+      exit 0
+    fi
+    if [ "${'$'}PC" != "200" ]; then echo "claude_run_state=UNKNOWN"; exit 0; fi
+    h() { printf '%s' "${'$'}PJ" | grep -qE "${'$'}1"; }
+    mx=n; h '"has_claude_max"[[:space:]]*:[[:space:]]*true' && mx=y
+    pr=n; h '"has_claude_pro"[[:space:]]*:[[:space:]]*true' && pr=y
+    sa=n; h '"subscription_status"[[:space:]]*:[[:space:]]*"(active|trialing)"' && sa=y
+    pd=n; { h '"payment_auth_hosted_invoice_url"[[:space:]]*:[[:space:]]*"http' || h '"pending_invoice"[[:space:]]*:[[:space:]]*("|\{|true)'; } && pd=y
+    TE=${'$'}(printf '%s' "${'$'}PJ" | sed -n -E 's/.*"claude_code_trial_ends_at"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+    NW=${'$'}(date +%s); TS=; [ -n "${'$'}TE" ] && TS=${'$'}(date -d "${'$'}TE" +%s 2>/dev/null)
+    ST=OK; DA=
+    if [ "${'$'}mx" = y -o "${'$'}pr" = y ] && [ "${'$'}sa" = y ]; then ST=OK
+    elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -gt "${'$'}NW" ]; then ST=TRIAL_ACTIVE; DA="${'$'}(( (${'$'}TS-${'$'}NW)/86400 )) days"
+    elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -le "${'$'}NW" ] && [ "${'$'}mx" = n ] && [ "${'$'}pr" = n ]; then ST=TRIAL_ENDED
+    elif [ "${'$'}pr" = y ] && [ -z "${'$'}TE" ]; then ST=TRIAL_START
+    elif [ "${'$'}pd" = y ]; then ST=PAYMENT_DUE
+    elif [ "${'$'}mx" = n ] && [ "${'$'}pr" = n ]; then ST=NO_SUBSCRIPTION
+    fi
+    # Usage overlay only for a runnable state; skip when usage itself is 429/empty
+    # (do NOT fake rate-limit). Windows that HARD-block OUR turns: five_hour,
+    # seven_day, and seven_day_oauth_apps (the third-party-OAuth-app bucket = our
+    # own access path). Model-scoped opus/sonnet are a per-model degrade, excluded.
+    if [ "${'$'}ST" = OK ] || [ "${'$'}ST" = TRIAL_ACTIVE ]; then
+      usg=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+      UC=${'$'}(printf '%s' "${'$'}usg" | sed -n 's/^HTTP://p' | tail -1)
+      UJ=${'$'}(printf '%s' "${'$'}usg" | sed '${'$'}d')
+      if [ "${'$'}UC" = "200" ]; then
+        MU=0; RS=
+        for w in five_hour seven_day seven_day_oauth_apps; do
+          bd=${'$'}(printf '%s' "${'$'}UJ" | grep -oE "\"${'$'}w\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" | head -1)
+          [ -z "${'$'}bd" ] && continue
+          u=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"utilization"[[:space:]]*:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+          [ -z "${'$'}u" ] && continue
+          ui=${'$'}{u%.*}
+          if [ "${'$'}ui" -gt "${'$'}MU" ] 2>/dev/null; then MU=${'$'}ui; RS=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"resets_at"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1); fi
+        done
+        if [ "${'$'}MU" -ge 100 ] 2>/dev/null; then ST=RATE_LIMITED; DA=${'$'}RS
+        elif [ "${'$'}MU" -ge 80 ] 2>/dev/null; then ST=NEAR_LIMIT; DA=${'$'}RS
+        fi
+      fi
+    fi
+    echo "claude_run_state=${'$'}ST"
+    [ -n "${'$'}DA" ] && echo "claude_run_data=${'$'}DA"
+  ) ;;
+esac
 """.trimIndent()
 
     /**

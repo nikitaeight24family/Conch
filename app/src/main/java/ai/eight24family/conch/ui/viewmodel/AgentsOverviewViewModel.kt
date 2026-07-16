@@ -32,6 +32,31 @@ class AgentsOverviewViewModel : ViewModel() {
     private val _loadedOnce = MutableStateFlow(false)
     val loadedOnce: StateFlow<Boolean> = _loadedOnce.asStateFlow()
 
+    // Pull-to-refresh on the Agents tab. Each server's agents live in a SEPARATE
+    // per-server AgentPickerViewModel (owned by its ServerSection), so this VM
+    // can't call their refresh() directly — instead it bumps [refreshTick], which
+    // every visible ServerSection observes and turns into a userTriggered
+    // re-probe. [refreshing] drives the PullToRefreshBox spinner: a short fixed
+    // window (the badges self-update live as each panel's probe lands, and each
+    // panel also shows its own "refreshing…" bar — we don't gate the gesture on N
+    // independent VMs all finishing). Before this, the tab had NO pull-to-refresh
+    // at all (it lived only in the full-screen picker) — the swipe did nothing,
+    // no animation.
+    private val _refreshTick = MutableStateFlow(0)
+    val refreshTick: StateFlow<Int> = _refreshTick.asStateFlow()
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    fun refreshAll() {
+        _refreshTick.value += 1
+        _refreshing.value = true
+        viewModelScope.launch {
+            delay(1_500)
+            _refreshing.value = false
+        }
+    }
+
     init {
         viewModelScope.launch {
             while (true) {
@@ -43,7 +68,7 @@ class AgentsOverviewViewModel : ViewModel() {
 
     private suspend fun reload() {
         // Sort by host then user so multiple users on the same machine
-        // (user@x, user@example.com) cluster together, each with its own agents.
+        // (alice@host, bob@host) cluster together, each with its own agents.
         val servers = repo.observeServers().first()
             .sortedWith(compareBy({ it.host.lowercase() }, { it.port }, { it.username.lowercase() }))
         _entries.value = servers.map { s -> Entry(server = s, connected = pool.peek(s.id) != null) }

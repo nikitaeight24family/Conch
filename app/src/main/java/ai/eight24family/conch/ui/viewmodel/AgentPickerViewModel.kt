@@ -158,70 +158,51 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  re-login). */
     private var pendingAddAccount: Agent? = null
 
-    /** When non-null, show the name dialog: (agent, default label). Saving it
-     *  captures the now-live login into a freshly-named slot. */
-    private val _captureNamePrompt = MutableStateFlow<Pair<Agent, String>?>(null)
-    val captureNamePrompt: StateFlow<Pair<Agent, String>?> = _captureNamePrompt.asStateFlow()
-
     /** "[ + add account ]" — run the normal login flow (method picker +
-     *  authorize); on success we'll prompt for a name and capture it. */
+     *  authorize); on success onLoginSuccess auto-captures it as the next
+     *  ordinal (no name prompt). */
     fun addAccount(agent: Agent) {
         pendingAddAccount = agent
         _methodSheetAgent.value = null
         startLogin(agent)
     }
 
-    /** Called by the login coordinators on a successful login. */
-    fun onLoginSuccess(agent: Agent) {
+    /** Called by the login coordinators on a successful login. NEVER prompts for
+     * a name (auto-assigns the next ordinal — the user renames later via the pencil
+     * if they want) and NEVER opens the accounts sheet: the login just needs to
+     * become a live, ready account as fast as possible. */
+    suspend fun onLoginSuccess(agent: Agent) {
         val wasAddFlow = pendingAddAccount == agent
         pendingAddAccount = null
-        viewModelScope.launch {
-            val v = vault(agent) ?: return@launch
-            val existing = v.listSlots()
-            if (wasAddFlow) {
-                // Explicit "+ add account" → let the user name it.
-                _captureNamePrompt.value = agent to "Account ${(existing?.size ?: 0) + 1}"
-                return@launch
-            }
-            // Plain [ log in ] on the row: persist the live login as a slot NOW,
-            // while the SSH is guaranteed up (the login just used it). Otherwise
-            // the account only got snapshotted lazily on manager-open — which
-            // silently failed when the pool wasn't connected, leaving the
-            // manager empty despite a working login (the bug). Only when there
-            // are no saved accounts yet, so a re-login doesn't spawn duplicates.
-            if (existing != null && existing.isEmpty()) {
-                val method = _statuses.value?.get(agent)?.activeMethod ?: "oauth"
-                if (ai.eight24family.conch.agent.CredentialVault.isSlottable(method)) {
-                    val id = v.captureLive(java.util.UUID.randomUUID().toString(), method, "Account 1")
-                    if (id != null) {
-                        ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, id)
-                        _activeSlots.value = _activeSlots.value + (agent to id)
-                    }
-                }
-            }
-            refreshSlots(agent)
-        }
-    }
-
-    fun cancelCaptureName() { _captureNamePrompt.value = null }
-
-    /** Save the just-logged-in account under [name] as a new slot + make it
-     *  active, then reopen the manager. */
-    fun confirmCaptureName(agent: Agent, name: String) {
-        _captureNamePrompt.value = null
-        viewModelScope.launch {
-            val v = vault(agent) ?: return@launch
-            val method = _statuses.value?.get(agent)?.activeMethod ?: "oauth"
-            val label = name.trim().ifBlank { "Account" }
-            val id = v.captureLive(java.util.UUID.randomUUID().toString(), method, label)
+        val v = vault(agent) ?: return
+        val existing = v.listSlots()
+        val method = _statuses.value?.get(agent)?.activeMethod ?: "oauth"
+        val slottable = ai.eight24family.conch.agent.CredentialVault.isSlottable(method)
+        // Capture the just-logged-in account as a fresh slot when it's a NEW
+        // one: an explicit "+ add account", or a plain [ log in ] on a server
+        // that had no accounts yet (Account 1). A plain re-login of an
+        // already-saved account does NOT spawn a duplicate.
+        val shouldCapture = slottable && (wasAddFlow || existing?.isEmpty() == true)
+        if (shouldCapture) {
+            val n = (existing?.size ?: 0) + 1
+            val id = v.captureLive(java.util.UUID.randomUUID().toString(), method, "Account $n")
             if (id != null) {
                 ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, id)
                 _activeSlots.value = _activeSlots.value + (agent to id)
             }
-            refreshSlots(agent)
-            reverifyAgent(agent)   // account added → re-check this agent only
-            _methodSheetAgent.value = agent
         }
+        refreshSlots(agent)
+        // Show the concrete current step in the still-open sign-in window (small
+        // log): now we're verifying the subscription.
+        _loginRequest.value = _loginRequest.value?.let { cur ->
+            cur.copy(submitted = true, rawTail = appendLoginStep(cur.rawTail, "Checking your subscription"))
+        }
+        // AWAIT the single-agent run-state probe INSIDE the login window — Claude's
+        // subscription check rides the same probe. The caller (login coordinator)
+        // holds the animation up until this returns, then closes it, so the row is
+        // ALREADY [ ready ]/[ no subscription ] with NO post-close refresh spinner.
+        refreshCoord.invalidateLiveAuth(agent)
+        refreshCoord.reprobeAgentQuiet(agent).join()
     }
 
     // ── Rename an account (pencil) ──
@@ -270,24 +251,71 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             if (v.activate(slotId)) {
                 ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, slotId)
                 _activeSlots.value = _activeSlots.value + (agent to slotId)
-                reverifyAgent(agent)   // switched active account → re-check this agent only
+                reverifyAgentQuiet(agent)   // switched account → quiet single-agent re-check
             }
         }
     }
 
-    /** Log out / forget a saved account (wipes the live creds too if active). */
+    /** Log out / forget a saved account (wipes the live creds too if active).
+     * No full refresh — reflect exactly what's left: if the removed account was
+     * active AND another remains, FAIL OVER to it (so the server stays usable and
+     * we show THAT account's status); */
     fun removeSlot(agent: Agent, slotId: String) {
         viewModelScope.launch {
             val v = vault(agent) ?: return@launch
             val wasActive = ServiceLocator.authMethodStore.activeSlot(serverId, agent) == slotId
             v.remove(slotId, clearLiveIfActive = wasActive)
             if (wasActive) {
-                ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, null)
-                _activeSlots.value = _activeSlots.value - agent
+                // remove() already wiped the live creds → make another saved
+                // account live, or go logged-out if none. NO probe afterwards —
+                // we already KNOW the outcome, so set the row directly (user:).
+                val next = v.listSlots().orEmpty().firstOrNull()
+                if (next != null && v.activate(next.id)) {
+                    ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, next.id)
+                    _activeSlots.value = _activeSlots.value + (agent to next.id)
+                    applyLocalAuthStatus(agent, loggedIn = true)
+                } else {
+                    ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, null)
+                    _activeSlots.value = _activeSlots.value - agent
+                    applyLocalAuthStatus(agent, loggedIn = false)
+                }
             }
+            // (Removing a NON-active slot leaves the live login untouched — the
+            // row's status is already correct, nothing to change.)
             refreshSlots(agent)
-            reverifyAgent(agent)   // account removed → re-check this agent only
         }
+    }
+
+    /** Set [agent]'s row from what we KNOW after an account op, with NO network
+     *  probe. `loggedIn=true` (failover to a saved account) → optimistically
+     *  ready — its own creds are now live; a real block surfaces when the chat
+     *  opens. `loggedIn=false` (no accounts left) → logged out ("[ log in ]").
+     *  Writes both the in-memory row and the cache so chat/home agree. */
+    private fun applyLocalAuthStatus(agent: Agent, loggedIn: Boolean) {
+        val cur = _statuses.value ?: return
+        val st = cur[agent] ?: return
+        val updated = if (loggedIn) {
+            st.copy(
+                loggedIn = true,
+                methods = st.methods.ifEmpty { setOf("oauth") },
+                liveAuthPending = false,
+                claudeState = if (agent == Agent.CLAUDE)
+                    ai.eight24family.conch.agent.ClaudeRunState.OK else st.claudeState,
+                claudeStateData = null,
+            )
+        } else {
+            st.copy(
+                loggedIn = false,
+                methods = emptySet(),
+                activeMethod = null,
+                liveAuthPending = false,
+                claudeState = null,
+                claudeStateData = null,
+            )
+        }
+        val merged = cur + (agent to updated)
+        _statuses.value = merged
+        viewModelScope.launch { ServiceLocator.agentStatusCache.save(serverId, merged) }
     }
 
     /** Switch the active auth method for [agent] on this server. Applies to
@@ -657,11 +685,11 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  — the bar shows ONLY when the cache is cold (first-ever
      *  visit), otherwise the probe runs silently in the background.
      */
-    fun refresh(userTriggered: Boolean = false): Job {
+    fun refresh(userTriggered: Boolean = false, showBar: Boolean = userTriggered): Job {
         // An explicit refresh (pull-to-refresh / offline-banner tap) clears the
         // offline hint and is allowed to connect (and surface the key).
         if (userTriggered) _needsManualRefresh.value = false
-        return refreshCoord.refresh(userTriggered)
+        return refreshCoord.refresh(userTriggered, showBar = showBar)
     }
 
     /** An account was just added / removed / switched for [agent]. Re-verify
@@ -670,12 +698,15 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  live-auth verdict (so it can't be trusted), mark only this agent
      *  pending, then force a probe. Other agents keep their cached state, so
      *  only this row visibly re-checks. */
-    private fun reverifyAgent(agent: Agent) {
+    /** QUIET single-agent re-check after an account add / remove / switch: probes
+     * ONLY [agent] over the already-live channel and updates just its row — no
+     * "refreshing…" bar, no whole-server re-probe, no "[ checking ]" flash on the
+     * other agents. Claude's run-state rides the same probe so [ ready ] lands as
+     * soon as the subscription check answers. The account-op paths use this
+     * instead of a whole-server refresh. */
+    private fun reverifyAgentQuiet(agent: Agent) {
         refreshCoord.invalidateLiveAuth(agent)
-        _statuses.value = _statuses.value?.let { cur ->
-            cur[agent]?.let { cur + (agent to it.copy(liveAuthPending = true)) } ?: cur
-        }
-        refreshCoord.refresh(userTriggered = true, force = true)
+        refreshCoord.reprobeAgentQuiet(agent)
     }
 
     suspend fun runProbeWithSigner(

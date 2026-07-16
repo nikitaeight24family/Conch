@@ -271,10 +271,11 @@ fun HomeSessionsScreen(
                         val multiAgent = newChatPairs.distinctBy { it.second }.size > 1
                         val multiServer = newChatPairs.distinctBy { it.first.id }.size > 1
                         Box {
-                            // Compose-new-chat button: a translucent cyber disc with a
-                            // chat-bubble-＋ glyph — reads as "new conversation", not
-                            // "attach a file" (a bare ＋ looked like add-photo). ~15%
-                            // smaller than the stock 56dp FAB + semi-transparent.
+                            // Compose-new-chat button: a translucent cyber disc with
+                            // a chat-bubble-＋ glyph — reads as "new conversation",
+                            // not "attach a file" (a bare ＋ looked like add-photo).
+                            // ~15% smaller than the stock 56dp FAB +
+                            // semi-transparent.
                             Box(
                                 modifier = Modifier
                                     .size(48.dp)
@@ -308,6 +309,16 @@ fun HomeSessionsScreen(
                                     }
                                     DropdownMenuItem(
                                         text = { Text(label) },
+                                        // Agent/company logo next to each target so
+                                        // the pick is scannable at a glance, not
+                                        // just text.
+                                        leadingIcon = {
+                                            Image(
+                                                painter = painterResource(AgentSpecRegistry[a].iconRes),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(20.dp),
+                                            )
+                                        },
                                         onClick = {
                                             serverMenuOpen = false
                                             onNewChat(s.id, a)
@@ -460,6 +471,24 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = true),
                 )
+                // Subscription has no Claude Code — the session opens but can't run
+                // a turn. Mark it here too so the dead state is visible in the list,
+                // not just inside the chat / agent picker.
+                if (row.codeBlocked) {
+                    Text(
+                        row.codeBadge ?: "blocked",
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .padding(end = 6.dp)
+                            .background(
+                                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                                RoundedCornerShape(4.dp),
+                            )
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    )
+                }
                 // Agent busy in this session right now → spinner. Multiple
                 // sessions can spin at once (agents run in parallel).
                 if (row.working) {

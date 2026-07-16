@@ -48,8 +48,18 @@ data class AgentStatus(
      *  row as "checking" (NOT "ready"/"OAuth") so a present-but-revoked cred is
      *  never flashed as usable before [AgentStatusProbe.probeLiveAuth] confirms. */
     val liveAuthPending: Boolean = false,
+    /** Claude ONLY: the account's Claude Code run-readiness (auth + subscription +
+     *  usage), as the CLI itself models it — see [ClaudeRunState]. null = not
+     *  checked / not applicable (Codex, Gemini, Claude api-key mode). A BLOCK state
+     *  means the account is logged in but a turn WON'T run (no subscription, trial
+     *  ended, payment due, login expired, rate limited, …) — and re-login won't fix
+     *  most of them. Resolved server-side from `api/oauth/profile` (+ `usage`). */
+    val claudeState: ClaudeRunState? = null,
+    /** Small datum for a data-bearing [claudeState] (trial days-left, usage reset
+     *  time). Folded into the display via [ClaudeRunState.lineWith]. */
+    val claudeStateData: String? = null,
 ) {
-    val ready: Boolean get() = installed && loggedIn && !updateAvailable
+    val ready: Boolean get() = installed && loggedIn && !updateAvailable && claudeState?.isBlocked != true
 
     /** True when both versions are known AND they differ. We treat
      *  "couldn't fetch latest" as "no update" so a network blip
@@ -270,6 +280,11 @@ class AgentStatusProbe(private val ssh: SshClient) {
                 // the switcher). Must still be one of the (live-filtered) methods.
                 activeMethod = selected?.takeIf { it in methods } ?: methods.singleOrNull(),
                 liveAuthPending = pendingLive && !selectedUnusable,
+                // Claude Code run-state (see AgentStatus.claudeState). The probe
+                // emits `<agent>_run_state=<NAME>` (+ optional `<agent>_run_data`)
+                // only for Claude in OAuth mode; absent ⇒ null (not applicable).
+                claudeState = ClaudeRunState.fromToken(kv["${tag}_run_state"]),
+                claudeStateData = kv["${tag}_run_data"]?.trim()?.takeIf { it.isNotEmpty() },
             )
         }
     }

@@ -192,9 +192,23 @@ internal class AgentPickerViewModelInstall(
             case "${'$'}CURRENT_BIN" in
                 /usr/local/bin/*|/usr/bin/*)
                     # System path — update via system npm with sudo.
+                    #
+                    # CRITICAL: pin the prefix to where the binary ACTUALLY lives
+                    # and IGNORE the user's ~/.npmrc. A very common setup has
+                    # `prefix=~/.local` in the user's ~/.npmrc (unprivileged global
+                    # installs). When we `sudo npm install -g`, npm reads that
+                    # ~/.npmrc, so the ROOT install either errors ("prefix cannot be
+                    # changed from project config") or lands in the user's ~/.local
+                    # instead of /usr — the system binary NEVER updates and the row
+                    # is stuck on "[ update ]" forever no matter how many times it's
+                    # tapped (user, 2026-07-16). `--prefix` (bin is <prefix>/bin/x, so
+                    # prefix = dirname(dirname(bin))) targets the real location;
+                    # `--userconfig=/dev/null` stops the stray ~/.npmrc from
+                    # redirecting the sudo install.
                     if command -v npm >/dev/null 2>&1; then
                         if [ -n "${'$'}SUDO" ] || [ "${'$'}(id -u)" = "0" ]; then
-                            ${'$'}SUDO npm install -g $npmTarget 2>&1
+                            SYSPREFIX="${'$'}(dirname "${'$'}(dirname "${'$'}CURRENT_BIN")")"
+                            ${'$'}SUDO npm install -g $npmTarget --prefix="${'$'}SYSPREFIX" --userconfig=/dev/null 2>&1
                             if "${'$'}CURRENT_BIN" --version 2>/dev/null | head -1; then exit 0; fi
                         fi
                     fi
@@ -303,9 +317,11 @@ internal class AgentPickerViewModelInstall(
                 if command -v $bin >/dev/null 2>&1; then exit 0; fi
                 # Last try with sudo into the system prefix — some
                 # setups have a writable global node_modules and we
-                # want to maximise success rate.
+                # want to maximise success rate. `--userconfig=/dev/null`
+                # so a user ~/.npmrc `prefix=~/.local` can't redirect the
+                # ROOT install back into the unprivileged home dir.
                 if [ -n "${'$'}SUDO" ]; then
-                    ${'$'}SUDO npm install -g $npmTarget 2>&1
+                    ${'$'}SUDO npm install -g $npmTarget --userconfig=/dev/null 2>&1
                     if command -v $bin >/dev/null 2>&1; then exit 0; fi
                 fi
             fi

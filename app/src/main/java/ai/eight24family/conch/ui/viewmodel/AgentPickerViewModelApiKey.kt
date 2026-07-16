@@ -32,9 +32,9 @@ internal class AgentPickerViewModelApiKey(
     private val startOAuthLogin: (Agent) -> Unit,
     /** Shell-escape helper shared with the OAuth path. */
     private val shellEscape: (String) -> String,
-    /** Fired after a key is written + status refreshed (drives the add-account
-     *  name prompt when an "add account" was in progress). */
-    private val onLoginSuccess: (Agent) -> Unit = {},
+    /** Fired after a key is written. SUSPEND — captures the account and awaits
+     *  the run-state probe (same fast, no-post-spinner path as OAuth). */
+    private val onLoginSuccess: suspend (Agent) -> Unit = {},
 ) {
 
     /**

@@ -86,7 +86,18 @@ internal class AgentPickerViewModelRefresh(
      *  — the bar shows ONLY when the cache is cold (first-ever
      *  visit), otherwise the probe runs silently in the background.
      */
-    fun refresh(userTriggered: Boolean = false, force: Boolean = false): Job {
+    fun refresh(
+        userTriggered: Boolean = false,
+        force: Boolean = false,
+        /** Show the in-panel "refreshing…" bar. ONLY a literal pull gesture on
+         *  THIS surface should pass true (the bar is that gesture's feedback).
+         *  Programmatic-but-thorough refreshes (the Agents-tab pull fanning out
+         *  to every server panel, retry taps, post-account-change reverify) pass
+         *  userTriggered=true for probe semantics but keep the bar OFF — the
+         *  user's rule: no refreshing panel unless THEY pulled; background work
+         *  shows only a small spinner by the connection dot, never blocking. */
+        showBar: Boolean = userTriggered,
+    ): Job {
         // HARD GATE: never probe while an OAuth login is in flight. Diagnosed
         // on-device: an automatic refresh fired the instant the user returned
         // from the browser (PiP-exit), its kickLiveAuth spawned a SECOND gemini
@@ -122,7 +133,7 @@ internal class AgentPickerViewModelRefresh(
             //  bar (so the swipe gesture has feedback). This was the
             //  user's explicit ask, repeated ~5 times now.
             probingMut.value = true
-            userRefreshingMut.value = userTriggered
+            userRefreshingMut.value = userTriggered && showBar
             errorMut.value = null
             diagnosisMut.value = null
             // Data-saver: skip the live SSH probe altogether when
@@ -287,10 +298,10 @@ internal class AgentPickerViewModelRefresh(
                         val cleared = result.mapValues { (_, st) ->
                             if (st.liveAuthPending) st.copy(liveAuthPending = false) else st
                         }
-                        statusesMut.value = cleared
+                        val effective = cache.save(serverId, cleared)
+                        statusesMut.value = effective
                         lastCheckedAtMut.value = System.currentTimeMillis()
                         firstProbeDoneMut.value = true
-                        cache.save(serverId, cleared)
                     }
                     .onFailure {
                         errorMut.value = ai.eight24family.conch.util.ErrorMessages.humanize(it)
@@ -330,10 +341,10 @@ internal class AgentPickerViewModelRefresh(
                     // session resolved (no "checking" re-flash on a background
                     // re-probe); leave an unverified one pending so it checks.
                     val resolved = withCachedLiveAuth(it)
-                    statusesMut.value = resolved
+                    val effective = cache.save(serverId, resolved)
+                    statusesMut.value = effective
                     lastCheckedAtMut.value = System.currentTimeMillis()
                     firstProbeDoneMut.value = true
-                    cache.save(serverId, resolved)
                     android.util.Log.d(tag, "  probe (pool) ok")
                     ok = true
                     kickLiveAuth(execLambda)   // async, non-blocking — self-corrects the badge
@@ -356,10 +367,10 @@ internal class AgentPickerViewModelRefresh(
             probe.probe(execLambda)
                 .onSuccess {
                     val resolved = withCachedLiveAuth(it)
-                    statusesMut.value = resolved
+                    val effective = cache.save(serverId, resolved)
+                    statusesMut.value = effective
                     lastCheckedAtMut.value = System.currentTimeMillis()
                     firstProbeDoneMut.value = true
-                    cache.save(serverId, resolved)
                     android.util.Log.d(tag, "  probe (reuse) ok")
                     ok = true
                     kickLiveAuth(execLambda)   // async, non-blocking — self-corrects the badge
@@ -370,6 +381,80 @@ internal class AgentPickerViewModelRefresh(
             return ok
         } finally {
             probingMut.value = false; userRefreshingMut.value = false
+        }
+    }
+
+    /**
+     * QUIET single-agent re-probe — the account-op path (add / remove / switch).
+     * Rides the pool/alive channel the op just used, runs ONE probe, and merges
+     * ONLY [agent]'s fresh status into the shown map — every other row is left
+     * exactly as-is. NO "refreshing…" bar, NO whole-server churn; the small
+     * spinner by the connection dot (probingMut) is the only affordance.
+     *
+     * Claude's run-state check (the profile curl) rides this same probe, so a
+     * determined state (OK / no-sub / login-expired) lands as fast as the curl
+     * answers — and since a 200/403-scope profile ALREADY proves the token, we
+     * clear liveAuthPending and SKIP the slow live-auth CLI spawn: "ready" shows
+     * immediately, no extra round-trip. If nothing is connected we can't probe
+     * without a touch, so we leave the caller's optimistic state.
+     */
+    fun reprobeAgentQuiet(agent: Agent): Job = scope.launch(Dispatchers.IO) {
+        val tag = "SshAi-AgentPicker"
+        val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+        val alive = if (pooled == null) {
+            ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CLAUDE)
+                ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CODEX)
+                ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.GEMINI)
+        } else null
+        val execLambda: (suspend (String) -> String?)? = when {
+            pooled != null -> { cmd ->
+                withContext(Dispatchers.IO) {
+                    SilentlyTry.logged(tag, "quiet reprobe on pool") {
+                        val sess = pooled.startSession()
+                        try {
+                            val proc = sess.exec(cmd)
+                            val out = java.io.ByteArrayOutputStream()
+                            proc.inputStream.copyTo(out)
+                            proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
+                            String(out.toByteArray(), Charsets.UTF_8)
+                        } finally { SilentlyTry.fired(tag, "close quiet reprobe session") { sess.close() } }
+                    }
+                }
+            }
+            alive != null -> { cmd -> alive.execOnLive(cmd) }
+            else -> null
+        }
+        if (execLambda == null) {
+            android.util.Log.w(tag, "  quiet reprobe($agent) SKIPPED — no live channel (pooled+alive both null)")
+            return@launch
+        }
+        probingMut.value = true
+        try {
+            var settled = false
+            probe.probe(execLambda)
+                .onSuccess { result ->
+                    val raw = result[agent] ?: return@onSuccess
+                    // A determined Claude run-state was reached by curling the
+                    // token's own profile → the token is proven live; drop the
+                    // "checking" pending so the row reads its true state NOW.
+                    val fresh = if (agent == Agent.CLAUDE && raw.claudeState != null) {
+                        settled = true
+                        raw.copy(liveAuthPending = false)
+                    } else raw
+                    val cur = statusesMut.value ?: emptyMap()
+                    statusesMut.value = cache.save(serverId, cur + (agent to fresh))
+                    lastCheckedAtMut.value = System.currentTimeMillis()
+                    firstProbeDoneMut.value = true
+                    android.util.Log.d(tag, "  quiet reprobe($agent) ok settled=$settled")
+                }
+                .onFailure {
+                    android.util.Log.w(tag, "  quiet reprobe($agent) failed: ${it.message}")
+                }
+            // Only pay for the (slower, CLI-spawning) live-auth confirm when the
+            // fast run-state didn't already settle the row.
+            if (!settled) kickLiveAuth(execLambda)
+        } finally {
+            probingMut.value = false
         }
     }
 
@@ -485,8 +570,7 @@ internal class AgentPickerViewModelRefresh(
                 }
             }
             if (merged != cur) {
-                statusesMut.value = merged
-                cache.save(serverId, merged)
+                statusesMut.value = cache.save(serverId, merged)
             }
         }
     }
@@ -549,10 +633,10 @@ internal class AgentPickerViewModelRefresh(
             probe.probe(execLambda)
                 .onSuccess {
                     val resolved = withCachedLiveAuth(it)
-                    statusesMut.value = resolved
+                    val effective = cache.save(serverId, resolved)
+                    statusesMut.value = effective
                     lastCheckedAtMut.value = System.currentTimeMillis()
                     firstProbeDoneMut.value = true
-                    cache.save(serverId, resolved)
                     // Live-auth pass (same as pooled/alive). A still-valid login
                     // stays resolved via withCachedLiveAuth above; an unverified
                     // one shows "checking" until this clears it.

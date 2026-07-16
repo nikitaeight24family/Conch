@@ -65,6 +65,7 @@ import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -309,6 +310,36 @@ internal fun EmptyChatGreeting(agentName: String, host: String, ready: Boolean) 
  * sheet — the panel lives in the layout, so the weight(1) message list above
  * simply shrinks.
  */
+/** Shown in place of the usage bar when the current agent is in a BLOCK Claude
+ *  run-state — the honest, SPECIFIC "this can't run + why" signal above the input,
+ *  matching the agent-picker badge and the session-list marker. */
+@Composable
+private fun CodeBlockedBanner(text: String) {
+    val amber = MaterialTheme.colorScheme.tertiary
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(amber.copy(alpha = 0.12f))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            Icons.Filled.Warning,
+            contentDescription = null,
+            tint = amber,
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.labelMedium,
+            color = amber,
+            maxLines = 3,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 private fun UsageBar(
     usage: UsageBarState,
@@ -655,6 +686,13 @@ internal fun PromptBar(
     onInputChange: (String) -> Unit,
     canSend: Boolean,
     working: Boolean,
+    /** Current agent in a BLOCK Claude run-state. Shows [codeBlockText] as a
+     *  warning banner in place of the (stale, meaningless) usage bar; send is
+     *  already gated off via [canSend]. */
+    codeBlocked: Boolean = false,
+    /** The specific reason a turn won't run (no subscription / trial ended / rate
+     *  limited / login expired …) — the banner text. */
+    codeBlockText: String? = null,
     usage: UsageBarState,
     usageReport: UsageReport?,
     usageCost: CostStats,
@@ -700,7 +738,13 @@ internal fun PromptBar(
         // nearest plan limit (accent fill + "14% · 3h"), or API spend, or
         // degrades to a 1.dp divider when there's nothing to report. Tap →
         // full breakdown (all windows + this chat's spend).
-        UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading)
+        //
+        // When the subscription has NO Claude Code, the usage bar is a LIE (a
+        // stale "12% · resets now" from when the plan was live), so replace it
+        // with an honest warning — the dead subscription must read as dead here
+        // too, not just on the agent-picker row.
+        if (codeBlocked) CodeBlockedBanner(codeBlockText ?: "This account can't run Claude Code right now.")
+        else UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading)
 
         // Staged attachments strip
         if (attachments.isNotEmpty()) {

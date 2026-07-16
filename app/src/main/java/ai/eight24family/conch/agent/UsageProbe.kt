@@ -358,9 +358,53 @@ object UsageProbe {
         C=${'$'}HOME/.claude/.credentials.json
         [ -f "${'$'}C" ] || C=${'$'}HOME/.config/claude/.credentials.json
         TOK=${'$'}(sed -n -E 's/.*"access_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}C" 2>/dev/null | head -1)
+        # A `claude setup-token` login has NO usable token in the file — it lives
+        # in CLAUDE_CODE_OAUTH_TOKEN (~/.profile). Read the env token as fallback,
+        # else the usage bar could never refresh and showed a stale ghost %.
+        [ -z "${'$'}TOK" ] && TOK="${'$'}CLAUDE_CODE_OAUTH_TOKEN"
         [ -z "${'$'}TOK" ] && exit 0
         VER=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        curl -fsS -m 6 -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: claude-code/${'$'}{VER:-2.0.0} (external, cli)" "https://api.anthropic.com/api/oauth/usage" 2>/dev/null
+        UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
+        # 1) FULL-scope OAuth (browser login): the rich usage endpoint — five_hour,
+        #    seven_day, per-model weeklies, extra_usage. Best data when available.
+        J=${'$'}(curl -fsS -m 6 -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+        if printf '%s' "${'$'}J" | grep -q '"utilization"'; then printf '%s' "${'$'}J"; exit 0; fi
+        # 2) INFERENCE-only token (claude setup-token, scope=user:inference) 403s on
+        #    that endpoint — but the SAME live 5h/weekly limits ride the rate-limit
+        #    response headers of a normal inference call, which this token CAN make.
+        #    A max_tokens:1 message is ~free; the headers come back regardless of the
+        #    body. Synthesize the same JSON shape the parser expects.
+        # Verified live against a setup-token account (2026-07-16): the OAuth token
+        # ONLY accepts a Claude-Code-shaped request — the "You are Claude Code…"
+        # system prompt is mandatory (without it → 404). The unified headers then
+        # come back on the 200. `utilization` is a FRACTION (0.55), so ×100 to match
+        # the percent the endpoint/parser use.
+        #
+        # Model is picked DYNAMICALLY from the live GET /v1/models list — the
+        # cheapest tier (haiku) if present, else the last-listed model — so a
+        # monthly model rename NEVER breaks this (a hardcoded id like
+        # claude-3-5-haiku-* already 404s). Only a last-ditch static fallback if the
+        # list can't be fetched.
+        IDS=${'$'}(curl -sS -m 6 -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "anthropic-version: 2023-06-01" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/v1/models?limit=100" 2>/dev/null | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+        MODEL=${'$'}(printf '%s' "${'$'}IDS" | grep -i haiku | head -1)
+        [ -z "${'$'}MODEL" ] && MODEL=${'$'}(printf '%s' "${'$'}IDS" | tail -1)
+        [ -z "${'$'}MODEL" ] && MODEL="claude-haiku-4-5"
+        SYS="You are Claude Code, Anthropic's official CLI for Claude."
+        BODY="{\"model\":\"${'$'}MODEL\",\"max_tokens\":1,\"system\":\"${'$'}SYS\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+        H=${'$'}(curl -sS -m 10 -D - -o /dev/null -X POST \
+          -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" \
+          -H "anthropic-version: 2023-06-01" -H "User-Agent: ${'$'}UA" -H "content-type: application/json" \
+          -d "${'$'}BODY" "https://api.anthropic.com/v1/messages" 2>/dev/null | tr -d '\r')
+        hv(){ printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}1:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1; }
+        pct(){ awk -v v="${'$'}1" 'BEGIN{ if(v=="") exit; printf "%.2f", v*100 }'; }
+        iso(){ [ -n "${'$'}1" ] && { date -u -d "@${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; }; }
+        U5=${'$'}(pct "${'$'}(hv 5h-utilization)"); R5=${'$'}(hv 5h-reset)
+        U7=${'$'}(pct "${'$'}(hv 7d-utilization)"); R7=${'$'}(hv 7d-reset)
+        [ -z "${'$'}U5" ] && exit 0
+        OUT="{\"five_hour\":{\"utilization\":${'$'}{U5:-0},\"resets_at\":\"${'$'}(iso "${'$'}R5")\"}"
+        [ -n "${'$'}U7" ] && OUT="${'$'}OUT,\"seven_day\":{\"utilization\":${'$'}U7,\"resets_at\":\"${'$'}(iso "${'$'}R7")\"}"
+        OUT="${'$'}OUT}"
+        printf '%s' "${'$'}OUT"
     """.trimIndent()
 
     // Claude /context breakdown — run on a THROWAWAY COPY of the chat's session
