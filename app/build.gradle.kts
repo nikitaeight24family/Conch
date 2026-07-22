@@ -68,7 +68,13 @@ android {
     defaultConfig {
         applicationId = "ai.eight24family.conch"
         minSdk = 26
-        targetSdk = 35
+        // Google Play target-API policy: updates submitted on/after
+        // 2026-08-31 must target Android 16 (API 36). Bumped 35 → 36.
+        // No manifest changes needed — the app is already adaptive
+        // (resizeableActivity, no orientation lock) so API 36's large-screen
+        // resizability/orientation enforcement is a no-op, and 16 KB
+        // page-size support was already required at target 35.
+        targetSdk = 36
         // versionCode is sourced from `gitCommitCount()` so every push
         // produces a strictly-monotonic value Play Console will accept.
         // Manual bumps still work — `versionCodeOverride` (set via
@@ -77,7 +83,7 @@ android {
         versionCode = computeVersionCode(project)
         // Live on Google Play. versionCode stays auto (git commit count) —
         // strictly monotonic, never reset, independent of this label.
-        versionName = "0.2.8"
+        versionName = "0.2.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
