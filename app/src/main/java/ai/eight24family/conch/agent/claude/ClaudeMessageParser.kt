@@ -174,6 +174,37 @@ object ClaudeMessageParser {
         if (trimmed.isEmpty()) return emptyList()
         if (!trimmed.startsWith("{")) return listOf(AgentMessage.Raw(uuid(), trimmed))
 
+        // SUBAGENT traffic is intercepted BEFORE the fast path: a sidechain
+        // record is text-shaped, so the streaming reader would turn it into a
+        // normal chat row and a Task fan-out of eight agents would bury the
+        // conversation — the CLI keeps these out of its own transcript too
+        // (`filtered from /resume: isSidechain=true`).
+        //
+        // ⚠ FAIL-OPEN, AND VERIFY BEFORE SWALLOWING. The first cut of this
+        // matched the raw substrings `"isSidechain":true` / `"agent_progress"`
+        // anywhere in the line and then dropped the line if the record didn't
+        // parse as a subagent. That ate ANY line merely CONTAINING that text —
+        // including `system.init`, which carries session_id and the model — so
+        // chats opened with an empty model and never answered at all (user,
+        // 2026-07-23). The substring is now only a cheap pre-filter; whether to
+        // intercept is decided by the PARSED record, and anything that isn't
+        // definitively a subagent record falls through to normal parsing. A
+        // chat line must never be able to vanish here.
+        // ⚠ The pre-filter must stay NARROW. EVERY ordinary record carries
+        // `"isSidechain":false`, so a bare `contains("isSidechain")` matches the
+        // whole transcript and drags every line through a full AST parse ahead
+        // of the fast path — the exact hot path that exists to avoid it at
+        // 50-100 deltas/sec. Match the `true` literal (both spellings; the CLI
+        // emits compact JSON, the spaced form is belt-and-braces). A miss here
+        // is safe by construction: it just means no interception, i.e. the
+        // pre-subagent behaviour, never a lost line.
+        if (trimmed.contains("\"isSidechain\":true") ||
+            trimmed.contains("\"isSidechain\": true") ||
+            trimmed.contains("agent_progress")
+        ) {
+            subagentActivity(trimmed)?.let { return listOf(it) }
+        }
+
         // Fast path: token-stream parser (JsonReader) for the hot
         // `assistant` / `user` events with text-only content. This is
         // where Claude streams 50-100 deltas/sec during a live reply.
@@ -206,6 +237,84 @@ object ClaudeMessageParser {
                 ?: return@section listOf(AgentMessage.Raw(uuid(), trimmed))
             parseObject(obj, trimmed)
         }
+    }
+
+    /**
+     * Pull one [AgentMessage.SubagentActivity] out of a sidechain /
+     * `agent_progress` record. Field names are taken from the shipped CLI
+     * binary (2.1.218), not guessed: `agentId`, `parentToolUseID` (the join key
+     * back to the spawning `Task` tool_use), `subagent_type`, `task_description`
+     * and `elapsed_time_seconds`.
+     *
+     * Returns null unless the record is DEFINITIVELY a subagent record, so the
+     * caller can safely fall through to normal parsing. Anything less strict
+     * eats real chat lines: the first version accepted any parseable JSON that
+     * merely mentioned the words, which silently swallowed `system.init`
+     * (session_id + model) and left chats mute (user, 2026-07-23).
+     */
+    private fun subagentActivity(line: String): AgentMessage.SubagentActivity? {
+        val obj = SilentlyTry.logged("SshAi-ClaudeParse", "parse subagent record") {
+            json.parseToJsonElement(line).jsonObject
+        } ?: return null
+
+        // Decide on the PARSED record, never on the raw text. Two positive
+        // signals, both structural:
+        //   • top-level `type` == "agent_progress" — the live progress event;
+        //   • top-level `isSidechain` == true — a turn belonging to a subagent.
+        // `"isSidechain":false` (every ordinary record carries it) and a chat
+        // message that merely quotes these words both fail this test, which is
+        // exactly the point.
+        val isProgress = firstString(obj, "type") == "agent_progress"
+        val isSidechain = SilentlyTry.loggedOrElse("SshAi-ClaudeParse", "read isSidechain", false) {
+            obj["isSidechain"]?.jsonPrimitive?.content == "true"
+        } ?: false
+        if (!isProgress && !isSidechain) return null
+
+        // Token usage lives on the assistant record's `message.usage`. Sum the
+        // billed halves; cache reads are counted too because that is what the
+        // CLI's per-agent "↓ N tokens" reflects.
+        var tokens = 0L
+        SilentlyTry.fired("SshAi-ClaudeParse", "subagent usage") {
+            val usage = obj["message"]?.jsonObject?.get("usage")?.jsonObject
+            if (usage != null) {
+                for (k in listOf(
+                    "input_tokens", "output_tokens",
+                    "cache_read_input_tokens", "cache_creation_input_tokens",
+                )) {
+                    tokens += usage[k]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                }
+            }
+        }
+
+        val subtype = firstString(obj, "subtype")
+        return AgentMessage.SubagentActivity(
+            id = uuid(),
+            agentId = firstString(obj, "agentId", "agent_id"),
+            parentToolUseId = firstString(obj, "parentToolUseID", "parent_tool_use_id"),
+            subagentType = firstString(obj, "subagent_type"),
+            task = firstString(obj, "task_description", "description"),
+            tokens = tokens,
+            elapsedSeconds = SilentlyTry.logged("SshAi-ClaudeParse", "subagent elapsed") {
+                obj["elapsed_time_seconds"]?.jsonPrimitive?.content?.toLongOrNull()
+            },
+            done = subtype == "subagent_complete",
+            // Keep the subagent's own words so a Task fan-out stays searchable
+            // (these records used to parse as AssistantText/ToolUse and get
+            // indexed; folding them into metadata alone would drop the whole
+            // research trail out of search).
+            text = SilentlyTry.logged("SshAi-ClaudeParse", "subagent text") {
+                val content = obj["message"]?.jsonObject?.get("content")
+                when (content) {
+                    is kotlinx.serialization.json.JsonArray -> content.mapNotNull { blk ->
+                        val o = blk as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                        o["text"]?.jsonPrimitive?.contentOrNull
+                            ?: o["content"]?.jsonPrimitive?.contentOrNull
+                    }.joinToString("\n").takeIf { it.isNotBlank() }
+                    is kotlinx.serialization.json.JsonPrimitive -> content.contentOrNull?.takeIf { it.isNotBlank() }
+                    else -> null
+                }
+            },
+        )
     }
 
     private fun quickType(line: String): String? = ParserHelpers.quickType(line)
@@ -428,8 +537,36 @@ object ClaudeMessageParser {
         else AgentMessage.UserText(id, text)
     }
 
+    /**
+     * The top-level `type`, or — when the CLI did not put one there — what the
+     * envelope's SHAPE says it is.
+     *
+     * The 2026-07-29 capture arrived as
+     * `{"is_error":false,"duration_api_ms":2593,"num_turns":1,…}`: `type` not
+     * first, `duration_ms` absent, a top-level `stop_reason` present. That is
+     * already a different key layout from the one documented in
+     * `docs/cli-research-2026-05.md`, so the app may not assume where — or
+     * whether — `type` appears. What a turn-final envelope ALWAYS carries is the
+     * turn's accounting: `total_cost_usd`, or `num_turns` + `duration_api_ms`.
+     * No other stream-json line carries those.
+     *
+     * Deliberately conservative: anything with `event` or `message` is a
+     * stream_event / assistant / user record and is left alone, so this can
+     * never promote a mid-turn line to terminal.
+     */
+    /** The marker that ends a turn. Non-rendering; the stream reader consumes it
+     *  and drops it. Every terminal exit of this parser must emit exactly one. */
+    private fun turnEnd(reason: String) = AgentMessage.TurnEnd(uuid(), reason)
+
+    private fun inferTopLevelType(obj: JsonObject): String? = when {
+        obj.containsKey("event") || obj.containsKey("message") -> null
+        obj.containsKey("total_cost_usd") -> "result"
+        obj.containsKey("num_turns") && obj.containsKey("duration_api_ms") -> "result"
+        else -> null
+    }
+
     private fun parseObject(obj: JsonObject, raw: String): List<AgentMessage> {
-        return when (obj.string("type")) {
+        return when (obj.string("type") ?: inferTopLevelType(obj)) {
             "system" -> parseSystem(obj, raw)
             "assistant" -> parseAssistant(obj, raw)
             "user" -> parseUser(obj, raw)
@@ -449,7 +586,7 @@ object ClaudeMessageParser {
                 // the plain Result bubble + tokens line that would otherwise
                 // double it (user, 2026-06-13).
                 if (text?.matchesModelUnavailable() == true) {
-                    return listOf(modelUnavailableCard(text))
+                    return listOf(modelUnavailableCard(text), turnEnd("result:unavailable"))
                 }
                 val isError = obj["is_error"]?.jsonPrimitive?.contentOrNull == "true" ||
                     subtype == "error" || subtype.startsWith("error_")
@@ -464,7 +601,7 @@ object ClaudeMessageParser {
                         body.contains("Request interrupted", ignoreCase = true) ||
                         body.contains("interrupted by user", ignoreCase = true)
                     ) {
-                        return listOf(note("stopped"))
+                        return listOf(note("stopped"), turnEnd("result:stopped"))
                     }
                     val isOverload = body.matchesOverloaded()
                     listOf(
@@ -480,7 +617,8 @@ object ClaudeMessageParser {
                                 "Try again in a moment, or switch to a different model."
                             else
                                 body.takeIf { it.isNotBlank() && it != text },
-                        )
+                        ),
+                        turnEnd("result:error"),
                     )
                 } else {
                     // Successful turn → ALSO emit a dim per-turn usage line:
@@ -511,12 +649,13 @@ object ClaudeMessageParser {
                         if (statParts.isNotEmpty()) {
                             add(note("tokens · ${statParts.joinToString(" · ")}"))
                         }
+                        add(turnEnd("result"))
                     }
                 }
             }
             "error" -> {
                 val msg = obj.string("message") ?: raw
-                if (msg.matchesModelUnavailable()) return listOf(modelUnavailableCard(msg))
+                if (msg.matchesModelUnavailable()) return listOf(modelUnavailableCard(msg), turnEnd("error:unavailable"))
                 val isOverload = msg.matchesOverloaded()
                 listOf(
                     AgentMessage.Error(
@@ -524,7 +663,8 @@ object ClaudeMessageParser {
                         text = if (isOverload) "Service is busy" else msg,
                         kind = if (isOverload) "overloaded" else null,
                         details = if (isOverload) "Try again in a moment, or switch to a different model." else null,
-                    )
+                    ),
+                    turnEnd("error"),
                 )
             }
             "permission_request", "tool_permission_request" -> {
@@ -720,18 +860,45 @@ object ClaudeMessageParser {
             "thinking_tokens" -> emptyList()
 
             // The model silently swapped under the user — they must see it.
-            "model_fallback", "model_refusal_fallback" -> {
+            // ALL of the CLI's swap subtypes land here (2.1.218 ships six).
+            // Handling only the first two meant the most common real-world
+            // swap — `model_consent_fallback`, i.e. "Switched to Sonnet 5 for
+            // this session · Fable 5 requires usage credits" — was dropped on
+            // the floor: the session quietly ran a different model and the app
+            // never told the user why their pick had no effect
+            // (user, 2026-07-23).
+            "model_fallback", "model_refusal_fallback", "model_consent_fallback",
+            "model_not_found_fallback", "availability_switch" -> {
                 val from = firstString(obj, "original_model", "from_model")
                 val to = firstString(obj, "fallback_model", "to_model")
                 val trigger = firstString(obj, "trigger")
+                val reason = when (subtype) {
+                    "model_refusal_fallback" -> " · after refusal"
+                    // Say "credits" outright: this one is ACTIONABLE by the
+                    // user (top up, or pick another model), unlike a capacity
+                    // or export-control swap they can only wait out.
+                    "model_consent_fallback" -> " · needs usage credits"
+                    "model_not_found_fallback" -> " · model not found"
+                    "availability_switch" -> " · unavailable"
+                    else -> ""
+                }
                 listOf(note(
                     "model fallback${from?.let { " · $it" } ?: ""}${to?.let { " → $it" } ?: ""}" +
-                        (trigger?.takeIf { it != "refusal" }?.let { " · $it" } ?: "") +
-                        if (subtype == "model_refusal_fallback") " · after refusal" else "",
+                        (trigger?.takeIf { it != "refusal" }?.let { " · $it" } ?: "") + reason,
                     detail = firstString(obj, "content", "api_refusal_explanation") ?: genericDetail(obj),
                     tone = AgentMessage.EventNote.Tone.WARN,
                 ))
             }
+
+            // Refused with NOTHING to fall back to — the turn is dead. Without
+            // this the chat just stopped with no explanation on screen.
+            // (Tone has no ERROR level; WARN is the loudest one available.)
+            "model_refusal_no_fallback" -> listOf(note(
+                "model refused${firstString(obj, "original_model", "from_model")?.let { " · $it" } ?: ""}" +
+                    " · no fallback available",
+                detail = firstString(obj, "content", "api_refusal_explanation") ?: genericDetail(obj),
+                tone = AgentMessage.EventNote.Tone.WARN,
+            ))
 
             "permission_denied" -> listOf(note(
                 "permission denied · ${firstString(obj, "tool_name") ?: "?"}" +

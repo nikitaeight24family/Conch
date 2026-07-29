@@ -140,8 +140,8 @@ internal fun WorkingStatusRow(
     waitingForInput: Boolean = false,
     /** Which CLI this chat drives. The sparkle glyph cycle + the rotating
      * gerund vocabulary are Claude Code's OWN TUI flair; rendering them for
-     * Codex/Gemini made those agents "look like Claude". Non-Claude agents get a
-     * plain CLI spinner and a neutral "Working" verb instead. */
+     * Codex/Gemini made those agents "look like Claude". Non-Claude agents get
+     * a plain CLI spinner and a neutral "Working" verb instead. */
     agent: ai.eight24family.conch.agent.Agent = ai.eight24family.conch.agent.Agent.CLAUDE,
 ) {
     val accent = MaterialTheme.colorScheme.primary

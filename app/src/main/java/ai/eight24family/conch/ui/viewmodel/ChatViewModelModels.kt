@@ -56,6 +56,9 @@ internal class ChatViewModelModels(
     initialSessionReasoning: String?,
 ) {
     companion object {
+        /** Sentinel: no explicit model pick has been made in this chat yet. */
+        private const val NEVER_PICKED = "<<never-picked>>"
+
         /** In-memory mirror of the last alias→label map each agent's probe
          *  returned (also persisted in prefs.modelLabelsForAgent). Lets a chat
          *  seed [availableModels] SYNCHRONOUSLY at construction so the topbar
@@ -63,8 +66,21 @@ internal class ChatViewModelModels(
          *  hardcoded fallback. Warmed by probes and the disk hydrate. */
         private val labelMemory = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
         fun cachedLabels(agent: Agent): Map<String, String> = labelMemory[agent.name].orEmpty()
-        fun rememberLabels(agentName: String, map: Map<String, String>) {
-            if (map.isNotEmpty()) labelMemory[agentName] = map
+
+        /**
+         * MERGE into the mirror and return the merged catalog — the SAME
+         * monotonic law the disk cache obeys ([ModelLabelMerge]). Callers must
+         * show the RETURN VALUE, not the raw probe map: the picker and the
+         * frame-zero seed read this mirror, so overwriting it here would let a
+         * stale probe put "Opus 4.8" back in front of the user even though the
+         * persisted catalog already knew "Opus 5" (user, 2026-07-29). Atomic —
+         * two servers' probes can land concurrently.
+         */
+        fun rememberLabels(agentName: String, map: Map<String, String>): Map<String, String> {
+            if (map.isEmpty()) return labelMemory[agentName].orEmpty()
+            return labelMemory.compute(agentName) { _, cached ->
+                ai.eight24family.conch.data.ModelLabelMerge.merge(cached.orEmpty(), map)
+            }.orEmpty()
         }
     }
 
@@ -130,6 +146,27 @@ internal class ChatViewModelModels(
                 .firstOrNull()
         }
         .stateIn(scope, SharingStarted.Eagerly, null)
+
+    /** The OBSERVED model as it stood when the user last picked, "" = never
+     *  picked. Sentinel object so "observed was null at pick time" is
+     *  distinguishable from "never picked". */
+    private val _obsAtPick = MutableStateFlow<String?>(NEVER_PICKED)
+
+    /**
+     * False while the live observation is still the SAME one that was on screen
+     * when the user picked — i.e. nothing new has been observed since, so the
+     * pick must win.
+     *
+     * ⚠ Do NOT approximate this with "the message list grew". Sending a message
+     * grows the list by the USER's own row, which flipped this true instantly
+     * and handed the chip straight back to the stale observation: pick Opus,
+     * send, chip shows Sonnet for a beat, then Opus once the real turn reports
+     * (user, 2026-07-27). Only a CHANGE of the observation itself counts.
+     */
+    val observationNewerThanPick: StateFlow<Boolean> =
+        combine(observedModel, _obsAtPick) { obs, atPick ->
+            atPick == NEVER_PICKED || obs != atPick
+        }.stateIn(scope, SharingStarted.Eagerly, true)
 
     /** Model names the SESSION itself reports as unavailable — parsed reactively
      *  from the "Claude <Model> is currently unavailable" banner (AgentMessage.Error
@@ -197,6 +234,13 @@ internal class ChatViewModelModels(
     private val _modelsProbing = MutableStateFlow(false)
     val modelsProbing: StateFlow<Boolean> = _modelsProbing.asStateFlow()
 
+    /**
+     * True when the list on screen is the CACHE, because the live `/model` read
+     * came back empty. Cleared by the next probe that returns anything.
+     */
+    private val _modelsStale = MutableStateFlow(false)
+    val modelsStale: StateFlow<Boolean> = _modelsStale.asStateFlow()
+
     /** Whatever the CLI uses when no --model flag is passed. */
     private val _defaultModel = MutableStateFlow<String?>(null)
     val defaultModel: StateFlow<String?> = _defaultModel.asStateFlow()
@@ -239,6 +283,13 @@ internal class ChatViewModelModels(
                     rememberLabels(agentNow.name, legacy)
                     if (_availableModels.value.isEmpty()) _availableModels.value = legacy
                 }
+            }
+            // The CLI's own default model — this is what a BRAND-NEW chat shows
+            // in the topbar, so it has to be here at frame zero rather than
+            // after a ~2s probe (or never, if nothing re-probes this run).
+            if (_defaultModel.value.isNullOrBlank()) {
+                ServiceLocator.preferences.defaultModelForAgent(agentNow.name).first()
+                    ?.let { _defaultModel.value = it }
             }
             // Reasoning catalog: same cold-start treatment as the labels.
             // Spec-encoded blob (agent-agnostic here) — without it the
@@ -314,13 +365,17 @@ internal class ChatViewModelModels(
         }
         android.util.Log.d(tag, "extracted ${spec.agent} models: $map")
         if (map.isNotEmpty()) {
-            _availableModels.value = map
             val agentForCache = currentAgent.value
-            rememberLabels(agentForCache.name, map)   // warm in-memory for frame-zero on next open
+            // Show the MERGED catalog, not this probe's raw answer: the list the
+            // user opens must never lose a model or step back a version because
+            // one probe rendered a stale menu.
+            val merged = rememberLabels(agentForCache.name, map)
+            _availableModels.value = merged
+            _modelsStale.value = false
             scope.launch {
                 ServiceLocator.preferences.setModelLabelsForAgent(agentForCache.name, map)
             }
-            val rmap = map.keys.mapNotNull { slug ->
+            val rmap = merged.keys.mapNotNull { slug ->
                 spec.reasoningInfoFor(slug)?.let { slug to it }
             }.toMap()
             _reasoningCatalog.value = rmap
@@ -338,8 +393,27 @@ internal class ChatViewModelModels(
             // chat open (or the sweep) from re-running the PTY pass.
             ai.eight24family.conch.data.ModelCatalogPrefetcher.markProbed(session.server.id, agentNow)
         } else {
-            _availableModels.value = emptyMap()
-            _reasoningCatalog.value = emptyMap()
+            // Probe came back EMPTY (PTY hiccup, CLI mid-update, a box that
+            // answered slowly). That is not evidence the agent lost its models —
+            // wiping the picker here is what left the user staring at an empty
+            // list / the old hardcoded fallback. Keep the catalog we already
+            // have; a genuine agent switch still clears via resetOnAgentSwitch.
+            val agentNowName = currentAgent.value.name
+            val fallback = cachedLabels(currentAgent.value)
+                .ifEmpty { ServiceLocator.preferences.modelLabelsForAgent(agentNowName).first() }
+            if (fallback.isNotEmpty()) {
+                rememberLabels(agentNowName, fallback)
+                _availableModels.value = fallback
+                val rmap = fallback.keys.mapNotNull { slug ->
+                    spec.reasoningInfoFor(slug)?.let { slug to it }
+                }.toMap()
+                if (rmap.isNotEmpty()) _reasoningCatalog.value = rmap
+                _modelsStale.value = true
+                android.util.Log.i(tag, "${spec.agent} probe empty — keeping cached catalog ${fallback.keys}")
+            } else {
+                _availableModels.value = emptyMap()
+                _reasoningCatalog.value = emptyMap()
+            }
         }
         }
         val defaultModelValue = runCatching { spec.probeDefaultModel(exec) }
@@ -347,6 +421,15 @@ internal class ChatViewModelModels(
             .getOrNull()
         android.util.Log.d(tag, "default ${spec.agent} model: $defaultModelValue")
         _defaultModel.value = defaultModelValue
+        // PERSIST it: the value only exists after a live probe, so keeping it in
+        // memory meant every process restart showed an empty model chip on a
+        // fresh chat until something re-probed. Cached, the next cold start can
+        // paint the real default at frame zero.
+        if (!defaultModelValue.isNullOrBlank()) {
+            runCatching {
+                ServiceLocator.preferences.setDefaultModelForAgent(agentNow.name, defaultModelValue)
+            }.onFailure { android.util.Log.w(tag, "persist default model failed", it) }
+        }
         val defaultReasoningValue = runCatching { spec.probeDefaultReasoning(exec) }
             .onFailure { android.util.Log.w(tag, "default-reasoning probe failed for ${spec.agent}", it) }
             .getOrNull()
@@ -362,6 +445,7 @@ internal class ChatViewModelModels(
     fun setModel(model: String?, applyToLiveSession: (String?) -> Unit) {
         scope.launch {
             val prefs = ServiceLocator.preferences
+            _obsAtPick.value = observedModel.value
             val rid = resumeId.value
             if (rid != null) {
                 prefs.setSelectedModelForChat(rid, model)
@@ -399,13 +483,33 @@ internal class ChatViewModelModels(
         _reasoningCatalog.value = emptyMap()
         _pendingModelPick.value = null
         _pendingReasoningPick.value = null
+        _obsAtPick.value = NEVER_PICKED
     }
 
     /** Seeds the topbar's model display from the listing-time probe BEFORE startNewChat
      *  triggers history load + SSH open. */
     fun setSessionInitialModel(model: String?) {
         // Never the "<synthetic>" marker — only a real model id.
-        _sessionInitialModel.value = model?.takeIf { it.isNotBlank() && !it.startsWith("<") }
+        val real = model?.takeIf { it.isNotBlank() && !it.startsWith("<") }
+        _sessionInitialModel.value = real
+        // REMEMBER IT AS THE AGENT'S DEFAULT. This value comes from the CLI's own
+        // `system.init` (and the per-turn `message.model`), so it is whatever the
+        // CLI ACTUALLY RAN — no menu scraping, no hardcoded family list. That
+        // makes it survive CLI upgrades for free: when the box moved to 2.1.220
+        // and started answering as "Opus 5", the /model TUI scrape returned
+        // nothing and a new chat showed an empty model chip, while this record
+        // was sitting right there in the stream (user, 2026-07-25 — a repeat of
+        // exactly the "be ready for agent updates" failure). A brand-new chat
+        // now opens on the last model this agent really used, and it re-learns
+        // itself the moment a new family ships.
+        if (real != null) {
+            scope.launch {
+                val agentNow = currentAgent.value
+                runCatching {
+                    ServiceLocator.preferences.setDefaultModelForAgent(agentNow.name, real)
+                }.onFailure { android.util.Log.w("SshAi-Models", "persist last model failed", it) }
+            }
+        }
     }
 
     fun setSessionInitialReasoning(reasoning: String?) {

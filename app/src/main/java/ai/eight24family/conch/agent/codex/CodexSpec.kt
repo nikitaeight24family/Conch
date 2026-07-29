@@ -476,13 +476,7 @@ esac
      * `$m` normalizes both schemas to one marker string. ISO `.timestamp` is
      * top-level on every line.
      */
-    override val turnStateRecordJq: String =
-        "(.type) as \$t | (if \$t==\"event_msg\" then (.payload.type // \"\") else \$t end) as \$m | " +
-            "select(\$m==\"task_started\" or \$m==\"task_complete\" or \$m==\"token_count\" or " +
-            "\$m==\"turn.started\" or \$m==\"turn.completed\" or \$m==\"turn.failed\") | " +
-            "[\$m, (.timestamp // \"\"), " +
-            "((.payload.info.last_token_usage.output_tokens // .payload.usage.output_tokens // .usage.output_tokens // 0)|tostring)] | @tsv"
-
+    
     /**
      * DEFINITIVE Codex turn state from the lifecycle markers — second-accurate,
      * no timeout. The LAST start/done boundary in the window decides:
@@ -495,6 +489,40 @@ esac
      * file-visible think-vs-tool split worth gating on). Codex approvals are driven
      * through our own channel, not the file, so waitingForUser stays false here.
      */
+    /**
+     * Field layout, read by index in [inferTurnState]:
+     *   0 marker · 1 timestamp · 2 outputTokens
+     * where marker = `payload.type` for an `event_msg`, else the top-level
+     * `type`, kept only when it is one of the turn-boundary / token markers.
+     */
+    override fun projectTurnStateRecords(lines: Sequence<String>): List<List<String>> {
+        val out = ArrayList<List<String>>()
+        for (line in lines) {
+            val t = line.trim()
+            if (t.length < 2 || t[0] != '{') continue
+            val obj = runCatching { json.parseToJsonElement(t).jsonObject }.getOrNull() ?: continue
+            val topType = obj["type"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() } ?: continue
+            val payload = runCatching { obj["payload"]?.jsonObject }.getOrNull()
+            val marker = if (topType == "event_msg") {
+                payload?.get("type")?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+            } else {
+                topType
+            }
+            if (marker !in TURN_STATE_MARKERS) continue
+            val ts = obj["timestamp"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+            // jq's `//` chain: first NON-NULL wins, else 0.
+            val tokens = runCatching {
+                payload?.get("info")?.jsonObject?.get("last_token_usage")?.jsonObject
+                    ?.get("output_tokens")?.jsonPrimitive?.content
+            }.getOrNull()
+                ?: runCatching { payload?.get("usage")?.jsonObject?.get("output_tokens")?.jsonPrimitive?.content }.getOrNull()
+                ?: runCatching { obj["usage"]?.jsonObject?.get("output_tokens")?.jsonPrimitive?.content }.getOrNull()
+                ?: "0"
+            out += listOf(marker, ts, tokens)
+        }
+        return out
+    }
+
     override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
         val recs = records.filter { it.isNotEmpty() && it[0].isNotBlank() }
         if (recs.isEmpty()) return TurnSignals()
@@ -513,7 +541,14 @@ esac
                 tokens = if (working) toks else 0L,
             )
         }
-        val inFlight = recs[lastBoundaryIdx][0] in CODEX_START_MARKERS
+        // Started with no matching completion ⇒ running — but bounded by the SAME
+        // staleness guard as the no-boundary branch above. A `task_started` whose
+        // `task_complete` never landed (the CLI was killed, the box rebooted, the
+        // rollout was truncated) otherwise pins the thinking indicator on for the
+        // life of the chat with nothing able to clear it. Same hole Claude had
+        // (2026-07-29); closing it here too rather than waiting for the report.
+        val inFlight = recs[lastBoundaryIdx][0] in CODEX_START_MARKERS &&
+            (frozenForMs == null || frozenForMs < AWAIT_STALE_MS)
         val startIdx = recs.indexOfLast { it[0] in CODEX_START_MARKERS }
         val turnStartMs = if (inFlight && startIdx >= 0)
             recs[startIdx].getOrNull(1)?.takeIf { it.isNotBlank() }?.let { ts ->
@@ -532,10 +567,24 @@ esac
             thinking = inFlight,
             turnStartMs = turnStartMs,
             tokens = tokens,
+            // A real completion marker in the file — the proof the stuck-turn
+            // reconcile needs. Unset until now, which left the reconcile dead for
+            // every Codex chat. Deliberately NOT set in the no-boundary branch
+            // above: there the "done" verdict is a staleness GUESS, and
+            // force-completing on a guess is what kills long research turns.
+            turnComplete = recs[lastBoundaryIdx][0] in CODEX_DONE_MARKERS,
         )
     }
 
     /** Markers that OPEN a turn (work begins). */
+    /** Every marker the turn-state projection keeps — the union of the boundary
+     *  markers and `token_count`. The single source of truth for
+     *  which records the turn detector considers. */
+    private val TURN_STATE_MARKERS = setOf(
+        "task_started", "task_complete", "token_count",
+        "turn.started", "turn.completed", "turn.failed",
+    )
+
     private val CODEX_START_MARKERS = setOf("task_started", "turn.started")
 
     /** Markers that CLOSE a turn (done / failed). */

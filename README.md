@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.8-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.2.11-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.8
+conch ▌ v0.2.11
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -48,6 +48,23 @@ conch ▌ v0.2.8
   signed build, your choice.
 
 ---
+
+## What's new in 0.2.11
+
+- **Voice messages.** Record from the composer and, before you send, play the
+  clip back on a waveform you can scrub. The envelope is decoded from the file,
+  so a clip you attached or received draws the same way one you recorded does.
+- **Live camera in the attachment sheet.** The first grid cell is a viewfinder —
+  tap it and the shot is attached in place, without leaving the app. Recent
+  photos sit beside it, four to a row.
+- **The thinking indicator stops when the turn really ends.** Turn state is now
+  derived on the phone instead of asking your server to project it with `jq`; on
+  a host without a usable `jq` every signal read false and a finished turn could
+  spin forever.
+- **The model you pick is law.** It is read before anything else is resolved and
+  re-applied continuously, so a background probe that learns your server's
+  default can no longer move a running conversation onto a different model.
+- **`conch-bridge audio`** — see the phone-bridge section; it is off by default.
 
 ## What's new in 0.2.8
 
@@ -358,6 +375,14 @@ per-chat opt-in, a warning on root@/shared hosts, an append-only audit log on
 your server, and a **"Run shell from server" kill-switch** in Settings →
 Security. Without Shizuku the bridge is unavailable.
 
+Since 0.2.11 the bridge also has **`conch-bridge audio`**, which records the
+phone's microphone for a fixed number of seconds and writes an `.m4a` next to
+the other bridge files on your server. It is the only bridge verb that ships
+**disabled**: `shell` and `logs` read a device you handed over, a microphone
+records the room you are sitting in and the people in it. Turn it on yourself in
+Settings → Security → "Record audio from server", or it refuses and tells the
+agent where the switch is.
+
 ### Mobile-native niceties
 - **Picture-in-Picture** — minimise mid-turn and a floating window keeps
   showing the agent's live progress while you use other apps.
@@ -402,6 +427,12 @@ Code `~/.claude/projects/.../*.jsonl`; Codex `~/.codex/sessions/.../*.jsonl`;
 Gemini rollouts under `~/.gemini`. Nothing leaves the device except over SSH
 to the servers you've added (plus opt-out Sentry crash reporting — no chat
 content, no identifiers).
+
+**Media you record** stays on the device until you send it. A voice message and
+a photo taken in the composer are written to the app's cache, attached to the
+chat, and swept after a day; a bridge `audio` capture is written to
+`~/.conch-bridge/audio-*.m4a` on the server that asked for it. Both travel over
+your own SSH connection and nowhere else — there is no backend to send them to.
 
 ## Known limitations
 

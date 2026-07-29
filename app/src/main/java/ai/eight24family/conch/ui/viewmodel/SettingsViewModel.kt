@@ -169,6 +169,16 @@ class SettingsViewModel : ViewModel() {
     val bridgeShellAllowed: StateFlow<Boolean> = prefs.bridgeShellAllowed
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
+    /** Whether the conch-bridge may record this phone's MIC from the server.
+     *  Seeded false, not true — the seed is what the UI shows before the flow
+     *  arrives, and a mic switch must never flash "on". */
+    val bridgeAudioAllowed: StateFlow<Boolean> = prefs.bridgeAudioAllowed
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun setBridgeAudioAllowed(allowed: Boolean) {
+        viewModelScope.launch { prefs.setBridgeAudioAllowed(allowed) }
+    }
+
     fun setBridgeShellAllowed(allowed: Boolean) {
         viewModelScope.launch { prefs.setBridgeShellAllowed(allowed) }
     }

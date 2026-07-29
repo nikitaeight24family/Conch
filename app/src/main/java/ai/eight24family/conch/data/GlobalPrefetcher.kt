@@ -85,9 +85,25 @@ class GlobalPrefetcher(
         // Listing-only, same policy as the sweep.
         procScope.launch {
             while (true) {
-                val dataSaver = SilentlyTry.loggedOrElse(TAG, "read data saver pref", false) {
-                    ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
+                // NOTHING speculative while the app is off screen. procScope is
+                // process-wide ON PURPOSE (so a sweep survives screen teardown),
+                // but the foreground service keeps that process alive forever —
+                // so this loop used to re-list every 30s during a four-hour taxi
+                // ride with the app never opened. Skip the work, keep the loop
+                // alive so it resumes the moment the user comes back.
+                // ⚠ Only PREFETCH is gated. An open chat's tail-poll must keep
+                // running backgrounded — that is the point of the service.
+                if (!ai.eight24family.conch.util.AppForeground.isForeground) {
+                    delay(30_000L)
+                    continue
                 }
+                // A metered link counts as data-saver whether or not the user
+                // ever found the toggle — see NetworkCost. Re-read every tick so
+                // walking out of wifi tightens the loop immediately.
+                val dataSaver = ai.eight24family.conch.util.NetworkCost.isMetered() ||
+                    SilentlyTry.loggedOrElse(TAG, "read data saver pref", false) {
+                        ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
+                    }
                 delay(if (dataSaver) 90_000L else 30_000L)
                 SilentlyTry.fired(TAG, "periodic re-list") { relistConnected() }
             }
@@ -146,26 +162,47 @@ class GlobalPrefetcher(
         // probes ~3 servers × 3 agents × (ls + cat) = ~20 SSH execs,
         // ~50-500 KB total. Nice quality-of-life when on Wi-Fi,
         // pure cost on mobile data.
-        val dataSaver = SilentlyTry.loggedOrElse("SshAi-Prefetch", "read data saver pref", false) {
-            ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
-        }
+        // The comment above already said body prefetch is "pure cost on mobile
+        // data" — but nothing ever CHECKED for mobile data. dataSaverEnabled was
+        // a manual toggle defaulting to off, so a backgrounded app on cellular
+        // kept pulling MB-sized session bodies; four hours in a taxi ate a whole
+        // monthly plan (user, 2026-07-23). Metered now implies data-saver, and
+        // the toggle remains for forcing thrift on unmetered links too.
+        val metered = ai.eight24family.conch.util.NetworkCost.isMetered()
+        val dataSaver = metered ||
+            SilentlyTry.loggedOrElse("SshAi-Prefetch", "read data saver pref", false) {
+                ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
+            }
         // Data saver gates ONLY the expensive body downloads (MB per session),
         // NOT the cheap listing pass. The listing is what writes the durable
         // owner sidecars + SessionsCache that search navigation depends on —
         // skipping it entirely (old behaviour) is exactly why chats went
         // "serverless" in search and opened empty/offline. So we always list +
         // record owners; only the JSONL body prefetch is suppressed under data
-        // saver.
-        val fetchBodies = !dataSaver
+        // saver. Bodies are the expensive, purely speculative half (MB per
+        // session). They require BOTH a cheap link AND the user actually being
+        // here: a sweep triggered by e.g. a server reconnecting must not start
+        // pulling megabytes while the phone is in a pocket.
+        val onScreen = ai.eight24family.conch.util.AppForeground.isForeground
+        val fetchBodies = !dataSaver && onScreen
         if (dataSaver) {
-            android.util.Log.d(TAG, "data saver ON — listing owners only, skipping body downloads")
+            android.util.Log.d(
+                TAG,
+                "data saver ON (metered=$metered) — listing owners only, skipping body downloads",
+            )
         }
         val servers = runCatching { repoListAll(repo) }.getOrElse { emptyList() }
         if (servers.isEmpty()) {
             android.util.Log.d(TAG, "no servers — nothing to prefetch")
             return
         }
-        android.util.Log.d(TAG, "starting sweep over ${servers.size} server(s)")
+        // Always state the network cost, not just when thrift kicks in — this is
+        // the line that proves on-device whether the metered gate engaged.
+        android.util.Log.d(
+            TAG,
+            "starting sweep over ${servers.size} server(s) " +
+                "metered=$metered onScreen=$onScreen bodies=$fetchBodies",
+        )
 
         for (server in servers) {
             if (!scope.isActive) return
@@ -305,7 +342,12 @@ class GlobalPrefetcher(
         // PTY pass while this is fresh. No live client → skip; chat-open warms it.
         val catalogClient = pooledClient
             ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
-        if (catalogClient != null && !ModelCatalogPrefetcher.isFresh(server.id, agent)) {
+        // ⚠ GATED like everything else speculative. This is the HEAVIEST thing
+        // the sweep does — it allocates a PTY and spawns a full interactive
+        // `claude` on the server — and it sat ABOVE the fetchBodies guard, so it
+        // ran on a metered link and with the app off screen, which is exactly
+        // what the taxi-ride bill was about. Same flag as the bodies.
+        if (fetchBodies && catalogClient != null && !ModelCatalogPrefetcher.isFresh(server.id, agent)) {
             SilentlyTry.fired(TAG, "model catalog warm-up") {
                 ModelCatalogPrefetcher.probeAndPersist(catalogClient, agent, server.id)
             }
@@ -333,6 +375,40 @@ class GlobalPrefetcher(
                     // OOM'd the read on a ~134 MB rollout (swallowed, but the
                     // session then went uncached → unsearchable).
                     val client = pooledClient
+                    // ASK THE SIZE FIRST. Background prefetch used to `cat` every
+                    // uncached session whole; with 29 sessions and rollouts in the
+                    // hundreds of MB that is gigabytes of pure speculation — 3 GB
+                    // measured in 4 hours, and note that was on WIFI. Metering is
+                    // beside the point: the bytes are wasted on any network, this
+                    // is just where the user happened to notice the bill.
+                    // One `stat` costs bytes, not megabytes; oversized sessions
+                    // stay uncached and are fetched when the user actually opens
+                    // one (that path streams + gzips already).
+                    val remoteBytes = SilentlyTry.loggedOrElse<Long?>(TAG, "stat session size", null) {
+                        val sess = client.startSession()
+                        try {
+                            // `stat -c` is GNU; BSD/macOS wants `stat -f %z`, and
+                            // BusyBox may have neither. Try both, then `wc -c` as
+                            // the portable last resort — otherwise the size comes
+                            // back null on those hosts and the cap silently stops
+                            // capping, which is the failure mode we were fixing.
+                            val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
+                            val p = sess.exec(
+                                "stat -c %s $q 2>/dev/null || stat -f %z $q 2>/dev/null || wc -c < $q 2>/dev/null",
+                            )
+                            val txt = p.inputStream.bufferedReader().readText().trim()
+                            p.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                            txt.toLongOrNull()
+                        } finally { SilentlyTry.fired(TAG, "close stat session") { sess.close() } }
+                    }
+                    if (remoteBytes != null && remoteBytes > PREFETCH_BODY_MAX_BYTES) {
+                        android.util.Log.d(
+                            TAG,
+                            "    skip body ${s.id.take(8)} — ${remoteBytes}B over prefetch cap " +
+                                "($PREFETCH_BODY_MAX_BYTES B); will fetch on open",
+                        )
+                        continue
+                    }
                     val cmd = discovery.catCommand(s.path)
                     val written = SilentlyTry.loggedOrElse(TAG, "stream session via pooled SSH", 0L) {
                         val sess = client.startSession()
@@ -349,7 +425,19 @@ class GlobalPrefetcher(
                 } else {
                     // Non-SK servers: no pooled client; fall back to the
                     // String fetch (these are typically smaller dev hosts).
-                    val raw = discovery.fetchSessionContent(server, secrets, s.path) ?: continue
+                    // Same 4 MB speculative cap as the pooled path — this branch
+                    // had none, so a non-SK host still pulled every uncached
+                    // session whole. Capped at the source, so the transfer AND
+                    // the String it lands in are both bounded.
+                    val raw = discovery.fetchSessionContentCapped(
+                        server, secrets, s.path, PREFETCH_BODY_MAX_BYTES,
+                    ) ?: run {
+                        android.util.Log.d(
+                            TAG,
+                            "    skip body ${s.id.take(8)} — over prefetch cap or unreadable; will fetch on open",
+                        )
+                        continue
+                    }
                     if (raw.isBlank()) continue
                     val bytes = raw.toByteArray(Charsets.UTF_8)
                     val safe = trimToLastNewline(bytes)
@@ -497,5 +585,16 @@ class GlobalPrefetcher(
 
     companion object {
         private const val TAG = "SshAi-Prefetch-Global"
+
+        /**
+         * Ceiling on a SPECULATIVE body download. Prefetch exists to make search
+         * work and to open a chat instantly — neither needs a 100 MB rollout
+         * pulled down on the off-chance. Above this the session stays uncached
+         * until the user actually opens it.
+         *
+         * Matches ChatViewModelTailPoll.BIG_FILE_STREAM_BYTES: past that point a
+         * session is already treated as "big" everywhere else in the app.
+         */
+        private const val PREFETCH_BODY_MAX_BYTES: Long = 4_000_000L
     }
 }

@@ -156,6 +156,60 @@ class HistoryCache internal constructor(private val rootDir: File) {
         SilentlyTry.fired("SshAi-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
+    /**
+     * Apply OUR OWN `"entrypoint":"sdk-cli"` → `"entrypoint":"cli"` rewrite to
+     * the cached copy, in place, and return the new size (null = nothing to do
+     * or the rewrite failed).
+     *
+     * Why this exists: `listSessionsScript` performs exactly this substitution
+     * on the SERVER so `claude --resume` can see conch sessions. It removes 4
+     * bytes per tag, so the remote file SHRINKS — and the tail-poll used to
+     * react to any shrink by downloading the entire file again to re-adopt it
+     * verbatim. On a live 102 MB rollout, with the CLI writing fresh `sdk-cli`
+     * tags every turn, that turned into a permanent re-download loop: measured
+     * 3 GB pulled in ~4 hours against 10 MB sent (user, 2026-07-23 — it ate a
+     * month of mobile data).
+     *
+     * The substitution is deterministic and byte-exact, so the SAME edit can be
+     * made locally for free. The caller compares the returned size against the
+     * server's; only an exact match lets it skip the download, so a real
+     * compaction still takes the authoritative path.
+     *
+     * Streams line-by-line through a temp file — never holds the session in
+     * RAM (a 134 MB rollout already OOM-killed one naive read, 2026-06-28).
+     */
+    fun rewriteEntrypointTags(sessionId: String): Long? {
+        val f = file(sessionId)
+        if (!f.exists() || f.length() == 0L) return null
+        val tmp = java.io.File(f.parentFile, f.name + ".rw")
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "local entrypoint rewrite", null) {
+            var hit = false
+            f.bufferedReader(Charsets.UTF_8).use { r ->
+                tmp.bufferedWriter(Charsets.UTF_8).use { w ->
+                    while (true) {
+                        val line = r.readLine() ?: break
+                        val fixed = line.replace("\"entrypoint\":\"sdk-cli\"", "\"entrypoint\":\"cli\"")
+                        if (fixed !== line) hit = true
+                        w.write(fixed)
+                        w.write("\n")
+                    }
+                }
+            }
+            if (!hit) {
+                tmp.delete()
+                return@loggedOrElse null
+            }
+            if (!tmp.renameTo(f)) {
+                tmp.copyTo(f, overwrite = true)
+                tmp.delete()
+            }
+            SilentlyTry.fired("SshAi-HistCache", "index after local rewrite") {
+                ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
+            }
+            f.length()
+        }
+    }
+
     /** Append new bytes (typically a tail fetched from the server). */
     fun append(sessionId: String, newBytes: ByteArray) {
         if (newBytes.isEmpty()) return
@@ -341,8 +395,22 @@ class HistoryCache internal constructor(private val rootDir: File) {
         // macOS / Android happily delete mapped files, so this is a
         // Windows-test-only path in practice, but it's also a
         // future-proof safety net.
-        SilentlyTry.fired("SshAi-HistCache", "gc before delete") { System.gc() }
-        SilentlyTry.fired("SshAi-HistCache", "delete after gc") { f.delete() }
+        //
+        // `System.gc()` is a HINT, not a guarantee, so a single attempt is a
+        // coin flip — the repo's own HistoryCacheTest failed roughly one run in
+        // three because of exactly that. Retry a bounded few times with a short
+        // yield between them: deterministic in practice, still bounded, and it
+        // protects the real app too if a Snapshot is ever leaked.
+        repeat(5) { attempt ->
+            SilentlyTry.fired("SshAi-HistCache", "gc before delete") { System.gc() }
+            if (SilentlyTry.loggedOrElse("SshAi-HistCache", "delete after gc", false) { f.delete() } ||
+                !f.exists()
+            ) {
+                return
+            }
+            SilentlyTry.fired("SshAi-HistCache", "yield before retry") { Thread.sleep(20L * (attempt + 1)) }
+        }
+        android.util.Log.w("SshAi-HistCache", "could not delete cached session file: ${f.name}")
         // Indexer's reconcile will drop this session next pass; eager
         // cleanup of the search rows happens through the indexer's
         // own reconcile, which is also kicked off by app start.
@@ -350,6 +418,38 @@ class HistoryCache internal constructor(private val rootDir: File) {
 
     /** Current cached size on disk in bytes (0 if not present). */
     fun size(sessionId: String): Long = file(sessionId).length()
+
+    /**
+     * The last [maxLines] COMPLETE lines of the cached session, read by seeking
+     * from the end — never loading the whole file. Empty when nothing is cached.
+     *
+     * Exists so the turn-state projection can run on the phone against bytes the
+     * app has already paid to download, instead of asking the server to re-derive
+     * them with `jq` (see [ai.eight24family.conch.agent.spec.AgentCliSpec.projectTurnStateRecords]).
+     * A session line can be very large (a whole tool_result), so the read is
+     * bounded by [maxBytes] as well; hitting that bound just yields fewer lines,
+     * which the turn detector already tolerates.
+     *
+     * The first line of the returned list is guaranteed complete: whatever the
+     * byte window cut in half is dropped.
+     */
+    fun tailLines(sessionId: String, maxLines: Int = 400, maxBytes: Long = 2L * 1024 * 1024): List<String> {
+        val f = file(sessionId)
+        val len = f.length()
+        if (len <= 0L) return emptyList()
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read cached tail", emptyList()) {
+            val take = minOf(len, maxBytes)
+            val buf = ByteArray(take.toInt())
+            java.io.RandomAccessFile(f, "r").use { raf ->
+                raf.seek(len - take)
+                raf.readFully(buf)
+            }
+            val text = String(buf, Charsets.UTF_8)
+            // Drop a leading partial line whenever we started mid-file.
+            val body = if (take < len) text.substringAfter('\n', "") else text
+            body.lineSequence().filter { it.isNotBlank() }.toList().takeLast(maxLines)
+        }
+    }
 
     private fun file(sessionId: String): File {
         val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")

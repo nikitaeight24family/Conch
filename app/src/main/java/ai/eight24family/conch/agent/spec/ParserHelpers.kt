@@ -51,18 +51,79 @@ internal object ParserHelpers {
     }
 
     /**
-     * Cheap top-level `"type":"…"` extractor — String.indexOf, no JSON
-     * parsing. Used to early-route lines to the right fast-path handler
-     * before paying for a full parse. Returns null when the field is
-     * absent or malformed (caller falls through to the tree path).
+     * Cheap **TOP-LEVEL** `"type":"…"` extractor — one pass, no JSON parsing.
+     * Used to route lines to the right fast-path handler before paying for a
+     * full parse. Returns null when the top-level field is absent or malformed.
+     *
+     * ⚠ "TOP-LEVEL" is the whole point, and it used to be a plain
+     * `line.indexOf("\"type\":\"")` — the FIRST such substring ANYWHERE in the
+     * line, nested objects included. Two ways that lies:
+     *
+     *  1. the top-level `type` is not the first key, and something nested
+     *     carries a `type` ahead of it;
+     *  2. the value returned belongs to an inner object entirely.
+     *
+     * That is what left a finished turn spinning. Claude's stream-json `result`
+     * envelope arrived as `{"is_error":false,"duration_api_ms":…,"usage":{…},…}`
+     * with its own `type` well down the object; the reader's turn-end gate reads
+     * quickType, got something that was not "result", and never completed the
+     * turn — while the file-mirror path, which uses the real parser
+     * (`obj.string("type")`, a genuine key lookup), rendered that same envelope's
+     * token/cost row on screen. Answer on screen, spinner still going
+     * (2026-07-29). A weaker second extraction disagreeing with the parser is a
+     * bug generator; keep them in agreement.
+     *
+     * Scans with brace/bracket depth, skipping string literals and escapes, so a
+     * text delta containing `{` or `"type":"` cannot fool it. O(n), no
+     * allocation until the value is found.
      */
     fun quickType(line: String): String? {
-        val needle = "\"type\":\""
-        val start = line.indexOf(needle).takeIf { it >= 0 } ?: return null
-        val s = start + needle.length
-        val e = line.indexOf('"', s)
-        if (e < 0) return null
-        return line.substring(s, e)
+        var i = 0
+        var depth = 0
+        val n = line.length
+        while (i < n) {
+            when (line[i]) {
+                '"' -> {
+                    // Walk the string literal; note where it started and ended.
+                    val keyStart = i + 1
+                    var j = keyStart
+                    while (j < n) {
+                        val ch = line[j]
+                        if (ch == '\\') { j += 2; continue }
+                        if (ch == '"') break
+                        j++
+                    }
+                    if (j >= n) return null
+                    // A TOP-LEVEL key named "type" — depth 1 means "directly
+                    // inside the outermost object".
+                    if (depth == 1 && j - keyStart == 4 && line.startsWith("type", keyStart)) {
+                        var k = j + 1
+                        while (k < n && line[k].isWhitespace()) k++
+                        if (k < n && line[k] == ':') {
+                            k++
+                            while (k < n && line[k].isWhitespace()) k++
+                            if (k < n && line[k] == '"') {
+                                val vs = k + 1
+                                var ve = vs
+                                while (ve < n) {
+                                    val ch = line[ve]
+                                    if (ch == '\\') { ve += 2; continue }
+                                    if (ch == '"') break
+                                    ve++
+                                }
+                                if (ve >= n) return null
+                                return line.substring(vs, ve)
+                            }
+                        }
+                    }
+                    i = j + 1
+                }
+                '{', '[' -> { depth++; i++ }
+                '}', ']' -> { depth--; i++ }
+                else -> i++
+            }
+        }
+        return null
     }
 
     /**

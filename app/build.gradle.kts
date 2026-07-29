@@ -83,7 +83,7 @@ android {
         versionCode = computeVersionCode(project)
         // Live on Google Play. versionCode stays auto (git commit count) —
         // strictly monotonic, never reset, independent of this label.
-        versionName = "0.2.9"
+        versionName = "0.2.11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -363,6 +363,12 @@ dependencies {
     // runtime whether the manager app is installed; absence is fine.
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+
+    // CameraX — live viewfinder in the attachment sheet.
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
 
     implementation(libs.sentry.android)
 

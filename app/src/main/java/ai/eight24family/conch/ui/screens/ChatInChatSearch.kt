@@ -124,11 +124,16 @@ internal fun buildInChatHits(messages: List<AgentMessage>, query: String): List<
             (if (winEnd < body.length) "…" else "")
         val matchInSnippet = pos - winStart + (if (winStart > 0) 1 else 0)
         val role = when (m) {
+            // Turn-completion signal, consumed by the stream reader — never a row.
+            is AgentMessage.TurnEnd -> "sys"
             is AgentMessage.UserText -> "user"
             is AgentMessage.AssistantText -> "ai"
             is AgentMessage.ToolUse -> "tool · ${m.toolName}"
             is AgentMessage.ToolResult -> "out"
             is AgentMessage.System -> "sys"
+            // Panel data, never a chat row — it carries no searchable body, so
+            // this label is unreachable in practice.
+            is AgentMessage.SubagentActivity -> "agent"
             is AgentMessage.Error -> "err"
             is AgentMessage.Raw -> "•"
             is AgentMessage.PermissionRequest -> "ask · ${m.toolName}"
@@ -197,11 +202,15 @@ internal fun InChatHitRow(
  *  Mirrors [ai.eight24family.conch.data.ChatSearch.searchableBody]
  *  but inlined so this file doesn't pay an import cost. */
 internal fun chatSearchableBody(m: AgentMessage): String? = when (m) {
+    // Turn-completion signal, not conversation text.
+    is AgentMessage.TurnEnd -> null
     is AgentMessage.UserText -> m.text
     is AgentMessage.AssistantText -> m.text
     is AgentMessage.ToolUse -> "${m.toolName} ${m.input}"
     is AgentMessage.ToolResult -> m.output
     is AgentMessage.System -> m.raw
+    // Subagent bookkeeping is not conversation text — keep it out of search.
+    is AgentMessage.SubagentActivity -> null
     is AgentMessage.Error -> m.text
     is AgentMessage.Raw -> m.text
     is AgentMessage.PermissionRequest -> "${m.toolName} ${m.description}"

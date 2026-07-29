@@ -21,6 +21,10 @@
 #   conch-bridge shell 'dumpsys battery'         # adb-shell-equivalent; needs Shizuku granted
 #   conch-bridge ping                            # connectivity check
 #   conch-bridge screenshot                      # request a screen capture
+#   conch-bridge audio [--seconds N] [--out FILE]  # record the phone mic (N<=300, default 10)
+#                                                # writes an .m4a and prints its path
+#                                                # OFF by default: the user must enable it in
+#                                                # Conch -> Settings -> Security
 #
 # Environment:
 #   CONCH_BRIDGE_DIR        Default ~/.conch-bridge. Override for testing.
@@ -39,7 +43,7 @@ trap 'rc=$?; echo "conch-bridge: internal error (exit $rc) near line $LINENO —
 
 # Bump whenever this script changes — the app compares installed-vs-bundled on
 # the server page and offers Update.
-CONCH_BRIDGE_VERSION="5"
+CONCH_BRIDGE_VERSION="6"
 
 BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
 TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
@@ -137,6 +141,12 @@ build_req_screenshot() {
 EOF
 }
 
+build_req_audio() {
+  cat <<EOF
+{ "id": "$ID", "command": "audio", "args": { "seconds": ${ARGS[seconds]:-10} }, "ts": $(date +%s%3N) }
+EOF
+}
+
 build_req_shell() {
   cat <<EOF
 { "id": "$ID", "command": "shell", "args": { "command": $(jq_str "$SHELL_CMD") }, "ts": $(date +%s%3N) }
@@ -153,6 +163,7 @@ case "$CMD" in
   logs)        build_req_logs       > "$REQ" ;;
   ping)        build_req_ping       > "$REQ" ;;
   screenshot)  build_req_screenshot > "$REQ" ;;
+  audio)       build_req_audio      > "$REQ" ;;
   shell)
     [ -n "$SHELL_CMD" ] || { echo "conch-bridge: shell needs a command, e.g. conch-bridge shell 'pm list packages'" >&2; exit 1; }
     build_req_shell > "$REQ" ;;
@@ -227,8 +238,20 @@ if [ -n "$DATA_PATH" ]; then
   # phone sent. (data_path is treated purely as a "uses a data file" flag.)
   DF="$OUTBOX/$ID.data"
   if [ -f "$DF" ]; then
-    cat "$DF"
-    rm -f "$DF"
+    if [ "$CMD" = "audio" ]; then
+      # Audio is BINARY and usually large. Dumping it to stdout would wedge the
+      # agent's terminal and is useless to it anyway — what it wants is a path it
+      # can hand to a transcriber. So move the payload into place and print that.
+      AUDIO_OUT="${ARGS[out]:-$BRIDGE_DIR/audio-$(date +%Y%m%d-%H%M%S).m4a}"
+      mkdir -p "$(dirname "$AUDIO_OUT")"
+      mv "$DF" "$AUDIO_OUT"
+      chmod 600 "$AUDIO_OUT"
+      printf '%s
+' "$AUDIO_OUT"
+    else
+      cat "$DF"
+      rm -f "$DF"
+    fi
   fi
 else
   printf '%s' "$TEXT"

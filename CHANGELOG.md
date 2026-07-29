@@ -11,6 +11,57 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.11] — 2026-07-30
+
+### Added
+- **Voice messages.** Record from the composer; before sending, play the clip
+  back on a waveform you can scrub. The envelope is decoded from the file, so an
+  attached or received clip draws the same way a recorded one does.
+- **Live camera in the attachment sheet.** The first grid cell is a viewfinder —
+  tap it and the shot is attached in place, no app switch.
+- **Recent photos inline**, four to a row, scrolling down; a paperclip for files.
+- `conch-bridge audio` — a server-side agent can record the phone's microphone.
+  **Off by default** behind its own switch, unlike every other bridge verb: a
+  microphone records the room, not the screen.
+
+### Fixed
+- **The thinking indicator stops when the turn really ends.** Turn state is now
+  derived on the phone instead of asking the server to project it with `jq` — on
+  a host without a usable `jq` every signal read false, and the one safety net
+  that clears a wedged spinner could never fire.
+- **The model you pick is law.** It is read before anything is resolved and
+  re-applied continuously, so a background probe learning the server's default
+  can no longer move a running conversation onto a different model.
+- A question card no longer appears twice, and "waiting for your answer" no
+  longer stays up after the question is answered.
+- The model list never regresses to an older name, and shows when it is cached
+  rather than live.
+- Much less mobile data: session history is compressed in transit and a routine
+  file rewrite no longer re-downloads the session.
+
+---
+
+## [0.2.10] — 2026-07-25
+
+### Added
+- Subagents are visible in chat: type, elapsed time, tokens.
+
+### Fixed
+- Large reductions in mobile data use; background downloads stop on a metered
+  connection.
+- The chat shows the model the CLI is really set to, and new model families are
+  picked up without a code change.
+- The weekly countdown keeps its hours ("2d16h", not "2d").
+
+---
+
+## [0.2.9] — 2026-07-22
+
+### Changed
+- Targets Android 16 (API 36) for Google Play compliance.
+
+---
+
 ## [0.2.8] — 2026-07-16
 
 ### Fixed
@@ -707,6 +758,9 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11
+[0.2.10]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.10
+[0.2.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.9
 [0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
 [0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta

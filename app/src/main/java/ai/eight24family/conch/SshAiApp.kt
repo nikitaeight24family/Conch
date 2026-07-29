@@ -16,6 +16,12 @@ class SshAiApp : Application() {
         Security.removeProvider("BC")
         Security.insertProviderAt(BouncyCastleProvider(), 1)
         installSshjBrokenTransportSwallow()
+        // Track whether any UI is on screen. A foreground SERVICE keeps this
+        // process alive forever, so "running" != "the user is looking" — and
+        // speculative background work has to know the difference.
+        ai.eight24family.conch.util.AppForeground.install(this)
+        // Connectivity signal — drives "no internet, message queued".
+        ai.eight24family.conch.util.NetworkCost.install(this)
         ServiceLocator.init(this)
         // Warm the usage/limit cache from disk early so the bar shows the
         // last-known limit the INSTANT a chat opens — before the live fetch

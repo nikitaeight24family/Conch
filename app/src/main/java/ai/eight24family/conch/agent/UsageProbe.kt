@@ -92,7 +92,15 @@ fun usageCountdownText(secs: Long): String = when {
         val m = (secs % 3600) / 60
         if (m == 0L) "${secs / 3600}h" else "${secs / 3600}h${m}m"
     }
-    else -> "${secs / 86_400}d"
+    // Days with the hour remainder ("2d16h", not a floor to "2d") — same reason
+    // as the hours branch above. A weekly reset renders its WEEKDAY next to the
+    // countdown ("Sun 5:00 AM (2d)"), and on Thursday a floored "2d" reads as a
+    // contradiction — the calendar says Sunday is three sleeps away. Exact-day
+    // boundaries still render clean ("3d").
+    else -> {
+        val h = (secs % 86_400) / 3600
+        if (h == 0L) "${secs / 86_400}d" else "${secs / 86_400}d${h}h"
+    }
 }
 
 /** All plan windows for an account. [windows] is ordered with the nearest /

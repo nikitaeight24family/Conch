@@ -145,6 +145,10 @@ internal class AgentSessionPersistentStream(
             val done = CompletableDeferred<Boolean>()
             turnDone = done
             lastReaderActivityMs = System.currentTimeMillis()
+            // Where this turn's output starts, so the silence backstop can tell
+            // "produced nothing" from "the reader wedged but the file mirror
+            // already delivered the reply".
+            val historyAtTurnStart = history.history.value.size
             val line = AgentSpecRegistry[server.agent].encodeUserTurn(text)
             if (!writeLine(line)) {
                 // stdin write failed → process/transport died between
@@ -175,12 +179,23 @@ internal class AgentSessionPersistentStream(
             if (completed == null) {
                 android.util.Log.w(tag, "turn silent ${INACTIVITY_TIMEOUT_MS / 60000} min — interrupting + tearing down")
                 interrupt()
-                history.emitMsg(
-                    AgentMessage.Error(
-                        UUID.randomUUID().toString(),
-                        "${server.agent.cliCommand} turn timed out (no output)",
+                // Only call it a FAILURE if nothing came back. When the reader
+                // wedges but the answer still reached the chat — the tail-poll
+                // mirror paints it from the session file, which is exactly what
+                // happens on a conch-bridge loopback turn — a red "timed out"
+                // row underneath a complete, correct reply is simply a lie. The
+                // wedge still needs the teardown below; it does not need an
+                // error the user has to reason about (2026-07-29).
+                if (!history.hasAssistantOutputSince(historyAtTurnStart)) {
+                    history.emitMsg(
+                        AgentMessage.Error(
+                            UUID.randomUUID().toString(),
+                            "${server.agent.cliCommand} turn timed out (no output)",
+                        )
                     )
-                )
+                } else {
+                    android.util.Log.i(tag, "wedged reader, but the reply landed via the file mirror — no error row")
+                }
                 // Force a clean process + reader restart on the next send so the
                 // wedged turn's reader can never satisfy (and swallow) a later
                 // turn's completion — that was the "new messages get no reply"
@@ -239,6 +254,21 @@ internal class AgentSessionPersistentStream(
         )
         if (procAlive && launched == params) return true
         if (procAlive) {
+            // ⚠ A RESTART MUST NEVER START A NEW SESSION. Relaunching without
+            // `--resume` makes the CLI mint a fresh <uuid>.jsonl, which shows up
+            // as a duplicate row carrying the same auto-title (user, 2026-07-27).
+            // `claude --resume <id>` appends to the SAME file and reports the
+            // SAME id — only --fork-session forks, and we never pass it — so the
+            // only way to fork by accident is losing the id. If it's gone, keep
+            // the process we have and retry the switch on the next turn.
+            if (getResumeId() == null) {
+                android.util.Log.w(
+                    tag,
+                    "launch params changed but resumeId is NULL — keeping the current " +
+                        "process rather than starting a second session",
+                )
+                return true
+            }
             android.util.Log.d(tag, "launch params changed → restarting persistent process")
         }
         teardownProcess()
@@ -277,7 +307,8 @@ internal class AgentSessionPersistentStream(
             android.util.Log.d(
                 tag,
                 "persistent process started resume=${getResumeId()} " +
-                    "model=${params.model ?: "<default>"} approval=${params.approval}",
+                    "model=${params.model ?: "<default>"} approval=${params.approval} " +
+                    "resume=${getResumeId() ?: "<NONE — NEW SESSION>"}",
             )
             // initialize handshake — the Agent SDK ALWAYS sends this first.
             // It registers the session and (critically) declares which
@@ -359,7 +390,7 @@ internal class AgentSessionPersistentStream(
                         lastReaderActivityMs = System.currentTimeMillis()
                         if (line.isBlank()) continue
                         synchronized(rawTail) {
-                            rawTail.addLast(line.take(200))
+                            rawTail.addLast(line.take(1200))
                             while (rawTail.size > 12) rawTail.removeFirst()
                         }
                         // Live reasoning counter — transient UI state, never
@@ -384,33 +415,61 @@ internal class AgentSessionPersistentStream(
                             android.util.Log.d(tag, "control ack: ${line.take(160)}")
                             continue
                         }
-                        for (msg in spec.parseStreamLine(line, myTag)) {
-                            if (msg is AgentMessage.System && msg.sessionId != null && getResumeId() == null) {
+                        val parsedMsgs = spec.parseStreamLine(line, myTag)
+                        for (msg in parsedMsgs) {
+                            // Adopt the id the CLI reports on EVERY launch, not just the first.
+                            // Adopting once meant that if the CLI ever answered with a
+                            // different session_id we kept resuming the OLD one forever
+                            // while the CLI wrote a file we never tracked — an orphan
+                            // session row (user, 2026-07-27). Tracking whatever file it
+                            // actually writes makes that impossible by construction.
+                            if (msg is AgentMessage.System && msg.sessionId != null &&
+                                msg.sessionId != getResumeId()
+                            ) {
                                 setResumeId(msg.sessionId)
                             }
-                            if (msg is AgentMessage.UserText) continue
+                            if (!rendersOnLiveStream(msg)) continue
                             history.emitMsg(msg)
                         }
                         // Persist to the on-device cache as we stream (gated to
                         // brand-new sessions — see cacheRawLine). Runs AFTER the
                         // parse so setResumeId has populated the id this turn.
                         cacheRawLine(line)
-                        // TURN-END detection on the RAW event type, NOT the parsed
-                        // message kind. The terminator in Claude stream-json is the
-                        // top-level `result` event — for SUCCESS *and* for is_error
-                        // results — plus a fatal top-level `error` (model
-                        // unavailable / rate limit / overloaded give-up). The old
-                        // gate keyed on `msg is AgentMessage.Result`, but the
-                        // result-with-is_error and the error event both parse to
-                        // AgentMessage.Error, so the turn NEVER completed on a
-                        // limit / Fable-5-disabled error → spinner span forever,
-                        // Stop stayed active (user, 2026-06-13). `api_retry` is a
-                        // `system` event so mid-turn 529 retries are NOT caught
-                        // here — the turn keeps running, correctly.
-                        val rawType = ParserHelpers.quickType(line)
-                        if (rawType == "result" || rawType == "error") {
-                            ai.eight24family.conch.util.Logx.d(tag) { "turn-terminal type=$rawType: ${line.take(200)}" }
+                        // TURN-END: ONE authority — what the parser recognised.
+                        //
+                        // It used to be a second, weaker extraction: a substring
+                        // scan for `"type":"` over the raw line, deciding
+                        // independently of the parser whether the same line was
+                        // terminal. The two disagreed on Claude's `result`
+                        // envelope and the app rendered a finished answer with the
+                        // spinner still running on top of it, nothing in the log
+                        // saying why (2026-07-29). The parser already did the full
+                        // parse and already knows; nothing downstream should
+                        // re-derive it.
+                        val terminal = parsedMsgs.filterIsInstance<AgentMessage.TurnEnd>().firstOrNull()
+                        if (terminal != null) {
+                            ai.eight24family.conch.util.Logx.d(tag) {
+                                "turn-terminal ${terminal.reason}: ${line.take(400)}"
+                            }
+                            // The turn is OVER, so the CLI cannot still be blocked
+                            // on a control it raised inside it. Leaving them here
+                            // keeps hasPendingControl() true forever, which pins
+                            // "waiting for your answer" and leaves a tappable card
+                            // writing into a void (user, 2026-07-29). Retiring only
+                            // on EOF/teardown was never enough: a Stop whose
+                            // interrupt IS honoured ends the turn with the channel
+                            // still alive.
+                            pendingControls.keys.toList().forEach { retireControl(it) }
                             turnDone?.complete(true)
+                        } else if (line.contains("\"total_cost_usd\"") || line.contains("\"num_turns\"")) {
+                            // Turn-final ACCOUNTING that nothing called terminal.
+                            // Only an envelope that ends a turn carries these. Log
+                            // the WHOLE line, once: the 200-char cut is what made
+                            // this undecidable for a day.
+                            android.util.Log.w(
+                                tag,
+                                "turn-terminal MISSED len=${line.length} line=$line",
+                            )
                         }
                     }
                 }
@@ -643,6 +702,24 @@ internal class AgentSessionPersistentStream(
     }
 
     companion object {
+        /**
+         * What may be RENDERED from the LIVE persistent stream.
+         *
+         * Extracted pure so it can be tested. The read-only AskUserQuestion is the
+         * MIRROR shape the file parser produces (`readOnly`, empty requestId), and
+         * on this channel the SAME question always arrives about one line later as
+         * a `can_use_tool` control_request — verified against a real CLI run in
+         * default, bypassPermissions and allowedTools modes. Rendering the
+         * file-shaped copy here is what showed the card twice, once answerable and
+         * once "answer this in your CLI session" (user, 2026-07-29). The parser
+         * keeps producing it for MIRRORED sessions, which never come through this
+         * reader.
+         */
+        internal fun rendersOnLiveStream(msg: AgentMessage): Boolean =
+            msg !is AgentMessage.UserText &&
+                msg !is AgentMessage.TurnEnd &&
+                !(msg is AgentMessage.AskUserQuestion && msg.readOnly)
+
         /** Poll cadence while awaiting a turn's completion (inactivity check). */
         private const val INACTIVITY_CHECK_MS = 60L * 1000
         /** A turn is abandoned only after this much stdout SILENCE (channel

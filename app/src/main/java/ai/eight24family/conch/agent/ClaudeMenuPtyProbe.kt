@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.SSHClient
+import ai.eight24family.conch.ssh.startStreamSession
 import net.schmizz.sshj.connection.channel.direct.Session
 import java.util.concurrent.TimeUnit
 
@@ -38,9 +39,20 @@ import java.util.concurrent.TimeUnit
  */
 suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dispatchers.IO) {
     if (!client.isConnected) return@withContext null
+    // PER-RUN cwd. It used to be a shared constant, and there are two independent
+    // callers — the connect sweep (ModelCatalogPrefetcher) and chat open
+    // (AgentSessionFileTransfer). The freshness gate only suppresses the second
+    // AFTER a successful probe, so on a host where the probe keeps failing the two
+    // overlap on every connect-then-open and each one's `finally` rm -rf's the
+    // other's cwd mid-run — turning a recoverable failure into a permanent one.
+    val probeCwd = "$PROBE_CWD_PREFIX${java.util.UUID.randomUUID()}"
     var sess: Session? = null
     try {
-        sess = client.startSession()
+        // STREAM session, not a plain one: this probe holds its channel open
+        // reading for many seconds, which is exactly the profile that starves on
+        // a shared transport without autoExpand — the same contention that wedges
+        // the turn reader (see [startStreamSession]; TURN-STREAM-AUTOEXPAND-1).
+        sess = client.startStreamSession()
         // WIDE pty (not the 80×24 default): the menu's right column —
         // the resolved model names — gets cut off at 80 cols, which
         // starved the parser of half the rows' data (verified from the
@@ -53,15 +65,47 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
         // disposable /tmp cwd puts those in a project dir the user's resume never
         // shows, and the finally block deletes it. Model/effort lists are global
         // (creds in ~/.claude), so cwd doesn't change what the menus return.
-        val cmd = sess.exec("bash -lc 'mkdir -p $PROBE_CWD 2>/dev/null; cd $PROBE_CWD; claude'")
+        // Same full-scope preference as the turn commands — this probe IS the
+        // picker's data source, so running it under the inference-only token is
+        // exactly what made the menu demand credits for an included model.
+        val authPrefix = AuthSelector.claudeFullScopePrefix()
+        // ⚠ `${'$'}{authPrefix}` here used to emit the LITERAL TEXT `${authPrefix}`
+        // (Kotlin's escape for a dollar sign), so the auth prefix was never
+        // applied — the probe ran under whatever token the environment had,
+        // which is exactly the inference-only setup-token case this prefix
+        // exists to avoid. And `claude` was launched WITHOUT the PATH preamble
+        // that every other probe carries, so on a host where npm installed it
+        // under ~/.local/bin the command simply wasn't found: blank screen,
+        // "autocomplete not ready" ×3, `extracted CLAUDE models: {}`, and a
+        // picker stuck on whatever it had cached (user, 2026-07-29).
+        val launch = RemoteEnv.PATH_PREAMBLE_INLINE + authPrefix +
+            "mkdir -p $probeCwd 2>/dev/null; cd $probeCwd; exec claude"
+        val cmd = sess.exec("bash -lc " + shQuoteProbe(launch))
 
         val sb = StringBuilder()
         val buf = ByteArray(8192)
         val tag = "SshAi-Models"
 
-        suspend fun readUntilQuiet(maxMs: Long, quietMs: Long) {
-            val deadline = System.currentTimeMillis() + maxMs
-            var lastByteAt = System.currentTimeMillis()
+        /**
+         * Read until the stream goes quiet for [quietMs], or [maxMs] elapses.
+         *
+         * ⚠ "Quiet" means IT STOPPED TALKING — never IT HASN'T STARTED YET. The
+         * timer used to be armed at entry (`var lastByteAt = now()`), so a CLI
+         * that had printed nothing yet satisfied the quiet condition on the first
+         * pass. Phase 1 allowed 1.2 s of quiet; a node cold start plus claude's
+         * OAuth bootstrap comfortably exceeds that, so the probe declared the
+         * screen settled before a single byte arrived, raced through all three
+         * `/model` attempts in ~4 s, and closed the channel. Downstream that is
+         * indistinguishable from "this CLI has no models": blank screen →
+         * `{}` → the picker silently keeps serving its old cached list (user,
+         * 2026-07-29). [firstByteMs] therefore holds the quiet timer OFF until
+         * something actually arrives.
+         */
+        suspend fun readUntilQuiet(maxMs: Long, quietMs: Long, firstByteMs: Long = 0L) {
+            val start = System.currentTimeMillis()
+            val deadline = start + maxMs + firstByteMs
+            // MAX_VALUE ⇒ "not quiet" until the first byte lands.
+            var lastByteAt = if (firstByteMs > 0L) Long.MAX_VALUE else start
             while (System.currentTimeMillis() < deadline) {
                 if (cmd.inputStream.available() > 0) {
                     val n = cmd.inputStream.read(buf)
@@ -70,7 +114,9 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
                         lastByteAt = System.currentTimeMillis()
                     }
                 } else {
-                    if (System.currentTimeMillis() - lastByteAt > quietMs) return
+                    if (lastByteAt != Long.MAX_VALUE &&
+                        System.currentTimeMillis() - lastByteAt > quietMs
+                    ) return
                     delay(50)
                 }
             }
@@ -103,17 +149,38 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
          * Open a slash-command dialog, verified at every step.
          * @return true when [headerMarker] is on screen (dialog open).
          */
+        /**
+         * WAIT for the slash-autocomplete to list [command] on its own line
+         * (composer + popup ⇒ ≥2 lines mention it). Before the registry loads
+         * there is no popup, and CR would submit the text as a chat prompt.
+         *
+         * A WAIT, not a single check: the old code read for one quiet window
+         * (~400 ms — the PTY's echo of the typed characters arms the timer
+         * instantly) and then tested once. All three retries therefore landed
+         * inside ~3 s and sampled the same instant of an ASYNCHRONOUS registry
+         * load, which is precisely the `autocomplete not ready (attempt 0/1/2)`
+         * triple in the field report.
+         */
+        suspend fun waitReady(command: String, budgetMs: Long): Boolean {
+            val deadline = System.currentTimeMillis() + budgetMs
+            while (System.currentTimeMillis() < deadline) {
+                if (screen().lineSequence().count { it.contains(command) } >= 2) return true
+                readUntilQuiet(maxMs = 1_200, quietMs = 250)
+            }
+            return false
+        }
+
         suspend fun openDialog(command: String, headerMarker: String): Boolean {
             for (attempt in 0 until 3) {
                 type(command)
                 readUntilQuiet(maxMs = 2_000, quietMs = 400)
-                // UI-ready check: the autocomplete popup lists the
-                // command on its OWN line (composer + popup ⇒ ≥2 lines
-                // mention it). Before the registry loads there's no
-                // popup and CR would submit the text as a chat prompt.
-                val ready = screen().lineSequence().count { it.contains(command) } >= 2
-                if (!ready) {
-                    android.util.Log.d(tag, "probe: $command autocomplete not ready (attempt $attempt)")
+                // Budget is generous on purpose: this runs on the connect sweep
+                // and on chat open, never on the send path.
+                if (!waitReady(command, budgetMs = 10_000)) {
+                    android.util.Log.d(
+                        tag,
+                        "probe: $command autocomplete not ready (attempt $attempt, screen=${screen().length}B)",
+                    )
                     key(0x15) // Ctrl+U — wipe the composer
                     readUntilQuiet(maxMs = 2_500, quietMs = 600)
                     continue
@@ -130,8 +197,32 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
             return false
         }
 
-        // Phase 1: let claude start and settle.
-        readUntilQuiet(maxMs = 6_000, quietMs = 1_200)
+        // Phase 1: let claude start and settle. The first-byte budget is
+        // deliberately generous — node cold start on a small VPS, plus claude's
+        // startup Bootstrap call, routinely runs past 10 s. Costs nothing when
+        // the CLI is warm: the wait ends the moment output begins.
+        readUntilQuiet(maxMs = 6_000, quietMs = 1_200, firstByteMs = 25_000)
+
+        // DID IT EVEN START? A probe that never got a byte, or got only a shell
+        // error, is INDISTINGUISHABLE downstream from "this CLI offers no
+        // models" — every later step just reports "not ready" and the caller
+        // records an empty catalog. Say it out loud, with the raw bytes, so the
+        // next failure is diagnosable instead of silent (user, 2026-07-29:
+        // `extracted CLAUDE models: {}` with a blank rendered screen, and no way
+        // to tell a missing binary from a changed menu format).
+        if (sb.isBlank()) {
+            android.util.Log.w(tag, "probe: claude produced NO OUTPUT — not started (PATH? auth? channel?)")
+            return@withContext null
+        }
+        val startupTail = screen().trim()
+        if (startupTail.isBlank() || NOT_STARTED_MARKERS.any { startupTail.contains(it, ignoreCase = true) }) {
+            android.util.Log.w(
+                tag,
+                "probe: claude did not reach its UI — raw=${sb.length}B first200=" +
+                    sb.toString().take(200).replace("\n", "\\n"),
+            )
+            return@withContext null
+        }
 
         // Phase 1.5: dismiss real modal prompts (trust folder etc).
         var loops = 0
@@ -200,7 +291,10 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
         // specific enough to never touch a real project.
         SilentlyTry.fired("SshAi-Models", "purge probe session") {
             if (client.isConnected) client.startSession().use { cs ->
-                cs.exec("bash -lc 'rm -rf $PROBE_CWD ~/.claude/projects/*conch-modelprobe* 2>/dev/null'")
+                // Our own cwd by exact path, plus a wildcard sweep so strays from a
+                // killed run still get cleaned. The wildcard never touches a live
+                // run's cwd because claude only writes the project dir on exit.
+                cs.exec("bash -lc 'rm -rf $probeCwd ~/.claude/projects/*conch-modelprobe* 2>/dev/null'")
                     .join(8, TimeUnit.SECONDS)
             }
         }
@@ -209,4 +303,17 @@ suspend fun probeClaudeMenuScreens(client: SSHClient): String? = withContext(Dis
 
 /** Throwaway cwd for the menu probe — keeps claude's auto-saved probe session
  *  out of the user's real project's `--resume` picker (deleted after each run). */
-private const val PROBE_CWD = "/tmp/.conch-modelprobe"
+private const val PROBE_CWD_PREFIX = "/tmp/.conch-modelprobe-"
+
+private fun shQuoteProbe(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
+/** Shell/CLI failures that mean the TUI never came up. Distinguishing these from
+ *  "the menu format changed" is the whole point — the first is our bug, the
+ *  second is the parser's. */
+private val NOT_STARTED_MARKERS = listOf(
+    "command not found",
+    "No such file or directory",
+    "Permission denied",
+    "unbound variable",
+    "cannot execute",
+)

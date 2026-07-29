@@ -299,6 +299,11 @@ done | sort -t'	' -k2 -rn | head -500
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private fun textOf(line: String): String {
+        // Cheap shape check FIRST. Callers hand us split fragments, and an empty
+        // one used to reach kotlinx and throw, which SilentlyTry then logged —
+        // a warn per fragment plus an exception's cost, forever ("JSON input: "
+        // with nothing after it, 2026-07-29).
+        if (line.isBlank() || !line.trimStart().startsWith("{")) return ""
         val obj = SilentlyTry.logged("SshAi-ClaudeSpec", "parse line json") { json.parseToJsonElement(line).jsonObject } ?: return ""
         val msg = SilentlyTry.logged("SshAi-ClaudeSpec", "read message obj") { obj["message"]?.jsonObject } ?: return ""
         val content = msg["content"] ?: return ""
@@ -479,6 +484,17 @@ esac
      * Cached by ChatViewModel and persisted to prefs so a cold start never
      * shows a stale list after Anthropic ships a new family.
      */
+    /**
+     * The model the CLI starts on when we pass no `--model`, i.e. what the
+     * `/model` menu labels "Default (recommended)".
+     *
+     * Free: [parseClaudeModelMenu] already resolved it during the menu probe
+     * and published it, so this costs no extra round-trip. Claude used to
+     * inherit the interface default (`null`) — that is Codex's config.toml
+     * notion — which left the topbar with nothing to show on a fresh chat.
+     */
+    override suspend fun probeDefaultModel(exec: AgentExec): String? = claudeDefaultModel
+
     override suspend fun probeAvailableModels(
         exec: AgentExec,
         pty: PtyProbe?,
@@ -672,15 +688,7 @@ done
      * the rest feed the timer + token counter. Robust to string OR array message
      * content. Never a nested type. (Moved verbatim from the old hardcoded probe.)
      */
-    override val turnStateRecordJq: String =
-        "select(.type==\"user\" or .type==\"assistant\") | [.type, " +
-            "((.isMeta // false)|tostring), " +
-            "(((.message.content // [])|if type==\"array\" then any(.[]?; .type==\"tool_result\") else false end)|tostring), " +
-            "(((.message.content // [])|if type==\"array\" then any(.[]?; .type==\"tool_use\") else false end)|tostring), " +
-            "((.message.usage.output_tokens // 0)|tostring), (.message.id // \"\"), (.timestamp // \"\"), " +
-            "(((.message.content) | if type==\"array\" then ([.[]? | (.text // \"\")] | join(\" \")) elif type==\"string\" then . else \"\" end | gsub(\"[\\t\\n\\r]\"; \" \")) | .[0:160]), " +
-            "(.message.stop_reason // \"\")] | @tsv"
-
+    
     /**
      * DEFINITIVE turn state — second-accurate, NO timeouts (verified empirically
      * against a live `claude` session 2026-06-27). The LAST MEANINGFUL user/
@@ -695,11 +703,91 @@ done
      * the persistent stream's pendingControls), so waitingForUser stays false and
      * the app detects it separately.
      */
+    /**
+     * Field layout, read by index in [inferTurnState]:
+     *   0 type · 1 isMeta · 2 hasToolResult · 3 hasToolUse · 4 outputTokens
+     *   5 messageId · 6 timestamp · 7 text(≤160, tabs/newlines flattened)
+     *   8 stopReason
+     * Malformed / partial lines are skipped silently — the last line of a file
+     * being appended to is routinely half-written, and one bad line must not
+     * cost us the whole window (which is exactly what remote jq did: it aborts).
+     */
+    override fun projectTurnStateRecords(lines: Sequence<String>): List<List<String>> {
+        val out = ArrayList<List<String>>()
+        for (line in lines) {
+            val t = line.trim()
+            if (t.length < 2 || t[0] != '{') continue
+            // Cheap pre-filter before the real parse: the window can hold
+            // multi-hundred-KB tool_result lines and we only care about two
+            // top-level types.
+            if (!t.contains("\"type\":\"user\"") && !t.contains("\"type\":\"assistant\"") &&
+                !t.contains("\"type\": \"user\"") && !t.contains("\"type\": \"assistant\"")
+            ) continue
+            val obj = runCatching { json.parseToJsonElement(t).jsonObject }.getOrNull() ?: continue
+            val type = obj["type"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() } ?: continue
+            if (type != "user" && type != "assistant") continue
+            val isMeta = obj["isMeta"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() } == "true"
+            val msg = runCatching { obj["message"]?.jsonObject }.getOrNull()
+            val content = msg?.get("content")
+
+            var hasToolResult = false
+            var hasToolUse = false
+            val text = StringBuilder()
+            when {
+                content is JsonArray -> {
+                    // jq: [.[]? | (.text // "")] | join(" ") — EVERY element
+                    // contributes, non-text ones as "", hence the plain join.
+                    val parts = ArrayList<String>(content.size)
+                    for (el in content) {
+                        val o = runCatching { el.jsonObject }.getOrNull()
+                        val bt = o?.get("type")?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+                        if (bt == "tool_result") hasToolResult = true
+                        if (bt == "tool_use") hasToolUse = true
+                        parts += o?.get("text")?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+                    }
+                    text.append(parts.joinToString(" "))
+                }
+                content != null -> {
+                    runCatching { content.jsonPrimitive.content }.getOrNull()?.let { text.append(it) }
+                }
+            }
+            val flat = text.toString()
+                .replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+                .take(160)
+            val tokens = runCatching {
+                msg?.get("usage")?.jsonObject?.get("output_tokens")?.jsonPrimitive?.content
+            }.getOrNull() ?: "0"
+            val id = msg?.get("id")?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+            val ts = obj["timestamp"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+            val stop = msg?.get("stop_reason")?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
+                ?.takeIf { it != "null" }.orEmpty()
+            out += listOf(
+                type, isMeta.toString(), hasToolResult.toString(), hasToolUse.toString(),
+                tokens, id, ts, flat, stop,
+            )
+        }
+        return out
+    }
+
     override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
         val recs = records.filter { it.size >= 7 }
         if (recs.isEmpty()) return TurnSignals()
+        // ⚠ SKIP isMeta ROWS (field 1). They are LOCAL bookkeeping the CLI writes
+        // into the same file — a slash command's `<local-command-caveat>` /
+        // `<command-name>` echo, `<local-command-stdout>`, an image-dimensions
+        // carrier — not events of an agent turn. They carry TEXT, so they used to
+        // win `lm`, and a `user` lm has NO staleness escape below: the app reported
+        // inFlight=true FOREVER, the spinner never stopped, and `turnComplete` went
+        // false so the stuck-turn reconcile couldn't rescue it either. Running
+        // `/model opus` mid-session is exactly that: the CLI appends a meta row
+        // AFTER the assistant's end_turn and the chat "thinks" forever. Measured on
+        // a real 15 150-row session: 19 file positions where a meta row falsely
+        // held inFlight while the last real event was `assistant end_turn`.
+        // `[Request interrupted by user]` is NOT meta (verified over 60
+        // occurrences), so the interrupt verdict is untouched.
         val lm = recs.lastOrNull {
-            (it.getOrNull(7)?.isNotBlank() == true) || it[2] == "true" || it[3] == "true"
+            it[1] != "true" &&
+                ((it.getOrNull(7)?.isNotBlank() == true) || it[2] == "true" || it[3] == "true")
         }
         val lmText = lm?.getOrNull(7).orEmpty()
         val lmStop = lm?.getOrNull(8).orEmpty()
@@ -708,7 +796,14 @@ done
             lm[0] == "user" && lmText.contains("[Request interrupted by user]") -> false
             lm[0] == "assistant" && lmText.trimStart().startsWith("No response requested") -> false
             lm[0] == "assistant" && lmStop in TERMINAL_STOP_REASONS -> false
-            lm[0] == "user" -> true
+            // A user prompt / tool_result with no assistant after it means the model
+            // owes us a reply. Bounded by the SAME staleness escape as the
+            // mid-stream case: without one, any record shape that lands last and
+            // isn't an assistant pins the spinner on for the life of the chat with
+            // no reconcile possible (turnComplete is false here by construction).
+            // 12 min of a frozen file after a tool_result is a dead turn, not a
+            // slow one — the model's own reply latency is seconds.
+            lm[0] == "user" -> frozenForMs == null || frozenForMs < AWAIT_STALE_MS
             lm[0] == "assistant" && lmStop == "tool_use" -> true
             lm[0] == "assistant" -> // no stop_reason yet → mid-stream; clear only if long-frozen
                 frozenForMs == null || frozenForMs < AWAIT_STALE_MS
@@ -716,7 +811,10 @@ done
         }
         val thinking = inFlight && lm != null && lm[0] == "user" &&
             !lmText.contains("[Request interrupted by user]")
-        val startIdx = recs.indexOfLast { it[0] == "user" && it[2] != "true" }
+        // Turn start = the last REAL user prompt: not a tool_result (field 2), and
+        // not a meta row (field 1) — a slash command's echo would otherwise restart
+        // the working timer and the per-turn token counter at the command.
+        val startIdx = recs.indexOfLast { it[0] == "user" && it[2] != "true" && it[1] != "true" }
         val turnStartMs = if (startIdx >= 0) recs[startIdx][6].takeIf { it.isNotBlank() }?.let { ts ->
             SilentlyTry.logged("SshAi-ClaudeSpec", "parse turn-start ts") {
                 java.time.Instant.parse(ts).toEpochMilli()
@@ -943,6 +1041,11 @@ internal fun parseClaudeModelMenu(raw: String): Map<String, String> {
     // Publish the unavailable set (by label) so the topbar skips it and the
     // picker greys it. Snapshot swap — singleton spec, no per-chat state.
     claudeUnavailableLabels = parsed.unavailableLabels
+    // Publish the RESOLVED default (a concrete model name) for the topbar. The
+    // picker below still refuses to list a "default" row — see the doc on
+    // [claudeDefaultModel] for why those two are not in conflict.
+    claudeDefaultModel = parsed.defaultResolved
+    claudeDefaultModelKey = parsed.defaultKey
     // NO "default" entry — the picker shows ONLY concrete models. Drop the
     // Default-row-SYNTHESIZED entry IFF an explicit row already lists the
     // same model (that's the twin "Opus 4.8" the user saw). Distinct models
@@ -965,6 +1068,33 @@ internal fun parseClaudeModelMenu(raw: String): Map<String, String> {
 @Volatile
 internal var claudeUnavailableLabels: Set<String> = emptySet()
 
+/**
+ * What the menu's "Default (recommended)" row RESOLVES TO — a concrete model,
+ * e.g. "Opus 4.8". Published for the topbar so a brand-new chat opens with the
+ * model it will actually start on and the user can just type instead of being
+ * made to pick.
+ *
+ * This does NOT walk back (user, 2026-06-13): that ruled out surfacing the
+ * ABSTRACTION — a picker row literally called "Default", which told the user
+ * nothing. The picker still lists only concrete models. What we show here is
+ * the resolved model NAME; the word "Default" appears nowhere.
+ */
+@Volatile
+internal var claudeDefaultModel: String? = null
+
+/**
+ * The MENU KEY of that same row (e.g. `opus`) — what actually goes on the wire
+ * as `--model`.
+ *
+ * Published next to the label so the topbar and the command line read ONE
+ * value. Resolving the label back to a key by string match was fragile: an
+ * exact compare misses when the row resolves to "Opus 5 with 1M context" while
+ * the picker entry reads "Opus 5 1M", and it silently degraded to the first map
+ * entry — which is `sonnet`.
+ */
+@Volatile
+internal var claudeDefaultModelKey: String? = null
+
 /** Rows in menu order + what the "Default (recommended)" row resolved to +
  *  the set of model LABELS the CLI marked unavailable (description column
  *  carried "is currently unavailable" — export-control suspension etc.). */
@@ -977,18 +1107,41 @@ private class ClaudeMenuParse(
      *  [parseClaudeModelMenu] IFF an explicit row already lists the same
      *  model — that's the twin-"Opus 4.8" the user saw. */
     val defaultSynthKey: String? = null,
+    /** Menu key of the ✔ row — the value that goes on the wire as `--model`. */
+    val defaultKey: String? = null,
 )
 
-/** The CLI's "<model> is currently unavailable" marker (Fable 5 / Mythos 5
- *  export-control suspension, deprecations). Lives in the row's description. */
+/** Markers in a `/model` row's description meaning "this row will NOT run".
+ *
+ *  ⚠ BILLING TEXT IS NOT AN AVAILABILITY VERDICT. "· Requires usage credits"
+ *  was briefly treated as unavailable here — and that was wrong: on a Max plan
+ *  Fable 5 IS included, the API answers `unified-status: allowed` and
+ *  `claude --model claude-fable-5 --print` returns a real reply. The CLI's own
+ *  picker shows that warning off a STALE local profile cache (Anthropic's
+ *  desktop app says so verbatim: "Fable 5 is still included with your Max plan.
+ *  If you see a prompt to set up usage credits for it, restart Claude Code").
+ *  Treating it as dead vetoed a model the user pays for (user, 2026-07-28).
+ *
+ *  Only two things mean a row genuinely will not run:
+ *   1. "<model> is currently unavailable" — export-control suspension,
+ *      deprecation;
+ *   2. "(disabled)".
+ *
+ *  Even these only DIM the row — see the picker. We can be wrong, and the
+ *  server is the real authority: passing `--model <id>` is the CLI's own
+ *  documented path ("For other/previous model names, specify with --model"),
+ *  so the user must always be able to try and let the server answer. */
+
 private fun String.marksUnavailable(): Boolean =
-    contains("is currently unavailable", ignoreCase = true)
+    contains("is currently unavailable", ignoreCase = true) ||
+        contains("(disabled)", ignoreCase = true)
 
 /** Primary path: structured numbered rows (see [parseClaudeModelMenu] doc). */
 private fun parseClaudeNumberedRows(section: String): ClaudeMenuParse {
     val rowRx = Regex("^[\\s❯›>]*(\\d+)\\.\\s+(\\S.*)$")
     val rows = LinkedHashMap<String, String>()
     var defaultResolved: String? = null
+    var defaultKey: String? = null
     var defaultSynthKey: String? = null
     val unavailable = HashSet<String>()
     fun put(key: String, display: String) {
@@ -998,6 +1151,12 @@ private fun parseClaudeNumberedRows(section: String): ClaudeMenuParse {
     }
     for (line in section.lineSequence()) {
         val row = rowRx.find(line)?.groupValues?.get(2) ?: continue
+        // ✔ marks the row the CLI is ACTUALLY set to — the user's own stored
+        // pick. It is NOT the same as "Default (recommended)", which is only
+        // Anthropic's suggestion for the account. Reading the recommended row
+        // as the effective model is why the topbar announced "Sonnet 5" on a
+        // box whose CLI banner said it was running Opus.
+        val isChecked = row.contains('✔') || row.contains('✓')
         val cleaned = row.replace('✔', ' ').replace('✓', ' ')
         // Columns separated by a run of 2+ spaces; the label itself only
         // ever contains single spaces ("Default (recommended)").
@@ -1041,12 +1200,29 @@ private fun parseClaudeNumberedRows(section: String): ClaudeMenuParse {
                 val synthKey = claudeIdFromName(resolvedMatch)
                 put(synthKey, resolved)
                 defaultSynthKey = synthKey
+                // Record WHAT the default resolves to. This was a declared-but
+                // -never-assigned variable, so ClaudeMenuParse.defaultResolved
+                // was permanently null and the topbar had no way to learn the
+                // CLI's own default — which is why a fresh chat showed no model
+                // at all. On this account the menu reads
+                // "1. Default (recommended)  Sonnet 5 · …", so the answer is
+                // Sonnet 5.
+                // Weakest source: only stands if no row is check-marked.
+                if (defaultResolved == null) defaultResolved = resolved
             }
             continue
         }
         put(key, resolved ?: label)
+        // A check-marked concrete row WINS over "Default (recommended)" — it is
+        // what the CLI will really run, so it overwrites whatever the
+        // recommendation put there. Keep the KEY as well: that is the value the
+        // command line needs, and deriving it back from the label is lossy.
+        if (isChecked && resolved != null) {
+            defaultResolved = resolved
+            defaultKey = key
+        }
     }
-    return ClaudeMenuParse(rows, defaultResolved, unavailable, defaultSynthKey)
+    return ClaudeMenuParse(rows, defaultResolved, unavailable, defaultSynthKey, defaultKey)
 }
 
 /**
@@ -1240,13 +1416,11 @@ internal fun claudeLabelFromId(value: String): String? {
  * NOTE: this is a LABEL-RESOLUTION table for legacy/known aliases, not
  * the menu source — the menu itself is dynamic (see `menuItems`).
  */
-private val CLAUDE_ALIAS_FALLBACK_LABELS = mapOf(
-    "default" to "Opus 4.8 (1M context)",
-    "sonnet" to "Sonnet 4.6",
-    "haiku" to "Haiku 4.5",
-    "opus" to "Opus 4.8",
-    "fable" to "Fable 5",
-)
+/** CLI aliases that every Claude Code build accepts as `--model <alias>`.
+ *  Names only — NEVER version labels: a baked-in "Opus 4.8" goes stale the day
+ *  a new family ships, and the real labels arrive from the live /model probe
+ *  (or its prefs cache) anyway. */
+private val CLAUDE_BASE_ALIASES = listOf("opus", "sonnet", "haiku")
 
 /**
  * Reasoning catalog for Claude Code's `--effort` flag. Same for
@@ -1269,7 +1443,8 @@ private object ClaudeTopbarUi : AgentTopbarUi {
      *  the raw value. */
     private fun resolve(state: TopbarModelState, value: String): String =
         state.availableModels[value]
-            ?: CLAUDE_ALIAS_FALLBACK_LABELS[value]
+            // NO hardcoded label table here either — a baked-in "Opus 4.8"
+            // mislabels the alias the moment a new family ships.
             ?: claudeLabelFromId(value)
             ?: value
 
@@ -1309,26 +1484,43 @@ private object ClaudeTopbarUi : AgentTopbarUi {
         // resolved id (e.g. "sonnet" ↔ claude-sonnet-4-6) is never mistaken for a
         // switch. Absent a real observation (obs==null, pre-first-turn) the pick
         // still wins, so there's no flicker on open.
-        val switched = sel != null && obs != null && resolve(state, obs) != resolve(state, sel)
+        val switched = sel != null && obs != null && state.observationNewerThanPick &&
+            resolve(state, obs) != resolve(state, sel)
         val pick = (if (switched) obs else (sel ?: obs))
             ?: usable(state.sessionInitialModel)
-            // NEVER invent the arbitrary first map entry (which is "sonnet" →
-            // "Sonnet 5") when NOTHING is known. A transient state wipe (e.g. a
-            // false-positive compaction briefly clearing observedModel) leaves all
-            // three sources null — returning null makes the topbar HOLD its last
-            // label instead of lying "Sonnet 5". The recommended-model substitution
-            // below fires ONLY when a model was genuinely REPORTED but is
-            // unavailable (e.g. suspended Fable 5) — gated strictly on `reported!=
-            // null`.
-            ?: run {
-                val reported = sequenceOf(
-                    state.selectedModel, state.observedModel, state.sessionInitialModel,
-                ).firstOrNull { !it.isNullOrBlank() } ?: return null
-                @Suppress("UNUSED_EXPRESSION") reported
-                state.availableModels.entries.firstOrNull { (k, label) ->
-                    k != "default" && !isUnavail(label)
-                }?.key
-            }
+            // NEVER invent the arbitrary first map entry (which is "sonnet" → "Sonnet
+            // 5") when NOTHING is known. A transient state wipe (e.g. a false-positive
+            // compaction briefly clearing observedModel) leaves all three sources null
+            // — returning null makes the topbar HOLD its last label instead of lying
+            // "Sonnet 5". The recommended-model substitution below fires ONLY when a
+            // model was genuinely REPORTED but is unavailable (e.g. suspended Fable 5)
+            // — gated strictly on `reported!= null`. Everything known is UNAVAILABLE —
+            // typically the server pins a dead model in settings.json (proven live
+            // 2026-07-23: the box pinned "claude-fable-5[1m]" while the session's last
+            // 60 turns all ran claude-opus-4-8). Do NOT guess from menu order:
+            // availableModels is a map whose first entry is "sonnet" -> "Sonnet 5",
+            // which has nothing to do with claude's real fallback, so the old
+            // substitution advertised Sonnet 5 on a session that was actually Opus 4.8
+            // every single reopen. Nothing observed at all -> null, so the topbar
+            // HOLDS its last label rather than inventing one
+            // (TOPBAR-MODEL-NEVER-INVENTED-1).
+            ?: state.observedModel?.takeIf { it.isNotBlank() }
+            // A FRESH chat has no pick, no observation and no session header — but
+            // it is NOT unknown. The `/model` menu's "Default (recommended)" row
+            // says exactly what the CLI starts with when we pass no --model, so
+            // show THAT: a new chat then opens with its real default already
+            // selected and the user can just start typing instead of being made to
+            // choose. This is NOT the invention TOPBAR-MODEL-NEVER-INVENTED-1
+            // forbids — that was pulling availableModels' arbitrary first entry
+            // out of thin air. This is a PROBED fact about the CLI's own default.
+            ?: usable(state.defaultModel)
+            // Claude exposes no `defaultModel` — that field is Codex's
+            // config.toml notion — and `availableModels` deliberately carries no
+            // "default" key either. The resolved default is published separately
+            // by parseClaudeModelMenu as [claudeDefaultModel]: a concrete model
+            // name, which is the honest answer to "what starts when we pass no
+            // --model".
+            ?: usable(claudeDefaultModel)
             ?: return null
         return resolve(state, pick)
     }
@@ -1366,26 +1558,20 @@ private object ClaudeTopbarUi : AgentTopbarUi {
                 )
             }
         if (items.isNotEmpty()) return items
-        // Cold-start fallback (no probe, no cache yet — or the probe only
-        // recovered the settings.json pin): last-known bundled trio.
-        // Deliberately NO Fable row here — we don't yet KNOW the server's
-        // CLI is new enough to accept `--model fable`, and an honest
-        // short list beats a send-killing guess.
+        // NO HARDCODED MODEL LIST. This used to fall back to a baked-in trio
+        // ("Opus 4.8" / "Sonnet 4.6" / "Haiku 4.5"), which is a lie the moment
+        // Anthropic ships anything new: the box was already on CLI 2.1.220
+        // serving Opus 5 while the picker still offered Opus 4.8, and picking a
+        // row sent an alias whose LABEL was fiction. The aliases themselves are
+        // stable CLI input, so offer THEM unlabelled rather than invent version
+        // numbers
         val info = state.reasoningCatalog.values.firstOrNull() ?: CLAUDE_REASONING_INFO
-        return listOf(
+        return CLAUDE_BASE_ALIASES.map { alias ->
             ModelMenuItem(
-                CLAUDE_ALIAS_FALLBACK_LABELS.getValue("opus"), "opus",
+                alias.replaceFirstChar { it.uppercase() }, alias,
                 reasoning = info.levels, defaultReasoning = info.defaultEffort,
-            ),
-            ModelMenuItem(
-                CLAUDE_ALIAS_FALLBACK_LABELS.getValue("sonnet"), "sonnet",
-                reasoning = info.levels, defaultReasoning = info.defaultEffort,
-            ),
-            ModelMenuItem(
-                CLAUDE_ALIAS_FALLBACK_LABELS.getValue("haiku"), "haiku",
-                reasoning = info.levels, defaultReasoning = info.defaultEffort,
-            ),
-        )
+            )
+        }
     }
 
     override fun reasoningLabel(state: TopbarModelState): String? {

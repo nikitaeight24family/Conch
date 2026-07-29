@@ -527,6 +527,10 @@ class SearchIndexer(
         is AgentMessage.System -> m.raw.take(MAX_NONCHAT_CHARS)
         is AgentMessage.Error -> m.text
         is AgentMessage.Result -> m.text
+        // Subagent work IS content — a Task fan-out can be most of a session's
+        // research. It never shows as a chat row, but it must stay findable.
+        is AgentMessage.SubagentActivity ->
+            m.text?.take(MAX_NONCHAT_CHARS)
         // Raw = one-line "· event" chrome markers + stderr leaks;
         // PermissionRequest = transient prompt. Neither is worth indexing.
         else -> null

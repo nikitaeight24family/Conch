@@ -59,6 +59,9 @@ private val Context.dataStore by preferencesDataStore(name = "settings")
 
 class AppPreferences(private val context: Context) {
 
+    /** Line separator for the serialized label cache. */
+    private val NL = 10.toChar().toString()
+
     private val themeKey = stringPreferencesKey("theme_mode")
     private val enterSendsKey = booleanPreferencesKey("enter_sends")
     private val accentHexKey = stringPreferencesKey("accent_hex")
@@ -86,6 +89,12 @@ class AppPreferences(private val context: Context) {
     // fallback ladder until the live probe lands.
     private fun reasoningCatalogKeyFor(agent: String) =
         stringPreferencesKey("agent_reasoning_catalog_${agent.uppercase()}_v1")
+    // What the CLI runs when no `--model` is passed, per agent. Persisted so a
+    // NEW chat can show its real default at frame zero: the value is discovered
+    // by the live `/model` probe, and keeping it only in memory meant every
+    // process restart produced an empty model chip until something re-probed.
+    private fun defaultModelKeyFor(agent: String) =
+        stringPreferencesKey("agent_default_model_${agent.uppercase()}_v1")
     private val userHeldServerIdsKey = stringPreferencesKey("user_held_server_ids")
     private val highRefreshRateKey = booleanPreferencesKey("high_refresh_rate_enabled")
     private val hapticsEnabledKey = booleanPreferencesKey("haptics_enabled")
@@ -102,6 +111,7 @@ class AppPreferences(private val context: Context) {
     // against a compromised/injected server driving the phone at adb level.
     // Default true to preserve the autonomous "agent drives my phone" UX.
     private val bridgeShellAllowedKey = booleanPreferencesKey("bridge_shell_allowed")
+    private val bridgeAudioAllowedKey = booleanPreferencesKey("bridge_audio_allowed")
     private val seamlessReconnectDaysKey = intPreferencesKey("seamless_reconnect_days")
     private val deviceKeyExpiryKey = stringPreferencesKey("device_key_expiry")
     private val skNotificationVisibilityKey = stringPreferencesKey("sk_notification_visibility")
@@ -158,10 +168,29 @@ class AppPreferences(private val context: Context) {
                 .toMap()
         }
 
+    /**
+     * MERGE, never overwrite. The catalog is a growing record of what this
+     * agent offers, shared across every server, and it must never move
+     * backwards: Opus 4.8 -> Opus 5 happens, the reverse does not. A probe CAN
+     * hand back the older name (stale menu render, half-parsed screen, an
+     * un-updated box), and blindly storing it is how the picker went back to
+     * advertising "Opus 4.8" after it had already learned "Opus 5" (user,
+     * 2026-07-29). A short probe result also must not delete aliases we
+     * already know.
+     */
     suspend fun setModelLabelsForAgent(agent: String, labels: Map<String, String>) {
         if (labels.isEmpty()) return
-        val serialized = labels.entries.joinToString("\n") { (k, v) -> "$k=$v" }
-        context.dataStore.edit { it[modelLabelsKeyFor(agent)] = serialized }
+        val key = modelLabelsKeyFor(agent)
+        context.dataStore.edit { prefs ->
+            val cached = prefs[key].orEmpty().lineSequence()
+                .mapNotNull { line ->
+                    val eq = line.indexOf('=')
+                    if (eq <= 0) null else line.substring(0, eq) to line.substring(eq + 1)
+                }
+                .toMap()
+            val merged = ai.eight24family.conch.data.ModelLabelMerge.merge(cached, labels)
+            prefs[key] = merged.entries.joinToString(NL) { (k, v) -> "$k=$v" }
+        }
     }
 
     /** Opaque spec-serialized reasoning catalog (see
@@ -172,6 +201,15 @@ class AppPreferences(private val context: Context) {
     suspend fun setReasoningCatalogForAgent(agent: String, raw: String) {
         if (raw.isBlank()) return
         context.dataStore.edit { it[reasoningCatalogKeyFor(agent)] = raw }
+    }
+
+    /** The CLI's own default model for [agent] — null when never probed. */
+    fun defaultModelForAgent(agent: String): Flow<String?> =
+        context.dataStore.data.map { p -> p[defaultModelKeyFor(agent)]?.takeIf { it.isNotBlank() } }
+
+    suspend fun setDefaultModelForAgent(agent: String, model: String) {
+        if (model.isBlank()) return
+        context.dataStore.edit { it[defaultModelKeyFor(agent)] = model }
     }
 
     /**
@@ -275,6 +313,24 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setBridgeShellAllowed(allowed: Boolean) {
         context.dataStore.edit { it[bridgeShellAllowedKey] = allowed }
+    }
+
+    /**
+     * Master switch for the bridge `audio` command — the server-side agent
+     * recording this phone's microphone.
+     *
+     * DEFAULT FALSE, unlike every other bridge verb. `shell` and `logs` read a
+     * device the user handed over; a microphone records the ROOM, and the people
+     * in it who never agreed to anything. The bridge is an unauthenticated
+     * channel by design — anything that can run code as the SSH user can drive
+     * it — so this one stays off until the user turns it on themselves.
+     */
+    val bridgeAudioAllowed: Flow<Boolean> = context.dataStore.data.map { p ->
+        p[bridgeAudioAllowedKey] ?: false
+    }
+
+    suspend fun setBridgeAudioAllowed(allowed: Boolean) {
+        context.dataStore.edit { it[bridgeAudioAllowedKey] = allowed }
     }
 
     /** Accent neon color as #RRGGBB hex. Default = classic cyan. */

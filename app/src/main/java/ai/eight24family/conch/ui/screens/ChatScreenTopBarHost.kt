@@ -73,7 +73,9 @@ internal fun ChatTopBarHost(
     val observedModel by vm.observedModel.collectAsState()
     val availableModels by vm.availableModels.collectAsState()
     val unavailableModels by vm.unavailableModelLabels.collectAsState()
+    val obsNewerThanPick by vm.observationNewerThanPick.collectAsState()
     val modelsProbing by vm.modelsProbing.collectAsState()
+    val modelsStale by vm.modelsStale.collectAsState()
     val defaultModel by vm.defaultModel.collectAsState()
     val sessionInitialModel by vm.sessionInitialModel.collectAsState()
     val selectedReasoning by vm.selectedReasoning.collectAsState()
@@ -121,7 +123,9 @@ internal fun ChatTopBarHost(
         observedModel = observedModel,
         availableModels = availableModels,
         unavailableModels = unavailableModels,
+        observationNewerThanPick = obsNewerThanPick,
         modelsProbing = modelsProbing,
+        modelsStale = modelsStale,
         defaultModel = defaultModel,
         sessionInitialModel = sessionInitialModel,
         selectedReasoning = selectedReasoning,

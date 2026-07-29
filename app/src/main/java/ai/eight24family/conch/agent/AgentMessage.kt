@@ -69,6 +69,40 @@ sealed interface AgentMessage {
     /** Visible user turn — locally-rendered or replayed from the saved session. */
     data class UserText(override val id: String, val text: String) : AgentMessage
 
+    /**
+     * One observation about a SUBAGENT (Claude's Task tool spawns these; the
+     * CLI's own footer counts them as "← 1 agent" and lists them under
+     * "↓ to manage"). NEVER rendered as a chat row: the CLI deliberately keeps
+     * subagent turns out of the main transcript (`filtered from /resume:
+     * isSidechain=true`), and a fan-out of eight agents would otherwise bury
+     * the conversation. The ChatViewModel folds these into the live agent
+     * panel instead.
+     *
+     * [parentToolUseId] is the join key — it points at the `Task` tool_use that
+     * spawned this agent, which is where [subagentType] and [task] come from.
+     * [agentId] is the CLI's own per-agent handle (carried by `agent_progress`
+     * records).
+     */
+    data class SubagentActivity(
+        override val id: String,
+        val agentId: String?,
+        val parentToolUseId: String?,
+        val subagentType: String? = null,
+        val task: String? = null,
+        /** Cumulative tokens this observation reports, 0 when unknown. */
+        val tokens: Long = 0,
+        val elapsedSeconds: Long? = null,
+        val done: Boolean = false,
+        /**
+         * The subagent's own text for this record — kept so a Task fan-out stays
+         * SEARCHABLE. Before subagent turns were folded into this type they
+         * parsed as AssistantText/ToolUse/ToolResult and got indexed; collapsing
+         * them to metadata alone would silently drop tens of thousands of tokens
+         * of research out of search. Indexed, never rendered as a chat row.
+         */
+        val text: String? = null,
+    ) : AgentMessage
+
     /** Agent invoked a tool. Input is opaque JSON serialized to string. */
     data class ToolUse(
         override val id: String,
@@ -133,6 +167,25 @@ sealed interface AgentMessage {
     ) : AgentMessage {
         enum class Resolution { PENDING, ALLOWED, DENIED }
     }
+
+    /**
+     * NON-RENDERING marker: "this line ended the turn."
+     *
+     * The single authority on turn completion. It exists because there used to
+     * be two — the parser dispatching on the real top-level `type`, and a
+     * separate substring scan in the stream reader deciding whether the same
+     * line was terminal. They disagreed on Claude's `result` envelope and the
+     * app rendered a finished answer while the spinner ran on top of it, with
+     * nothing in the log to say why (2026-07-29).
+     *
+     * The parser knows what it recognised; nothing downstream should
+     * re-derive it. Consumed by the reader and dropped — never enters history.
+     */
+    data class TurnEnd(
+        override val id: String,
+        /** Why it ended, for the log: "result", "result:error", "error", … */
+        val reason: String,
+    ) : AgentMessage
 
     /** Final aggregated turn result with summary text + status. */
     data class Result(

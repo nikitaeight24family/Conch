@@ -627,6 +627,12 @@ private fun PinnedWorkingStatus(
     remoteWorking: Boolean,
 ) {
     val isWorking = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
+    // Subagents render BEFORE the working check on purpose: the roster has to
+    // survive the turn that spawned them, otherwise a fan-out would vanish from
+    // the screen the moment the main turn goes idle and the user would again
+    // have no idea what ran (user, 2026-07-23).
+    val roster by vm.subagents.collectAsState()
+    ai.eight24family.conch.ui.components.SubagentRosterRow(roster)
     if (!isWorking) return
     val liveTokens by vm.liveThinkingTokens.collectAsState()
     val remoteTokens by vm.remoteTokens.collectAsState()

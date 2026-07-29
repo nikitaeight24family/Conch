@@ -195,7 +195,17 @@ internal class ChatViewModelAttachments(
             } finally {
                 // The temp copy is only a staging buffer — the bytes live on the
                 // server now (or the upload failed). Either way, reclaim the space.
-                ai.eight24family.conch.util.SilentlyTry.fired(tag, "delete temp upload file") { file.delete() }
+                //
+                // AUDIO IS THE EXCEPTION. A voice note is played from the LOCAL
+                // file, and the upload finishes within a second of recording, so
+                // deleting here left a play button that could only ever fail with
+                // ENOENT. The reclaim rule exists for a 439 MB zip; a voice note is
+                // kilobytes, capped at five minutes, and swept after a day by
+                // AudioRecorder.sweepOld.
+                val keepForPlayback = mimeType?.startsWith("audio/") == true
+                if (!keepForPlayback) {
+                    ai.eight24family.conch.util.SilentlyTry.fired(tag, "delete temp upload file") { file.delete() }
+                }
             }
         }
     }

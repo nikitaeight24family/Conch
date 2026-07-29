@@ -43,7 +43,7 @@ import ai.eight24family.conch.agent.SessionState
  *
  *  - **No header.** User knows which server and agent they're on
  *    — they tapped into this chat 30 seconds ago. Wasting a row on
- *    "❯ prod Server · claude" is just shouting metadata back at them.
+ *    "❯ 824 Server · claude" is just shouting metadata back at them.
  *  - **No echo of their own prompt.** They typed it; they don't
  *    need to read it again.
  *  - **No "N tokens" counter.** Tokens don't tell a user anything

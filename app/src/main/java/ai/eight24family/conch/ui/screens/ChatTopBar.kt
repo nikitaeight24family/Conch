@@ -239,7 +239,9 @@ internal fun TerminalTopBar(
     observedModel: String?,
     availableModels: Map<String, String>,
     unavailableModels: Set<String> = emptySet(),
+    observationNewerThanPick: Boolean = true,
     modelsProbing: Boolean,
+    modelsStale: Boolean = false,
     defaultModel: String?,
     sessionInitialModel: String?,
     selectedReasoning: String?,
@@ -305,6 +307,7 @@ internal fun TerminalTopBar(
         defaultModel = defaultModel,
         availableModels = availableModels,
         unavailableModels = unavailableModels,
+        observationNewerThanPick = observationNewerThanPick,
         modelsProbing = modelsProbing,
         selectedReasoning = selectedReasoning,
         reasoningCatalog = reasoningCatalog,
@@ -398,7 +401,17 @@ internal fun TerminalTopBar(
                         modelAnchorX = it.positionInWindow().x
                     },
                 ) {
-                        if (!displayLabel.isNullOrBlank()) {
+                        // The chip renders even when NO model is known yet. Gating it
+                        // on displayLabel meant a FRESH chat had no chip at all — and
+                        // the chip is the picker's only entry point, so the user could
+                        // not choose a model until after the first message, by which
+                        // time the CLI had already started the session on whatever
+                        // ~/.claude/settings.json pins (and, when that pin is
+                        // credit-gated, already silently fallen back). That is the
+                        // trap (user, 2026-07-23): the pick only became possible once
+                        // it no longer mattered. The placeholder is a NOUN, never a
+                        // model name, so TOPBAR-MODEL-NEVER-INVENTED-1 still holds —
+                        // we never claim to be running something we have not observed.
                             Column(
                                 modifier = Modifier
                                     .clickable(enabled = enableMenu) { onToggleModelMenu() }
@@ -418,7 +431,15 @@ internal fun TerminalTopBar(
                                     // never greys mid-probe (that thrash was a
                                     // past bug); the click is gated by enableMenu.
                                     Text(
-                                        displayLabel,
+                                        // NO "model" placeholder word — a new chat
+                                        // must open with its real default already
+                                        // showing so the user can just type. The
+                                        // default now comes from the /model menu's
+                                        // "Default (recommended)" row (see
+                                        // ClaudeTopbarUi.displayLabel). Blank only
+                                        // in the brief window before the catalog is
+                                        // known; the chip stays tappable throughout.
+                                        displayLabel.orEmpty(),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.SemiBold,
@@ -454,19 +475,10 @@ internal fun TerminalTopBar(
                                     )
                                 }
                             }
-                        } else {
-                            // Hold ~two lines of height while the model resolves
-                            // so the bar doesn't pop when the chip appears. FIXED
-                            // dp — never toDp() a typography lineHeight: with the
-                            // custom font some styles carry an Unspecified (non-Sp)
-                            // lineHeight and toDp() throws "Only Sp can convert to
-                            // Px" (crash on chat open).
-                            Spacer(
-                                modifier = Modifier
-                                    .padding(top = 3.dp, bottom = 3.dp)
-                                    .height(34.dp)
-                            )
-                        }
+                        // No `else` branch any more: the chip itself now occupies
+                        // that space with the placeholder, so the bar still doesn't
+                        // pop when the real label resolves — and, unlike the old
+                        // fixed-height Spacer, it stays tappable the whole time.
                 // Stage 2 panel: full-ish width, centered on the SCREEN.
                 // The popup normally hangs off the anchor's left edge; an
                 // x-offset of (screen−panel)/2 − anchorX recenters it. The
@@ -506,17 +518,38 @@ internal fun TerminalTopBar(
                         menuItems.firstOrNull { it.storedValue == snap.storedValue } ?: snap
                     }
                     if (drillModel == null) {
+                        // Say WHERE the list came from when it isn't live. The
+                        // picker deliberately keeps the cached catalog rather
+                        // than emptying itself, but presenting a cache as a
+                        // fresh read is what made this look like a hardcoded
+                        // list. One dim line, the fact and the reason, no advice.
+                        if (modelsStale) {
+                            Text(
+                                text = "cached list — could not read /model on this server",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
                         menuItems.forEach { item ->
                             val isSelected = selectedModel == item.storedValue
                             val hasReasoning = item.reasoning.isNotEmpty()
-                            // Unavailable model (CLI flagged "currently
-                            // unavailable", e.g. suspended Fable 5): dim it
-                            // and disable the tap — exactly like the CLI's own
-                            // /model menu (user, 2026-06-13).
+                            // A flagged model is DIMMED BUT STILL SELECTABLE.
+                            // Disabling the tap made our guess final, and the
+                            // guess can be wrong: Fable 5 reads "Requires usage
+                            // credits" in the CLI menu off a stale profile cache
+                            // while the account's Max plan actually includes it —
+                            // the API answers `allowed` and `--model
+                            // claude-fable-5` returns a real reply. Vetoing it
+                            // locked the user out of a model they pay for (user,
+                            // 2026-07-28). The server is the authority; passing
+                            // `--model <id>` is the CLI's own documented path, so
+                            // let the user try and let the reply decide. If it
+                            // genuinely cannot run, the fallback note says why.
                             val unavailable = !item.available
                             val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                             DropdownMenuItem(
-                                enabled = !unavailable,
+                                enabled = true,
                                 text = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(

@@ -30,6 +30,65 @@
          Both surfaces are optional — `required="false"` means devices
          without NFC or without USB-host can still install the app and
          use software keys. -->
+    <!--
+        RECENT-MEDIA STRIP in the attachment sheet.
+
+        ⚠ RESTRICTED BY GOOGLE PLAY. READ_MEDIA_IMAGES / READ_MEDIA_VIDEO may
+        only be requested by an app targeting API 33+ when a system picker is
+        insufficient for CORE functionality, and shipping them REQUIRES a
+        declaration in Play Console explaining why the Android Photo Picker does
+        not suffice. Since 2025-05-28 non-compliance is grounds for removal.
+        See PERMISSION_DECLARATIONS.md.
+
+        We ask for them ONLY to draw our own thumbnail strip inside the sheet —
+        the system picker cannot host the camera cell or live inside our UI.
+        Requested by the user with that trade-off stated (2026-07-29).
+
+        READ_MEDIA_VISUAL_USER_SELECTED is the Android 14+ "selected photos"
+        grant. It is NOT a substitute: the platform requires it to be paired
+        with one of the two above, it cannot be declared alone.
+
+        REMOVING THESE THREE LINES fully reverts the feature — the sheet falls
+        back to its tile row with no dead UI. Nothing else depends on them.
+    -->
+    <!--
+        LIVE VIEWFINDER in the attachment sheet's first cell (Telegram-style).
+
+        ⚠ This CHANGES the camera capture contract. Without this permission,
+        ACTION_IMAGE_CAPTURE is serviced by another app under ITS permission and
+        we need none. DECLARING it means Android now requires the user to grant
+        it to US before that intent works too. We take that on because a live
+        preview cannot be rendered any other way — the frames have to come from
+        our own process.
+
+        Not required=true: a device without a camera still installs and simply
+        gets no viewfinder cell.
+    -->
+    <!--
+        MICROPHONE. Two uses, both explicitly started:
+          - a voice message the user records in the composer;
+          - the bridge `audio` verb, which the server-side agent can call — and
+            which is OFF BY DEFAULT behind its own switch, because it records the
+            room rather than the screen (see AppPreferences.bridgeAudioAllowed).
+        Never recorded speculatively, never left open in the background.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Android 12L and below had no per-type media permissions. Capped so it
+         is never requested on 13+, where it would be both useless and a second
+         restricted permission on the listing. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
@@ -156,6 +215,37 @@
             `getPackageInfo` works without raising
             `<queries>`-policy issues on Android 11+).
         -->
+
+        <!--
+            Hands the camera app a writable content:// URI for one photo.
+
+            This FileProvider predates the in-sheet viewfinder and still earns
+            its keep: it backs the ACTION_IMAGE_CAPTURE fallback used when the
+            user has not granted CAMERA, or when the device has no viewfinder to
+            offer. In that path the shot is taken by ANOTHER app under ITS own
+            permission and handed back through this URI.
+
+            CAMERA itself is declared above, for the live preview only — frames
+            for a viewfinder have to come from our own process. Note the
+            side effect that buys: once CAMERA is declared, the capture INTENT
+            needs the grant too, which is why the fallback above is gated on it.
+
+            `authorities` derives from ${applicationId}, so the debug build
+            (applicationIdSuffix ".debug") gets its own authority and can be
+            installed alongside the release one.
+
+            exported=false + grantUriPermissions: only the camera activity we
+            explicitly hand the URI to can write it, and only for that call.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- PiP window header actions (Stop turn). The receiver is
              private to the app — only PendingIntents we mint ourselves

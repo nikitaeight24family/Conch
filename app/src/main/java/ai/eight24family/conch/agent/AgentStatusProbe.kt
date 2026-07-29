@@ -182,13 +182,7 @@ class AgentStatusProbe(private val ssh: SshClient) {
     private fun liveAuthScript(): String? {
         val live = AgentSpecRegistry.all.joinToString("\n") { it.liveAuthProbeLines }.trim()
         if (live.isBlank()) return null
-        val pathPrep = """
-            export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
-            for nd in ${'$'}HOME/.nvm/versions/node/*/bin ${'$'}HOME/.local/node-*/bin; do
-                [ -d "${'$'}nd" ] && export PATH="${'$'}nd:${'$'}PATH"
-            done
-            [ -s "${'$'}HOME/.nvm/nvm.sh" ] && . "${'$'}HOME/.nvm/nvm.sh" >/dev/null 2>&1
-        """.trimIndent()
+        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd()
         return "bash -lc " + shellEscape(pathPrep + "\n" + live)
     }
 
@@ -204,13 +198,7 @@ class AgentStatusProbe(private val ssh: SshClient) {
         // invisible to a plain `bash -lc`. Adding them by hand here
         // means the probe sees what's actually installed without
         // requiring any rc-file patching server-side.
-        val pathPrep = """
-            export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
-            for nd in ${'$'}HOME/.nvm/versions/node/*/bin ${'$'}HOME/.local/node-*/bin; do
-                [ -d "${'$'}nd" ] && export PATH="${'$'}nd:${'$'}PATH"
-            done
-            [ -s "${'$'}HOME/.nvm/nvm.sh" ] && . "${'$'}HOME/.nvm/nvm.sh" >/dev/null 2>&1
-        """.trimIndent()
+        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd()
         val body = pathPrep + "\n" + AgentSpecRegistry.all.joinToString("\n") { it.statusProbeLines }
         return "bash -lc " + shellEscape(body)
     }

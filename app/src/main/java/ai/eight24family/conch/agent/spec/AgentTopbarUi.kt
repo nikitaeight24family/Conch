@@ -101,6 +101,12 @@ data class TopbarModelState(
      *  "<Model> is currently unavailable" banner). The topbar must not advertise
      *  one of these as the chat's model — mirror the CLI's fallback. */
     val unavailableModels: Set<String> = emptySet(),
+    /** False while [observedModel] predates the user's explicit [selectedModel]
+     *  pick. A pick can never equal a PAST observation, so treating "differs"
+     *  as "the session force-switched" pinned the chip to the old model on
+     *  every pick (user, 2026-07-25: picked Opus, chip stayed Sonnet). Only an
+     *  observation that arrived AFTER the pick may override it. */
+    val observationNewerThanPick: Boolean = true,
     /** True while [AgentCliSpec.probeAvailableModels] is in flight. */
     val modelsProbing: Boolean,
     /** Per-chat reasoning effort pick. `null` = use the model's

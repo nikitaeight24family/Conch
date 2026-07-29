@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.Mic
 import ai.eight24family.conch.data.prefs.SkNotificationVisibility
 import ai.eight24family.conch.ui.viewmodel.SettingsViewModel
 
@@ -21,6 +22,7 @@ import ai.eight24family.conch.ui.viewmodel.SettingsViewModel
 internal fun SettingsSectionSecurity(vm: SettingsViewModel, onOpenKeychain: () -> Unit) {
     val skNotificationVisibility by vm.skNotificationVisibility.collectAsState()
     val bridgeShellAllowed by vm.bridgeShellAllowed.collectAsState()
+    val bridgeAudioAllowed by vm.bridgeAudioAllowed.collectAsState()
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
         SettingsRow(
             icon = Icons.Outlined.VpnKey,
@@ -48,6 +50,21 @@ internal fun SettingsSectionSecurity(vm: SettingsViewModel, onOpenKeychain: () -
             Switch(
                 checked = bridgeShellAllowed,
                 onCheckedChange = { vm.setBridgeShellAllowed(it) },
+            )
+        }
+        // The microphone verb. OFF by default and deliberately worded so nobody
+        // flips it without understanding it: shell and logs read a device you
+        // handed over, this records the room you are sitting in.
+        SettingsRow(
+            icon = Icons.Filled.Mic,
+            title = "Record audio from server",
+            subtitle = "Let a server agent record this phone's microphone via the bridge. " +
+                "Off by default — this captures the room around you, not the screen.",
+            onClick = { vm.setBridgeAudioAllowed(!bridgeAudioAllowed) },
+        ) {
+            Switch(
+                checked = bridgeAudioAllowed,
+                onCheckedChange = { vm.setBridgeAudioAllowed(it) },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

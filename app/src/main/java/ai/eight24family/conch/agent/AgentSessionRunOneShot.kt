@@ -205,7 +205,15 @@ internal class AgentSessionRunOneShot(
                         }
                         for (msg in spec.parseStreamLine(line, turnTag)) {
                             // Capture the agent's session id for subsequent --resume.
-                            if (msg is AgentMessage.System && msg.sessionId != null && getResumeId() == null) {
+                            // Adopt the id the CLI reports on EVERY launch, not just the first.
+                            // Adopting once meant that if the CLI ever answered with a
+                            // different session_id we kept resuming the OLD one forever
+                            // while the CLI wrote a file we never tracked — an orphan
+                            // session row (user, 2026-07-27). Tracking whatever file it
+                            // actually writes makes that impossible by construction.
+                            if (msg is AgentMessage.System && msg.sessionId != null &&
+                                msg.sessionId != getResumeId()
+                            ) {
                                 setResumeId(msg.sessionId)
                             }
                             // Don't double-show user echoes — we already emitted on send().

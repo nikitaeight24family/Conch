@@ -74,8 +74,10 @@ import androidx.compose.material.icons.filled.Difference
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
@@ -151,6 +153,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -778,6 +782,57 @@ internal fun PromptBar(
             ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
         }
     }
+    // CAMERA. The URI has to exist before the camera app starts, and it has to
+    // survive this composable being recomposed (or destroyed and restored while
+    // the camera is in front), so it is remembered rather than captured in the
+    // callback.
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { saved ->
+        val uri = pendingCameraUri
+        pendingCameraUri = null
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (saved) {
+            // Same ingest path a PICKED photo takes — identical preview, identical
+            // size rules. Then drop our capture copy: ingestUri has either read it
+            // into memory or streamed it to the uploads temp, so keeping it would
+            // just be a second copy of every photo in the cache.
+            ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
+        }
+        cleanUpCapture(ctx, uri)
+    }
+
+    // VOICE MESSAGE. Tap to start, tap to stop — not press-and-hold: a long
+    // recording with a thumb pinned to the screen is unusable, and the user
+    // records notes for an agent, not walkie-talkie chatter.
+    var recording by remember { mutableStateOf<ai.eight24family.conch.util.AudioRecorder.Session?>(null) }
+    var recordElapsed by remember { mutableStateOf(0) }
+    val micLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            ai.eight24family.conch.util.AudioRecorder.sweepOld(ctx)
+            recording = ai.eight24family.conch.util.AudioRecorder.start(ctx, "voice")
+        }
+    }
+    // Ticks the visible timer, and enforces the hard cap so a forgotten
+    // recording cannot run until the cache fills.
+    LaunchedEffect(recording) {
+        val session = recording
+        if (session == null) { recordElapsed = 0; return@LaunchedEffect }
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            recordElapsed = ((System.currentTimeMillis() - session.startedAtMs) / 1000).toInt()
+            if (recordElapsed >= ai.eight24family.conch.util.AudioRecorder.MAX_SECONDS) {
+                session.stop()?.let { f ->
+                    onAddFileAttachment(f, f.name, "audio/mp4", f.length())
+                }
+                recording = null
+                return@LaunchedEffect
+            }
+        }
+    }
 
     val cyan = MaterialTheme.colorScheme.primary
     val outline = MaterialTheme.colorScheme.outline
@@ -795,17 +850,38 @@ internal fun PromptBar(
         if (codeBlocked) CodeBlockedBanner(codeBlockText ?: "This account can't run Claude Code right now.")
         else UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, claudePlan)
 
-        // Staged attachments strip
+        // Staged attachments strip.
+        // AUDIO gets a full-width player row instead of a 64dp square: a voice
+        // note is worthless as a thumbnail — the only useful thing you can do
+        // with it before sending is LISTEN to it, which needs a play button and
+        // a scrubbable waveform. Everything else stays in the square-chip row.
+        val audioAtts = attachments.filter { it.mimeType?.startsWith("audio/") == true && it.localFile != null }
+        val otherAtts = attachments.filter { it !in audioAtts }
         if (attachments.isNotEmpty()) {
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(attachments, key = { it.id }) { att ->
-                    AttachmentChip(att = att, onRemove = { onRemoveAttachment(att.id) })
+            audioAtts.forEach { att ->
+                key(att.id) {
+                    ai.eight24family.conch.ui.components.VoicePlayer(
+                        file = att.localFile!!,
+                        sizeBytes = att.sizeBytes,
+                        onRemove = { onRemoveAttachment(att.id) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            if (otherAtts.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(otherAtts, key = { it.id }) { att ->
+                        AttachmentChip(att = att, onRemove = { onRemoveAttachment(att.id) })
+                    }
                 }
             }
             HorizontalDivider(thickness = 1.dp, color = outline.copy(alpha = 0.4f))
@@ -826,6 +902,47 @@ internal fun PromptBar(
                     Icons.Default.AttachFile,
                     contentDescription = "attach files",
                     tint = if (canAttachMore) cyan else outline
+                )
+            }
+            // Voice message. While recording the button turns into a stop with a
+            // live timer, so the mic is never open without the user seeing it.
+            IconButton(
+                onClick = {
+                    val session = recording
+                    if (session != null) {
+                        session.stop()?.let { f ->
+                            onAddFileAttachment(f, f.name, "audio/mp4", f.length())
+                        }
+                        recording = null
+                    } else if (ai.eight24family.conch.util.AudioRecorder.micGranted(ctx)) {
+                        // Sweep here rather than on a timer: it is the one moment
+                        // we know the user is about to add audio, and yesterday's
+                        // notes are kept only so their player still works.
+                        ai.eight24family.conch.util.AudioRecorder.sweepOld(ctx)
+                        recording = ai.eight24family.conch.util.AudioRecorder.start(ctx, "voice")
+                    } else {
+                        micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                    }
+                },
+                enabled = canAttachMore || recording != null,
+            ) {
+                if (recording != null) {
+                    Icon(Icons.Default.Stop, contentDescription = "stop recording", tint = MaterialTheme.colorScheme.error)
+                } else {
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = "record a voice message",
+                        tint = if (canAttachMore) cyan else outline,
+                    )
+                }
+            }
+            if (recording != null) {
+                Text(
+                    "%d:%02d".format(recordElapsed / 60, recordElapsed % 60),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(end = 4.dp),
                 )
             }
             Text(
@@ -965,62 +1082,162 @@ internal fun PromptBar(
             onDismissRequest = { sheetOpen = false },
             containerColor = MaterialTheme.colorScheme.background
         ) {
+            // Telegram-shaped: a row of round action tiles instead of a stack of
+            // list rows. Camera first — it is the one thing you reach for with
+            // the phone already in your hand, and it was missing entirely.
             Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                 Text(
                     "// attach (${attachments.size}/${ChatViewModel.MAX_ATTACHMENTS})",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp)
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 12.dp)
                 )
-                ListItem(
-                    leadingContent = {
-                        Icon(Icons.Default.PhotoLibrary, contentDescription = "attach photo", tint = cyan)
-                    },
-                    headlineContent = { Text("Photos & videos") },
-                    supportingContent = { Text("up to 10 at once") },
-                    modifier = Modifier.clickable {
+                // Recent-media strip, camera as cell zero — the Telegram part.
+                // Draws nothing at all without media access, so the tile row
+                // below is a complete menu on its own.
+                val launchCamera = {
+                    val uri = newCaptureUri(ctx)
+                    if (uri != null) {
                         sheetOpen = false
-                        photoLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
+                        pendingCameraUri = uri
+                        cameraLauncher.launch(uri)
                     }
-                )
-                ListItem(
-                    leadingContent = {
-                        Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = "attach file", tint = cyan)
-                    },
-                    headlineContent = { Text("Files") },
-                    supportingContent = { Text("any document — uploaded via SFTP") },
-                    modifier = Modifier.clickable {
+                }
+                AttachMediaStrip(
+                    enabled = canAttachMore,
+                    onPick = { uri ->
                         sheetOpen = false
-                        fileLauncher.launch(arrayOf("*/*"))
-                    }
-                )
-                ListItem(
-                    leadingContent = {
-                        Icon(Icons.Default.PhoneAndroid, contentDescription = "connect phone", tint = cyan)
+                        ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
                     },
-                    headlineContent = { Text("Connect phone to server") },
-                    supportingContent = { Text("let the agent run commands & read logs on this phone (Shizuku)") },
-                    modifier = Modifier.clickable {
+                    // Shot by our own viewfinder — already a file on disk, so it
+                    // skips the content-URI round trip a picked photo needs.
+                    onCapture = { file ->
                         sheetOpen = false
-                        onConnectPhone()
-                    }
+                        onAddFileAttachment(file, file.name, "image/jpeg", file.length())
+                    },
+                    onCameraFallback = if (hasCameraApp(ctx)) launchCamera else null,
+                    modifier = Modifier.padding(bottom = 14.dp),
                 )
-                if (clipboardHasImage(ctx)) {
-                    ListItem(
-                        leadingContent = {
-                            Icon(Icons.Default.ContentPaste, contentDescription = "paste", tint = cyan)
-                        },
-                        headlineContent = { Text("Paste image from clipboard") },
-                        modifier = Modifier.clickable {
-                            sheetOpen = false
-                            pasteImageFromClipboard(ctx, onAddAttachment)
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    // Camera also stays in the row: the strip is invisible until
+                    // the user grants media access, and the camera must not be
+                    // hidden behind a permission it does not need.
+                    if (hasCameraApp(ctx)) {
+                        item {
+                            AttachTile(
+                                icon = Icons.Default.PhotoCamera,
+                                label = "Camera",
+                                cyan = cyan,
+                                enabled = canAttachMore,
+                            ) { launchCamera() }
                         }
+                    }
+                    item {
+                        AttachTile(
+                            icon = Icons.Default.PhotoLibrary,
+                            label = "Gallery",
+                            cyan = cyan,
+                            enabled = canAttachMore,
+                        ) {
+                            sheetOpen = false
+                            photoLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        }
+                    }
+                    item {
+                        AttachTile(
+                            icon = Icons.Default.AttachFile,
+                            label = "File",
+                            cyan = cyan,
+                            enabled = canAttachMore,
+                        ) {
+                            sheetOpen = false
+                            fileLauncher.launch(arrayOf("*/*"))
+                        }
+                    }
+                    if (clipboardHasImage(ctx)) {
+                        item {
+                            AttachTile(
+                                icon = Icons.Default.ContentPaste,
+                                label = "Paste",
+                                cyan = cyan,
+                                enabled = canAttachMore,
+                            ) {
+                                sheetOpen = false
+                                pasteImageFromClipboard(ctx, onAddAttachment)
+                            }
+                        }
+                    }
+                    item {
+                        AttachTile(
+                            icon = Icons.Default.PhoneAndroid,
+                            label = "This phone",
+                            cyan = cyan,
+                            enabled = true,
+                        ) {
+                            sheetOpen = false
+                            onConnectPhone()
+                        }
+                    }
+                }
+                if (!canAttachMore) {
+                    Text(
+                        "attachment limit reached — send or remove one first",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp)
                     )
                 }
             }
         }
+    }
+}
+
+/**
+ * One round action tile in the attachment sheet — Telegram's bottom row, in this
+ * app's palette. Icon in a tinted circle, label under it, whole thing one tap
+ * target so the label is not dead space.
+ */
+@Composable
+private fun AttachTile(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    cyan: androidx.compose.ui.graphics.Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val tint = if (enabled) cyan else MaterialTheme.colorScheme.outline
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .width(72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 6.dp)
+            .semantics { contentDescription = label }
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .background(tint.copy(alpha = if (enabled) 0.14f else 0.07f))
+        ) {
+            Icon(icon, contentDescription = null, tint = tint)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (enabled) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.outline,
+            maxLines = 1,
+        )
     }
 }
 
@@ -1223,6 +1440,45 @@ private fun ingestUri(
 }
 
 private val INGEST_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "heif")
+
+/** Where the camera writes. Inside cacheDir, and the ONLY path exposed through
+ *  the FileProvider (see res/xml/file_paths.xml). */
+private const val CAMERA_DIR = "conch_camera"
+
+/**
+ * Mint a fresh, writable `content://` URI for one photo.
+ *
+ * Returns null when the device has no camera app at all — a tablet, a
+ * locked-down work profile — so the caller can leave the tile out instead of
+ * launching an intent that resolves to nothing and looks like a crash.
+ */
+private fun newCaptureUri(ctx: Context): Uri? = SilentlyTry.logged("SshAi-ChatPrompt", "create capture uri") {
+    val dir = java.io.File(ctx.cacheDir, CAMERA_DIR).apply { mkdirs() }
+    val file = java.io.File(dir, "cam_${System.currentTimeMillis()}.jpg")
+    androidx.core.content.FileProvider.getUriForFile(
+        ctx, "${ctx.packageName}.fileprovider", file,
+    )
+}
+
+/** Delete the capture temp once it has been ingested (or abandoned). Also sweeps
+ *  anything an earlier run left behind — a process death between capture and
+ *  ingest would otherwise leak a photo into the cache for good. */
+private fun cleanUpCapture(ctx: Context, uri: Uri?) {
+    SilentlyTry.fired("SshAi-ChatPrompt", "clean capture temp") {
+        uri?.lastPathSegment?.substringAfterLast('/')?.let { name ->
+            java.io.File(java.io.File(ctx.cacheDir, CAMERA_DIR), name).delete()
+        }
+        val dir = java.io.File(ctx.cacheDir, CAMERA_DIR)
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        dir.listFiles()?.forEach { f -> if (f.lastModified() < cutoff) f.delete() }
+    }
+}
+
+/** True when something on this device can service ACTION_IMAGE_CAPTURE. */
+private fun hasCameraApp(ctx: Context): Boolean =
+    SilentlyTry.loggedOrElse("SshAi-ChatPrompt", "resolve camera app", false) {
+        ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
+    }
 
 private fun querySize(ctx: Context, uri: Uri): Long = SilentlyTry.loggedOrElse("SshAi-ChatPrompt", "query attachment size", -1L) {
     ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->

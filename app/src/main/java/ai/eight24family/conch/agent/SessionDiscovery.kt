@@ -105,6 +105,21 @@ class SessionDiscovery(private val ssh: SshClient) {
             ssh.execute(server, secrets, cmd, skSigner).getOrNull()
         }
 
+    /** [fetchSessionContent] bounded to [maxBytes]; null when the file is over
+     *  the cap (caller should leave it uncached and fetch it on open instead). */
+    suspend fun fetchSessionContentCapped(
+        server: Server,
+        secrets: ServerSecrets,
+        path: String,
+        maxBytes: Long,
+        skSigner: ai.eight24family.conch.ssh.securitykey.SkSigner? = null,
+    ): String? =
+        withContext(Dispatchers.IO) {
+            val raw = ssh.execute(server, secrets, catCappedCommand(path, maxBytes), skSigner).getOrNull()
+                ?: return@withContext null
+            if (raw.toByteArray(Charsets.UTF_8).size > maxBytes) null else raw
+        }
+
     /**
      * Variant that pipes the `cat` through a caller-provided [exec] —
      * typically a closure over a pooled SSHClient's `startSession()`. Lets
@@ -126,6 +141,19 @@ class SessionDiscovery(private val ssh: SshClient) {
      *  fetch above OOM'd on very large rollouts. */
     fun catCommand(path: String): String =
         "bash -lc " + shellEscape("cat ${shellEscape(path)}")
+
+    /**
+     * Like [catCommand] but reads at most [maxBytes] + 1 bytes.
+     *
+     * Lets a SPECULATIVE prefetch bound both the transfer and the memory it
+     * costs without a second round-trip to stat the file first: ask for one
+     * byte more than the cap, and if that many come back the file is over the
+     * cap and gets skipped. Non-pooled (password / plain-key) hosts had no cap
+     * at all and still pulled every uncached session whole, through the same
+     * String path that already OOM'd on a large rollout.
+     */
+    fun catCappedCommand(path: String, maxBytes: Long): String =
+        "bash -lc " + shellEscape("head -c ${maxBytes + 1} ${shellEscape(path)}")
 
     /**
      * Variant that runs the discovery script through a caller-provided

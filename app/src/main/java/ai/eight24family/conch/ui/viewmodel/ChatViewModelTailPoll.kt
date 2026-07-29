@@ -71,7 +71,7 @@ internal class ChatViewModelTailPoll(
      *  seconds, not the minutes the inactivity backstop would take. Safe to keep
      *  small now that the gate is turnComplete (a real terminal stop_reason), not
      *  the heuristic `!inFlight` — a running turn never trips it. */
-    private val RECONCILE_STUCK_MS = 6_000L
+    private val RECONCILE_STUCK_MS = RECONCILE_STUCK_GRACE_MS
     /**
      * Unix-millis timestamp of the most recent EXTERNAL growth seen on the remote
      * session's JSONL file.
@@ -137,6 +137,18 @@ internal class ChatViewModelTailPoll(
     ) {
         val cache = ServiceLocator.historyCache
         var lastOffset = initialOffset
+        // When the file first said "turn terminal" — our own fallback clock for
+        // the stuck-turn reconcile when the server's mtime can't be read.
+        var terminalSeenAtMs: Long? = null
+        // Has the session file been WRITTEN since our turn began? The terminal
+        // record of the PREVIOUS turn is still sitting at the end of the file
+        // when we start a new one, and it has been frozen for however long the
+        // chat was idle — so without this latch the very first poll tick after a
+        // send satisfies every reconcile conjunct and force-completes a turn the
+        // CLI has not even started answering. That was invisible while the remote
+        // projection was returning nothing (turnComplete was permanently false);
+        // projecting locally makes it reachable, so the gate has to exist.
+        var sawGrowthThisTurn = false
 
         // Wait for SSH to be Running so execOnLive doesn't fall back to a fresh handshake.
         var waited = 0
@@ -155,10 +167,11 @@ internal class ChatViewModelTailPoll(
         // Truncate detection + merge-not-wipe.
         val pre = statSizeAndAgentAlive(s, agent, path, sessionId)
         val preSize = pre.size
-        _remoteFileOpen.value = (s.state.value is SessionState.Working) || pre.inFlight
-        _remoteTurnStartMs.value = pre.turnStartMs
-        _remoteThinking.value = pre.thinking
-        _remoteTokens.value = pre.tokens
+        val preFrozenMs = pre.frozenForMs
+        // Spinner at frame zero comes from OUR state only; the file's own verdict
+        // needs the record window, which is seeded below once the cache is
+        // caught up (a chat opened cold has nothing to project until then).
+        _remoteFileOpen.value = s.state.value is SessionState.Working
         if (preSize != null && preSize < lastOffset) {
             android.util.Log.w(
                 "SshAi-Tail",
@@ -176,13 +189,34 @@ internal class ChatViewModelTailPoll(
                     "compact STREAMED sid=${sessionId.take(8)} bytes=$written newOffset=$lastOffset",
                 )
             } else {
+                // Free local repair first — identical reasoning to the mid-poll
+                // branch: our own sdk-cli→cli rewrite is deterministic, so replay
+                // it on the cache instead of pulling the whole session down just
+                // to re-adopt it. Exact size match only; anything else falls
+                // through to the authoritative path below.
+                val repairedOpen = cache.rewriteEntrypointTags(sessionId)
+                if (repairedOpen != null && repairedOpen == preSize) {
+                    lastOffset = preSize
+                    android.util.Log.i(
+                        "SshAi-Tail",
+                        "shrink open sid=${sessionId.take(8)} — repaired locally, no transfer",
+                    )
+                } else {
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
                 // Same benign-shrink guard as the mid-poll branch: a rewrite that
                 // kept every id (our sdk-cli→cli entrypoint fix) must re-adopt the
                 // server verbatim, NOT run the lossy/offset-desyncing mergeServer.
                 if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
-                    cache.save(sessionId, serverFull)
-                    lastOffset = serverFull.size.toLong()
+                    // TRIM to a whole line before storing. `serverFull` is a raw
+                    // cat of a file the CLI may be mid-write on, so its tail can
+                    // be a partial line — and HistoryCache's contract is that
+                    // saved bytes always end on a newline, because lastOffset is
+                    // derived from the saved length. Storing it untrimmed makes
+                    // the offset point into the middle of a record and the next
+                    // append() glues the rest of that line onto itself.
+                    val safeFull = trimToLastNewline(serverFull)
+                    cache.save(sessionId, safeFull)
+                    lastOffset = safeFull.size.toLong()
                     android.util.Log.i(
                         "SshAi-Tail",
                         "shrink open sid=${sessionId.take(8)} — benign rewrite, re-adopted server verbatim (${serverFull.size}B)",
@@ -196,25 +230,43 @@ internal class ChatViewModelTailPoll(
                         "compact merged sid=${sessionId.take(8)} mergedBytes=${merged?.size ?: -1} newOffset=$lastOffset",
                     )
                 }
+                }
             }
         }
 
-        // ── Catch-up pass ──
-        // Giant file, from-scratch (no/stale cache) → STREAM it into the cache
-        // (RAM-flat) and load history from the mmap'd cache buffer instead of the
-        // String path that OOM'd. Only the full from-zero read; incremental growth
-        // stays on the cheap inline path below.
+        // ── Catch-up pass ── Giant file, from-scratch (no/stale cache) → STREAM
+        // it into the cache (RAM-flat) and load history from the mmap'd cache
+        // buffer instead of the String path that OOM'd. Only the full from-zero
+        // read; incremental growth stays on the cheap inline path below. ⚠ MUST
+        // FALL THROUGH ON FAILURE. streamFullToCache returns null on a missing
+        // pooled client, a refused channel, or a gzip stream that never
+        // materialises, and 0 on an empty read. The `else` used to hang off the
+        // big-file predicate, so any of those simply SKIPPED the catch-up: no
+        // history loaded, lastOffset still 0, chat opens EMPTY and looks dead.
+        // Adding `| gzip -c` to that path made the failure modes strictly more
+        // likely, which is what turned a latent hole into a visible one. Now a
+        // failed stream degrades to the ordinary fetch instead of silently doing
+        // nothing.
+        var streamedOk = false
         if (lastOffset == 0L && s.history.value.isEmpty() && (preSize ?: 0L) > BIG_FILE_STREAM_BYTES) {
             val written = streamFullToCache(s, sessionId, path)
             if (written != null && written > 0) {
                 cache.load(sessionId)?.use { snap -> s.loadHistory(parseJsonl(snap.buffer, agent)) }
                 lastOffset = written
+                streamedOk = true
                 android.util.Log.i(
                     "SshAi-Tail",
                     "catch-up STREAMED sid=${sessionId.take(8)} bytes=$written history=${s.history.value.size}",
                 )
+            } else {
+                android.util.Log.w(
+                    "SshAi-Tail",
+                    "catch-up STREAM FAILED sid=${sessionId.take(8)} written=$written — " +
+                        "falling back to the plain fetch so the chat still paints",
+                )
             }
-        } else {
+        }
+        if (!streamedOk) {
         val tailBytes = fetchTail(s, path, lastOffset) ?: ByteArray(0)
         android.util.Log.i(
             "SshAi-Tail",
@@ -252,6 +304,55 @@ internal class ChatViewModelTailPoll(
         }
         }
 
+        // ── Turn-state record window (LOCAL projection) ──
+        // The authoritative "is a turn running?" signal, derived on the phone from
+        // the bytes we already downloaded — NOT from `jq` on the server.
+        //
+        // The remote jq path was a silent single point of failure: on a host where
+        // jq is missing from the non-interactive `bash -lc` PATH, or built without
+        // oniguruma so the program's `gsub` is an undefined function, jq prints
+        // nothing and exits. Records came back empty, every signal read false —
+        // including `turnComplete`, which the stuck-turn reconcile is gated on — so
+        // the ONE safety net that clears a wedged spinner could never fire. Measured
+        // on the user's own host: `recs=0` on every single tick for the whole
+        // session while `stat` on the same command line parsed fine, and the
+        // thinking indicator ran forever (2026-07-29).
+        //
+        // Kept INCREMENTAL on purpose: re-projecting 400 lines every 5 s costs
+        // 7-80 ms per tick on a desktop (measured against real 40-64 MB sessions),
+        // several times that on a phone. Growth is projected once, appended, and
+        // the window trimmed — so a frozen file, which is exactly the stuck-turn
+        // case, costs nothing at all.
+        val spec = AgentSpecRegistry[agent]
+        val recWindow = ArrayDeque<List<String>>()
+        fun trimWindow() { while (recWindow.size > TURN_RECORD_WINDOW) recWindow.removeFirst() }
+        fun reseedWindow() {
+            recWindow.clear()
+            recWindow.addAll(spec.projectTurnStateRecords(cache.tailLines(sessionId).asSequence()))
+            trimWindow()
+        }
+        fun growWindow(newBytes: ByteArray) {
+            if (newBytes.isEmpty()) return
+            val lines = String(newBytes, Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }
+            recWindow.addAll(spec.projectTurnStateRecords(lines))
+            trimWindow()
+        }
+        reseedWindow()
+        // The file's OWN verdict, now that the window exists: catches a turn that
+        // the CLI (or another device) started while this chat was closed, the
+        // instant it opens — the same thing the old remote projection did on its
+        // pre-probe, minus the round trip.
+        val preSig = spec.inferTurnState(recWindow.toList(), preFrozenMs)
+        android.util.Log.i(
+            "SshAi-Tail",
+            "turn-state window seeded sid=${sessionId.take(8)} agent=$agent records=${recWindow.size} " +
+                "inFlight=${preSig.inFlight} complete=${preSig.turnComplete}",
+        )
+        if (preSig.inFlight) _remoteFileOpen.value = true
+        _remoteTurnStartMs.value = preSig.turnStartMs
+        _remoteThinking.value = preSig.thinking
+        _remoteTokens.value = preSig.tokens
+
         // ── Poll loop ──
         var lastSeenWorking = false
         // Whether WE drove the turn last tick (s.state == Working). DISTINCT from
@@ -260,12 +361,25 @@ internal class ChatViewModelTailPoll(
         // turn" gate made mirror growth look "ours" and skip the history append, so
         // a console-driven turn never updated the chat.
         var lastCurWorking = false
+        // TRUE when the value we last published came from a LIVE control in OUR
+        // RAM. Such a banner must die with its control even if every stat below
+        // fails — that is the 2026-07-29 stall, where the transport wedged for 30s
+        // and the assignment at the bottom of this loop never ran again.
+        var waitingFromControl = false
+        // Did WE drive the turn that wrote the file's tail? A frozen "thinking" on
+        // our own tail is our dead or killed process — never a question sitting in
+        // another client's RAM.
+        var fileTailIsOurs = false
         var idleTicks = 0
         // Per-turn token accumulator: monotonic within a turn (keyed on the
         // protected turn-start), so a transient 0 from the probe never makes the
         // «↓ tokens» counter flicker; reset when the turn changes or work ends.
         var tokenTurnKey: Long? = null
         var tokenAccum = 0L
+        // NO POLLER, NO BANNER. The loop also leaves via `return` (Failed /
+        // Closed) and via job cancellation when the chat closes — states in which
+        // nothing left in the app could ever clear this flag.
+        try {
         while (true) {
             val bgSince = backgroundedSince()
             val bgFor = if (bgSince != null) System.currentTimeMillis() - bgSince else 0L
@@ -274,17 +388,41 @@ internal class ChatViewModelTailPoll(
                 bgForMs = bgFor,
                 idleTicks = idleTicks,
             )
-            delay(interval)
+            // INTERRUPTIBLE sleep. The interval is chosen from the state as it
+            // was at the TOP of the tick, and a turn that starts two seconds
+            // into a 30 s sleep used to go unnoticed for the remaining
+            // twenty-eight — with the persistent reader wedged, the tail-poll IS
+            // the delivery path, so that latency is what the user sees between
+            // the agent finishing and the words appearing. Sleep in short slices
+            // and break out the moment our own turn starts or ends. Costs one
+            // in-memory StateFlow read per second; zero bytes.
+            val wakeAt = System.currentTimeMillis() + interval
+            while (System.currentTimeMillis() < wakeAt) {
+                val st = s.state.value
+                if (st is SessionState.Failed || st is SessionState.Closed) return
+                if ((st is SessionState.Working) != lastCurWorking) break
+                delay(minOf(TURN_EDGE_CHECK_MS, wakeAt - System.currentTimeMillis()).coerceAtLeast(1L))
+            }
             val curState = s.state.value
             if (curState is SessionState.Failed || curState is SessionState.Closed) return
             val curWorking = curState is SessionState.Working
-            val probe = statSizeAndAgentAlive(s, agent, path, sessionId)
-            val size = probe.size
-            val inFlight = probe.inFlight
-            val turnStart = probe.turnStartMs
-            val thinking = probe.thinking
+            // Reset on BOTH edges: a mirrored turn must not inherit the latch
+            // from one of ours, or vice versa.
+            if (curWorking != lastCurWorking) sawGrowthThisTurn = false
+            if (curWorking) fileTailIsOurs = true
+            val stat = statSizeAndAgentAlive(s, agent, path, sessionId)
+            val size = stat.size
             if (size == null) {
                 // Transport hiccup — DON'T flip the spinner; keep prior state.
+                // BUT pendingControl() is an in-RAM map read, and a banner WE
+                // raised from a live control must not outlive that control just
+                // because stat failed. Without this, a wedged transport strands
+                // "waiting for your answer" with nothing left in the app able to
+                // clear it (user, 2026-07-29).
+                if (waitingFromControl && !pendingControl()) {
+                    _remoteWaitingForInput.value = false
+                    waitingFromControl = false
+                }
                 idleTicks++
                 continue
             }
@@ -301,14 +439,65 @@ internal class ChatViewModelTailPoll(
             // ⇒ NOT a compaction ⇒ re-adopt server verbatim (authoritative +
             // complete, cache bytes == server bytes → offset invariant restored).
             if (size < lastOffset) {
+                // FREE REPAIR FIRST. The overwhelmingly common shrink is our own
+                // listSessionsScript flipping "entrypoint":"sdk-cli"→"cli"
+                // (−4 bytes/tag) — a deterministic substitution we can replay on
+                // the cached copy for zero bytes. Downloading the whole file to
+                // re-adopt it was costing a FULL file per shrink, and since the
+                // CLI writes fresh sdk-cli tags every turn this repeated forever:
+                // 3 GB pulled in ~4 hours on a 102 MB session (user, 2026-07-23).
+                // Only an EXACT size match proves the local copy now equals the
+                // server byte-for-byte; anything else falls through to the
+                // authoritative download path, so a real compaction is unaffected.
+                val repaired = cache.rewriteEntrypointTags(sessionId)
+                if (repaired != null && repaired == size) {
+                    android.util.Log.i(
+                        "SshAi-Tail",
+                        "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — repaired locally, no transfer",
+                    )
+                    lastOffset = size
+                    reseedWindow()
+                    idleTicks = 0
+                    lastSeenWorking = curWorking
+                    lastCurWorking = curWorking
+                    _remoteFileOpen.value = curWorking
+                    continue
+                }
+                // A GIANT file must stream, exactly like the open path does. This
+                // branch used to call fetchTail(0) unconditionally, materialising
+                // the whole rollout in RAM — the very OOM the 4 MB guard exists to
+                // prevent, just on the mid-poll side where nobody added it.
+                if (size > BIG_FILE_STREAM_BYTES) {
+                    val written = streamFullToCache(s, sessionId, path)
+                    if (written != null && written > 0) {
+                        cache.load(sessionId)?.use { snap -> s.loadHistory(parseJsonl(snap.buffer, agent)) }
+                        lastOffset = written
+                        reseedWindow()
+                        android.util.Log.i(
+                            "SshAi-Tail",
+                            "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — STREAMED (${written}B)",
+                        )
+                        idleTicks = 0
+                        lastSeenWorking = curWorking
+                        lastCurWorking = curWorking
+                        _remoteFileOpen.value = curWorking
+                        continue
+                    }
+                    android.util.Log.w(
+                        "SshAi-Tail",
+                        "shrink mid-poll sid=${sessionId.take(8)} stream failed — falling back to in-memory fetch",
+                    )
+                }
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
                 if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
                     android.util.Log.i(
                         "SshAi-Tail",
                         "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — benign rewrite, re-adopting server verbatim",
                     )
-                    cache.save(sessionId, serverFull)
-                    lastOffset = serverFull.size.toLong()
+                    // Same complete-line contract as the open path.
+                    val safeFull = trimToLastNewline(serverFull)
+                    cache.save(sessionId, safeFull)
+                    lastOffset = safeFull.size.toLong()
                 } else {
                     android.util.Log.w(
                         "SshAi-Tail",
@@ -318,6 +507,9 @@ internal class ChatViewModelTailPoll(
                     if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
                     lastOffset = size
                 }
+                // The cache was rewritten wholesale — the incremental record
+                // window no longer describes it.
+                reseedWindow()
                 idleTicks = 0
                 lastSeenWorking = curWorking
                 lastCurWorking = curWorking
@@ -348,9 +540,18 @@ internal class ChatViewModelTailPoll(
                             // growth only — not our own (stream-silent) turn.
                             if (added > 0 && genuinelyExternal) {
                                 _remoteActive.value = System.currentTimeMillis()
+                                // Someone else is writing this file now, so the
+                                // frozen-think fallback becomes meaningful again.
+                                fileTailIsOurs = false
                             }
                         }
                         cache.append(sessionId, safe)
+                        // Project ONLY the new bytes into the turn-state window —
+                        // same records the remote jq used to return, for zero
+                        // extra traffic and no dependency on the host's toolchain.
+                        growWindow(safe)
+                        // Proof this turn actually reached the file.
+                        if (curWorking) sawGrowthThisTurn = true
                         lastOffset += safe.size.toLong()
                     }
                 }
@@ -358,6 +559,30 @@ internal class ChatViewModelTailPoll(
             } else {
                 idleTicks++
             }
+            // ── TURN VERDICT, from the LOCAL window ──
+            // Computed HERE, after the fetch above folded this tick's growth into
+            // the window, so a mirrored turn lights the spinner on the SAME tick
+            // its bytes land — not one poll interval later. `frozenForMs` still
+            // comes from the server (its own clock at both ends, so it stays
+            // skew-proof); everything else is derived from bytes we already hold.
+            val sig = spec.inferTurnState(recWindow.toList(), stat.frozenForMs)
+            val probe = stat.copy(
+                inFlight = sig.inFlight,
+                turnStartMs = sig.turnStartMs,
+                thinking = sig.thinking,
+                tokens = sig.tokens,
+                waitingForUser = sig.waitingForUser,
+                turnComplete = sig.turnComplete,
+            )
+            val inFlight = probe.inFlight
+            val turnStart = probe.turnStartMs
+            val thinking = probe.thinking
+            ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
+                "turn sid=${sessionId.take(8)} agent=$agent recs=${recWindow.size} " +
+                    "inFlight=$inFlight complete=${probe.turnComplete} thinking=$thinking " +
+                    "tokens=${probe.tokens} frozenMs=${stat.frozenForMs} size=$size"
+            }
+
             // AUTHORITATIVE waiting signal (no timeout). A live control_request the
             // agent raised — AskUserQuestion or a permission prompt — is held in the
             // persistent stream's RAM (pendingControls) and is NEVER written to the
@@ -378,14 +603,34 @@ internal class ChatViewModelTailPoll(
             // mid-flight, losing all output. turnComplete only trips on a real
             // terminal stop_reason, which a running turn never has. Skipped while a
             // control_request / file approval is pending (the turn is legitimately
-            // blocked on the user, invisible to the file).
-            val liveStuck = curWorking && probe.turnComplete && !pendingCtl &&
-                !probe.waitingForUser &&
-                probe.frozenForMs != null && probe.frozenForMs >= RECONCILE_STUCK_MS
+            // blocked on the user, invisible to the file). ⚠ The freshness gate must
+            // not be able to DISABLE the safety net. It used to read `frozenForMs!=
+            // null && frozenForMs >= GRACE`, and frozenForMs is null whenever the
+            // stat probe can't produce BOTH size and mtime — on such a host the
+            // whole reconcile silently never fired and a finished turn span forever
+            // (user, 2026-07-29: reply complete, token/cost row rendered, spinner
+            // still going). When the server clock is unreadable, fall back to OUR
+            // OWN elapsed since the file first reported the turn terminal: same
+            // grace, no dependency on parsing the remote clock.
+            val stuckSinceMs = probe.frozenForMs ?: run {
+                val first = terminalSeenAtMs ?: System.currentTimeMillis().also { terminalSeenAtMs = it }
+                System.currentTimeMillis() - first
+            }
+            if (!probe.turnComplete) terminalSeenAtMs = null
+            val liveStuck = shouldReconcileStuckTurn(
+                curWorking = curWorking,
+                sawGrowthThisTurn = sawGrowthThisTurn,
+                turnComplete = probe.turnComplete,
+                pendingCtl = pendingCtl,
+                waitingForUser = probe.waitingForUser,
+                stuckSinceMs = stuckSinceMs,
+            )
             if (liveStuck) {
                 android.util.Log.w(
                     "SshAi-Tail",
-                    "live turn stuck: file done + frozen ${probe.frozenForMs}ms but state=Working — reconciling",
+                    "live turn stuck: file done + ${stuckSinceMs}ms " +
+                        "(frozen=${probe.frozenForMs ?: "n/a"}, growth=$sawGrowthThisTurn) " +
+                        "but state=Working — reconciling",
                 )
                 s.reconcileStuckTurn()
             }
@@ -436,11 +681,20 @@ internal class ChatViewModelTailPoll(
             // session whose question lives in ANOTHER client's RAM (we can't see it,
             // so a long frozen think is the best weak hint) — never used when the
             // real signal is available.
-            _remoteWaitingForInput.value = pendingCtl || probe.waitingForUser ||
-                (!pendingCtl && fileWorking && thinking &&
-                    probe.frozenForMs != null && probe.frozenForMs > STALL_FOR_INPUT_MS)
+            waitingFromControl = pendingCtl
+            _remoteWaitingForInput.value = waitingForInput(
+                pendingCtl = pendingCtl,
+                fileWaiting = probe.waitingForUser,
+                fileTailIsOurs = fileTailIsOurs,
+                inFlight = inFlight,
+                thinking = thinking,
+                frozenForMs = probe.frozenForMs,
+            )
             lastSeenWorking = working
             lastCurWorking = curWorking
+        }
+        } finally {
+            _remoteWaitingForInput.value = false
         }
     }
 
@@ -460,7 +714,16 @@ internal class ChatViewModelTailPoll(
         }
         val k = if (dataSaver) 6L else 1L
         return when {
-            isWorking -> POLL_INTERVAL_MS * (if (dataSaver) 3L else 1L)
+            // A TURN IS RUNNING — full speed, data saver or not. The multiplier
+            // was sized when this probe shipped a `tail -n 400 | jq` projection
+            // back on every tick (tens of KB); it is now `stat` + `date`, about
+            // 250 bytes of command and reply. Throttling that 3× saves the user
+            // roughly 40 bytes a second and costs them up to half a minute of
+            // staring at a spinner after the answer already exists. Data saver
+            // means "don't spend my money", not "make the app unusable"; what it
+            // must throttle is the FETCH of file bytes, which is already
+            // proportional to real growth.
+            isWorking -> POLL_INTERVAL_MS
             bgForMs >= BG_DEEP_AFTER_MS -> POLL_INTERVAL_BG_DEEP_MS * k
             bgForMs > 0 -> POLL_INTERVAL_BACKGROUND_MS * k
             // Foreground idle: cap at 2× (≈10 s). NEVER the old 30 s — a
@@ -555,24 +818,24 @@ internal class ChatViewModelTailPoll(
         /** File size in bytes, null on a transport hiccup. */
         val size: Long?,
         /** A turn is in flight (model thinking OR a tool is running). */
-        val inFlight: Boolean,
+        val inFlight: Boolean = false,
         /** Turn-start epoch ms — the last user PROMPT (not a tool_result), so the
          *  timer spans the whole turn like the CLI, not since the last tool. */
-        val turnStartMs: Long?,
+        val turnStartMs: Long? = null,
         /** THINKING phase specifically (last event is `user` — model generating),
          *  as opposed to a tool running. Gates the «with X effort» suffix. */
-        val thinking: Boolean,
+        val thinking: Boolean = false,
         /** Cumulative output tokens THIS turn — sum of distinct assistant
          *  messages' output_tokens since the turn-start (matches the CLI's
          *  «↓ N tokens» for a mirrored session, where there's no live feed). */
-        val tokens: Long,
+        val tokens: Long = 0L,
         /** File last-modified epoch ms (server clock). Kept for logging. */
-        val mtimeMs: Long?,
+        val mtimeMs: Long? = null,
         /** How long the file has been FROZEN, in ms, computed ENTIRELY on the
          *  server (`date +%s` − mtime) so phone↔server clock skew can't make the
          *  "waiting for a console answer" hint fire instantly or never (audit,
          *  2026-06-14). null when the stat/date read failed. */
-        val frozenForMs: Long?,
+        val frozenForMs: Long? = null,
         /** The turn is BLOCKED on a human answer that the session FILE records
          *  (a file-visible approval/question). Claude's live AskUserQuestion is
          *  NOT here — it never hits the file (detected via pendingControls). Set
@@ -593,57 +856,50 @@ internal class ChatViewModelTailPoll(
         sessionId: String,
     ): PollProbe {
         val q = shQuote(path)
-        // ── PER-AGENT turn-state ──
-        // Each CLI's JSONL is shaped on a totally different axis — Claude carries
-        // `stop_reason` on assistant events; Codex brackets turns with
-        // `event_msg.payload.type` task_started/task_complete (NO stop_reason);
-        // Gemini interleaves `$set` snapshots with top-level `user`/`gemini`
-        // message records. A Claude-shaped probe matches ZERO lines in a Codex or
-        // Gemini rollout. So the projection (`turnStateRecordJq`) AND the verdict
-        // (`inferTurnState`) both live in the agent's spec; here we just run the
-        // jq the spec hands us and feed the records back to it. `stat -c %s,%Y`
-        // gives size+mtime, `date +%s` is the server clock → skew-proof "frozen"
-        // duration. tail -n 400: a long tool chain emits ~2 lines/round; 200 lost
-        // the turn-start at scale (audit 2026-06-14).
-        val spec = AgentSpecRegistry[agent]
-        val recJq = spec.turnStateRecordJq
-        val inner = "stat -c %s,%Y $q 2>/dev/null || stat -f %z,%m $q 2>/dev/null; date +%s; echo ---;" +
-            (if (recJq != null) " tail -n 400 $q 2>/dev/null | jq -rc '$recJq' 2>/dev/null" else "")
-        val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return PollProbe(null, false, null, false, 0L, null, null)
-        val (statPart, recPart) = out.split("---", limit = 2).let {
-            it[0] to (it.getOrNull(1).orEmpty())
-        }
+        // SIZE + MTIME ONLY. The turn-state RECORDS are no longer projected here:
+        // they used to ride a `tail -n 400 | jq` on the far end, which (a) made the
+        // single most important signal in the app depend on `jq` being installed
+        // AND regex-capable on the user's box — when it isn't, jq prints nothing,
+        // every signal reads false, and the stuck-turn reconcile can never fire —
+        // and (b) shipped up to ~80 KB of projection back every 5 s on top of the
+        // file bytes we were already downloading. Both gone: the poll loop projects
+        // the same records locally from the cache. `stat -c %s,%Y` gives size+mtime,
+        // `date +%s` is the server clock → skew-proof "frozen" duration.
+        // ⚠ The stat line MUST be unambiguous. Both stats print nothing when the
+        // file is gone or unreadable (a stale path from the never-pruned owner
+        // sidecar, a session deleted server-side), and the next line — `date +%s`
+        // — then slid into first place and was read as the SIZE. That made a
+        // missing file look like a ~1.8 GB one: the `size == null` guard never
+        // fired, every tick saw "grew", the poll never backed off, and the chat
+        // sat there alive-but-empty. Sentinel + a shape check on the pair.
+        val inner = "if [ -r $q ]; then stat -c %s,%Y $q 2>/dev/null || " +
+            "stat -f %z,%m $q 2>/dev/null; else echo SSHAI_NOFILE; fi; date +%s; echo ---;"
+        val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return PollProbe(size = null)
+        val statPart = out.substringBefore("---")
         val statLines = statPart.lineSequence().filter { it.isNotBlank() }.toList()
-        val statFields = statLines.firstOrNull()?.split(',')
-        val size = statFields?.getOrNull(0)?.toLongOrNull()
-        val mtimeSec = statFields?.getOrNull(1)?.toLongOrNull()
+        // Accept ONLY a real "<size>,<mtime>" pair. `date +%s` carries no comma,
+        // so it can never be mistaken for a stat result again — belt and braces
+        // next to the sentinel, since a BSD/BusyBox host could still surprise us.
+        val statFields = statLines.firstOrNull()
+            ?.takeIf { it != "SSHAI_NOFILE" }
+            ?.split(',')
+            ?.takeIf { it.size == 2 && it[0].trim().toLongOrNull() != null && it[1].trim().toLongOrNull() != null }
+        val size = statFields?.getOrNull(0)?.trim()?.toLongOrNull()
+        val mtimeSec = statFields?.getOrNull(1)?.trim()?.toLongOrNull()
         val mtimeMs = mtimeSec?.let { it * 1000 }
         val serverNowSec = statLines.getOrNull(1)?.trim()?.toLongOrNull()
         // Both ends are the server's own clock → skew-proof, and still correct on
         // open (real frozen time, not "since the app noticed").
         val frozenForMs = if (mtimeSec != null && serverNowSec != null)
             ((serverNowSec - mtimeSec) * 1000).coerceAtLeast(0L) else null
-        // Generic split: every spec's jq emits tab-separated records (oldest→
-        // newest), text fields already tab/newline-scrubbed. The spec owns the
-        // field layout and the decision.
-        val records = recPart.lineSequence().map { it.split('\t') }
-            .filter { it.isNotEmpty() && it[0].isNotBlank() }.toList()
-        val sig = spec.inferTurnState(records, frozenForMs)
-        ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
-            "statSize=$size agent=$agent inFlight=${sig.inFlight} thinking=${sig.thinking} " +
-                "waiting=${sig.waitingForUser} turnStartMs=${sig.turnStartMs} tokens=${sig.tokens} " +
-                "frozenMs=$frozenForMs recs=${records.size} sid=${sessionId.take(8)}"
-        }
+        // Turn signals are filled in by the poll loop from the LOCAL record
+        // window; this probe answers only "how big is it and when did it last
+        // change". A caller that just wants the size gets it without paying for
+        // any projection at all.
         return PollProbe(
             size = size,
-            inFlight = sig.inFlight,
-            turnStartMs = sig.turnStartMs,
-            thinking = sig.thinking,
-            tokens = sig.tokens,
             mtimeMs = mtimeMs,
             frozenForMs = frozenForMs,
-            waitingForUser = sig.waitingForUser,
-            turnComplete = sig.turnComplete,
         )
     }
 
@@ -653,9 +909,38 @@ internal class ChatViewModelTailPoll(
         } else {
             "tail -c +${fromOffset + 1} ${shQuote(path)}"
         }
+        // COMPRESS ON THE WIRE. Session JSONL is highly repetitive text and
+        // gzips ~10x; a full open of a 100 MB rollout used to put 100 MB across
+        // the link. On mobile data that is real money — it ate a whole monthly
+        // quota (user, 2026-07-23). base64 is needed only because execOnLive
+        // hands back a String and raw gzip bytes would be mangled by UTF-8
+        // decoding; its +33% is dwarfed by what gzip removes.
+        //
+        // `base64 -w0` is GNU; if a host ships a BusyBox/BSD base64, or has no
+        // gzip, the command fails or the payload won't decode — so we FALL BACK
+        // to the old plain path rather than lose the chat.
+        val gz = s.execOnLive("bash -lc " + shQuote("$inner | gzip -c | base64 -w0"))
+        if (!gz.isNullOrBlank()) {
+            gunzipBase64(gz)?.let { plain ->
+                // Account every transfer so the next traffic question is answered
+                // with numbers, not an estimate. Debug-only (R8 strips Logx.d).
+                ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
+                    "fetch offset=$fromOffset wire=${gz.length}B inflated=${plain.size}B " +
+                        "ratio=${plain.size / gz.length.coerceAtLeast(1)}x"
+                }
+                return plain
+            }
+        }
         val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return null
         return out.toByteArray(Charsets.UTF_8)
     }
+
+    /** base64 → gzip → bytes. Null when the payload isn't what we asked for. */
+    private fun gunzipBase64(b64: String): ByteArray? =
+        SilentlyTry.loggedOrElse("SshAi-Tail", "gunzip base64 tail", null) {
+            val raw = android.util.Base64.decode(b64.trim(), android.util.Base64.DEFAULT)
+            java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(raw)).use { it.readBytes() }
+        }
 
     /**
      * Stream the WHOLE remote file straight into the session's cache file over the
@@ -669,12 +954,19 @@ internal class ChatViewModelTailPoll(
      */
     private suspend fun streamFullToCache(s: AgentSession, sessionId: String, path: String): Long? {
         val client = ServiceLocator.sshConnectionPool.peek(s.server.id) ?: return null
-        val cmd = "bash -lc " + shQuote("cat ${shQuote(path)}")
+        // Same wire-compression story as fetchTail, minus the base64: this path
+        // owns a raw byte stream, so gzip rides it directly. A full re-adopt of
+        // a 100 MB rollout drops to ~10 MB on the link. RAM stays flat — we
+        // inflate streaming, never materialising the file.
+        val cmd = "bash -lc " + shQuote("cat ${shQuote(path)} | gzip -c")
         return SilentlyTry.loggedOrElse("SshAi-Tail", "stream full file to cache", null) {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(cmd)
-                val n = ServiceLocator.historyCache.saveFromStream(sessionId, proc.inputStream)
+                val n = ServiceLocator.historyCache.saveFromStream(
+                    sessionId,
+                    java.util.zip.GZIPInputStream(proc.inputStream),
+                )
                 proc.join(120, java.util.concurrent.TimeUnit.SECONDS)
                 n
             } finally {
@@ -762,6 +1054,79 @@ internal class ChatViewModelTailPoll(
 
     companion object {
         /** Cadence of the remote-tail poller. 5 s feels alive without churning data. */
+        /**
+         * May we force-complete a live turn from the session file's verdict?
+         *
+         * Every conjunct is load-bearing:
+         *  - [curWorking] — we think a turn of OURS is running;
+         *  - [sawGrowthThisTurn] — the file has been written SINCE that turn
+         *    began. Without it the previous turn's terminal record, frozen for
+         *    however long the chat sat idle, force-completes a turn the CLI
+         *    hasn't started answering yet: a warm process gets `turnDone` and a
+         *    teardown mid-reply, a cold one loses its spinner and Stop button
+         *    while the agent works. `Working` is set BEFORE the process is even
+         *    launched, so the window is seconds wide;
+         *  - [turnComplete] — a REAL terminal stop_reason, never the staleness
+         *    fallback, so a long silent research turn is never torn down;
+         *  - not [pendingCtl] / not [waitingForUser] — the turn is legitimately
+         *    blocked on the human, which the file cannot see;
+         *  - [stuckSinceMs] past the grace, so a normal end-of-turn race doesn't
+         *    trip it.
+         *
+         * Extracted as a pure function purely so it can be tested — it lives
+         * inside a 300-line suspend fun otherwise, which is why it had none.
+         */
+        /** See [RECONCILE_STUCK_MS]. */
+        internal const val RECONCILE_STUCK_GRACE_MS = 6_000L
+
+        /**
+         * Should the chat say the agent is BLOCKED ON A HUMAN ANSWER?
+         *
+         * Extracted pure so it can be tested, same reason as
+         * [shouldReconcileStuckTurn].
+         *
+         *  - [pendingCtl] — WE hold the live control. Authoritative, no timeout.
+         *  - [fileWaiting] — the FILE records a blocked turn (per-agent signal).
+         *  - the frozen-think fallback is a WEAK guess for a MIRRORED session
+         *    whose question lives in ANOTHER client's RAM, where we cannot see it.
+         *
+         * [fileTailIsOurs] is the gate that was missing. The old code fed the
+         * fallback `(curWorking && !liveStuck) || inFlight`, which is TRUE for our
+         * own turn — flatly contradicting the comment two lines above it. So after
+         * we KILLED a turn, the file's last row stayed a `user` record with no
+         * interrupt marker, inFlight and thinking stayed true for twelve minutes,
+         * the file froze because nothing was writing, and the app told the user to
+         * go answer a question that did not exist (2026-07-29).
+         */
+        internal fun waitingForInput(
+            pendingCtl: Boolean,
+            fileWaiting: Boolean,
+            fileTailIsOurs: Boolean,
+            inFlight: Boolean,
+            thinking: Boolean,
+            frozenForMs: Long?,
+        ): Boolean = pendingCtl || fileWaiting ||
+            (!fileTailIsOurs && inFlight && thinking &&
+                frozenForMs != null && frozenForMs > STALL_FOR_INPUT_MS)
+
+        internal fun shouldReconcileStuckTurn(
+            curWorking: Boolean,
+            sawGrowthThisTurn: Boolean,
+            turnComplete: Boolean,
+            pendingCtl: Boolean,
+            waitingForUser: Boolean,
+            stuckSinceMs: Long,
+        ): Boolean = curWorking && sawGrowthThisTurn && turnComplete &&
+            !pendingCtl && !waitingForUser && stuckSinceMs >= RECONCILE_STUCK_GRACE_MS
+
+        /** How many projected turn-state records to keep. A long tool chain emits
+         *  ~2 lines per round; 200 lost the turn-start at scale (audit
+         *  2026-06-14), so 400 — the same window the remote `tail -n 400` used. */
+        const val TURN_RECORD_WINDOW: Int = 400
+
+        /** How often the interruptible sleep re-checks for a turn edge. */
+        const val TURN_EDGE_CHECK_MS: Long = 1_000L
+
         const val POLL_INTERVAL_MS: Long = 5_000L
         /** Background poll cadence — chat-might-come-back-soon. */
         const val POLL_INTERVAL_BACKGROUND_MS: Long = 30_000L

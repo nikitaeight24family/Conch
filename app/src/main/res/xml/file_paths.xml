@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Exactly ONE directory is shareable: the camera capture folder inside our
+    own cache. Nothing else — the app holds SSH keys and session transcripts,
+    and a FileProvider root of "." would put every one of them one crafted URI
+    away from any app we ever hand a URI to.
+
+    cache-path resolves to Context.getCacheDir(); the OS is free to reclaim it,
+    which is right for a photo that has already been staged as an attachment.
+-->
+<paths>
+    <cache-path name="camera" path="conch_camera/" />
+</paths>

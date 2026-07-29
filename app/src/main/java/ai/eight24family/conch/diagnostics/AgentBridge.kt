@@ -1,6 +1,7 @@
 package ai.eight24family.conch.diagnostics
 
 import ai.eight24family.conch.di.ServiceLocator
+import ai.eight24family.conch.util.AudioRecorder
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -164,6 +165,20 @@ class AgentBridge(
                                 "logs/ping/screenshot still work.",
                         )
                     }
+                // MICROPHONE. Off by default, unlike every other verb: shell and
+                // logs read a device the user handed over, a mic records the ROOM
+                // and whoever is in it. The bridge is unauthenticated by design,
+                // so this one waits for an explicit opt-in on the phone.
+                "audio" ->
+                    if (ServiceLocator.preferences.bridgeAudioAllowed.first()) {
+                        handler.handleAudio(args)
+                    } else {
+                        BridgeResponse.err(
+                            "audio disabled on this phone — enable it in Conch → " +
+                                "Settings → Security → \"Record audio from server\". " +
+                                "Off by default because this records the room, not the screen.",
+                        )
+                    }
                 else -> BridgeResponse.err("unknown command: $command")
             }
         }.getOrElse { BridgeResponse.err(it.message ?: it.javaClass.simpleName) }
@@ -286,6 +301,14 @@ interface BridgeHandler {
     suspend fun handleLogs(args: JsonObject): BridgeResponse
     suspend fun handleScreenshot(args: JsonObject): BridgeResponse =
         BridgeResponse.err("screenshot not implemented yet")
+    /**
+     * Record the phone's microphone for `args.seconds` (default 10, capped at
+     * [ai.eight24family.conch.util.AudioRecorder.MAX_SECONDS]) and return the
+     * AAC/MP4 bytes. Gated by the phone-side switch at the call site.
+     */
+    suspend fun handleAudio(args: JsonObject): BridgeResponse =
+        BridgeResponse.err("audio not implemented")
+
     /** Run an arbitrary shell command at shell UID (adb-shell equivalent)
      *  via Shizuku. `args.command` = the command string. */
     suspend fun handleShell(args: JsonObject): BridgeResponse =
@@ -318,7 +341,38 @@ data class BridgeResponse(
  */
 class DefaultBridgeHandler(
     private val logs: LogCaptureCoordinator,
+    private val appContext: android.content.Context = ServiceLocator.appContext,
 ) : BridgeHandler {
+
+    /**
+     * Record the microphone for a fixed span and hand back the AAC/MP4 bytes.
+     *
+     * Fixed duration because there is nobody on this end to press stop — the
+     * caller is an agent on the far side of an SSH link. Capped by
+     * [AudioRecorder.MAX_SECONDS] so a typo cannot leave the mic open.
+     *
+     * The phone-side switch is checked by the DISPATCHER, not here, so this stays
+     * a plain capability and the policy lives in one place.
+     */
+    override suspend fun handleAudio(args: JsonObject): BridgeResponse {
+        val seconds = args["seconds"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 10
+        if (!AudioRecorder.micGranted(appContext)) {
+            return BridgeResponse.err(
+                "microphone not granted to Conch — open Conch and record one voice " +
+                    "message, or grant it in Android Settings → Apps → Conch → Permissions.",
+            )
+        }
+        val started = System.currentTimeMillis()
+        val bytes = AudioRecorder.recordFor(appContext, seconds)
+            ?: return BridgeResponse.err("recording produced nothing (mic busy, or another app holds it)")
+        val meta = mapOf(
+            "seconds" to JsonPrimitive(seconds.coerceIn(1, AudioRecorder.MAX_SECONDS)),
+            "bytes" to JsonPrimitive(bytes.size),
+            "duration_ms" to JsonPrimitive(System.currentTimeMillis() - started),
+            "format" to JsonPrimitive("audio/mp4"),
+        )
+        return BridgeResponse.ok(bytes, meta)
+    }
 
     override suspend fun handleLogs(args: JsonObject): BridgeResponse {
         val req = LogCaptureService.CaptureRequest(

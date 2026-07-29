@@ -115,6 +115,20 @@ internal class AgentSessionHistory(
      *  existing message with the same id (Claude ships a stable
      *  `msg_xxx#blockIndex` for every assistant chunk in the same turn)
      *  and replace it in place, so the bubble grows live. */
+    /**
+     * Did the agent actually SAY anything since [fromIndex]?
+     *
+     * Used by the turn-silence backstop to tell "this turn produced nothing" —
+     * a real failure worth an error row — from "the persistent reader wedged,
+     * but the tail-poll mirror already painted the reply from the session file".
+     * The second case is a transport problem the user should never see reported
+     * as a failed turn, because the answer is right there on screen.
+     */
+    fun hasAssistantOutputSince(fromIndex: Int): Boolean =
+        _history.value.asSequence()
+            .drop(fromIndex.coerceAtLeast(0))
+            .any { it is AgentMessage.AssistantText || it is AgentMessage.Result }
+
     fun emitMsg(msg: AgentMessage) {
         if (msg is AgentMessage.AssistantText) {
             // Whole emit + flush-job-schedule must be in the same lock

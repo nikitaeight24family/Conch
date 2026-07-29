@@ -140,6 +140,31 @@ class SshConnectionPool {
     }
 
     /**
+     * Throw away the shared transport for [serverId] — it is alive at the TCP
+     * level but useless, so the next connect rebuilds it.
+     *
+     * Needed because sshd caps concurrent channels per connection
+     * (`MaxSessions`, 10 by default). Once that ceiling is hit the server
+     * answers EVERY channel request with an open-failure, so the sessions list,
+     * the model probe, command discovery and the turn itself all fail together
+     * and keep failing forever — the app looks connected (the socket is fine)
+     * and does nothing.
+     *
+     * Dropping it is cheap and, on a seamless-enrolled server, invisible: the
+     * reconnect authenticates with the enrolled ephemeral device key, so there
+     * is NO FIDO tap. The user should never have to disconnect/reconnect by
+     * hand to clear this — that is exactly what seamless reconnect is for.
+     */
+    fun evictPoisoned(serverId: String, reason: String) {
+        val lock = perServerLock[serverId] ?: return
+        synchronized(lock) {
+            val entry = pool.remove(serverId) ?: return
+            android.util.Log.w(TAG, "evictPoisoned($serverId) — $reason; transport dropped for rebuild")
+            SilentlyTry.fired("SshAi-Pool", "disconnect poisoned client") { entry.client.disconnect() }
+        }
+    }
+
+    /**
      * Look up an alive shared client without mutating refcounts.
      * Used by the sessions-list / agent-picker reuse paths so they
      * can ride a connection without bumping the count (they don't

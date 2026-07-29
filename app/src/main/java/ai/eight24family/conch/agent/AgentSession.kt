@@ -55,7 +55,12 @@ class AgentSession(
     private val secrets: ServerSecrets,
     private val ssh: SshClient,
     private val chatSessionId: String,
-    private var resumeId: String? = null
+    // @Volatile: WRITTEN on the reader coroutine (the CLI's session_id arrives
+    // in its system/init) and READ on the turn coroutine when building the
+    // command. A stale null read there launches with NO `--resume`, and the CLI
+    // then starts a WHOLE NEW session file — surfacing as a duplicate row with
+    // the same auto-title (user, 2026-07-27).
+    @Volatile private var resumeId: String? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

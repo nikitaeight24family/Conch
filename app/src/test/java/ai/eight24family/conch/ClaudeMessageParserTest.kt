@@ -35,7 +35,10 @@ class ClaudeMessageParserTest {
         val asError = ClaudeMessageParser.parse(
             """{"type":"error","message":"Claude Fable 5 is currently unavailable. Learn more: $url"}"""
         )
-        assertEquals(1, asError.size)
+        // Card + the non-rendering TurnEnd marker (a terminal envelope always
+        // ends the turn, whatever card it renders).
+        assertEquals(2, asError.size)
+        assertTrue(asError.any { it is AgentMessage.TurnEnd })
         val card = asError.first() as AgentMessage.Error
         assertEquals("unavailable", card.kind)
         assertEquals("Claude Fable 5 is currently unavailable.", card.text)
@@ -48,7 +51,8 @@ class ClaudeMessageParserTest {
         val asResult = ClaudeMessageParser.parse(
             """{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude Fable 5 is currently unavailable. Learn more: $url"}"""
         )
-        assertEquals(1, asResult.size)
+        assertEquals(2, asResult.size)
+        assertTrue(asResult.any { it is AgentMessage.TurnEnd })
         assertEquals(card.id, (asResult.first() as AgentMessage.Error).id)
         // No plain Result bubble / tokens line leaks through.
         assertTrue(asResult.none { it is AgentMessage.Result })
@@ -284,8 +288,10 @@ class ClaudeMessageParserTest {
     fun `result message`() {
         val json = """{"type":"result","subtype":"success","total_cost_usd":0.001,"result":"done","usage":{"input_tokens":12000,"output_tokens":1400},"duration_ms":45000}"""
         val out = ClaudeMessageParser.parse(json)
-        // Result + the per-turn usage line (user asked to see spend per turn).
-        assertEquals(2, out.size)
+        // Result + the per-turn usage line (user asked to see spend per turn)
+        // + the non-rendering TurnEnd marker.
+        assertEquals(3, out.size)
+        assertTrue(out.any { it is AgentMessage.TurnEnd })
         val m = out.first() as AgentMessage.Result
         assertEquals("success", m.subtype)
         assertEquals("done", m.text)
@@ -299,7 +305,9 @@ class ClaudeMessageParserTest {
     fun `error message`() {
         val json = """{"type":"error","message":"something broke"}"""
         val out = ClaudeMessageParser.parse(json)
-        assertEquals(1, out.size)
+        // Error card + the non-rendering TurnEnd marker.
+        assertEquals(2, out.size)
+        assertTrue(out.any { it is AgentMessage.TurnEnd })
         assertEquals("something broke", (out.first() as AgentMessage.Error).text)
     }
 

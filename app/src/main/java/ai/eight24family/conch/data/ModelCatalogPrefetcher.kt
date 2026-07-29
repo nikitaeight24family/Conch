@@ -49,7 +49,9 @@ object ModelCatalogPrefetcher {
      * Probe models + reasoning for one (client, agent) and persist.
      * Rides the given pooled client only — never initiates a handshake
      * (SK servers would need a FIDO touch). Returns the parsed model map
-     * (empty = probe failed; nothing is overwritten in that case).
+     * Returns the MERGED catalog (empty = probe failed; nothing is overwritten
+     * in that case) — callers must not see this probe's raw answer, or they
+     * would re-introduce the regression the merge exists to prevent.
      */
     suspend fun probeAndPersist(client: SSHClient, agent: Agent, serverId: String): Map<String, String> {
         val spec = AgentSpecRegistry[agent]
@@ -72,10 +74,12 @@ object ModelCatalogPrefetcher {
             .onFailure { android.util.Log.w(TAG, "catalog warm-up failed for ${spec.agent}", it) }
             .getOrDefault(emptyMap())
         if (map.isEmpty()) return map
-        // Same persistence the chat coordinator does after ITS probe.
-        ChatViewModelModels.rememberLabels(agent.name, map)
+        // Same persistence the chat coordinator does after ITS probe. Both go
+        // through the monotonic merge, so a warm-up against a server running an
+        // older CLI can't roll the catalog back for every other server.
+        val merged = ChatViewModelModels.rememberLabels(agent.name, map)
         ServiceLocator.preferences.setModelLabelsForAgent(agent.name, map)
-        val rmap = map.keys.mapNotNull { slug ->
+        val rmap = merged.keys.mapNotNull { slug ->
             spec.reasoningInfoFor(slug)?.let { slug to it }
         }.toMap()
         spec.serializeReasoningCatalog(rmap)?.let {
@@ -84,9 +88,9 @@ object ModelCatalogPrefetcher {
         markProbed(serverId, agent)
         android.util.Log.d(
             TAG,
-            "catalog warm ${spec.agent}@$serverId: models=${map.keys} " +
+            "catalog warm ${spec.agent}@$serverId: probed=${map.keys} merged=${merged.keys} " +
                 "levels=${rmap.values.firstOrNull()?.levels?.map { l -> l.effort }}",
         )
-        return map
+        return merged
     }
 }

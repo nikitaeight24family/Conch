@@ -357,23 +357,66 @@ interface AgentCliSpec {
     // ──────── Mirror turn-state (working / done / waiting) ────────
 
     /**
-     * Server-side `jq` PROGRAM that projects this CLI's session JSONL into ONE
-     * tab-separated record per RELEVANT line, oldest→newest. The field layout is
-     * private to the spec — only [inferTurnState] (same spec) reads it back. The
-     * tail-poll pipes the session file's tail through this to learn, second-
-     * accurate, whether a turn is running — WITHOUT transferring the whole file.
+     * Projects this CLI's session JSONL into ONE record per RELEVANT line,
+     * oldest→newest, as an ordered field list. The layout is private to the
+     * spec — only [inferTurnState] (same spec) reads it back.
      *
-     * Null ⇒ this CLI has no file-based turn-state detection (e.g. its sessions
-     * aren't mirrored on disk); the mirror then relies only on the app-driven
-     * `curWorking` flag. Each CLI's JSONL is shaped totally differently (Claude:
-     * `type:user/assistant` + `message.stop_reason`; Codex: `type:event_msg` with
-     * `payload.type:task_started/task_complete`), so this MUST be per-spec — a
-     * Claude-shaped probe matches ZERO lines in a Codex rollout.
+     * Runs ON THE PHONE, against bytes the tail-poll has already downloaded.
+     * It used to be a `jq` program executed on the user's server, which made
+     * the single most important signal in the app — "is a turn still running?"
+     * — depend on a binary that may not be installed, may not be on a
+     * non-interactive login shell's PATH, or may be built without the regex
+     * support the program needed. In every one of those cases jq printed
+     * nothing, `stderr` was discarded, the record list came back EMPTY, and
+     * [inferTurnState] answered all-false — including `turnComplete`, the one
+     * flag the stuck-turn reconcile is gated on. The thinking indicator then
+     * ran forever with nothing able to clear it (2026-07-29, ground-truthed:
+     * `recs=0` on every tick for an entire session while `stat` on the same
+     * command line parsed fine). Local projection also costs LESS, since the
+     * bytes were already on the phone.
+     *
+     * Empty ⇒ this CLI has no file-based turn-state detection; the mirror then
+     * relies only on the app-driven `curWorking` flag. Each CLI's JSONL is
+     * shaped totally differently (Claude: `type:user/assistant` +
+     * `message.stop_reason`; Codex: `type:event_msg` with
+     * `payload.type:task_started/task_complete`), so this MUST be per-spec.
+     *
+     * Implementations MUST skip blank and malformed lines rather than throw:
+     * the tail of a file being appended to is routinely a partial line, and
+     * losing the whole window to one bad line is exactly what jq did.
+     *
+     * @param lines raw JSONL lines, oldest→newest.
      */
-    val turnStateRecordJq: String? get() = null
 
     /**
-     * Decide the turn signals from the records [turnStateRecordJq] projected
+     * Implementations project one JSONL line per record; see the contract above.
+     *
+     * Why it moved here: the remote projection needed `jq` on the user's server.
+     * When `jq` is absent from a non-interactive `bash -lc` PATH — or present but
+     * built without oniguruma, so the `gsub` in the program is an undefined
+     * function — jq emits NOTHING and exits. `2>/dev/null` hid it, records came
+     * back empty, [inferTurnState] returned all-false including `turnComplete`,
+     * and the stuck-turn reconcile could therefore NEVER fire: the thinking
+     * indicator ran forever with no way for the user to clear it (2026-07-29,
+     * ground-truthed from logcat — `recs=0` on every single tick while `stat` on
+     * the same line parsed fine).
+     *
+     * Computing it locally also costs LESS: the tail-poll already downloads every
+     * byte of the session file, so shipping a 400-record projection back on top
+     * of that, every 5 seconds, was pure duplicate traffic on a metered link.
+     *
+     * Implementations MUST return the identical field layout their jq emits —
+     * [inferTurnState] reads both by index, and an off-by-one silently corrupts
+     * the turn verdict rather than failing loudly.
+     *
+     * @param lines raw JSONL lines, oldest→newest. Blank and malformed lines
+     *   must be skipped, not throw: the tail of a file being appended to is
+     *   routinely a partial line.
+     */
+    fun projectTurnStateRecords(lines: Sequence<String>): List<List<String>> = emptyList()
+
+    /**
+     * Decide the turn signals from the records [projectTurnStateRecords] produced
      * (oldest→newest) + how long the session file has been frozen ([frozenForMs],
      * null if unknown). Verdict must be DETERMINISTIC from the file content, not a
      * timeout (timeouts are at most a last-resort fallback for a malformed tail).

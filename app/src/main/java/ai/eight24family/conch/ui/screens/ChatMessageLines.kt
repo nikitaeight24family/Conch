@@ -248,6 +248,14 @@ internal fun TerminalLine(
     onAllowSession: () -> Unit = {},
 ) {
     when (msg) {
+        // Subagent activity is panel data, not a transcript row. Rendering it
+        // here would put a fan-out of eight agents' turns into the middle of the
+        // conversation — exactly what the CLI filters out of its own transcript.
+        is AgentMessage.SubagentActivity -> Unit
+        // Turn-completion signal. The reader drops it before history, so this
+        // branch should be unreachable — it exists so the compiler keeps
+        // guarding the rest of this `when`.
+        is AgentMessage.TurnEnd -> Unit
         is AgentMessage.AskUserQuestion -> QuestionCard(msg, onAnswerQuestion)
         is AgentMessage.EventNote -> EventLine(
             label = msg.label.take(140),

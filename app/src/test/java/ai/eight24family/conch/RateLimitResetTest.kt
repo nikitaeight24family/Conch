@@ -110,5 +110,12 @@ class RateLimitResetTest {
         assertEquals("2h40m", usageCountdownText(2 * 3600L + 40 * 60L))
         assertEquals("3h", usageCountdownText(3 * 3600L))
         assertEquals("2d", usageCountdownText(2 * 86_400L))
+        // Days carry the hour remainder, same as hours carry minutes. The real
+        // report: Thursday 12:53 → weekly reset Sunday 5:00 AM is 2d16h07m, and
+        // a floored "2d" next to the "Sun" label read as a contradiction — the
+        // calendar says Sunday is three sleeps off (user, 2026-07-23).
+        assertEquals("2d16h", usageCountdownText(2 * 86_400L + 16 * 3600L + 7 * 60L))
+        assertEquals("3d", usageCountdownText(3 * 86_400L))
+        assertEquals("1d1h", usageCountdownText(86_400L + 3600L))
     }
 }

@@ -14,6 +14,9 @@ import ai.eight24family.conch.agent.spec.TopbarModelState
 import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.util.SilentlyTry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Per-CLI spec for Google Gemini CLI (binary `gemini`, npm `@google/gemini-cli`).
@@ -400,10 +403,7 @@ fi
      * sent and the `gemini` record when the reply lands, so the last record's type
      * IS the live state — last `user` → model working, last `gemini` → done.
      */
-    override val turnStateRecordJq: String =
-        "select(.type==\"user\" or .type==\"gemini\") | " +
-            "[.type, (.timestamp // \"\"), ((.tokens.output // 0)|tostring)] | @tsv"
-
+    
     /**
      * DEFINITIVE Gemini turn state from the last message record — no timeout for
      * the DONE case (a `gemini` reply means the turn finished), a staleness guard
@@ -411,6 +411,30 @@ fi
      * thinking == (awaiting the model). Gemini approvals ride our own channel, not
      * the file, so waitingForUser stays false.
      */
+    /**
+     * Field layout, read by index in [inferTurnState]:
+     *   0 type ("user" | "gemini") · 1 timestamp · 2 outputTokens
+     */
+    override fun projectTurnStateRecords(lines: Sequence<String>): List<List<String>> {
+        val j = Json { ignoreUnknownKeys = true; isLenient = true }
+        val out = ArrayList<List<String>>()
+        for (line in lines) {
+            val t = line.trim()
+            if (t.length < 2 || t[0] != '{') continue
+            val obj = runCatching { j.parseToJsonElement(t).jsonObject }.getOrNull() ?: continue
+            val type = obj["type"]?.let {
+                runCatching { it.jsonPrimitive.content }.getOrNull()
+            } ?: continue
+            if (type != "user" && type != "gemini") continue
+            val ts = obj["timestamp"]?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }.orEmpty()
+            val tokens = runCatching {
+                obj["tokens"]?.jsonObject?.get("output")?.jsonPrimitive?.content
+            }.getOrNull() ?: "0"
+            out += listOf(type, ts, tokens)
+        }
+        return out
+    }
+
     override fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals {
         val recs = records.filter { it.isNotEmpty() && (it[0] == "user" || it[0] == "gemini") }
         if (recs.isEmpty()) return TurnSignals()
@@ -439,6 +463,12 @@ fi
             thinking = thinking,
             turnStartMs = turnStartMs,
             tokens = tokens,
+            // The model having replied IS the definitive completion for Gemini —
+            // the same record that clears inFlight above. Leaving this unset meant
+            // the stuck-turn reconcile, which is gated on turnComplete, was
+            // structurally dead for every Gemini chat: exactly the condition that
+            // produced the unstoppable spinner on Claude (2026-07-29).
+            turnComplete = last[0] == "gemini",
         )
     }
 

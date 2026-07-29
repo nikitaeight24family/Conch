@@ -279,6 +279,21 @@ internal class AgentSessionSshLifecycle(
                     "execOnLive LIVE channel failed (${e.javaClass.simpleName}: ${e.message}) for cmd=${command.take(60)} — falling back to fresh handshake",
                     e,
                 )
+                // An OPEN failure means the server refused the channel — almost
+                // always MaxSessions exhaustion on this one transport. Retrying
+                // into it never recovers: every subsystem keeps failing while the
+                // socket stays up, so the app looks connected and does nothing.
+                // on a seamless-enrolled server that reconnect needs NO FIDO tap,
+                // so this is invisible rather than something the user must fix by
+                // hand.
+                if (e is net.schmizz.sshj.connection.channel.OpenFailException ||
+                    (e.message?.contains("open failed", ignoreCase = true) == true)
+                ) {
+                    SilentlyTry.fired("SshAi-AgentSession", "evict poisoned transport") {
+                        ai.eight24family.conch.di.ServiceLocator.sshConnectionPool
+                            .evictPoisoned(server.id, "channel open refused (MaxSessions?)")
+                    }
+                }
             }
         }
         // Fallback to a fresh ssh.execute when the persistent channel

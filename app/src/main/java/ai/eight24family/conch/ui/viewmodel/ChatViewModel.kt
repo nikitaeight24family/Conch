@@ -427,6 +427,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 is AgentMessage.Error ->
                     m.text.contains("bubblewrap", ignoreCase = true) ||
                         m.text.contains("permissions.allow entries", ignoreCase = true)
+                // Subagent bookkeeping feeds the roster, never the transcript.
+                // Leaving it in the list made every record a real LazyColumn item
+                // that renders zero height — but the list's 1.dp spacing is still
+                // applied between items, so a fan-out injected a run of blank gaps
+                // into the conversation.
+                is AgentMessage.SubagentActivity -> true
                 else -> false
             }
         }
@@ -435,6 +441,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val wi = shown.indexOfFirst { it is AgentMessage.System && it.subtype == "welcome" }
         if (wi > 0) listOf(shown[wi]) + shown.filterIndexed { i, _ -> i != wi } else shown
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Live subagent roster for the open chat — the data behind the CLI's own
+     * "← 1 agent · ↓ to manage" footer, which Conch previously showed nowhere
+     * at all.
+     *
+     * Folded from the RAW per-session list, not from [messages]: subagent
+     * activity is deliberately not a transcript row, so it never survives the
+     * de-noising above.
+     */
+    val subagents: StateFlow<List<ai.eight24family.conch.agent.SubagentRun>> =
+        combine(_localSessionId, _messagesBySession) { id, byId ->
+            ai.eight24family.conch.agent.foldSubagents(
+                if (id == null) emptyList() else byId[id].orEmpty(),
+            )
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Phone-bridge plumbing is invisible: the WHOLE handshake turn — the injected
      * prompt, the `conch-bridge ping` Bash call, the `pong` result, the agent's task
@@ -511,7 +533,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val tailPollCoord by lazy {
         ChatViewModelTailPoll(
             backgroundedSince = { backgroundedSince },
-            streamLastFedMs = { sid -> lastStreamUpdate[sid] },
+            // ⚠ Key mismatch, fixed: tailPoll passes the CLI RESUME id, but every
+            // writer of lastStreamUpdate keys by the per-open localId (a fresh
+            // UUID). The two are never equal, so this lookup always returned null
+            // and the double-add guard it feeds was dead code. tailPoll runs for
+            // the open chat, so resolve against that chat's local id.
+            streamLastFedMs = { _ -> _localSessionId.value?.let { lastStreamUpdate[it] } },
             // The currently-displayed session's live pending question/permission —
             // authoritative WAITING-FOR-USER signal (never reaches the JSONL).
             pendingControl = { activeSessions[_localSessionId.value]?.hasPendingControl() ?: false },
@@ -665,8 +692,29 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // Already installed → no dialog; the session just starts using it.
             val avail = ai.eight24family.conch.diagnostics.BridgeInstaller.bundledVersion
             val cur = status.version
-            _bridgeUpdateNotice.value =
-                if (cur != null && cur != "?" && avail != "?" && cur != avail) "v$cur → v$avail" else null
+            val stale = cur != null && cur != "?" && avail != "?" && cur != avail
+            if (stale) {
+                // REFRESH IT, don't just mention it. This used to only set a
+                // notice, so a server kept running whatever script it was given
+                // months ago and every verb added since failed as "unknown
+                // subcommand" — the agent then tells the user it has no access to
+                // something the app plainly supports (user, 2026-07-29: the mic).
+                //
+                // Safe to do without re-asking: it is OUR script, the write is
+                // idempotent, the user already consented to the bridge on this
+                // host, and no new capability is granted by the refresh itself —
+                // the new verbs are gated by their own phone-side switches, which
+                // stay off until the user flips them.
+                val upd = ai.eight24family.conch.diagnostics.BridgeInstaller.install(serverId)
+                android.util.Log.i(
+                    "SshAi-BridgeInstall",
+                    "auto-updated bridge on $serverId: v$cur → v$avail ok=${upd.success}",
+                )
+                _bridgeUpdateNotice.value = if (upd.success) "bridge updated v$cur → v$avail"
+                else "bridge is v$cur, this app ships v$avail — update failed"
+            } else {
+                _bridgeUpdateNotice.value = null
+            }
             activateBridgeForThisChat()
         }
     }
@@ -900,6 +948,38 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
+    /** True once we've told the user we're offline; reset when the link returns,
+     *  so a long offline stretch says it once instead of on every send. */
+    @Volatile
+    private var offlineNoticeShown = false
+
+    /**
+     * Watch connectivity and flush the outbox the moment the link is validated
+     * again, so a prompt typed with no internet lands by itself — the user
+     * shouldn't have to remember to press send again (user, 2026-07-27).
+     */
+    private fun observeConnectivityForOutbox() {
+        viewModelScope.launch {
+            ai.eight24family.conch.util.NetworkCost.online.collect { up ->
+                if (!up) return@collect
+                offlineNoticeShown = false
+                if (_outbox.value.isEmpty()) return@collect
+                val sid = _localSessionId.value ?: return@collect
+                val s = activeSessions[sid] ?: return@collect
+                // Only drain into an idle session — a running turn already has
+                // drainOutbox wired to its completion, and draining twice would
+                // send the same message on both paths.
+                if (_stateBySession.value[sid] !is SessionState.Working) {
+                    android.util.Log.i(
+                        "SshAi-Turn",
+                        "network back — draining ${_outbox.value.size} queued message(s)",
+                    )
+                    drainOutbox(s)
+                }
+            }
+        }
+    }
+
     /** Drop a still-queued message before it's sent (the ✕ on its queue row). */
     fun cancelQueued(id: String) {
         _outbox.update { lst -> lst.filterNot { it.id == id } }
@@ -909,10 +989,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  new turn, so the rest stay queued+cancelable and drain one-by-one as each
      *  turn ends. */
     private fun drainOutbox(s: AgentSession) {
-        val next = _outbox.value.firstOrNull() ?: return
-        _outbox.update { it.drop(1) }
+        // ATOMIC take. This used to read the head and drop it in two steps, and
+        // the gap between them is a race: two callers both see the same head and
+        // BOTH send it. Harmless while turn-completion was the only caller —
+        // then the offline outbox added a second one (network-back drain), and
+        // the same prompt went out twice, each starting its own turn (user,
+        // 2026-07-29: two identical bubbles, second turn still running while the
+        // first had already answered). `update` is a compareAndSet loop, so the
+        // head is claimed by exactly one caller.
+        var next: QueuedMessage? = null
+        _outbox.update { lst ->
+            next = lst.firstOrNull()
+            if (lst.isEmpty()) lst else lst.drop(1)
+        }
+        val claimed = next ?: return
         viewModelScope.launch {
-            s.send(next.text, next.imagePaths)
+            s.send(claimed.text, claimed.imagePaths)
             val newId = s.agentSessionId
             if (newId != null && _resumeId.value != newId) {
                 _resumeId.value = newId
@@ -1180,6 +1272,8 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val availableModels: StateFlow<Map<String, String>> get() = modelsCoord.availableModels
     val unavailableModelLabels: StateFlow<Set<String>> get() = modelsCoord.unavailableModelLabels
     val modelsProbing: StateFlow<Boolean> get() = modelsCoord.modelsProbing
+    val modelsStale: StateFlow<Boolean> get() = modelsCoord.modelsStale
+    val observationNewerThanPick: StateFlow<Boolean> get() = modelsCoord.observationNewerThanPick
     val defaultModel: StateFlow<String?> get() = modelsCoord.defaultModel
     val defaultReasoning: StateFlow<String?> get() = modelsCoord.defaultReasoning
     val sessionInitialModel: StateFlow<String?> get() = modelsCoord.sessionInitialModel
@@ -1208,12 +1302,46 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * show a stale list. The dropdown shows the cached list instantly; this
      * refreshes it in place when the probe lands. No-op if a probe is
      * already in flight (overlap guard) or no live session yet. */
+    /** Guards the pooled (no-live-session) catalog probe — see below. */
+    private val pooledProbeInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
     fun onModelPickerOpened() {
         if (modelsCoord.modelsProbing.value) return
-        val sid = _localSessionId.value ?: return
-        val s = activeSessions[sid] ?: return
+        val s = _localSessionId.value?.let { activeSessions[it] }
+        if (s != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                modelsCoord.probeAvailableModels(s, force = true)
+            }
+            return
+        }
+        // NO live session yet — a fresh chat before its first message. This used
+        // to `return` here, so the picker on a new chat NEVER probed: it showed a
+        // stale cached list and `claudeUnavailableLabels` stayed empty, meaning a
+        // credit-gated model (Fable 5 · Requires usage credits) rendered as a
+        // perfectly healthy row the user could pick — and the session would then
+        // silently fall back (see MODEL-CREDIT-GATE-1). A fresh chat is exactly
+        // when choosing the model still MATTERS, so it must probe too.
+        //
+        // Ride the pooled, already-authenticated client the same way the startup
+        // warm-up does — `probeAndPersist` never initiates a handshake, so an SK
+        // server can't be made to demand a FIDO touch from a mere picker tap.
+        // Nothing to ride (not connected) → leave the cached list alone.
+        val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return
+        // ⚠ IN-FLIGHT GUARD. This probe spawns an interactive `claude` PTY on the
+        // SHARED pooled client. modelsProbing (checked above) is only set by the
+        // live-session path, so without this flag every re-open of the picker
+        // stacked another PTY on the same transport — enough of them exhaust the
+        // server's MaxSessions and then NOTHING else can open a channel, which
+        // takes the whole chat down with it.
+        if (!pooledProbeInFlight.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
-            modelsCoord.probeAvailableModels(s, force = true)
+            try {
+                ai.eight24family.conch.data.ModelCatalogPrefetcher.probeAndPersist(
+                    client, _currentAgent.value, serverId,
+                )
+            } finally {
+                pooledProbeInFlight.set(false)
+            }
         }
     }
 
@@ -1221,6 +1349,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun refreshServerStats() = statsCoord.refresh()
 
     init {
+        observeConnectivityForOutbox()
         viewModelScope.launch {
             val s = repo.getById(serverId) ?: return@launch
             _server.value = s
@@ -1656,12 +1785,66 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // when Anthropic ships a new flagship or suspends/restores one, the probe
             // refreshes availableModels/unavailable and the app follows with ZERO code
             // changes. NO model name is hardcoded. Explicit available pick still wins.
-            val claudePick = selectedModel.value?.takeIf { it.isNotBlank() }?.takeIf { p ->
-                (modelsCoord.availableModels.value[p] ?: p) !in unavail
+            // AN EXPLICIT PICK IS NEVER DISCARDED. This used to drop the user's
+            // choice when its label appeared in `unavail` and silently fall
+            // through to the "recommended" model — so picking Opus fifteen times
+            // still ran Sonnet, with nothing on screen saying why (user,
+            // 2026-07-27). `unavail` is populated from a session banner that
+            // lives for the whole chat, so one stale notice permanently vetoed a
+            // model the user kept choosing. If a pick really can't run, the CLI
+            // says so and the fallback note now surfaces that — which is honest;
+            // substituting a different model behind the user's back is not.
+            // THE USER'S PICK IS LAW — so read it, do not race it.
+            //
+            // `selectedModel` is a stateIn whose initial value is null until the
+            // first DataStore read lands. This line runs during chat open, so on
+            // a cold open `.value` is still null, the chain falls through to a
+            // DEFAULT, and a chat with `opus` written in its prefs gets launched
+            // on whatever the server's default happens to be — sonnet (user,
+            // 2026-07-29, with `selected_model_chat_8ce28eb6…=opus` sitting in
+            // DataStore the whole time). Await the stored value.
+            val storedPick = _resumeId.value?.let { rid ->
+                SilentlyTry.logged("SshAi-Models", "read stored model pick") {
+                    ServiceLocator.preferences.selectedModelForChat(rid).first()
+                }
+            }?.takeIf { it.isNotBlank() }
+            val claudePick = (selectedModel.value ?: storedPick)?.takeIf { it.isNotBlank() }
+            if (claudePick != null && (modelsCoord.availableModels.value[claudePick] ?: claudePick) in unavail) {
+                android.util.Log.i(
+                    "SshAi-Models",
+                    "explicit pick '$claudePick' is flagged unavailable — honouring it anyway",
+                )
             }
-            val claudeRecommended = modelsCoord.availableModels.value.entries
-                .firstOrNull { (k, label) -> k != "default" && label !in unavail }?.key
-            s.modelOverride = (if (isClaude) (claudePick ?: claudeRecommended)
+            // WHAT WE SHOW MUST BE WHAT WE SEND. This used to be "the first
+            // entry of availableModels", whose order is sonnet, fable, opus,
+            // haiku — so with no explicit pick the wire got `--model sonnet`
+            // while the topbar advertised the CLI's real default. The user saw
+            // a new chat say "Opus 5", send one message, and flip to "Sonnet 5"
+            // (2026-07-25) — because Sonnet is literally what we asked for.
+            // Use the CLI's OWN default (the ✔ row of /model, published as
+            // claudeDefaultModel) and map that label back to its menu key; the
+            // arbitrary-first-entry pick stays only as a last resort.
+            val claudeModels = modelsCoord.availableModels.value
+            val claudeRecommended = ai.eight24family.conch.agent.claude.claudeDefaultModelKey
+                ?.takeIf { k -> k.isNotBlank() && (claudeModels[k] ?: k) !in unavail }
+                ?: claudeModels.entries
+                    .firstOrNull { (k, label) -> k != "default" && label !in unavail }?.key
+            // A conversation that is ALREADY RUNNING on a model keeps it. The
+            // CLI's default is a SEED for a chat that has none — never a live
+            // input to one in progress. `claudeDefaultModelKey` is a per-agent
+            // global that any background probe can rewrite at any moment, so
+            // without this the sequence is: probe learns the server's default is
+            // Sonnet -> "launch params changed" -> the running Opus conversation
+            // is restarted on Sonnet, with the user never touching the picker
+            // (2026-07-29, caught in logcat: `default CLAUDE model: Sonnet 5` at
+            // 22:53:19, `model=sonnet` at 22:53:24, after `model=opus` at 22:51).
+            // That silently changes both the answers and the bill.
+            //
+            // The non-Claude branch already consulted the session's own model;
+            // only Claude skipped it.
+            val sessionModel = modelsCoord.currentSessionInitialModel()
+                ?.takeIf { it.isNotBlank() && (claudeModels[it] ?: it) !in unavail }
+            s.modelOverride = (if (isClaude) (claudePick ?: sessionModel ?: claudeRecommended)
                 else (selectedModel.value ?: modelsCoord.currentSessionInitialModel()))
                 ?.takeIf { it.isNotBlank() }
             s.reasoningEffortOverride = (selectedReasoning.value
@@ -2093,6 +2276,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (finalText.isBlank()) return
 
         val curState = _stateBySession.value[sid] ?: SessionState.Idle
+
+        // NO INTERNET → park it, don't lose it. Handing this to the SSH layer
+        // offline just fails somewhere deep and the text is gone; instead say so
+        // plainly in the chat and hold the message in the SAME visible outbox the
+        // busy-turn path uses (rendered above the prompt bar, each row cancelable).
+        // [onNetworkBack] drains it as soon as the link is validated again.
+        if (!ai.eight24family.conch.util.NetworkCost.isOnline()) {
+            _outbox.update {
+                it + QueuedMessage(
+                    id = UUID.randomUUID().toString(),
+                    text = finalText,
+                    displayText = trimmed,
+                    imagePaths = imagePaths,
+                    thumbs = ready.filter { r -> r.first.isImage }.map { r -> r.first.bytes },
+                    queuedAt = System.currentTimeMillis(),
+                )
+            }
+            // Say it once per offline stretch, not on every keystroke-send.
+            if (!offlineNoticeShown) {
+                offlineNoticeShown = true
+                _messagesBySession.update { m ->
+                    m + (sid to ((m[sid] ?: emptyList()) + AgentMessage.Error(
+                        UUID.randomUUID().toString(),
+                        "No internet — your message is queued and will send as soon as you're back online.",
+                    )))
+                }
+            }
+            return
+        }
+
         // A turn is already running → DON'T hand the message to the CLI now: the
         // agent would queue it internally, invisibly and uncancelably. Hold it in
         // the VISIBLE outbox (rendered above the prompt bar, each with a cancel ✕)
@@ -2391,6 +2604,28 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // account isn't painted as still-limited.
                     last is AgentMessage.UserText || last is AgentMessage.AssistantText ->
                         _cliLimitReset.value = null
+                }
+            }
+        }
+        // THE USER'S PICK IS LAW — enforced continuously, not just at open.
+        //
+        // The pick lives in DataStore and loads asynchronously, and the launch
+        // model is otherwise resolved once, at chat open, from whatever was known
+        // then. That let a chat open on a default and stay there even though the
+        // user's choice was sitting in prefs. Whenever the stored pick arrives or
+        // changes, it overrides whatever the resolution chain guessed — no probe,
+        // no default, no freshness sweep gets to move it afterwards.
+        viewModelScope.launch {
+            modelsCoord.selectedModel.collect { pick ->
+                val chosen = pick?.takeIf { it.isNotBlank() } ?: return@collect
+                val sid = _localSessionId.value ?: return@collect
+                val sess = activeSessions[sid] ?: return@collect
+                if (sess.modelOverride != chosen) {
+                    android.util.Log.i(
+                        "SshAi-Models",
+                        "explicit pick '$chosen' re-applied (was '${sess.modelOverride}')",
+                    )
+                    sess.modelOverride = chosen
                 }
             }
         }
