@@ -298,6 +298,13 @@ private fun CameraCell(
             .semantics { contentDescription = "Take a photo" },
     ) {
         if (live && onCapture != null) {
+            // The provider future can still be PENDING when the user swipes the
+            // sheet away, and both sides of this cell have to survive that:
+            // nothing may block waiting for it, and nothing may bind a camera to
+            // a cell that is already gone. `remember` inside this branch gives
+            // the flag exactly the branch's lifetime, so re-entering the
+            // viewfinder starts alive again.
+            val alive = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
             AndroidView(
                 factory = { c ->
                     PreviewView(c).also { view ->
@@ -307,15 +314,21 @@ private fun CameraCell(
                         // attach to the view that is actually composed.
                         val future = ProcessCameraProvider.getInstance(c)
                         future.addListener({
-                            SilentlyTry.fired("SshAi-ChatPrompt", "bind camera preview") {
-                                val provider = future.get()
-                                val preview = Preview.Builder().build()
-                                    .also { p -> p.setSurfaceProvider(view.surfaceProvider) }
-                                provider.unbindAll()
-                                provider.bindToLifecycle(
-                                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA,
-                                    preview, imageCapture,
-                                )
+                            // Late resolution after dismissal: binding here would
+                            // hand the camera to a dead cell and hold it against
+                            // every other app, with no DisposableEffect left to
+                            // release it.
+                            if (alive.get()) {
+                                SilentlyTry.fired("SshAi-ChatPrompt", "bind camera preview") {
+                                    val provider = future.get()
+                                    val preview = Preview.Builder().build()
+                                        .also { p -> p.setSurfaceProvider(view.surfaceProvider) }
+                                    provider.unbindAll()
+                                    provider.bindToLifecycle(
+                                        lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA,
+                                        preview, imageCapture,
+                                    )
+                                }
                             }
                         }, ContextCompat.getMainExecutor(c))
                     }
@@ -324,11 +337,27 @@ private fun CameraCell(
             )
             // Release the camera when the sheet closes — holding it would block
             // every other app's camera for as long as the chat is open.
+            //
+            // ⚠ NEVER `.get()` the provider future here. onDispose runs on the
+            // main thread, and CameraX retries provider init for up to 6 s
+            // before it completes (1.4.x raised that window from 2.5 s — see the
+            // camerax pin note in libs.versions.toml). Blocking on it while a
+            // dismissal races init parks the UI past Android's 5 s
+            // input-dispatch deadline, i.e. a real ANR rather than a stutter,
+            // and SilentlyTry cannot save us because a parked thread throws
+            // nothing. So: flip the flag synchronously, then unbind from the
+            // future's own listener once it resolves. Listeners fire in
+            // registration order on the same executor, so the bind listener
+            // above always observes `alive == false` before this one runs.
             DisposableEffect(Unit) {
                 onDispose {
-                    SilentlyTry.fired("SshAi-ChatPrompt", "release camera") {
-                        ProcessCameraProvider.getInstance(ctx).get().unbindAll()
-                    }
+                    alive.set(false)
+                    val future = ProcessCameraProvider.getInstance(ctx)
+                    future.addListener({
+                        SilentlyTry.fired("SshAi-ChatPrompt", "release camera") {
+                            future.get().unbindAll()
+                        }
+                    }, ContextCompat.getMainExecutor(ctx))
                 }
             }
             // A small glyph over the preview so the cell still reads as "shoot".

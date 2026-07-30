@@ -11,6 +11,34 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.13] — 2026-07-30
+
+Supersedes 0.2.12, which never reached anyone: its CameraX bump fixed the 16 KB
+page-size problem and introduced two runtime bugs in the same viewfinder. An
+adversarial review of the shipped commit found them before a user did.
+
+### Fixed
+- **ANR when the attachment sheet is dismissed while the camera is still
+  starting.** `onDispose` waited on the CameraX provider future on the main
+  thread. camera-core 1.3.4 stopped retrying provider init after 2.5 s, so the
+  wait was a stutter; 1.4.x replaced that with a retry policy whose timeout is
+  6 s (last attempt at ~5.5 s), which parks the UI past Android's 5 s
+  input-dispatch deadline. Emulators and devices that under-report their cameras
+  consume the whole window on every open. The release path no longer waits on
+  the future — it unbinds from the future's own callback.
+- **The camera could be left bound with nothing able to release it.** The bind
+  callback fired whenever the provider resolved, with no check that the cell was
+  still composed; because the old dispose path waited on that same future and
+  then unbound, a late resolution ordered itself after the unbind and left the
+  camera held against every other app — the exact outcome that code exists to
+  prevent. One `alive` flag, remembered inside the viewfinder branch, now gates
+  the bind and is flipped synchronously on dispose.
+- **The Korean store listing** for 0.2.12 shipped as corrupted Hangul: five
+  wrong code points from hand-written `\uXXXX` escapes. Store notes are written
+  as literal text now, and the other two CJK locales were re-checked.
+
+---
+
 ## [0.2.12] — 2026-07-30
 
 ### Fixed
@@ -770,13 +798,14 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.12...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.13...HEAD
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
 [0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12
 [0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11
 [0.2.10]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.10

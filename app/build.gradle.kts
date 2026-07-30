@@ -97,7 +97,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.2.12"
+        val baseVersionName = "0.2.13"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -180,9 +180,10 @@ android {
             // under C:\Android\Sdk, so AGP skips it silently and the AAB ships
             // without a `com.android.tools.build.debugsymbols` entry — which is
             // exactly the "upload a symbol file" warning Play shows on every
-            // upload. Setting it here still earns its keep: any build machine
-            // that DOES have an NDK (CI) produces the symbols without a config
-            // change.
+            // upload. Setting it here costs nothing and would start producing
+            // symbols the moment a build machine with an NDK builds a bundle —
+            // note that today NO such machine exists: the Play artifact is only
+            // ever built here, and neither .github workflow runs `bundleRelease`.
             //
             // Installing an NDK just to clear that warning would buy close to
             // nothing, measured rather than assumed: every .so we ship is a
@@ -190,7 +191,8 @@ android {
             // symbol data present anywhere was `.dynsym` (exports, which Play
             // resolves from the library itself) plus a 1296-byte `.symtab` in
             // libdatastore_shared_counter.so. There is no `.debug_info` and no
-            // `.gnu_debuglink` to extract — see scratchpad/elfsections.py.
+            // `.gnu_debuglink` to extract — re-measure with
+            // `python tools/elfsections.py <aab>` before revisiting this.
             ndk {
                 debugSymbolLevel = "FULL"
             }
