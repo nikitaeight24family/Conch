@@ -11,6 +11,25 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.12] — 2026-07-30
+
+### Fixed
+- **16 KB memory pages.** One shipped native library — the image helper CameraX
+  loads for the attachment-sheet viewfinder — was built for 4 KB pages only. On a
+  device that uses 16 KB pages such a library does not load at all, so the
+  camera cell added in 0.2.11 could fail outright. The CameraX floor is now
+  1.4.0, the first release built for 16 KB pages; every other native library in
+  the bundle was already aligned.
+
+### Changed
+- `bundleRelease` now reads the ELF program headers out of the bundle it just
+  built and **fails** if any 64-bit library is aligned below 16 KB, and no
+  publish task can run without that check passing. The alignment is baked into a
+  prebuilt `.so`, so the only fix is the dependency version — which makes this
+  exactly the kind of mistake a build should refuse to repeat.
+
+---
+
 ## [0.2.11] — 2026-07-30
 
 ### Added
@@ -751,13 +770,14 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.12...HEAD
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12
 [0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11
 [0.2.10]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.10
 [0.2.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.9

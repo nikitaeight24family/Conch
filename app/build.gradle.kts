@@ -1,6 +1,10 @@
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Properties
+import java.util.zip.ZipFile
 import org.gradle.api.Project
+import com.github.triplet.gradle.androidpublisher.ReleaseStatus
 
 /**
  * Compute a strictly-monotonic [versionCode] for this build.
@@ -59,6 +63,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.sentry.android)
+    alias(libs.plugins.play.publisher)
 }
 
 android {
@@ -69,11 +74,11 @@ android {
         applicationId = "ai.eight24family.conch"
         minSdk = 26
         // Google Play target-API policy: updates submitted on/after
-        // 2026-08-31 must target Android 16 (API 36). Bumped 35 → 36.
-        // No manifest changes needed — the app is already adaptive
-        // (resizeableActivity, no orientation lock) so API 36's large-screen
-        // resizability/orientation enforcement is a no-op, and 16 KB
-        // page-size support was already required at target 35.
+        // 2026-08-31 must target Android 16 (API 36). Bumped 35 → 36
+        // (up, never down — see CLAUDE.md §8). No manifest/runtime changes:
+        // app is already adaptive (resizeableActivity, no orientation lock),
+        // edge-to-edge + dataSync timeout + 16 KB pages all already applied
+        // at target 35. compileSdk stays 37.
         targetSdk = 36
         // versionCode is sourced from `gitCommitCount()` so every push
         // produces a strictly-monotonic value Play Console will accept.
@@ -83,7 +88,17 @@ android {
         versionCode = computeVersionCode(project)
         // Live on Google Play. versionCode stays auto (git commit count) —
         // strictly monotonic, never reset, independent of this label.
-        versionName = "0.2.11"
+        //
+        // versionName rule: `baseVersionName` is the CLEAN name that ships to
+        // GitHub/Play — set to the NEXT version being worked toward. It reaches
+        // the store ONLY via a full release build (`assembleRelease` /
+        // `bundleRelease`, NO -PfastRelease). LOCAL on-device dev builds always
+        // use `-PfastRelease`, and those get a `-nightly` suffix so the phone
+        // NEVER claims the same version string as the published store build.
+        // Per-build the nightly is still distinguishable by its git-derived
+        // versionCode, shown in About as "build N".
+        val baseVersionName = "0.2.12"
+        versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -157,14 +172,25 @@ android {
             val fastRelease = project.hasProperty("fastRelease")
             isMinifyEnabled = !fastRelease
             isShrinkResources = !fastRelease
-            // Bundle native debug symbols (.so → symbol tables + line info)
-            // into the AAB's BUNDLE-METADATA so Play can symbolicate native
-            // crash / ANR stacks. We DO ship native code transitively
-            // (sentry-android-ndk, conscrypt, etc.), so the old "no native
-            // code" assumption was wrong — Play warns on every upload until
-            // this is set. Symbols are NOT shipped to users; Play strips them
-            // for distribution and keeps them only for de-obfuscation.
-            // FULL = function names + file/line; best ANR/crash readability.
+            // Bundle native debug symbols into the AAB's BUNDLE-METADATA so
+            // Play can symbolicate native crash / ANR stacks.
+            //
+            // ⚠ ON THIS MACHINE IT IS A NO-OP, and that is deliberate. The
+            // extraction task shells out to the NDK's objcopy; there is no NDK
+            // under C:\Android\Sdk, so AGP skips it silently and the AAB ships
+            // without a `com.android.tools.build.debugsymbols` entry — which is
+            // exactly the "upload a symbol file" warning Play shows on every
+            // upload. Setting it here still earns its keep: any build machine
+            // that DOES have an NDK (CI) produces the symbols without a config
+            // change.
+            //
+            // Installing an NDK just to clear that warning would buy close to
+            // nothing, measured rather than assumed: every .so we ship is a
+            // stripped third-party prebuilt. In the 0.2.11 bundle the only
+            // symbol data present anywhere was `.dynsym` (exports, which Play
+            // resolves from the library itself) plus a 1296-byte `.symtab` in
+            // libdatastore_shared_counter.so. There is no `.debug_info` and no
+            // `.gnu_debuglink` to extract — see scratchpad/elfsections.py.
             ndk {
                 debugSymbolLevel = "FULL"
             }
@@ -364,7 +390,7 @@ dependencies {
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
 
-    // CameraX — live viewfinder in the attachment sheet.
+    // CameraX — live viewfinder in the attachment sheet (Telegram-style first cell).
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
@@ -398,3 +424,126 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
 }
+
+// ── Google Play publishing (gradle-play-publisher) ──────────────────────────
+// Uploads the signed AAB + "What's new" to Play via the Developer API, so an
+// update is one command (`./gradlew publishReleaseBundle`) instead of a manual
+// Console upload.
+//
+// SECRETS: the service-account JSON key is NEVER committed. Its PATH is read
+// from a gradle property `playServiceAccountFile` (set locally in
+// GRADLE_USER_HOME/gradle.properties — bang-free, out of git) or the
+// PLAY_SERVICE_ACCOUNT_JSON env var. If neither is set, the credentials aren't
+// wired and the publish tasks fail loudly rather than doing anything surprising.
+play {
+    val credPath = providers.gradleProperty("playServiceAccountFile").orNull
+        ?: System.getenv("PLAY_SERVICE_ACCOUNT_JSON")
+    if (credPath != null) serviceAccountCredentials.set(file(credPath))
+    // Default to the INTERNAL testing track so production users never get an
+    // accidental push. Target another track per-run, e.g.:
+    //   ./gradlew publishReleaseBundle -Pplaytrack=production
+    track.set(providers.gradleProperty("playtrack").orElse("internal"))
+    // Full release (no staged fraction). For a staged production rollout use
+    // -Pplaytrack=production with a userFraction override later.
+    releaseStatus.set(ReleaseStatus.COMPLETED)
+    // We hand GPP the AAB, not APKs.
+    defaultToAppBundles.set(true)
+}
+
+// ── 16 KB page-size gate ────────────────────────────────────────────────────
+// Google Play rejects a bundle whose 64-bit native libraries are not
+// 16 KB-page-safe, and on a 16 KB-page device such a library does not load at
+// all — the feature behind it simply breaks. 0.2.11 shipped one (camera-core
+// 1.3.4's libimage_processing_util_jni.so) and Play caught it, not us.
+//
+// The check reads the ELF program headers straight out of the AAB: every
+// PT_LOAD segment of every arm64-v8a / x86_64 `.so` must declare
+// p_align >= 16384. It is deliberately dependency-free (java.util.zip +
+// ByteBuffer) so it runs identically here and on CI, with no NDK and no Python.
+//
+// NOTE the failure mode this guards against: we ship no native code of our own,
+// so the offender is always a transitive prebuilt, and the only fix is the
+// dependency version. Neither zipalign nor any packaging flag can re-align a
+// prebuilt .so — see INVARIANTS.md (2026-07-30).
+abstract class VerifyNativeAlignment : DefaultTask() {
+    @get:org.gradle.api.tasks.InputFile
+    abstract val bundle: RegularFileProperty
+
+    @get:org.gradle.api.tasks.OutputFile
+    abstract val report: RegularFileProperty
+
+    @TaskAction
+    fun verify() {
+        val required = 16384L
+        val lines = mutableListOf<String>()
+        val bad = mutableListOf<String>()
+        // NOTE the imports at the top of this script: inside a Gradle Kotlin DSL
+        // build file the identifier `java` is the JavaPluginExtension, so a
+        // fully-qualified `java.util.zip.ZipFile` does NOT compile here.
+        ZipFile(bundle.get().asFile).use { zip ->
+            zip.entries().asSequence()
+                .filter { e -> e.name.endsWith(".so") }
+                .filter { e ->
+                    e.name.split('/').any { it == "arm64-v8a" || it == "x86_64" }
+                }
+                .sortedBy { it.name }
+                .forEach { entry ->
+                    val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                    val worst = minLoadAlign(bytes) ?: return@forEach
+                    lines += "${if (worst >= required) "OK " else "BAD"}  $worst  ${entry.name}"
+                    if (worst < required) bad += "${entry.name} (p_align=$worst)"
+                }
+        }
+        report.get().asFile.writeText(lines.joinToString("\n", postfix = "\n"))
+        lines.forEach { logger.lifecycle("  $it") }
+        if (bad.isNotEmpty()) {
+            throw GradleException(
+                "16 KB page-size gate FAILED -- these 64-bit libraries are aligned " +
+                    "below $required and Play will reject the bundle:\n" +
+                    bad.joinToString("\n") { "  - $it" } +
+                    "\n\nFix the DEPENDENCY that ships the library (bump to a build " +
+                    "made with -Wl,-z,max-page-size=16384). Repacking or zipaligning " +
+                    "cannot change a prebuilt .so's segment alignment."
+            )
+        }
+        logger.lifecycle("16 KB page-size gate: ${lines.size} 64-bit libraries, all aligned.")
+    }
+
+    /** Smallest `p_align` across the PT_LOAD segments of a 64-bit LE ELF. */
+    private fun minLoadAlign(data: ByteArray): Long? {
+        if (data.size < 64) return null
+        if (!(data[0] == 0x7F.toByte() && data[1] == 'E'.code.toByte() &&
+                data[2] == 'L'.code.toByte() && data[3] == 'F'.code.toByte())
+        ) return null
+        if (data[4] != 2.toByte()) return null          // ELFCLASS64 only
+        val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val phoff = bb.getLong(0x20)
+        val phentsize = bb.getShort(0x36).toInt() and 0xFFFF
+        val phnum = bb.getShort(0x38).toInt() and 0xFFFF
+        var worst = Long.MAX_VALUE
+        for (i in 0 until phnum) {
+            val off = (phoff + i.toLong() * phentsize).toInt()
+            if (off < 0 || off + 0x38 > data.size) break
+            if (bb.getInt(off) != 1) continue           // PT_LOAD
+            worst = minOf(worst, bb.getLong(off + 0x30))
+        }
+        return worst.takeIf { it != Long.MAX_VALUE }
+    }
+}
+
+val verifyReleaseNativeAlignment =
+    tasks.register<VerifyNativeAlignment>("verifyReleaseNativeAlignment") {
+        group = "verification"
+        description = "Fails if any 64-bit .so in the release AAB is not 16 KB-page aligned."
+        bundle.set(layout.buildDirectory.file("outputs/bundle/release/app-release.aab"))
+        report.set(layout.buildDirectory.file("reports/native-align/release.txt"))
+        dependsOn("bundleRelease")
+    }
+
+// A plain `bundleRelease` is verified too — that is the artifact a human uploads
+// by hand — and no publish task may run without the gate having passed.
+tasks.matching { it.name == "bundleRelease" }.configureEach {
+    finalizedBy(verifyReleaseNativeAlignment)
+}
+tasks.matching { it.name == "publishReleaseBundle" || it.name == "publishBundle" }
+    .configureEach { dependsOn(verifyReleaseNativeAlignment) }

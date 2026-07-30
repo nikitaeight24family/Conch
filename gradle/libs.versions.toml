@@ -2,14 +2,40 @@
 agp = "9.2.0"
 kotlin = "2.3.21"
 ksp = "2.3.8"
+# gradle-play-publisher — 4.0.0 is the AGP-9 compatible release. Uploads the
+# signed AAB + release notes to Play via the Developer API (service account).
+play = "4.0.0"
 
 # Held at 1.16.0: 1.17.0+ requires compileSdk 36 and AGP 8.9.1+, both out of
 # scope here (separate concerns from the dep-bump pass). Revisit alongside
 # the AGP / compileSdk upgrade.
 # CameraX for the live viewfinder in the attachment sheet's first grid cell.
-# Held at 1.3.4 deliberately: 1.4.x pulls androidx.lifecycle 2.9.x transitively,
-# and this project pins lifecycle at 2.8.7.
-camerax = "1.3.4"
+#
+# ⚠ FLOOR IS 1.4.0 — DO NOT GO BACK TO 1.3.x. Play rejects 64-bit native
+# libraries whose ELF load segments are aligned to 4 KB instead of 16 KB, and
+# camera-core 1.3.4 ships `libimage_processing_util_jni.so` built with
+# max-page-size=4096. It was the ONLY offending library in the 0.2.11 bundle
+# (versionCode 616): sentry, datastore and graphics-path were all already at
+# 16384. zipalign cannot fix this — the alignment is baked into the prebuilt
+# .so, so the fix is the dependency version and nothing else. 1.4.0 is the
+# first release built with a 16 KB page size. `bundleRelease` now gates on this
+# itself (`:app:verifyReleaseNativeAlignment`); to vet a candidate BEFORE
+# pinning it, run `python tools/elfalign.py <the .aar>` on the artifact from
+# dl.google.com — that is how 1.4.0 was identified as the floor.
+#
+# The old pin note said 1.4.x drags in androidx.lifecycle 2.9.x, whose
+# NonNullableMutableLiveDataDetector crashed lintVitalAnalyzeRelease. That was
+# true under AGP 8.7.3. It stopped being a reason to hold CameraX back for two
+# independent reasons, both verified with
+# `./gradlew :app:dependencies --configuration releaseRuntimeClasspath`:
+#   1. lifecycle ALREADY resolves to 2.9.4 for every module in this project
+#      (`lifecycle-runtime-ktx:2.8.7 -> 2.9.4`) — something else outvoted the
+#      2.8.7 pin long ago, and 0.2.11 shipped on 2.9.4 without a lint crash
+#      under AGP 9.2.0. The "held at 2.8.7" notes below are stale in the same
+#      way; they describe an AGP we no longer use.
+#   2. camera-lifecycle 1.4.2 only asks for lifecycle-common 2.1.0 anyway, so
+#      the bump adds nothing to that conflict either way.
+camerax = "1.4.2"
 coreKtx = "1.16.0"
 # Held at 2.8.7: 2.9.x+ bundles a NonNullableMutableLiveDataDetector lint
 # rule built against a newer kotlin-compiler than AGP 8.7.3 ships, causing
@@ -161,3 +187,4 @@ kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "ko
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 sentry-android = { id = "io.sentry.android.gradle", version.ref = "sentryPlugin" }
+play-publisher = { id = "com.github.triplet.play", version.ref = "play" }
