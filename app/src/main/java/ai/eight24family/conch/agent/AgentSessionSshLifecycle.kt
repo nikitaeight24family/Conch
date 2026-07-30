@@ -114,6 +114,29 @@ internal class AgentSessionSshLifecycle(
     }
 
     /**
+     * The transport to actually USE right now — our captured client if it is
+     * still up, otherwise whatever live client the pool currently holds for this
+     * server.
+     *
+     * ⚠ [sshClient] is captured ONCE in `start()` and never re-bound, while the
+     * pool legitimately throws transports away and builds new ones underneath
+     * us: `evictPoisoned` on a MaxSessions failure, `acquire` rebuilding a dead
+     * cached client, and the service watchdog silently re-connecting every
+     * held-but-down server after a network change. Every consumer that read the
+     * captured field kept talking to a corpse while the pool held a working
+     * connection — that is how a file upload could report "SSH not connected"
+     * seconds after the app had silently reconnected.
+     *
+     * `peek` ONLY — deliberately no [openSshClient] here. That would `acquire`
+     * a second reference against the single `release` in [close] and leak the
+     * pool's refcount, so this never resurrects a server the user has hung up
+     * on; it only notices a transport that already exists.
+     */
+    fun liveClient(): SSHClient? =
+        sshClient?.takeIf { it.isConnected }
+            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+
+    /**
      * Acquire an authenticated [SSHClient] for this AgentSession via
      * the shared [ai.eight24family.conch.ssh.SshConnectionPool]. First
      * acquirer on a given server pays the auth cost (one NFC touch on

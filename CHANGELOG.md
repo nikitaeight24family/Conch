@@ -11,6 +11,45 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.2.14] — 2026-07-30
+
+### Fixed
+- **Tapping the camera in the attachment sheet opens the camera.** It used to
+  fire the shutter the instant you touched the preview, so every tap read as
+  "open the camera" cost a 2.5 MB attachment nobody asked for. The viewfinder is
+  an affordance, not a shutter: the photo arrives after you press the shutter in
+  the camera, and no capture pipeline is bound to the preview at all.
+- **A photo attached from the camera renders as a photo.** The streaming
+  attachment path hardcoded `isImage = false`, so a JPEG handed over with
+  `image/jpeg` and a `.jpg` name still drew as a generic document tile.
+- **"SSH not connected" no longer appears while the connection is up.** The
+  transfer paths read an `SSHClient` captured once when the session started,
+  while the pool legitimately evicts and rebuilds transports underneath
+  (poisoned channel, dead cached client, the watchdog's silent reconnect after a
+  network change) — so an upload aborted against a corpse seconds after the app
+  had reconnected. They now ask for a live client.
+- **A failed upload says which file and why, and stops the send.** The failure
+  used to be a row in the transcript that named no file, blamed SSH, advised a
+  pull-to-refresh that cannot retry an upload, and stayed in history to be
+  replayed on every reopen — while `send()` quietly dropped the attachment and
+  posted the text anyway, so the model was asked about a photo it never
+  received.
+
+### Changed
+- Recent photos are **three to a row**, five once the window is at least 600dp
+  wide (an unfolded book foldable, a tablet, a DeX window). The height cap is
+  derived from the real tile size instead of a constant that silently encoded
+  four columns, and thumbnails are requested at 512px so the bigger tiles stay
+  sharp.
+- `androidx.fragment` is pinned to 1.8.9 (with appcompat 1.7.1): Play's SDK Index
+  flagged the 1.1.0 that arrived transitively through `camera-view`. The release
+  APK got 218 KB smaller.
+- The 16 KB alignment gate now fails on an archive it could not inspect — an
+  unreadable 64-bit ELF, or 32-bit libraries with no 64-bit ones — instead of
+  reporting success after checking nothing.
+
+---
+
 ## [0.2.13] — 2026-07-30
 
 Supersedes 0.2.12, which never reached anyone: its CameraX bump fixed the 16 KB
@@ -798,13 +837,14 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.13...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.14...HEAD
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
 [0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12
 [0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11

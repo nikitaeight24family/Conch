@@ -6,7 +6,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.connection.channel.direct.Session
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
@@ -16,7 +15,6 @@ import java.util.concurrent.TimeUnit
  */
 internal class AgentSessionFileTransfer(
     private val sshLifecycle: AgentSessionSshLifecycle,
-    private val history: AgentSessionHistory,
     private val state: StateFlow<SessionState>,
 ) {
 
@@ -37,8 +35,11 @@ internal class AgentSessionFileTransfer(
     suspend fun uploadFile(
         bytes: ByteArray,
         displayName: String,
-        onProgress: (Float) -> Unit = {}
-    ): String? = uploadStream({ java.io.ByteArrayInputStream(bytes) }, bytes.size.toLong(), displayName, onProgress)
+        onProgress: (Float) -> Unit = {},
+        onFailure: (String) -> Unit = {},
+    ): String? = uploadStream(
+        { java.io.ByteArrayInputStream(bytes) }, bytes.size.toLong(), displayName, onProgress, onFailure,
+    )
 
     /**
      * Streaming upload — reads the source in 64 KiB chunks straight to the
@@ -52,22 +53,30 @@ internal class AgentSessionFileTransfer(
         open: () -> java.io.InputStream,
         total: Long,
         displayName: String,
-        onProgress: (Float) -> Unit = {}
+        onProgress: (Float) -> Unit = {},
+        onFailure: (String) -> Unit = {},
     ): String? = withContext(Dispatchers.IO) {
         val tag = "SshAi-Upload"
         val t0 = System.currentTimeMillis()
         android.util.Log.d(tag, "begin name=$displayName size=${total}B sessionState=${state.value}")
 
-        val client = sshLifecycle.sshClient
-        if (client == null) {
-            android.util.Log.w(tag, "abort: sshClient is null")
-            return@withContext null
+        // Report the reason to the CALLER (it lands on the attachment chip),
+        // never into the chat transcript. A failed upload is a composer event: it
+        // belongs on the thing the user staged, next to the X that removes it —
+        // not as a permanent turn in the conversation with the agent, which is
+        // where two rows of "SSH not connected — pull-down to retry" came from
+        // while the connection was fine and pull-to-refresh could not retry an
+        // upload anyway.
+        fun fail(reason: String): String? {
+            android.util.Log.w(tag, "upload failed: $reason")
+            onFailure(reason)
+            return null
         }
-        if (!client.isConnected) {
-            android.util.Log.w(tag, "abort: client not connected")
-            history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "SSH not connected — pull-down to retry"))
-            return@withContext null
-        }
+
+        // liveClient(), never the captured field — see its KDoc. The pool rebuilds
+        // transports underneath us, and the old code aborted against a corpse.
+        val client = sshLifecycle.liveClient()
+            ?: return@withContext fail("no SSH connection")
         // Wait briefly until the session leaves Bootstrapping so we don't race
         // the agent startup channel. A stalled boot would otherwise translate
         // into a "stuck at 0%" upload bar.
@@ -94,8 +103,7 @@ internal class AgentSessionFileTransfer(
         val mkRes = sshLifecycle.execOnLive("mkdir -p $remoteDir && [ -d $remoteDir ] && echo SSHAI_MKOK")
         if (mkRes?.contains("SSHAI_MKOK") != true) {
             android.util.Log.w(tag, "upload prepare failed: execOnLive=${mkRes?.let { "\"${it.take(120)}\" (ran, but no OK)" } ?: "null (SSH exec did not run — see execOnLive catch)"}")
-            history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "Couldn't prepare the upload on the server — pull down to retry"))
-            return@withContext null
+            return@withContext fail("server would not accept the upload folder")
         }
         android.util.Log.d(tag, "mkdir ok")
 
@@ -157,16 +165,10 @@ internal class AgentSessionFileTransfer(
                 .firstOrNull { it.startsWith("SSHAI_ERR_") }
                 ?.removePrefix("SSHAI_ERR_")
                 ?: ("exit=" + exit)
-            android.util.Log.w(tag, "upload failed: $err")
-            history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "Upload failed: $err"))
-            return@withContext null
+            return@withContext fail(err)
         } catch (t: Throwable) {
             android.util.Log.e(tag, "exception during upload", t)
-            history.emitMsg(AgentMessage.Error(
-                UUID.randomUUID().toString(),
-                "Upload failed: ${t.message ?: t.javaClass.simpleName}"
-            ))
-            return@withContext null
+            return@withContext fail(t.message ?: t.javaClass.simpleName)
         } finally {
             SilentlyTry.fired("SshAi-AgentSession", "close upload ssh session") { sess?.close() }
         }
@@ -197,10 +199,9 @@ internal class AgentSessionFileTransfer(
         onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
     ): AgentSession.DownloadOutcome = withContext(Dispatchers.IO) {
         val tag = "SshAi-Download"
-        val client = sshLifecycle.sshClient
-        if (client == null || !client.isConnected) {
-            return@withContext AgentSession.DownloadOutcome.Failed("SSH not connected")
-        }
+        // Same stale-capture bug as the upload path had; ask for a live transport.
+        val client = sshLifecycle.liveClient()
+            ?: return@withContext AgentSession.DownloadOutcome.Failed("no SSH connection")
         // Wait briefly for bootstrap, same logic as upload.
         var spent = 0
         while (state.value is SessionState.Bootstrapping && spent < 10_000) {

@@ -643,6 +643,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  null otherwise. Drives the tiny "update in Server settings" banner. */
     private val _bridgeUpdateNotice = MutableStateFlow<String?>(null)
     val bridgeUpdateNotice: StateFlow<String?> = _bridgeUpdateNotice.asStateFlow()
+    /** Non-null when a send was refused because a staged attachment never
+     *  uploaded. Drives the one-line banner above the prompt bar.
+     *
+     *  This exists because the failure used to be invisible: `send()` dropped
+     *  every `UploadStatus.Failed` attachment and posted the text anyway, so the
+     *  user asked the model about a photo the model never received. The only clue
+     *  was an error row in the transcript that named no file and blamed SSH. */
+    private val _attachmentNotice = MutableStateFlow<String?>(null)
+    val attachmentNotice: StateFlow<String?> = _attachmentNotice.asStateFlow()
     /** SEC-1: non-null when installing the bridge onto a higher-risk host (root@
      *  / shared box). Surfaced as a red caution line in the install dialog so the
      *  user knows code-exec on that host = adb-level control of this phone. */
@@ -2235,11 +2244,28 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val trimmed = text.trim()
         // Slash commands hijack the send path — never go to the model.
         if (staged.isEmpty() && trimmed.startsWith("/") && runSlash(trimmed)) return
-        // Block while any are still uploading. Skip failed; only ready paths are appended.
+        // Block while any are still uploading. Only ready paths are appended.
         if (staged.any { it.status is UploadStatus.Uploading }) return
         val ready = staged.mapNotNull { att ->
             val st = att.status
             if (st is UploadStatus.Ready) att to st.remotePath else null
+        }
+        // A failed upload used to be dropped SILENTLY here: the text went to the
+        // model, the attachment did not, and nothing on screen said so — the only
+        // hint was an error row in the transcript that named no file and lied
+        // about the cause. Refuse the send instead, and leave the failed chips
+        // where they are so the user can see which file and remove or re-attach
+        // it. Sending a question about a photo that never arrived wastes a whole
+        // turn and reads as the model ignoring him.
+        val failed = staged.filter { it.status is UploadStatus.Failed }
+        if (failed.isNotEmpty()) {
+            val why = (failed.first().status as UploadStatus.Failed).reason
+            _attachmentNotice.value = if (failed.size == 1) {
+                "${failed.first().displayName} didn't upload ($why) — remove it or try again"
+            } else {
+                "${failed.size} attachments didn't upload ($why) — remove them or try again"
+            }
+            return
         }
         if (trimmed.isEmpty() && ready.isEmpty()) return
 
@@ -2391,7 +2417,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun addFileAttachment(file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) =
         attachmentsCoord.addFileAttachment(file, displayName, mimeType, sizeBytes)
 
-    fun removeAttachment(id: String) = attachmentsCoord.removeAttachment(id)
+    fun dismissAttachmentNotice() { _attachmentNotice.value = null }
+
+    fun removeAttachment(id: String) {
+        attachmentsCoord.removeAttachment(id)
+        // The banner names a specific file; once it is gone the banner is stale.
+        _attachmentNotice.value = null
+    }
 
     fun clearAttachments() = attachmentsCoord.clearAttachments()
 

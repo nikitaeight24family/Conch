@@ -300,7 +300,7 @@ class AgentSession(
         },
     )
 
-    private val fileTransfer = AgentSessionFileTransfer(sshLifecycle, historyMod, _state)
+    private val fileTransfer = AgentSessionFileTransfer(sshLifecycle, _state)
 
     /** Agent-side session id captured from the first stream-json system event. */
     val agentSessionId: String? get() = resumeId
@@ -638,19 +638,22 @@ class AgentSession(
         object ProbeError : RemoteFileProbe
     }
 
+    /** @param onFailure the reason, for the attachment chip — NOT the transcript. */
     suspend fun uploadFile(
         bytes: ByteArray,
         displayName: String,
-        onProgress: (Float) -> Unit = {}
-    ): String? = fileTransfer.uploadFile(bytes, displayName, onProgress)
+        onProgress: (Float) -> Unit = {},
+        onFailure: (String) -> Unit = {},
+    ): String? = fileTransfer.uploadFile(bytes, displayName, onProgress, onFailure)
 
     /** Streaming upload (large files) — see [AgentSessionFileTransfer.uploadStream]. */
     suspend fun uploadStream(
         open: () -> java.io.InputStream,
         total: Long,
         displayName: String,
-        onProgress: (Float) -> Unit = {}
-    ): String? = fileTransfer.uploadStream(open, total, displayName, onProgress)
+        onProgress: (Float) -> Unit = {},
+        onFailure: (String) -> Unit = {},
+    ): String? = fileTransfer.uploadStream(open, total, displayName, onProgress, onFailure)
 
     suspend fun downloadFile(
         remotePath: String,

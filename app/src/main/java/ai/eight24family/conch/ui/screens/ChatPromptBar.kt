@@ -1109,12 +1109,9 @@ internal fun PromptBar(
                         sheetOpen = false
                         ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
                     },
-                    // Shot by our own viewfinder — already a file on disk, so it
-                    // skips the content-URI round trip a picked photo needs.
-                    onCapture = { file ->
-                        sheetOpen = false
-                        onAddFileAttachment(file, file.name, "image/jpeg", file.length())
-                    },
+                    // Cell zero opens the camera app; the shot comes back through
+                    // the same result handler a tap on the camera TILE uses, so a
+                    // photo is attached only after he presses the shutter.
                     onCameraFallback = if (hasCameraApp(ctx)) launchCamera else null,
                     modifier = Modifier.padding(bottom = 14.dp),
                 )
@@ -1257,9 +1254,32 @@ internal fun AttachmentChip(att: StagedAttachment, onRemove: () -> Unit) {
     ) {
         // Body — image preview or file tile
         if (att.isImage) {
+            // Two sources, because there are two attachment paths: small picks
+            // arrive as `bytes`, while anything streamed (a camera shot, a big
+            // pick) lives only as [StagedAttachment.localFile] and has an EMPTY
+            // `bytes` by design. Decoding only from `bytes` meant every streamed
+            // photo fell through to the document tile.
+            //
+            // Downsampled with inSampleSize rather than decoded whole: the chip is
+            // 64dp, and a 12 MP phone JPEG is ~48 MB as a full-size Bitmap — one
+            // of those per chip is how you OOM a composer.
             val bitmap: ImageBitmap? = remember(att.id) {
                 SilentlyTry.logged("SshAi-ChatPrompt", "decode attachment bitmap") {
-                    BitmapFactory.decodeByteArray(att.bytes, 0, att.bytes.size)?.asImageBitmap()
+                    val file = att.localFile
+                    if (att.bytes.isNotEmpty()) {
+                        BitmapFactory.decodeByteArray(att.bytes, 0, att.bytes.size)?.asImageBitmap()
+                    } else if (file != null && file.length() > 0L) {
+                        val probe = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(file.absolutePath, probe)
+                        var scale = 1
+                        while (probe.outWidth / (scale * 2) >= 256) scale *= 2
+                        BitmapFactory.decodeFile(
+                            file.absolutePath,
+                            BitmapFactory.Options().apply { inSampleSize = scale },
+                        )?.asImageBitmap()
+                    } else {
+                        null
+                    }
                 }
             }
             if (bitmap != null) {

@@ -121,6 +121,7 @@ fun ChatScreen(
     val bridgeStep by vm.bridgeStep.collectAsState()
     val bridgeLog by vm.bridgeLog.collectAsState()
     val bridgeUpdateNotice by vm.bridgeUpdateNotice.collectAsState()
+    val attachmentNotice by vm.attachmentNotice.collectAsState()
     val bridgeHostWarning by vm.bridgeHostWarning.collectAsState()
     androidx.compose.runtime.LaunchedEffect(bridgeStep) {
         if (bridgeStep == ChatViewModel.BridgeStep.NeedSettings) {
@@ -454,6 +455,16 @@ fun ChatScreen(
                     BridgeUpdateBanner(notice = notice, onDismiss = { vm.dismissBridgeUpdateNotice() })
                 }
 
+                // A send refused because a staged file never reached the server.
+                // Error-tinted sibling of the nudge above: it names the file and
+                // stays until he removes it, re-attaches it, or dismisses.
+                attachmentNotice?.let { notice ->
+                    AttachmentFailureBanner(
+                        notice = notice,
+                        onDismiss = { vm.dismissAttachmentNotice() },
+                    )
+                }
+
                 // Sticky-above-scroll: connect chip + search-match
                 // banner live OUTSIDE the verticalScroll Column below.
                 // Above the scroll area their height changes only
@@ -608,6 +619,30 @@ private fun BridgeUpdateBanner(notice: String, onDismiss: () -> Unit) {
         androidx.compose.material3.Text(
             "⬆ Bridge update available ($notice) — update it in Server settings",
             color = amber,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        androidx.compose.material3.TextButton(onClick = onDismiss) {
+            androidx.compose.material3.Text("dismiss")
+        }
+    }
+}
+
+/** Why a send was refused: a staged attachment never uploaded. Error-tinted
+ *  sibling of [BridgeUpdateBanner] — one line, dismissible, and it names the
+ *  file, because the failure it replaces was invisible: the text used to go to
+ *  the model while the attachment was silently dropped. */
+@Composable
+private fun AttachmentFailureBanner(notice: String, onDismiss: () -> Unit) {
+    androidx.compose.foundation.layout.Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.material3.Text(
+            "! " + notice,
+            color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
         )

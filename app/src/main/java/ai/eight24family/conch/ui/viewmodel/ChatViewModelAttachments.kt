@@ -118,15 +118,21 @@ internal class ChatViewModelAttachments(
             }
 
             android.util.Log.d(tag, "session ready (${s.state.value::class.simpleName}), starting uploadFile")
-            val path = s.uploadFile(bytes, displayName) { progress ->
-                updateAttachmentStatus(attId, UploadStatus.Uploading(progress))
-            }
+            // NAMED argument: with onFailure added, a trailing lambda would bind
+            // to it instead of onProgress and the compiler happily wires a
+            // progress handler into the failure slot.
+            var why: String? = null
+            val path = s.uploadFile(
+                bytes, displayName,
+                onProgress = { progress -> updateAttachmentStatus(attId, UploadStatus.Uploading(progress)) },
+                onFailure = { reason -> why = reason },
+            )
             android.util.Log.d(tag, "uploadFile returned path=$path")
             if (path != null) {
                 uploadCache.record(serverId, sha, path)
                 updateAttachmentStatus(attId, UploadStatus.Ready(path))
             } else {
-                updateAttachmentStatus(attId, UploadStatus.Failed("upload failed"))
+                updateAttachmentStatus(attId, UploadStatus.Failed(why ?: "upload failed"))
             }
         }
     }
@@ -140,7 +146,17 @@ internal class ChatViewModelAttachments(
      */
     fun addFileAttachment(file: java.io.File, displayName: String, mimeType: String?, sizeBytes: Long) {
         if (_attachments.value.size >= MAX_ATTACHMENTS) { file.delete(); return }
-        Telemetry.attachmentUploaded(Telemetry.AttachmentKind.FILE)
+        // This used to hardcode `isImage = false`, so EVERY streamed attachment
+        // — including a JPEG straight from the camera, handed over with
+        // mimeType="image/jpeg" and a.jpg name — rendered as a generic document
+        // tile with its raw temp filename. Same predicate as [addAttachment];
+        // `bytes` stays empty on purpose (the preview is decoded from
+        // [localFile], which is the whole point of the streaming path).
+        val isImage = mimeType?.startsWith("image/") == true ||
+            displayName.substringAfterLast('.', "").lowercase() in IMAGE_EXTS
+        Telemetry.attachmentUploaded(
+            if (isImage) Telemetry.AttachmentKind.PHOTO else Telemetry.AttachmentKind.FILE
+        )
         val attId = UUID.randomUUID().toString()
         _attachments.update {
             it + StagedAttachment(
@@ -148,7 +164,7 @@ internal class ChatViewModelAttachments(
                 displayName = displayName,
                 mimeType = mimeType,
                 bytes = ByteArray(0),
-                isImage = false,
+                isImage = isImage,
                 status = UploadStatus.Uploading(0f),
                 localFile = file,
                 sizeBytes = sizeBytes,
@@ -183,14 +199,23 @@ internal class ChatViewModelAttachments(
                     uploadCache.forget(serverId, sha)
                 }
 
-                val path = s.uploadStream({ file.inputStream() }, sizeBytes, displayName) { progress ->
-                    updateAttachmentStatus(attId, UploadStatus.Uploading(progress))
-                }
+                // The reason lands on the chip. It used to be a row in the chat
+                // transcript instead, which said "SSH not connected — pull-down to
+                // retry" on a live connection and offered a gesture that cannot
+                // retry an upload.
+                var why: String? = null
+                val path = s.uploadStream(
+                    { file.inputStream() }, sizeBytes, displayName,
+                    onProgress = { progress ->
+                        updateAttachmentStatus(attId, UploadStatus.Uploading(progress))
+                    },
+                    onFailure = { reason -> why = reason },
+                )
                 if (path != null) {
                     uploadCache.record(serverId, sha, path)
                     updateAttachmentStatus(attId, UploadStatus.Ready(path))
                 } else {
-                    updateAttachmentStatus(attId, UploadStatus.Failed("upload failed"))
+                    updateAttachmentStatus(attId, UploadStatus.Failed(why ?: "upload failed"))
                 }
             } finally {
                 // The temp copy is only a staging buffer — the bytes live on the

@@ -97,7 +97,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.2.13"
+        val baseVersionName = "0.2.14"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -304,6 +304,28 @@ sentry {
 }
 
 dependencies {
+    // Play SDK Index flagged `androidx.fragment:fragment:1.1.0` as outdated on the
+    // live release (2026-07-30). It is nobody's declared dependency here — the
+    // edge is `camera:camera-view -> appcompat:1.1.0 -> fragment:1.1.0`, and it
+    // arrived with the viewfinder in 0.2.11, NOT with the 1.3.4 -> 1.4.2 bump:
+    // camera-view 1.3.4's POM asks for the same appcompat 1.1.0.
+    //
+    // This app is pure Compose and touches no AppCompat or Fragment API (nothing
+    // extends AppCompatActivity or FragmentActivity), so the safe fix is to raise
+    // the pair rather than exclude it: excluding a declared transitive dependency
+    // risks a NoClassDefFoundError from camera-view internals, whereas raising it
+    // keeps an AndroidX-tested appcompat/fragment combination on the classpath.
+    // Constraints rather than `implementation` — we want the version floor
+    // without adding an API surface for our own code to start using by accident.
+    constraints {
+        implementation("androidx.fragment:fragment:1.8.9") {
+            because("Play SDK Index: 1.1.0 is outdated; 1.2.1+ required")
+        }
+        implementation("androidx.appcompat:appcompat:1.7.1") {
+            because("keeps appcompat paired with a fragment version AndroidX tests it against")
+        }
+    }
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -479,25 +501,49 @@ abstract class VerifyNativeAlignment : DefaultTask() {
         val required = 16384L
         val lines = mutableListOf<String>()
         val bad = mutableListOf<String>()
+        // A guard must not be able to pass by inspecting nothing, so both "no
+        // 64-bit libraries at all" and "a 64-bit library I could not read" are
+        // failures rather than skips. Neither is reachable today; that is exactly
+        // when to nail the contract down, while the expected numbers are known.
+        var native32 = 0
         // NOTE the imports at the top of this script: inside a Gradle Kotlin DSL
         // build file the identifier `java` is the JavaPluginExtension, so a
         // fully-qualified `java.util.zip.ZipFile` does NOT compile here.
         ZipFile(bundle.get().asFile).use { zip ->
             zip.entries().asSequence()
                 .filter { e -> e.name.endsWith(".so") }
-                .filter { e ->
-                    e.name.split('/').any { it == "arm64-v8a" || it == "x86_64" }
-                }
                 .sortedBy { it.name }
                 .forEach { entry ->
+                    val abis = entry.name.split('/')
+                    if (!abis.any { it == "arm64-v8a" || it == "x86_64" }) {
+                        // 16 KB pages are a 64-bit concern only; count the 32-bit
+                        // libraries so we can tell "no native code" apart from
+                        // "native code whose 64-bit slices went missing".
+                        if (abis.any { it == "armeabi-v7a" || it == "x86" }) native32++
+                        return@forEach
+                    }
                     val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                    val worst = minLoadAlign(bytes) ?: return@forEach
+                    val worst = minLoadAlign(bytes)
+                    if (worst == null) {
+                        bad += "${entry.name} (not a readable 64-bit ELF)"
+                        lines += "BAD  unreadable  ${entry.name}"
+                        return@forEach
+                    }
                     lines += "${if (worst >= required) "OK " else "BAD"}  $worst  ${entry.name}"
                     if (worst < required) bad += "${entry.name} (p_align=$worst)"
                 }
         }
         report.get().asFile.writeText(lines.joinToString("\n", postfix = "\n"))
         lines.forEach { logger.lifecycle("  $it") }
+        if (lines.isEmpty() && native32 > 0) {
+            throw GradleException(
+                "16 KB page-size gate FAILED -- the archive ships $native32 32-bit " +
+                    "native library(ies) and NOT ONE 64-bit library. Play requires a " +
+                    "64-bit slice for every native ABI, so this artifact would be " +
+                    "rejected on that ground alone, and this gate would otherwise have " +
+                    "reported success after checking nothing."
+            )
+        }
         if (bad.isNotEmpty()) {
             throw GradleException(
                 "16 KB page-size gate FAILED -- these 64-bit libraries are aligned " +

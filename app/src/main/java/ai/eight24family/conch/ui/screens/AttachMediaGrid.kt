@@ -7,8 +7,6 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -17,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
@@ -58,6 +57,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import ai.eight24family.conch.ui.window.LocalAppWindowAdaptive
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -65,7 +65,7 @@ import kotlinx.coroutines.withContext
 /**
  * The recent-media grid at the top of the attachment sheet — Telegram's most
  * recognisable piece: a live viewfinder in cell zero, then your recent photos,
- * four to a row, scrolling DOWN.
+ * three to a row (five once the window is medium-wide), scrolling DOWN.
  *
  * ⚠ THIS COSTS TWO RESTRICTED THINGS.
  *
@@ -179,23 +179,50 @@ internal suspend fun loadRecentMedia(ctx: Context, limit: Int = 120): List<Recen
         }
     }
 
-/** Columns in the grid. Four across is what the user asked for; it also makes
- *  each cell roughly twice the old two-row strip's height on a phone. */
-private const val GRID_COLUMNS = 4
+/**
+ * Columns in the grid: THREE on a phone, FIVE once the window is at least
+ * medium-wide.
+ *
+ * The threshold is `isMediumOrWider` (>= 600dp) rather than `isExpanded`
+ * (>= 840dp) deliberately: a book-style foldable's inner display lands around
+ * 700dp in portrait, so keying off EXPANDED would leave the unfolded screen on
+ * three columns — exactly the state he is asking about. Medium also catches the
+ * tablet and DeX windows, where five is right for the same reason.
+ */
+internal fun gridColumns(mediumOrWider: Boolean): Int = if (mediumOrWider) 5 else 3
+
+/**
+ * How tall the grid may get before it scrolls inside itself: three and a half
+ * rows of whatever the tile currently is.
+ *
+ * Derived, not guessed. The old `340.dp` was silently a FOUR-column number —
+ * 3.5 x 93.75dp tile + 3 x 4dp gap on a 411dp window — so changing the column
+ * count without it would have shrunk the visible grid to 2.6 rows. The half row
+ * is deliberate: a clipped row is what tells the eye the grid scrolls.
+ *
+ * @param widthDp the grid's own width, minus nothing — the horizontal
+ *   contentPadding is subtracted here.
+ */
+internal fun gridMaxHeightDp(widthDp: Float, columns: Int): Float {
+    val usable = widthDp - H_PADDING_DP * 2 - GAP_DP * (columns - 1)
+    val tile = (usable / columns).coerceAtLeast(48f)
+    return tile * 3.5f + GAP_DP * 3
+}
+
+internal const val H_PADDING_DP = 12f
+internal const val GAP_DP = 4f
 
 /**
  * The grid. Scrolls DOWN. Renders NOTHING when there is no access and nothing to
  * offer, so the caller's tile row is then the whole sheet.
  *
- * @param onCapture called with a JPEG the viewfinder just took.
- * @param onCameraFallback tapped when there is no live preview to tap — opens
- *   the system camera instead, so the cell is never a dead square.
+ * @param onCameraFallback what a tap on cell zero does: opens the system camera.
+ *   The viewfinder is a preview, never a shutter — see [CameraCell].
  */
 @Composable
 internal fun AttachMediaStrip(
     enabled: Boolean,
     onPick: (Uri) -> Unit,
-    onCapture: ((java.io.File) -> Unit)?,
     onCameraFallback: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
@@ -224,21 +251,23 @@ internal fun AttachMediaStrip(
             ) { Text("Show recent photos") }
             return@Column
         }
+        val columns = gridColumns(LocalAppWindowAdaptive.current.isMediumOrWider)
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val maxRows = gridMaxHeightDp(maxWidth.value, columns).dp
         LazyVerticalGrid(
-            columns = GridCells.Fixed(GRID_COLUMNS),
-            contentPadding = PaddingValues(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            columns = GridCells.Fixed(columns),
+            contentPadding = PaddingValues(horizontal = H_PADDING_DP.dp),
+            horizontalArrangement = Arrangement.spacedBy(GAP_DP.dp),
+            verticalArrangement = Arrangement.spacedBy(GAP_DP.dp),
             // Bounded so the sheet never swallows the screen; the grid itself
             // scrolls inside it.
-            modifier = Modifier.fillMaxWidth().heightIn(max = 340.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(max = maxRows),
         ) {
-            if (onCapture != null || onCameraFallback != null) {
+            if (onCameraFallback != null) {
                 item(key = "camera") {
                     CameraCell(
                         enabled = enabled,
                         live = camera,
-                        onCapture = onCapture,
                         onRequestCamera = { permLauncher.launch(arrayOf(Manifest.permission.CAMERA)) },
                         onFallback = onCameraFallback,
                     )
@@ -247,6 +276,7 @@ internal fun AttachMediaStrip(
             items(items, key = { it.uri.toString() }) { media ->
                 MediaCell(media = media, enabled = enabled, onClick = { onPick(media.uri) })
             }
+        }
         }
         if (access == MediaAccess.PARTIAL) {
             // Android 14+ partial grant: the app can only ever see what was
@@ -261,18 +291,25 @@ internal fun AttachMediaStrip(
 }
 
 /**
- * Cell zero: a LIVE viewfinder once CAMERA is granted, tap to shoot.
+ * Cell zero: a LIVE viewfinder once CAMERA is granted. Tapping it OPENS THE
+ * CAMERA — it does not shoot.
  *
- * Before the grant it is the same square with a camera glyph — tapping asks for
- * the permission rather than doing nothing. If the grant is refused it still
- * works: the tap falls back to the system camera app, which needs no permission
- * of ours.
+ * ⚠ It used to shoot on tap, and that was wrong. A viewfinder that fires on
+ * touch means every stray tap costs a 2.5 MB attachment the user never asked
+ * for, and he had three of them from taps he read as "open the camera". The
+ * preview is an affordance, not a shutter: the shot happens in the camera app,
+ * after HE presses the shutter, and comes back through the same
+ * ACTION_IMAGE_CAPTURE path a device without a viewfinder uses.
+ *
+ * Before the grant the cell is the same square with a camera glyph and a tap
+ * asks for the permission. Asking is not optional politeness here: once this app
+ * declares CAMERA, Android requires the grant for ACTION_IMAGE_CAPTURE too, so
+ * without it there is nothing the tap could do.
  */
 @Composable
 private fun CameraCell(
     enabled: Boolean,
     live: Boolean,
-    onCapture: ((java.io.File) -> Unit)?,
     onRequestCamera: () -> Unit,
     onFallback: (() -> Unit)?,
 ) {
@@ -280,7 +317,6 @@ private fun CameraCell(
     val cyan = MaterialTheme.colorScheme.primary
     val tint = if (enabled) cyan else MaterialTheme.colorScheme.outline
     val lifecycleOwner = LocalLifecycleOwner.current
-    val imageCapture = remember { ImageCapture.Builder().build() }
 
     Box(
         contentAlignment = Alignment.Center,
@@ -289,15 +325,11 @@ private fun CameraCell(
             .clip(RoundedCornerShape(8.dp))
             .background(tint.copy(alpha = 0.14f))
             .clickable(enabled = enabled) {
-                when {
-                    !live -> onRequestCamera()
-                    onCapture != null -> takePhoto(ctx, imageCapture, onCapture)
-                    else -> onFallback?.invoke()
-                }
+                if (live) onFallback?.invoke() else onRequestCamera()
             }
-            .semantics { contentDescription = "Take a photo" },
+            .semantics { contentDescription = "Open the camera" },
     ) {
-        if (live && onCapture != null) {
+        if (live) {
             // The provider future can still be PENDING when the user swipes the
             // sheet away, and both sides of this cell have to survive that:
             // nothing may block waiting for it, and nothing may bind a camera to
@@ -324,9 +356,14 @@ private fun CameraCell(
                                     val preview = Preview.Builder().build()
                                         .also { p -> p.setSurfaceProvider(view.surfaceProvider) }
                                     provider.unbindAll()
+                                    // Preview ONLY. No ImageCapture use case is
+                                    // bound any more: this cell cannot shoot, so
+                                    // binding a capture pipeline would reserve
+                                    // camera resources (and a JPEG encoder) for a
+                                    // button that does not exist.
                                     provider.bindToLifecycle(
                                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA,
-                                        preview, imageCapture,
+                                        preview,
                                     )
                                 }
                             }
@@ -360,7 +397,7 @@ private fun CameraCell(
                     }, ContextCompat.getMainExecutor(ctx))
                 }
             }
-            // A small glyph over the preview so the cell still reads as "shoot".
+            // A small glyph over the preview so the cell still reads as "camera".
             Icon(
                 Icons.Default.PhotoCamera,
                 contentDescription = null,
@@ -373,25 +410,6 @@ private fun CameraCell(
     }
 }
 
-/** Shoot straight into the capture folder and hand the file back. */
-private fun takePhoto(ctx: Context, capture: ImageCapture, onCapture: (java.io.File) -> Unit) {
-    SilentlyTry.fired("SshAi-ChatPrompt", "take photo") {
-        val dir = java.io.File(ctx.cacheDir, "conch_camera").apply { mkdirs() }
-        val file = java.io.File(dir, "cam_${System.currentTimeMillis()}.jpg")
-        capture.takePicture(
-            ImageCapture.OutputFileOptions.Builder(file).build(),
-            ContextCompat.getMainExecutor(ctx),
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) = onCapture(file)
-                override fun onError(exc: ImageCaptureException) {
-                    android.util.Log.w("SshAi-ChatPrompt", "capture failed: ${exc.message}")
-                    SilentlyTry.fired("SshAi-ChatPrompt", "delete failed capture") { file.delete() }
-                }
-            },
-        )
-    }
-}
-
 @Composable
 private fun MediaCell(media: RecentMedia, enabled: Boolean, onClick: () -> Unit) {
     val ctx = LocalContext.current
@@ -401,7 +419,11 @@ private fun MediaCell(media: RecentMedia, enabled: Boolean, onClick: () -> Unit)
                 // loadThumbnail asks MediaStore for a cached thumbnail — it never
                 // decodes the full image, so a 12 MP photo costs what a small one
                 // does and the grid stays smooth.
-                ctx.contentResolver.loadThumbnail(media.uri, android.util.Size(320, 320), null)
+                // 512, not 320: at three columns a tile is ~126dp, which is
+                // ~378px at 3x and ~504px at 4x — a 320px thumbnail would be
+                // visibly upscaled. Still a cached MediaStore thumbnail, so a
+                // 12 MP photo costs what a small one does.
+                ctx.contentResolver.loadThumbnail(media.uri, android.util.Size(512, 512), null)
                     .asImageBitmap()
             }
         }
