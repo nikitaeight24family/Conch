@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.Icon
@@ -62,6 +63,7 @@ internal fun ChatPromptHost(
     val anyUploading by vm.anyUploading.collectAsState()
     val attachments by vm.attachments.collectAsState()
     val customCommands by vm.customCommands.collectAsState()
+    val agentCommands by vm.agentCommands.collectAsState()
     val reconnecting by vm.reconnecting.collectAsState()
     val reconnectAttempt by vm.reconnectAttempt.collectAsState()
     val hasPending by vm.hasPending.collectAsState()
@@ -83,10 +85,12 @@ internal fun ChatPromptHost(
     // Slash-command autocomplete state. Filters built-in + user-defined
     // commands by what's typed after the leading `/` and before any
     // space.
+    // Ours first, then the user's own files, then everything the CLI itself
+    // offers (its skills included) — which the palette never showed at all.
     val acItems = if (input.startsWith("/") && !input.contains(' ')) {
         ai.eight24family.conch.agent.SlashCommands
-            .matchPrefix(input.removePrefix("/"), customCommands)
-            .take(7)
+            .matchPrefix(input.removePrefix("/"), customCommands + agentCommands)
+            .take(9)
     } else emptyList()
 
     if (acItems.isNotEmpty()) {
@@ -112,6 +116,10 @@ internal fun ChatPromptHost(
             },
         )
     }
+    // A `/loop` the CLI armed for itself: it will wake up and spend tokens with
+    // no further input, so it gets a visible countdown and a stop.
+    val loopArmed by vm.loopArmed.collectAsState()
+    loopArmed?.let { LoopStrip(armed = it, onStop = { vm.stopLoop() }) }
     // Messages typed mid-turn wait here (visible, cancelable) until the current
     // reply finishes — then they're sent in order.
     if (queuedMessages.isNotEmpty()) {
@@ -168,6 +176,77 @@ internal fun ChatPromptHost(
         onStop = { vm.stopCurrent() },
         onSend = onSend,
     )
+}
+
+/**
+ * The armed `/loop`: what it will do, when, and one tap to end it.
+ *
+ * A loop is the one thing in the app that spends money while the user is doing
+ * nothing, so it is not allowed to be invisible. The countdown is live, and the
+ * model's own one-line reason for the delay sits under it — it is the only
+ * honest answer to "why is it waiting that long".
+ */
+@Composable
+private fun LoopStrip(
+    armed: ai.eight24family.conch.agent.LoopWatch.Armed,
+    onStop: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    // Recomposes once a second while the strip is on screen; stops with it.
+    val now = androidx.compose.runtime.remember(armed) {
+        androidx.compose.runtime.mutableLongStateOf(System.currentTimeMillis())
+    }
+    androidx.compose.runtime.LaunchedEffect(armed) {
+        while (true) {
+            kotlinx.coroutines.delay(1_000)
+            now.longValue = System.currentTimeMillis()
+        }
+    }
+    val left = ((armed.dueAtMs - now.longValue).coerceAtLeast(0L) / 1000L).toInt()
+    val due = when {
+        left >= 60 -> "next run in ${left / 60}m ${left % 60}s"
+        left > 0 -> "next run in ${left}s"
+        else -> "running now"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(accent.copy(alpha = 0.08f))
+            .border(1.dp, accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+            .padding(start = 10.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            Icons.Filled.Autorenew,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(15.dp),
+        )
+        Column(modifier = Modifier.weight(1f).padding(vertical = 6.dp)) {
+            Text(
+                "Loop running · $due",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            armed.reason?.let { why ->
+                Text(
+                    why,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        androidx.compose.material3.TextButton(onClick = onStop) {
+            Text("stop", style = MaterialTheme.typography.labelMedium, color = accent)
+        }
+    }
 }
 
 /**

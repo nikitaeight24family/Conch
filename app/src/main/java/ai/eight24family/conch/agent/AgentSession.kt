@@ -181,7 +181,20 @@ class AgentSession(
             ai.eight24family.conch.agent.claude.ClaudeSpec.adoptInitState(st)
             _claudeInitState.value = st
         },
+        onLoopWakeup = { input ->
+            _loopArmed.value = input?.let { LoopWatch.read(it, System.currentTimeMillis()) }
+        },
     )
+
+    /** A `/loop` armed by the CLI in THIS live process — null when no loop is
+     *  running. Live-only on purpose: pending wakeups die with the process, so
+     *  a chip resurrected from cached history would promise a loop that isn't
+     *  there. See [LoopWatch]. */
+    private val _loopArmed = MutableStateFlow<LoopWatch.Armed?>(null)
+    val loopArmed: StateFlow<LoopWatch.Armed?> = _loopArmed.asStateFlow()
+
+    /** The loop is over — the process is gone, or the user stopped it. */
+    internal fun clearLoop() { _loopArmed.value = null }
 
     /** The CLI's own `initialize` handshake data (models / commands /
      *  subagents / account), republished on every persistent launch. Null
@@ -597,7 +610,15 @@ class AgentSession(
      * prompt still queued behind the in-flight one (Stop means "halt
      * everything", not "skip just this turn").
      */
+    /** Stop a `/loop` that is asleep between ticks. Stop-the-turn can't: there
+     *  is no turn. The CLI drops its pending wakeups on an interrupt. */
+    fun stopLoop() {
+        clearLoop()
+        if (usePersistent()) persistentStream.cancelIdleLoop() else cancelCurrent()
+    }
+
     fun cancelCurrent() {
+        clearLoop()
         // Stop = "cancel current turn AND drop everything queued behind
         // it". Cancelling just the in-flight turn while letting the
         // drainer roll to the next queued prompt would feel weird —

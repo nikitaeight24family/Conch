@@ -97,7 +97,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.3.0"
+        val baseVersionName = "0.3.1"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -330,7 +330,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.photopicker.compose)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
@@ -416,6 +415,7 @@ dependencies {
     implementation(libs.shizuku.provider)
 
     // CameraX — live viewfinder in the attachment sheet (Telegram-style first cell).
+    implementation(libs.androidx.photopicker.compose)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)

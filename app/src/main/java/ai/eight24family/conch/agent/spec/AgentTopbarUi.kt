@@ -120,6 +120,11 @@ data class TopbarModelState(
      *  every pick (user, 2026-07-25: picked Opus, chip stayed Sonnet). Only an
      *  observation that arrived AFTER the pick may override it. */
     val observationNewerThanPick: Boolean = true,
+    /** True only while the user's EFFORT pick is newer than the last effort the
+     *  session reported. Defaults to false — i.e. what the session actually
+     *  runs at wins — because showing a stale pick is how the topbar came to
+     *  print "low" over an xhigh session (2026-08-02). */
+    val reasoningPickIsNewer: Boolean = false,
     /** True while [AgentCliSpec.probeAvailableModels] is in flight. */
     val modelsProbing: Boolean,
     /** Per-chat reasoning effort pick. `null` = use the model's

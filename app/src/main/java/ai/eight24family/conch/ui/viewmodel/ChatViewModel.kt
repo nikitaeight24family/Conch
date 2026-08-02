@@ -511,6 +511,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             if (id == null) null else byId[id]
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** A `/loop` the CLI has armed in THIS chat — the model scheduled its own
+     *  next turn and will spend tokens on it with no further input. Drives the
+     *  countdown chip above the prompt bar; null = no loop running. */
+    private val _loopBySession = MutableStateFlow<Map<String, ai.eight24family.conch.agent.LoopWatch.Armed?>>(emptyMap())
+    val loopArmed: StateFlow<ai.eight24family.conch.agent.LoopWatch.Armed?> =
+        combine(_localSessionId, _loopBySession) { id, byId ->
+            if (id == null) null else byId[id]
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     private val _activeAgents = MutableStateFlow<Set<Agent>>(emptySet())
     val activeAgents: StateFlow<Set<Agent>> = _activeAgents.asStateFlow()
 
@@ -574,12 +583,30 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         kotlinx.coroutines.flow.combine(
             selectedReasoning, observedReasoning, sessionInitialReasoning, defaultReasoning,
         ) { sel, obs, init, def ->
-            sel?.takeIf { it.isNotBlank() }
-                ?: obs?.takeIf { it.isNotBlank() }
-                ?: init?.takeIf { it.isNotBlank() }
-                ?: def?.takeIf { it.isNotBlank() }
+            // ⚠ WHAT THE SESSION IS ACTUALLY RUNNING BEATS AN OLD PICK.
+            // The pick used to win unconditionally, so a stale
+            // `selected_reasoning_chat_<id>` displayed "low" over a session the
+            // CLI was running at xhigh — and the same value went on to set the
+            // thinking budget (user, 2026-08-02). The observation now wins
+            // unless the user picked AFTER it, which is the same rule the model
+            // chip follows (USER-PICK-BEATS-STALE-OBSERVATION-1).
+            val pick = sel?.takeIf { it.isNotBlank() }
+            val seen = obs?.takeIf { it.isNotBlank() }
+            when {
+                pick != null && (seen == null || reasoningPickIsNewer.value) -> pick
+                seen != null -> seen
+                else -> init?.takeIf { it.isNotBlank() } ?: def?.takeIf { it.isNotBlank() }
+            }
         }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
     }
+
+    /** True while the user's effort pick is NEWER than the last effort the
+     *  session reported — see [activeReasoningEffort]. Public for the topbar,
+     *  which must apply the SAME rule: every surface that shows the effort has
+     *  to agree, or one of them is lying (2026-08-02: the working row was fixed
+     *  and the topbar kept printing the stale pick). */
+    private val reasoningPickIsNewer: StateFlow<Boolean> get() = modelsCoord.reasoningPickIsNewer
+    val reasoningPickIsNewerFlow: StateFlow<Boolean> get() = modelsCoord.reasoningPickIsNewer
 
     // ──────── Hardware security key touch request ────────
     // Owned by `ChatViewModelSkTouch`. The public API below remains on ChatViewModel
@@ -1878,73 +1905,67 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     "explicit pick '$claudePick' is flagged unavailable — honouring it anyway",
                 )
             }
-            // WHAT WE SHOW MUST BE WHAT WE SEND. This used to be "the first
-            // entry of availableModels", whose order is sonnet, fable, opus,
-            // haiku — so with no explicit pick the wire got `--model sonnet`
-            // while the topbar advertised the CLI's real default. The user saw
-            // a new chat say "Opus 5", send one message, and flip to "Sonnet 5"
-            // (2026-07-25) — because Sonnet is literally what we asked for.
-            // Use the CLI's OWN default (the ✔ row of /model, published as
-            // claudeDefaultModel) and map that label back to its menu key; the
-            // arbitrary-first-entry pick stays only as a last resort.
+            // ⚠ WE DO NOT DICTATE THE MODEL OF AN EXISTING CONVERSATION.
+            //
+            // Every flip the user suffered was OURS: we passed `--model
+            // <something>` on every launch, and whenever that something came from
+            // a default/global/stale source the chat was forced onto another model
+            // — which busts the per-model prompt cache, so the WHOLE conversation
+            // is re-read and re-billed.
+            //
+            // So: for a chat that already exists, send `--model` ONLY when the
+            // user picked one IN THIS CHAT. No pick ⇒ send nothing ⇒ the session
+            // keeps whatever it was on. This deletes the entire class of leak —
+            // no global, no probe, no catalog order can reach an existing chat.
+            // A BRAND-NEW chat may still carry an explicit pick; with none, the
+            // CLI applies its own default and we pin whatever it actually
+            // started on (see "pin born-with model").
+            // ⚠ AND THE PIN YIELDS TO THE SESSION ITSELF. A new chat is pinned to
+            // the model it started on ("pin born-with model"), which is how a
+            // chat gets a pick the user never made. If they then switch the
+            // model INSIDE the CLI (`/model` in that very chat), our pin would
+            // drag it back on the next send — the same forced flip, just with a
+            // friendlier-looking source. So the pick only wins while it is
+            // NEWER than what the session last reported; otherwise we send
+            // nothing and the session keeps what it is on.
+            val isExistingChat = resumeIdParam != null
             val claudeModels = modelsCoord.availableModels.value
-            // WHAT WE SHOW MUST BE WHAT WE SEND — and the last resort used to
-            // break exactly that. With no known default KEY (a cold start, or
-            // any launch before the first handshake) this fell through to "the
-            // first catalog entry", whose order is arbitrary and, after the
-            // scraper→registry migration, starts with STALE keys the CLI no
-            // longer offers. Result on device: `--model sonnet` launched under
-            // an "Opus 5 1M" chip (2026-08-02).
-            //
-            // So the fallback now walks the SAME chain the chip does: the known
-            // default LABEL → the catalog entry carrying that label. Only if
-            // even that is unknown do we take the first runnable entry, and
-            // that case now means "we genuinely know nothing", not "we forgot
-            // to persist the key".
-            val defaultLabel = (modelsCoord.defaultModel.value
-                ?: ai.eight24family.conch.agent.claude.claudeDefaultModel)?.takeIf { it.isNotBlank() }
-            val claudeRecommended = ai.eight24family.conch.agent.claude.claudeDefaultModelKey
-                ?.takeIf { k -> k.isNotBlank() && (claudeModels[k] ?: k) !in unavail }
-                ?: defaultLabel
-                    ?.takeIf { it !in unavail }
-                    ?.let { label -> claudeModels.entries.firstOrNull { it.value == label }?.key }
-                ?: claudeModels.entries
-                    .firstOrNull { (k, label) -> k != "default" && label !in unavail }?.key
-            // A conversation that is ALREADY RUNNING on a model keeps it. The
-            // CLI's default is a SEED for a chat that has none — never a live
-            // input to one in progress. `claudeDefaultModelKey` is a per-agent
-            // global that any background probe can rewrite at any moment, so
-            // without this the sequence is: probe learns the server's default is
-            // Sonnet -> "launch params changed" -> the running Opus conversation
-            // is restarted on Sonnet, with the user never touching the picker
-            // (2026-07-29, caught in logcat: `default CLAUDE model: Sonnet 5` at
-            // 22:53:19, `model=sonnet` at 22:53:24, after `model=opus` at 22:51).
-            // That silently changes both the answers and the bill.
-            //
-            // The non-Claude branch already consulted the session's own model;
-            // only Claude skipped it.
-            val sessionModel = modelsCoord.currentSessionInitialModel()
-                ?.takeIf { it.isNotBlank() && (claudeModels[it] ?: it) !in unavail }
-            s.modelOverride = (if (isClaude) (claudePick ?: sessionModel ?: claudeRecommended)
-                else (selectedModel.value ?: modelsCoord.currentSessionInitialModel()))
-                ?.takeIf { it.isNotBlank() }
-            // SHOWN-MODEL-IS-SENT-MODEL-1 is decided HERE, so log every input to
-            // the decision. Without this the only symptom is a topbar and a
-            // command line disagreeing, with nothing in the log saying which
-            // source won (exactly how the 2026-08-02 'sonnet launched under an
-            // Opus chip' was invisible until it was reproduced by hand).
+            val pickBeatsSession = !modelsCoord.observationNewerThanPick.value
+            s.modelOverride = if (isClaude) {
+                claudePick?.takeIf { it.isNotBlank() && (!isExistingChat || pickBeatsSession) }
+            } else {
+                (selectedModel.value ?: modelsCoord.currentSessionInitialModel())
+                    ?.takeIf { it.isNotBlank() }
+            }
             if (isClaude) {
                 android.util.Log.i(
                     "SshAi-Models",
-                    "launch model resolve: pick=$claudePick session=$sessionModel " +
-                        "recommended=$claudeRecommended defaultKey=" +
-                        "${ai.eight24family.conch.agent.claude.claudeDefaultModelKey} " +
-                        "catalog=${claudeModels.keys} unavail=$unavail → ${s.modelOverride}",
+                    "launch model resolve: pick=$claudePick existingChat=$isExistingChat " +
+                        "pickBeatsSession=$pickBeatsSession " +
+                        "catalog=${claudeModels.keys} → ${s.modelOverride ?: "<none — session keeps its own>"}",
                 )
             }
-            s.reasoningEffortOverride = (selectedReasoning.value
-                ?: if (isClaude) null else modelsCoord.currentSessionInitialReasoning())
-                ?.takeIf { it.isNotBlank() }
+            // ⚠ AND WE DO NOT DICTATE THE EFFORT EITHER — same evidence, same
+            // law. Forcing MAX_THINKING_TOKENS onto a session that already has
+            // its own /effort setting is how an xhigh conversation came to run
+            // on the LOW budget (2026-08-02). A pick made in THIS chat is
+            // honoured; otherwise we pass nothing and the CLI keeps its own.
+            val effortPick = selectedReasoning.value?.takeIf { it.isNotBlank() }
+            val observedEffort = modelsCoord.observedReasoning.value?.takeIf { it.isNotBlank() }
+            s.reasoningEffortOverride = when {
+                !isClaude -> (effortPick ?: modelsCoord.currentSessionInitialReasoning())
+                    ?.takeIf { it.isNotBlank() }
+                effortPick != null && (observedEffort == null || modelsCoord.reasoningPickIsNewer.value) -> effortPick
+                else -> null
+            }
+            if (isClaude) {
+                android.util.Log.i(
+                    "SshAi-Models",
+                    "launch effort resolve: pick=$effortPick observed=$observedEffort " +
+                        "pickNewer=${modelsCoord.reasoningPickIsNewer.value} → " +
+                        "${s.reasoningEffortOverride ?: "<none — session keeps its own>"}",
+                )
+            }
             // Apply persisted approval/sandbox mode.
             s.approvalMode = approvalMode.value
             // Probe Claude's bundled model display names so we don't lie to
@@ -2104,6 +2125,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     }
                 }
                 launch {
+                    s.loopArmed.collect { armed ->
+                        _loopBySession.update { it + (localId to armed) }
+                    }
+                }
+                launch {
                     s.state.collect { st ->
                         _stateBySession.update { it + (localId to st) }
                         // Every state transition counts as "something happened" —
@@ -2122,7 +2148,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // relaunch). For a live chat this replaces the catalog
                     // probe entirely: same data, zero extra round-trips.
                     s.claudeInitState.collect { st ->
-                        if (st != null) modelsCoord.adoptClaudeInit(st, serverId)
+                        if (st != null) {
+                            modelsCoord.adoptClaudeInit(st, serverId)
+                            // The same handshake carries the CLI's OWN commands
+                            // and skills — 45 of them, previously invisible from
+                            // the phone. Ours still win on a name collision.
+                            slashCoord.setAgentCommands(
+                                st.commands.map { c ->
+                                    ai.eight24family.conch.agent.SlashCommand(
+                                        name = c.name,
+                                        description = c.description,
+                                        kind = ai.eight24family.conch.agent.SlashCommandKind.AGENT_BUILTIN,
+                                        acceptsArgs = c.argumentHint.isNotBlank(),
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
                 // Track which agent-session id we've already propagated so the
@@ -2881,6 +2922,39 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val chatNotice: StateFlow<String?> = _chatNotice.asStateFlow()
     fun dismissChatNotice() { _chatNotice.value = null }
 
+    // ── Compact ───────────────────────────────────────────────────────────
+    /** Pending confirmation for a manual compaction: the context numbers as
+     *  they stand, so the cost is on screen before the user agrees. */
+    data class PendingCompact(val tokens: Long, val max: Long, val percent: Int)
+
+    private val _pendingCompact = MutableStateFlow<PendingCompact?>(null)
+    val pendingCompact: StateFlow<PendingCompact?> = _pendingCompact.asStateFlow()
+
+    /** Chat menu → "compact conversation". Opens the confirmation; nothing is
+     *  sent until [confirmCompact]. */
+    fun requestCompact() {
+        val cs = costStats.value
+        val max = cs.contextMax.takeIf { it > 0L } ?: 200_000L
+        _pendingCompact.value = PendingCompact(
+            tokens = cs.contextTokens,
+            max = max,
+            percent = ((cs.contextTokens.toDouble() / max) * 100).toInt().coerceIn(0, 100),
+        )
+    }
+
+    fun cancelCompact() { _pendingCompact.value = null }
+
+    /**
+     * Run the CLI's own compaction. VERIFIED over our channel (2026-08-03): a
+     * plain `/compact` user turn makes the CLI emit `status` → `compact_boundary`
+     * — the very events the chat already renders — and the following turn reads
+     * a much smaller context. So this needs no new protocol, just the turn.
+     */
+    fun confirmCompact() {
+        _pendingCompact.value = null
+        viewModelScope.launch { send("/compact") }
+    }
+
     // ── Rewind (/rewind) ──────────────────────────────────────────────────
     // Two SEPARATE steps, deliberately: the conversation rewind is reversible
     // (the discarded branch stays in the transcript, nothing on disk moves),
@@ -3045,6 +3119,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val chosen = pick?.takeIf { it.isNotBlank() } ?: return@collect
                 val sid = _localSessionId.value ?: return@collect
                 val sess = activeSessions[sid] ?: return@collect
+                // ⚠ ONLY A PICK THAT STILL BEATS THE SESSION. This collector used
+                // to re-apply the stored pick unconditionally, so everything the
+                // launch resolution stopped doing came straight back in through
+                // here a moment later — a stale pin would switch the running
+                // conversation's model, bust its prompt cache and re-read the
+                // whole thing. Same predicate as the launch: the pick wins while
+                // it is newer than what the session last reported.
+                if (modelsCoord.observationNewerThanPick.value) {
+                    android.util.Log.i(
+                        "SshAi-Models",
+                        "stale pick '$chosen' NOT applied — the session's own model stands",
+                    )
+                    return@collect
+                }
                 if (sess.modelOverride != chosen) {
                     android.util.Log.i(
                         "SshAi-Models",
@@ -3133,6 +3221,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * starts right away. Stop = "halt what's running and go to the queued one".
      * To DISCARD a queued message instead of running it, use its ✕
      * ([cancelQueued]) — Stop no longer wipes the queue. */
+    /** Stop the armed `/loop`. Separate from [stopCurrent] because between
+     *  ticks there is no turn to stop — see AgentSession.stopLoop. */
+    fun stopLoop() {
+        val sid = _localSessionId.value ?: return
+        activeSessions[sid]?.stopLoop()
+        _loopBySession.update { it + (sid to null) }
+    }
+
     fun stopCurrent() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid] ?: return
@@ -3166,6 +3262,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // (UI subscribers).
     /** Discovered slash commands (~/.claude/commands/, etc.). */
     val customCommands: StateFlow<List<SlashCommand>> get() = slashCoord.customCommands
+
+    /** The CLI's own commands and skills (from the initialize handshake). */
+    val agentCommands: StateFlow<List<SlashCommand>> get() = slashCoord.agentCommands
 
     /** Memory editor state. */
     val memory: StateFlow<MemoryDocs> get() = slashCoord.memory

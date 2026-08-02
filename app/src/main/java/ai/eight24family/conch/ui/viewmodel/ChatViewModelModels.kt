@@ -579,10 +579,27 @@ internal class ChatViewModelModels(
         }
     }
 
+    /** The effort the session had REPORTED when the user last picked one; the
+     *  sentinel means "never picked in this chat". Mirrors [_obsAtPick]. */
+    private val _obsAtPickReasoning = MutableStateFlow<String?>(NEVER_PICKED)
+
+    /**
+     * False while the live effort observation is the same one that was on
+     * screen when the user picked — i.e. nothing new has been reported since,
+     * so the pick stands. A pick can never equal a PAST observation, so this
+     * must compare the OBSERVATION to what it was at pick time, never "did the
+     * list grow" (the mistake that cost the model chip two fixes).
+     */
+    val reasoningPickIsNewer: StateFlow<Boolean> =
+        combine(observedReasoning, _obsAtPickReasoning) { obs, atPick ->
+            atPick != NEVER_PICKED && obs == atPick
+        }.stateIn(scope, SharingStarted.Eagerly, false)
+
     /** Same isolation rules as [setModel] but for reasoning effort. */
     fun setReasoning(effort: String?, applyToLiveSession: (String?) -> Unit) {
         scope.launch {
             val prefs = ServiceLocator.preferences
+            _obsAtPickReasoning.value = observedReasoning.value
             val rid = resumeId.value
             if (rid != null) {
                 prefs.setSelectedReasoningForChat(rid, effort)

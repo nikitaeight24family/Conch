@@ -85,6 +85,35 @@ object ClaudeMessageParser {
      *  VM reads the LAST so a later change wins. */
     private const val OBSERVED_REASONING_ID = "claude-effort-observed"
 
+    /** Effort levels the CLI can stamp on a record. Closed set on purpose: the
+     *  value is read out of a raw line, and anything else is not an effort. */
+    private val EFFORT_LEVELS =
+        setOf("low", "medium", "high", "xhigh", "max", "ultracode")
+
+    /**
+     * The session's CURRENT effort, as the CLI itself records it: a top-level
+     * `"effort":"…"` on its own records.
+     *
+     * ⚠ This is the ground truth the app was missing. It used to observe ONLY
+     * `ultra_effort_enter`, because in June the ordinary levels genuinely did
+     * not reach the file. They do now — and while we weren't reading them, the
+     * app showed (and relaunched with) its own stored pick instead of the level
+     * the session was actually running at.
+     *
+     * Cheap substring read, then a closed-set check, so a chat message that
+     * merely contains the word can't become an effort. Null when the line has
+     * no such field.
+     */
+    fun effortOf(line: String): String? {
+        val key = "\"effort\":\""
+        val at = line.indexOf(key)
+        if (at < 0) return null
+        val from = at + key.length
+        val end = line.indexOf('"', from)
+        if (end <= from || end - from > 12) return null
+        return line.substring(from, end).takeIf { it in EFFORT_LEVELS }
+    }
+
     /** Stable id for the non-rendering System row carrying the session's
      *  auto-generated title (`ai-title`). VM reads the latest for the topbar. */
     private const val AI_TITLE_ID = "claude-ai-title"

@@ -20,6 +20,16 @@ enum class SlashCommandKind {
     OPEN_MODEL_PICKER,  // /model      — also: model dropdown in topbar
     REVIEW,             // /review     — Codex code review (uncommitted, or vs a base branch)
     CUSTOM,             // user-defined custom command files
+    /**
+     * A command the CLI ITSELF owns — its built-ins and its skills, exactly as
+     * the `initialize` handshake reports them (45 on a stock install: /compact,
+     * /context, /usage, /doctor, /security-review, plus every skill). We never
+     * reimplemented these and never listed them either, so they were
+     * unreachable from the phone. Dispatch is the honest one: send `/name args`
+     * as a turn, which is how the CLI runs them anyway (verified over our own
+     * channel with /compact, 2026-08-03).
+     */
+    AGENT_BUILTIN,
 }
 
 data class SlashCommand(
@@ -64,6 +74,22 @@ object SlashCommands {
         val lc = name.lowercase()
         return BUILT_IN.firstOrNull { it.name == lc }
             ?: custom.firstOrNull { it.name == lc }
+    }
+
+    /**
+     * Merge the CLI's own commands into the palette WITHOUT shadowing ours.
+     *
+     * Where we have a native handler the native one wins: /model opens the
+     * picker, /memory the editor, /agents the roster — sending those as text
+     * would land a useless line in the chat instead. Everything else the CLI
+     * offers (its skills included) becomes reachable for the first time.
+     */
+    fun mergeAgentCommands(
+        agentCommands: List<SlashCommand>,
+        custom: List<SlashCommand>,
+    ): List<SlashCommand> {
+        val taken = (BUILT_IN.map { it.name } + custom.map { it.name }).toHashSet()
+        return agentCommands.filter { it.name !in taken }
     }
 
     /** Filter for autocomplete by prefix. Built-ins first, then custom. */

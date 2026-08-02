@@ -81,6 +81,10 @@ internal class AgentSessionPersistentStream(
      *  The CLI's own registry; replaces the /model TUI scrape as the
      *  catalog source for live chats. */
     private val onInitState: (ai.eight24family.conch.agent.claude.ClaudeInitState) -> Unit = {},
+    /** Raw input of a `ScheduleWakeup` call seen on the live stream — the CLI
+     *  arming (or ending) a `/loop`. Read by [LoopWatch]; live-only, because a
+     *  pending wakeup dies with the process it was armed in. */
+    private val onLoopWakeup: (String?) -> Unit = {},
 ) {
     private val tag = "SshAi-Persist"
 
@@ -488,6 +492,16 @@ internal class AgentSessionPersistentStream(
                             continue
                         }
                         val parsedMsgs = spec.parseStreamLine(line, myTag)
+                        // A `/loop` arming (or ending) itself. Gen-gated like
+                        // everything else here: a torn-down process still
+                        // draining stdout must not light a countdown over a
+                        // process that no longer exists.
+                        if (myGen == turnSeq) {
+                            parsedMsgs.asSequence()
+                                .filterIsInstance<AgentMessage.ToolUse>()
+                                .filter { it.toolName == LoopWatch.TOOL }
+                                .forEach { onLoopWakeup(it.input) }
+                        }
                         for (msg in parsedMsgs) {
                             // Adopt the id the CLI reports on EVERY launch, not just the first.
                             // Adopting once meant that if the CLI ever answered with a
@@ -731,6 +745,24 @@ internal class AgentSessionPersistentStream(
                 }
             }
         }
+    }
+
+    /**
+     * Cancel a `/loop` that is sleeping between ticks.
+     *
+     * Nothing is running, so [cancelTurn] is a no-op here (no turn to fence
+     * on, nothing to escalate to) — but the CLI still holds pending wakeups,
+     * and an interrupt is precisely what drops them: `onInterrupt` cancels
+     * every scheduled loop wakeup ("cancelled N pending loop wakeup(s) on user
+     * abort", binary 2.1.219). No escalation: killing the process would work
+     * too, but it would throw away a perfectly good session to stop a timer.
+     */
+    fun cancelIdleLoop() {
+        val id = "loopstop-${reqCounter.incrementAndGet()}-${UUID.randomUUID().toString().take(8)}"
+        scope.launch {
+            synchronized(writeLock) { writeLine(ClaudeControlWire.encodeInterrupt(id)) }
+        }
+        onLoopWakeup(null)
     }
 
     /**
@@ -1002,6 +1034,10 @@ internal class AgentSessionPersistentStream(
     /** Close stdin (graceful CLI exit: flush session file, then quit),
      *  then the channel. Safe to call repeatedly. */
     fun teardownProcess() {
+        // Pending `/loop` wakeups live in the process, so they die with it.
+        // Clearing here (rather than only on an explicit stop) is what keeps
+        // the chip from outliving the loop it describes.
+        onLoopWakeup(null)
         readerJob?.cancel()
         readerJob = null
         procCmd?.let { cmd ->

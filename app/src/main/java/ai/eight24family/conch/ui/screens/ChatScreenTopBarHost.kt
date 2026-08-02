@@ -77,6 +77,7 @@ internal fun ChatTopBarHost(
     val hiddenModels by vm.hiddenModels.collectAsState()
     val unavailableModels by vm.unavailableModelLabels.collectAsState()
     val obsNewerThanPick by vm.observationNewerThanPick.collectAsState()
+    val effortPickIsNewer by vm.reasoningPickIsNewerFlow.collectAsState()
     val modelsProbing by vm.modelsProbing.collectAsState()
     val modelsStale by vm.modelsStale.collectAsState()
     val defaultModel by vm.defaultModel.collectAsState()
@@ -87,6 +88,7 @@ internal fun ChatTopBarHost(
     val sessionInitialReasoning by vm.sessionInitialReasoning.collectAsState()
     val observedReasoning by vm.observedReasoning.collectAsState()
     val customCommands by vm.customCommands.collectAsState()
+    val agentCommands by vm.agentCommands.collectAsState()
     val approvalMode by vm.approvalMode.collectAsState()
     val showApprovalIcon by vm.showApprovalInChatBar.collectAsState()
 
@@ -154,6 +156,47 @@ internal fun ChatTopBarHost(
         )
     }
 
+    // Manual compaction — confirmed, with the cost on screen. Compaction
+    // rewrites the conversation into a summary: it is not undoable from here,
+    // and the next turn re-caches the (now much smaller) context. Say both.
+    val pendingCompact by vm.pendingCompact.collectAsState()
+    pendingCompact?.let { pc ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { vm.cancelCompact() },
+            title = { Text("Compact this conversation?") },
+            text = {
+                Column {
+                    Text(
+                        "Context now: ${pc.percent}% of the window.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    androidx.compose.foundation.layout.Spacer(
+                        Modifier.padding(top = 6.dp),
+                    )
+                    Text(
+                        "Claude Code replaces the earlier turns with a summary, so the " +
+                            "conversation keeps going in far less context. The exchange itself " +
+                            "is not lost from the transcript, but the agent will only see the " +
+                            "summary from here on — and the next message pays to cache the new, " +
+                            "shorter context once.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.confirmCompact() }) {
+                    Text("Compact")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.cancelCompact() }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     // Bar, then a thin full-width session-title strip stacked below it.
     Column(modifier = Modifier.fillMaxWidth()) {
     TerminalTopBar(
@@ -170,6 +213,7 @@ internal fun ChatTopBarHost(
         hiddenModels = hiddenModels,
         unavailableModels = unavailableModels,
         observationNewerThanPick = obsNewerThanPick,
+        reasoningPickIsNewer = effortPickIsNewer,
         modelsProbing = modelsProbing,
         modelsStale = modelsStale,
         defaultModel = defaultModel,
@@ -196,7 +240,9 @@ internal fun ChatTopBarHost(
             onOpenStatsSheet()
             vm.refreshServerStats()
         },
-        customCommands = customCommands,
+        // The menu lists the user's own command files AND the CLI's own
+        // commands/skills — the latter were unreachable from the phone until now.
+        customCommands = customCommands + agentCommands,
         commandMenuOpen = commandMenuOpen,
         onToggleCommandMenu = onToggleCommandMenu,
         onPickCommand = { cmd ->
@@ -209,6 +255,8 @@ internal fun ChatTopBarHost(
         showMemoryIcon = currentAgent.supportsMemory,
         showRenameItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
         onRenameSession = { renameDialogOpen = true },
+        showCompactItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
+        onCompact = { vm.requestCompact() },
         approvalMode = approvalMode,
         approvalMenuOpen = approvalMenuOpen,
         onToggleApprovalMenu = onToggleApprovalMenu,

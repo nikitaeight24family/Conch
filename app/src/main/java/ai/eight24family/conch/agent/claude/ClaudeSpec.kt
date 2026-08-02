@@ -106,10 +106,31 @@ object ClaudeSpec : AgentCliSpec {
             ?.let { "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 MAX_THINKING_TOKENS=$it " } ?: ""
         val effortArg = if (thinkingEnv.isEmpty() && effort != null)
             " --effort ${shellEscape(effort)}" else ""
+        // ⚠ `--permission-prompt-tool stdio` IS NOT FREE. It adds a tool to the tool
+        // set, the tool set is part of the prompt prefix, and a changed prefix re-caches
+        // the ENTIRE conversation. MEASURED on the user's own server (2026-08-03), same
+        // session, alternating laptop CLI / phone: bare CLI cache_read=38732
+        // cache_creation=13 Conch WITH stdio cache_read=25073 cache_creation=15195 ←
+        // full re-read bare CLI again cache_read=38745 cache_creation=260 ← and back
+        // Conch WITHOUT stdio cache_read=39005 cache_creation=15 ← free bare CLI again
+        // cache_read=39020 cache_creation=15 ← free So every switch between the terminal
+        // and the phone was re-billing the whole history.
+        //
+        // The flag exists to route tool permissions to us as live cards. In
+        // BYPASS mode there are no permissions to route — every tool is
+        // auto-approved — so there it is pure cost and we drop it, which makes
+        // Conch's prefix identical to the plain CLI's and the two share one
+        // cache. In SAFE/AUTO it stays: that is the mode where the cards ARE
+        // the feature, and the user chose to be asked.
+        // ⚠ KNOWN TRADE-OFF, stated rather than hidden: in BYPASS an
+        // AskUserQuestion can no longer be answered from the app (it renders as
+        // the read-only mirrored card and the CLI proceeds on its own).
+        val permissionToolArg =
+            if (input.approvalMode == AgentApprovalMode.YOLO) "" else " --permission-prompt-tool stdio"
         return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}stdbuf -oL claude" +
             " --output-format stream-json --input-format stream-json" +
             " --include-partial-messages --verbose" +
-            " --permission-prompt-tool stdio" +
+            permissionToolArg +
             "$approvalArg$resume$modelArg$effortArg 2>&1"
     }
 
@@ -207,6 +228,23 @@ object ClaudeSpec : AgentCliSpec {
 
     override fun parseStreamLine(line: String): List<AgentMessage> {
         val msgs = ClaudeMessageParser.parse(line)
+        // THE SESSION'S OWN EFFORT, from the record the CLI writes itself.
+        //
+        // The parser only ever recognised `ultra_effort_enter`, on a note from
+        // 2026-06-13 that "the regular levels never appear in the file". That
+        // stopped being true: the CLI now stamps a top-level `"effort":"…"` on
+        // its records (2424 of them in one real session). Because we did not
+        // read it, the app fell back to its own stored pick — so a session the
+        // CLI was running at xhigh was DISPLAYED as low and, worse, relaunched
+        // with the low thinking budget (user, 2026-08-02). Read the truth.
+        ClaudeMessageParser.effortOf(line)?.let { eff ->
+            return msgs + AgentMessage.System(
+                id = "claude-effort-observed",
+                subtype = "reasoning_observed",
+                reasoning = eff,
+                raw = "",
+            )
+        }
         // Stamp user rows with the JSONL record's own uuid — the anchor the
         // rewind protocol addresses. Done HERE, at the single Claude parse
         // choke point, rather than in both parser paths (fast JsonReader +
@@ -279,6 +317,13 @@ for f in ~/.claude/projects/*/*.jsonl; do
   # window start can only corrupt the FIRST match, never the `tail -1` we keep.
   model=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]+"' | grep -v '"<' | tail -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
   [ -z "${'$'}model" ] && model=${'$'}(grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]+"' "${'$'}f" 2>/dev/null | grep -v '"<' | tail -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
+  # Effort, exactly like the model: the CLI stamps a top-level `"effort":"…"`
+  # on its records, so the LAST one is what this session is running at. Read it
+  # HERE, at listing time, or the topbar has nothing to show for the first
+  # second of a chat and prints an invented catalog default instead — the
+  # "medium → xhigh" flicker on open (user, 2026-08-03). Closed set of tokens
+  # so a stray key named "effort" elsewhere can't poison the column.
+  reasoning=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -oE '"effort"[[:space:]]*:[[:space:]]*"(none|minimal|low|medium|high|xhigh|max|ultracode)"' | tail -1 | sed -E 's/.*"([^"]+)"${'$'}/\1/')
   # First user message lives at the TOP of the file — bound the read to the
   # first 500 lines instead of grepping a possibly-100MB rollout end to end
   # (the listing's biggest per-file cost). 500 lines >> the first 8 user turns.
@@ -300,8 +345,8 @@ for f in ~/.claude/projects/*/*.jsonl; do
   [ -z "${'$'}title" ] && title=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -ao '"aiTitle":"[^"]*"' | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
   [ -z "${'$'}title" ] && title=${'$'}(grep -ao '"aiTitle":"[^"]*"' "${'$'}f" 2>/dev/null | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
   if [ -n "${'$'}title" ]; then preview=${'$'}(printf '%s\037%s' "${'$'}title" "${'$'}candidates"); else preview="${'$'}candidates"; fi
-  # 7-col contract: id, mtime, path, model, reasoning(empty), size, preview.
-  printf '%s\t%s\t%s\t%s\t\t%s\t%s\n' "${'$'}id" "${'$'}mtime" "${'$'}f" "${'$'}model" "${'$'}size" "${'$'}preview"
+  # 7-col contract: id, mtime, path, model, reasoning, size, preview.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}id" "${'$'}mtime" "${'$'}f" "${'$'}model" "${'$'}reasoning" "${'$'}size" "${'$'}preview"
 done | sort -t'	' -k2 -rn | head -500
 """.trimIndent()
 
@@ -1080,10 +1125,17 @@ private object ClaudeTopbarUi : AgentTopbarUi {
         // the stale pick, or it lies. Compare RESOLVED labels so an alias vs its
         // resolved id (e.g. "sonnet" ↔ claude-sonnet-4-6) is never mistaken for a
         // switch. Absent a real observation (obs==null, pre-first-turn) the pick
-        // still wins, so there's no flicker on open.
+        // still wins, so there's no flicker on open. ⚠ THE CHIP SHOWS WHAT IS
+        // SET, NOT WHAT WE ONCE WANTED. A pick is displayed ONLY while it is the
+        // thing actually in force — which is the SAME predicate the launch uses
+        // to decide whether to send `--model` at all. A pick the session has
+        // since overruled (or that we deliberately stopped sending, so the
+        // session kept its own model) must not be shown: that is the difference
+        // between a label and a fact.
+        val pickStillInForce = sel != null && !state.observationNewerThanPick
         val switched = sel != null && obs != null && state.observationNewerThanPick &&
             resolve(state, obs) != resolve(state, sel)
-        val pick = (if (switched) obs else (sel ?: obs))
+        val pick = (if (switched || !pickStillInForce) (obs ?: sel) else (sel ?: obs))
             ?: usable(state.sessionInitialModel)
             // NEVER invent the arbitrary first map entry (which is "sonnet" → "Sonnet
             // 5") when NOTHING is known. A transient state wipe (e.g. a false-positive
@@ -1179,24 +1231,38 @@ private object ClaudeTopbarUi : AgentTopbarUi {
     }
 
     override fun reasoningLabel(state: TopbarModelState): String? {
-        // Claude's reasoning catalog is identical for every slug, so any
-        // entry works; CLAUDE_REASONING_INFO covers the pre-probe window.
-        val info = state.reasoningCatalog.values.firstOrNull() ?: CLAUDE_REASONING_INFO
         // Chain (mirror the SESSION, never impose a default): explicit
         // user pick → what the LIVE session reports (observedReasoning,
         // e.g. ultracode) → what THIS chat opened on → the PROBED current
-        // effort → the catalog default. observedReasoning sits right under
+        // effort. observedReasoning sits right under
         // the user pick because it's ground truth from the running session
         // — it's why a `/effort ultracode` typed in the CLI now shows
         // "Ultracode" instead of the stale probe's "xHigh" (user, 2026-06-13).
-        val effort = state.selectedReasoning?.takeIf { it.isNotBlank() }
-            ?: state.observedReasoning?.takeIf { it.isNotBlank() }
-            ?: state.sessionInitialReasoning?.takeIf { it.isNotBlank() }
-            ?: state.defaultReasoning?.takeIf { it.isNotBlank() }
-            ?: info.defaultEffort
-        // Topbar sub-label mirrors the CLI FOOTER, which prints the raw effort
-        // token («48s · xhigh») — never a capitalized invention. The dropdown
-        // still uses the PROBED menu names; this label is footer-authentic raw.
+        //
+        // ⚠ AND THE PICK DOES NOT OUTRANK REALITY. It used to win outright, so a
+        // stale `selected_reasoning_chat_<id>` printed "low" under the model
+        // name while the session was demonstrably running at xhigh (user,
+        // 2026-08-02 — 2424 `"effort":"xhigh"` records on the box). A pick only
+        // wins while it is NEWER than the session's own last report; the same
+        // law the model chip follows.
+        val pick = state.selectedReasoning?.takeIf { it.isNotBlank() }
+        val seen = state.observedReasoning?.takeIf { it.isNotBlank() }
+        val effort = when {
+            pick != null && (seen == null || state.reasoningPickIsNewer) -> pick
+            seen != null -> seen
+            else -> state.sessionInitialReasoning?.takeIf { it.isNotBlank() }
+                ?: state.defaultReasoning?.takeIf { it.isNotBlank() }
+        }
+        // ⚠ AND NOTHING IS PRINTED WHEN NOTHING IS KNOWN. The catalog default
+        // used to sit at the end of that chain, so opening a session flashed
+        // "medium" for the first frames and then snapped to the truth once the
+        // transcript parsed — an invented value shown as fact. Same law the
+        // model chip already follows: show the fact or show nothing. The listing
+        // now carries the session's own effort, so "nothing" is rare and brief
+        // rather than wrong. Topbar sub-label mirrors the CLI FOOTER, which
+        // prints the raw effort token («48s · xhigh») — never a capitalized
+        // invention. The dropdown still uses the PROBED menu names; this label
+        // is footer-authentic raw.
         return effort
     }
 }

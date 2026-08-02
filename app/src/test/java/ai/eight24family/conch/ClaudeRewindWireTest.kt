@@ -53,6 +53,7 @@ class ClaudeRewindWireTest {
         assertTrue(cmd.contains("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1"))
         // …and the rest of the launch is unchanged.
         assertTrue(cmd.contains("--input-format stream-json"))
+        // SAFE keeps the permission tool — that mode is why it exists.
         assertTrue(cmd.contains("--permission-prompt-tool stdio"))
     }
 
@@ -64,5 +65,13 @@ class ClaudeRewindWireTest {
         assertTrue(cmd.contains("IS_SANDBOX=1"))
         assertTrue(cmd.contains("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1"))
         assertTrue(cmd.contains("--permission-mode bypassPermissions"))
+        // ⚠ AND NO PERMISSION TOOL IN BYPASS. It routes prompts that can never
+        // fire in this mode, while adding a tool to the prefix — which re-caches
+        // the whole conversation on every switch between the terminal and the
+        // phone (measured: 15195 vs 15 tokens of cache creation, 2026-08-03).
+        assertTrue(
+            "bypass must not carry the permission tool — it costs a full re-read",
+            !cmd.contains("--permission-prompt-tool"),
+        )
     }
 }

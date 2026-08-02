@@ -11,6 +11,27 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.1] — 2026-08-03
+
+### Added
+- **Every command the CLI has.** Its built-in commands and skills are now listed
+  in the palette, and a `/name` the app has never heard of is sent to the CLI
+  instead of refused. Typing `/loop` used to answer "no such command" — the app
+  has no business vetting names the CLI owns.
+- **A loop you can see and stop.** When the agent schedules its own next run,
+  the prompt bar shows a countdown with the model's reason for the delay and a
+  one-tap stop. It is the one thing here that spends money while you do nothing,
+  so it does not get to be invisible. Stopping drops every pending wakeup.
+- **Compact the conversation** from the chat menu, with an upfront note on what
+  it costs.
+
+### Fixed
+- The effort shown in the topbar no longer flashes an invented default when a
+  chat opens: the sessions list carries the session's own value, and when
+  nothing is known yet the label stays empty rather than guessing.
+
+---
+
 ## [0.3.0] — 2026-08-02
 
 ### Added

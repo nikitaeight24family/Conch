@@ -54,6 +54,16 @@ internal class ChatViewModelSlash(
     private val _customCommands = MutableStateFlow<List<SlashCommand>>(emptyList())
     val customCommands: StateFlow<List<SlashCommand>> = _customCommands.asStateFlow()
 
+    /** The CLI's OWN commands and skills, straight from the `initialize`
+     *  handshake — 45 of them on a stock install, none of which the palette
+     *  used to show. Ours still win on name collisions. */
+    private val _agentCommands = MutableStateFlow<List<SlashCommand>>(emptyList())
+    val agentCommands: StateFlow<List<SlashCommand>> = _agentCommands.asStateFlow()
+
+    fun setAgentCommands(cmds: List<SlashCommand>) {
+        _agentCommands.value = SlashCommands.mergeAgentCommands(cmds, _customCommands.value)
+    }
+
     private val _memory = MutableStateFlow(MemoryDocs())
     val memory: StateFlow<MemoryDocs> = _memory.asStateFlow()
 
@@ -63,10 +73,15 @@ internal class ChatViewModelSlash(
      */
     fun runSlash(text: String): Boolean {
         val (name, args) = SlashCommands.parse(text) ?: return false
-        val cmd = SlashCommands.find(name, _customCommands.value) ?: run {
-            setModal(ChatModal.Unsupported(name, "no such command"))
-            return true
-        }
+        // Ours + the user's files + everything the CLI itself offers. Anything
+        // we don't recognise is NOT an error: the CLI has its own commands,
+        // skills, and plugins, and it gains more with every release — a phone
+        // client that vets the name can only ever be behind. `/loop` was in the
+        // CLI's own list and we still popped "no such command" over it (user,
+        // 2026-08-03). Unknown → return false so the caller sends the line as a
+        // normal turn and the CLI answers for itself.
+        val cmd = SlashCommands.find(name, _customCommands.value + _agentCommands.value)
+            ?: return false
         dispatchSlash(cmd, args)
         return true
     }
@@ -79,10 +94,10 @@ internal class ChatViewModelSlash(
             SlashCommandKind.INIT_REPO -> sendInitPrompt()
             SlashCommandKind.OPEN_MEMORY -> {
                 if (!agent.supportsMemory) {
-                    setModal(ChatModal.Unsupported(
-                        cmd.name,
-                        "${agent.displayName} doesn't use CLAUDE.md. Memory editor is only wired up for Claude Code right now."
-                    ))
+                    // Our editor is Claude-only; the COMMAND is not ours to
+                    // refuse. Hand it to the CLI rather than telling the user
+                    // their own tool doesn't exist.
+                    sendAgentBuiltin(cmd, args)
                 } else {
                     setModal(ChatModal.Memory)
                     refreshMemory()
@@ -90,10 +105,7 @@ internal class ChatViewModelSlash(
             }
             SlashCommandKind.OPEN_AGENTS -> {
                 if (!agent.supportsSubagents) {
-                    setModal(ChatModal.Unsupported(
-                        cmd.name,
-                        "${agent.displayName} doesn't have subagents. This feature is Claude Code only."
-                    ))
+                    sendAgentBuiltin(cmd, args)
                 } else {
                     setModal(ChatModal.Unsupported(
                         cmd.name,
@@ -104,6 +116,10 @@ internal class ChatViewModelSlash(
             SlashCommandKind.OPEN_MODEL_PICKER -> setModal(ChatModal.ModelHint)
             SlashCommandKind.REVIEW -> startReview(args)
             SlashCommandKind.CUSTOM -> sendCustom(cmd, args)
+            // The CLI runs its own commands from a plain turn — that is how
+            // /compact, /context, /doctor and every skill are invoked. We send
+            // exactly what the user would have typed.
+            SlashCommandKind.AGENT_BUILTIN -> sendAgentBuiltin(cmd, args)
         }
     }
 
@@ -115,10 +131,10 @@ internal class ChatViewModelSlash(
     fun startReview(args: String) {
         val agent = currentAgent()
         if (agent != Agent.CODEX) {
-            setModal(ChatModal.Unsupported(
-                "review",
-                "Code review is a Codex feature. Switch this server's agent to Codex to use /review."
-            ))
+            // `startReview` drives CODEX's purpose-built reviewer. Every other
+            // CLI has its own review command or skill (Claude ships
+            // /code-review) — send the line and let it answer.
+            sendAgentBuiltin(SlashCommand("review", "", SlashCommandKind.AGENT_BUILTIN), args)
             return
         }
         val s = sessionAccess() ?: return
@@ -201,6 +217,17 @@ internal class ChatViewModelSlash(
         """.trimIndent()
         scope.launch {
             s.send(prompt)
+            postSendUpdate(s.agentSessionId)
+        }
+    }
+
+    /** Run one of the CLI's own commands the way the CLI runs them: as the
+     *  literal `/name args` turn the user would have typed. */
+    private fun sendAgentBuiltin(cmd: SlashCommand, args: String) {
+        val s = sessionAccess() ?: return
+        val line = if (args.isBlank()) "/${cmd.name}" else "/${cmd.name} $args"
+        scope.launch {
+            s.send(line)
             postSendUpdate(s.agentSessionId)
         }
     }

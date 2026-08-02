@@ -53,6 +53,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SmartToy
@@ -242,6 +243,9 @@ internal fun TerminalTopBar(
     hiddenModels: Set<String> = emptySet(),
     unavailableModels: Set<String> = emptySet(),
     observationNewerThanPick: Boolean = true,
+    /** See TopbarModelState.reasoningPickIsNewer — a stale effort pick must not
+     *  outrank what the session reports. */
+    reasoningPickIsNewer: Boolean = false,
     modelsProbing: Boolean,
     modelsStale: Boolean = false,
     defaultModel: String?,
@@ -268,6 +272,9 @@ internal fun TerminalTopBar(
      *  (Claude). Opens the rename dialog owned by the host. */
     showRenameItem: Boolean = false,
     onRenameSession: () -> Unit = {},
+    /** Manual compaction — shown where the CLI offers `/compact`. */
+    showCompactItem: Boolean = false,
+    onCompact: () -> Unit = {},
     approvalMode: AgentApprovalMode,
     approvalMenuOpen: Boolean,
     onToggleApprovalMenu: () -> Unit,
@@ -315,6 +322,7 @@ internal fun TerminalTopBar(
         hiddenModels = hiddenModels,
         unavailableModels = unavailableModels,
         observationNewerThanPick = observationNewerThanPick,
+        reasoningPickIsNewer = reasoningPickIsNewer,
         modelsProbing = modelsProbing,
         selectedReasoning = selectedReasoning,
         reasoningCatalog = reasoningCatalog,
@@ -901,6 +909,22 @@ internal fun TerminalTopBar(
                             onClick = {
                                 onToggleCommandMenu()
                                 onOpenAgents()
+                            }
+                        )
+                    }
+                    if (showCompactItem) {
+                        DropdownMenuItem(
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.Compress,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            },
+                            text = { Text("compact conversation", style = MaterialTheme.typography.bodyMedium) },
+                            onClick = {
+                                onToggleCommandMenu()
+                                onCompact()
                             }
                         )
                     }

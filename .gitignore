@@ -31,3 +31,7 @@ analysis/
 # as a path arg without `=`.
 Gradleuser-home/
 
+
+# Python bytecode from the tools/ helpers (mirror scrub, ELF checks).
+__pycache__/
+*.pyc
