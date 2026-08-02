@@ -95,8 +95,21 @@ data class TopbarModelState(
      *  notion of "default". */
     val defaultModel: String?,
     /** `alias → human-readable label` map from the spec's
-     *  `probeAvailableModels`. Empty until the probe returns. */
+     *  `probeAvailableModels`. Empty until the probe returns.
+     *
+     *  ⚠ COMPLETE ON PURPOSE — it must keep entries that are no longer
+     *  offered, because a chat pinned to an old alias still has to resolve
+     *  its LABEL (a pinned chat showing a raw slug is a regression). What
+     *  the user may PICK is [availableModels] minus [hiddenModels]. */
     val availableModels: Map<String, String>,
+    /**
+     * Keys that exist in [availableModels] for label resolution only and must
+     * NOT be offered in the picker: catalog entries left over from the era
+     * when models were scraped off the `/model` TUI, which no CLI registry has
+     * since confirmed. Empty = we have no provenance data yet, and the picker
+     * shows everything (fail-open — an empty picker is worse than a stale row).
+     */
+    val hiddenModels: Set<String> = emptySet(),
     /** Model NAMES the running session reported as unavailable (parsed from the
      *  "<Model> is currently unavailable" banner). The topbar must not advertise
      *  one of these as the chat's model — mirror the CLI's fallback. */

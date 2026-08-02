@@ -257,17 +257,6 @@ internal class AgentSessionFileTransfer(
     }
 
     /**
-     * Capture the `/model` menu + `/effort` slider screens of the live
-     * session's server. Delegates to the standalone PTY driver
-     * [probeClaudeMenuScreens] (shared with the startup catalog warm-up
-     * in ModelCatalogPrefetcher).
-     */
-    suspend fun probeModelMenu(): String? {
-        val client = sshLifecycle.sshClient ?: return null
-        if (!client.isConnected) return null
-        return probeClaudeMenuScreens(client)
-    }
-    /**
      * Cheap probe: does the file at the given absolute path exist on the
      * server right now? Used by the upload-dedupe path to confirm a cached
      * remote path is still live before skipping the actual upload.

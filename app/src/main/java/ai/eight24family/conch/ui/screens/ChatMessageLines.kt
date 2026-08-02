@@ -53,6 +53,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -274,18 +275,27 @@ internal fun TerminalLine(
             // never the path / "Attached image at:" text.
             val vm: ChatViewModel = viewModel()
             val (clean, imgs) = remember(msg.text) { extractImages(msg.text) }
+            // ⚠ LONG-PRESS BELONGS TO THE TEXT, NOT TO US. Every row is wrapped
+            // in a SelectionContainer, so a long press is how the user selects
+            // and copies — and for a while this branch stole that gesture to
+            // open the rewind sheet, which both removed copying and put a
+            // DESTRUCTIVE action on a habit (user, 2026-08-02). Rewind now has
+            // its own quiet handle beside the bubble: one deliberate tap.
+            val onRewind = { vm.openRewind(msg.recordUuid, clean.ifBlank { msg.text }) }
             if (imgs.isEmpty()) {
-                UserLine(msg.text)
+                RewindableUserRow(onRewind) { UserLine(msg.text) }
             } else {
                 // User messages live on the RIGHT — right-align the images too
                 // (they were left-aligned like the agent's, which looked wrong).
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    // Image on top, the caption the user typed UNDER it.
-                    imgs.forEach { InlineRemoteImage(it, vm) }
-                    if (clean.isNotBlank()) UserLine(clean)
+                RewindableUserRow(onRewind) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.End,
+                    ) {
+                        // Image on top, the caption the user typed UNDER it.
+                        imgs.forEach { InlineRemoteImage(it, vm) }
+                        if (clean.isNotBlank()) UserLine(clean)
+                    }
                 }
             }
         }
@@ -459,6 +469,41 @@ internal fun InlineRemoteImage(path: String, vm: ChatViewModel) {
                 )
             }
         }
+    }
+}
+
+/**
+ * A user message row plus its rewind handle.
+ *
+ * The handle is a small, dim ⟲ to the LEFT of the right-aligned bubble: a
+ * distinct target with a single deliberate tap, so the destructive action is
+ * never something you can trigger by habit. Long-press stays with the text
+ * (selection / copy / translate), which is what people actually do most.
+ *
+ * Rare action pays the extra pixel; frequent action pays nothing.
+ */
+@Composable
+private fun RewindableUserRow(
+    onRewind: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.End,
+    ) {
+        IconButton(
+            onClick = onRewind,
+            modifier = Modifier.size(30.dp),
+        ) {
+            Icon(
+                Icons.Filled.History,
+                contentDescription = "Rewind the conversation to this message",
+                tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                modifier = Modifier.size(17.dp),
+            )
+        }
+        Box(modifier = Modifier.weight(1f, fill = false)) { content() }
     }
 }
 

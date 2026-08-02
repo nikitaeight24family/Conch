@@ -10,7 +10,6 @@ import ai.eight24family.conch.agent.spec.AgentTopbarUi
 import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.spec.ModelMenuItem
 import ai.eight24family.conch.agent.spec.ModelReasoningInfo
-import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.ReasoningLevel
 import ai.eight24family.conch.agent.spec.TopbarModelState
 import ai.eight24family.conch.agent.spec.TurnSignals
@@ -247,10 +246,7 @@ esac
      * `config.toml` as a one-entry list so the topbar at least shows
      * the configured default instead of going empty.
      */
-    override suspend fun probeAvailableModels(
-        exec: AgentExec,
-        pty: PtyProbe?,
-    ): Map<String, String> {
+    override suspend fun probeAvailableModels(exec: AgentExec): Map<String, String> {
         // Single SSH round trip: dump the cache file (authoritative)
         // and as a fallback the top-level `model =` line from
         // config.toml. Separator marker so we can split deterministically.

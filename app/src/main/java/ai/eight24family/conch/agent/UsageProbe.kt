@@ -187,6 +187,117 @@ object UsageProbe {
     /** Last known report (cache hit) — instant, no SSH. Null if never fetched. */
     fun cached(serverId: String, agent: Agent): UsageReport? = cache[key(serverId, agent)]
 
+    /** Adopt a report obtained elsewhere (the live control channel) into the
+     *  same cache the fetch path warms, so chat re-opens stay instant. */
+    fun remember(serverId: String, agent: Agent, report: UsageReport) {
+        cache[key(serverId, agent)] = report
+        persistToDisk()
+    }
+
+    /**
+     * Build a [UsageReport] from the CLI's `get_usage` control_response
+     * payload — `{session:{total_cost_usd,…}, subscription_type,
+     * rate_limits:{five_hour:{utilization,resets_at}, seven_day, …,
+     * model_scoped:[{display_name,utilization,resets_at}]}|null, …}`.
+     * The windows are the SAME shape the oauth/usage endpoint returns (the
+     * CLI caches that endpoint), so the dynamic window parser is reused;
+     * `resets_at` additionally arrives as EPOCH SECONDS here (the endpoint
+     * sends ISO), which [parseClaude] now accepts. Null when the payload
+     * carries no windows (API-key mode, inference-only token) — the caller
+     * then falls back to the legacy probe.
+     */
+    fun reportFromControlPayload(payload: String): UsageReport? {
+        val windows = parseClaude(payload) + parseModelScoped(payload)
+        if (windows.isEmpty()) return null
+        val plan = Regex("\"subscription_type\"\\s*:\\s*\"([a-z]+)\"").find(payload)
+            ?.groupValues?.get(1)
+            ?.replaceFirstChar { it.uppercase() }
+        return UsageReport(
+            windows = windows,
+            extraUsedUsd = parseClaudeExtra(payload),
+            plan = plan,
+        )
+    }
+
+    /** The `model_scoped` array — per-model windows keyed by display name
+     *  instead of a JSON key: `[{display_name,utilization,resets_at}]`.
+     *  utilization may be null (window exists but idle) — skipped. */
+    internal fun parseModelScoped(json: String): List<UsageWindow> {
+        val arr = Regex("\"model_scoped\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
+            .find(json)?.groupValues?.get(1) ?: return emptyList()
+        return Regex("\\{([^{}]*)\\}").findAll(arr).mapNotNull { m ->
+            val body = m.groupValues[1]
+            val name = Regex("\"display_name\"\\s*:\\s*\"([^\"]+)\"").find(body)
+                ?.groupValues?.get(1) ?: return@mapNotNull null
+            val util = Regex("\"utilization\"\\s*:\\s*([0-9.]+)").find(body)
+                ?.groupValues?.get(1)?.toFloatOrNull() ?: return@mapNotNull null
+            val resetEpochMs = windowResetEpochSec(body)?.let { it * 1000 }
+            window(
+                name, util,
+                resetEpochMs?.let { secsToText((it - System.currentTimeMillis()) / 1000) }.orEmpty(),
+                resetAtEpochMs = resetEpochMs, perModel = true,
+            )
+        }.toList()
+    }
+
+    /** `resets_at` as epoch seconds, whether the source wrote an ISO string
+     *  (endpoint) or a raw number (CLI cache). */
+    private fun windowResetEpochSec(body: String): Long? {
+        Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
+            ?.let { return isoToEpoch(it) }
+        return Regex("\"resets_at\"\\s*:\\s*([0-9]+)").find(body)?.groupValues?.get(1)
+            ?.toLongOrNull()
+            ?.let { if (it > 1_000_000_000_000L) it / 1000 else it }
+    }
+
+    /**
+     * Map the CLI's `get_context_usage` payload to the panel's segments —
+     * `{categories:[{name,tokens}], totalTokens, maxTokens, percentage}` →
+     * the same rows the old markdown-table parse produced ("Context window"
+     * first, then per-category). Empty on shape miss (caller falls back).
+     */
+    fun contextFromControlPayload(payload: kotlinx.serialization.json.JsonObject): List<ContextSegment> {
+        fun num(key: String): Long? =
+            (payload[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()?.toLong()
+        val total = num("totalTokens") ?: return emptyList()
+        val max = num("maxTokens") ?: return emptyList()
+        if (max <= 0L) return emptyList()
+        val pct = num("percentage")?.toFloat()
+            ?: (total.toFloat() / max * 100f)
+        val segs = mutableListOf(
+            ContextSegment("Context window", "${kFmt(total)} / ${kFmt(max)}", pct),
+        )
+        val cats = payload["categories"] as? kotlinx.serialization.json.JsonArray ?: return segs
+        for (c in cats) {
+            val o = c as? kotlinx.serialization.json.JsonObject ?: continue
+            val name = (o["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: continue
+            val tokens = (o["tokens"] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toDoubleOrNull()?.toLong() ?: continue
+            if (tokens <= 0L) continue
+            // Round at the SOURCE too, not just in the renderer: the model
+            // should carry a percentage, not a float artefact.
+            segs += ContextSegment(
+                name, kFmt(tokens),
+                Math.round(tokens.toFloat() / max * 1000f) / 10f,
+            )
+        }
+        return segs
+    }
+
+    /** Cache a control-channel context read under the chat's resume id so
+     *  re-expanding the panel stays instant (same cache the probe warms). */
+    fun rememberContext(resumeId: String, segments: List<ContextSegment>) {
+        if (segments.isNotEmpty()) ctxCache[resumeId] = segments
+    }
+
+    /** 104728 → "104.7k"; 1000000 → "1.0M"; 900 → "900". Mirrors the CLI's
+     *  own /context number style so both surfaces read the same. */
+    internal fun kFmt(n: Long): String = when {
+        n >= 1_000_000L -> String.format(java.util.Locale.US, "%.1fM", n / 1_000_000.0)
+        n >= 1_000L -> String.format(java.util.Locale.US, "%.1fk", n / 1_000.0)
+        else -> n.toString()
+    }
+
     /** [fast]=true uses the cheap source that paints immediately (Codex: the
      *  rollout snapshot; Claude: the last cached report, no network) so the bar
      *  is up within a few hundred ms; [fast]=false hits the live source (Codex:
@@ -295,12 +406,15 @@ object UsageProbe {
             val body = m.groupValues[2]
             val util = Regex("\"utilization\"\\s*:\\s*([0-9.]+)").find(body)
                 ?.groupValues?.get(1)?.toFloatOrNull() ?: return@mapNotNull null
-            val resetsAt = Regex("\"resets_at\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
-            val resetEpochMs = resetsAt?.let { isoToEpoch(it) }?.let { it * 1000 }
+            // resets_at is an ISO string from the oauth endpoint, but EPOCH
+            // SECONDS in the CLI's get_usage cache — accept both.
+            val resetEpochSec = windowResetEpochSec(body)
+            val resetEpochMs = resetEpochSec?.let { it * 1000 }
             val perModel = key != "five_hour" && key != "seven_day" &&
                 (key.startsWith("five_hour_") || key.startsWith("seven_day_"))
             key to window(
-                claudeWindowLabel(key), util, isoToDelta(resetsAt),
+                claudeWindowLabel(key), util,
+                resetEpochSec?.let { secsToText(it - Instant.now().epochSecond) }.orEmpty(),
                 resetAtEpochMs = resetEpochMs, perModel = perModel,
             )
         }.sortedBy { claudeWindowOrder(it.first) }.map { it.second }.toList()
@@ -423,18 +537,6 @@ object UsageProbe {
             resetAtEpochMs = resetAtEpochMs,
             perModel = perModel,
         )
-    }
-
-    private fun isoToDelta(iso: String?): String {
-        if (iso.isNullOrBlank()) return ""
-        val epoch = SilentlyTry.logged("SshAi-Usage", "parse resets_at") {
-            try {
-                Instant.parse(iso).epochSecond
-            } catch (_: Throwable) {
-                OffsetDateTime.parse(iso).toInstant().epochSecond
-            }
-        } ?: return ""
-        return secsToText(epoch - Instant.now().epochSecond)
     }
 
     private fun secsToText(s: Long): String = when {

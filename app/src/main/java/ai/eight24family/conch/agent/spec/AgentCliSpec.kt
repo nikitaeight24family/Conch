@@ -93,6 +93,16 @@ interface AgentCliSpec {
     val supportsControlProtocol: Boolean get() = false
 
     /**
+     * True when [probeAvailableModels] returns the CLI's OWN REGISTRY — a
+     * complete, authoritative list — rather than something scraped or guessed.
+     * Only such a result may CONFIRM model keys (see
+     * `AppPreferences.registryModelKeysForAgent`): confirmed keys are the ones
+     * the picker offers, unconfirmed leftovers survive for label resolution
+     * only. Default false, so a spec must opt in deliberately.
+     */
+    val catalogIsAuthoritative: Boolean get() = false
+
+    /**
      * Build the **inner** shell command for the persistent channel —
      * like [buildExecCommand] but WITHOUT the prompt (turns arrive via
      * stdin) and with bidirectional stream-json flags. Null when
@@ -222,18 +232,16 @@ interface AgentCliSpec {
     /**
      * Discover the universe of model names this CLI accepts.
      *
-     * Returns `alias → human-readable label`. For Claude these are
-     * `"sonnet" → "Sonnet 4.6"`, captured by driving an interactive `/model`
-     * via PTY. For Codex it's the union of `~/.codex/config.toml` + bundled
-     * default catalog. For Gemini it's a hardcoded alias table.
+     * Returns `alias → human-readable label`. For Claude these come from the
+     * `initialize` control handshake of a headless stream-json launch (the
+     * CLI's own registry — the old interactive `/model` PTY scrape is gone).
+     * For Codex it's the union of `~/.codex/config.toml` + bundled default
+     * catalog. For Gemini it's a hardcoded alias table.
      *
      * Empty map = caller falls back to "type whatever, the CLI will reject
      * bad values".
-     *
-     * [pty] is provided when the spec needs a PTY (Claude `/model` menu).
-     * Non-PTY specs ignore it.
      */
-    suspend fun probeAvailableModels(exec: AgentExec, pty: PtyProbe?): Map<String, String>
+    suspend fun probeAvailableModels(exec: AgentExec): Map<String, String>
 
     /**
      * The CLI's effective default model — the one used when `--model`
@@ -505,11 +513,3 @@ fun interface AgentExec {
     suspend fun exec(command: String): String?
 }
 
-/**
- * Optional PTY-backed probe. Currently only Claude's `/model` menu uses it,
- * but baking it into the spec contract means Codex/Gemini could grow PTY
- * probes later without changing call sites.
- */
-fun interface PtyProbe {
-    suspend fun probeModelMenu(): String?
-}

@@ -433,6 +433,12 @@ internal fun rememberChatScrollController(
     LaunchedEffect(imeBottomPx) {
         if (messages.isEmpty()) return@LaunchedEffect
         if (cameFromSearch) return@LaunchedEffect
+        // INVARIANT #3 (header): gate on wasAtBottomSnapshot, NOT the live
+        // isAtBottom. Without it, tapping the prompt bar while parked mid-history
+        // yanks the reader to the bottom — the exact thing every other effect in
+        // this file is careful not to do (see the inline-image effect above, which
+        // kept its gate). Lost in the LazyColumn migration; restored 2026-08-02.
+        if (!wasAtBottomSnapshot) return@LaunchedEffect
         if (imeBottomPx > 0) lazyListState.scrollToBottom(messages.size)
     }
 

@@ -11,6 +11,44 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.0] — 2026-08-02
+
+### Added
+- **Live model / effort / approval switching.** A pick is applied to the running
+  session instead of restarting its CLI process, so it takes effect at once and
+  the conversation is not re-read. A pick the protocol cannot express falls back
+  to the previous restart path, silently.
+- **Rewind.** A ⟲ handle beside each message you sent takes the conversation
+  back to just before it, returning its text to the composer. If that turn
+  changed files, the sheet lists them by name with the ± lines before offering
+  to restore them — a separate, explicit step. Long-press is untouched and still
+  selects and copies text.
+- **@-mentions.** Typing `@` searches files on the server the agent runs on.
+- **Session rename** from the chat menu, using the CLI's own title record.
+
+### Changed
+- **Plan limits and the context breakdown are read over the agent's own control
+  channel**, so they match what the CLI reports rather than a separate probe.
+- **The model catalog comes from the CLI's registry**, so new model families
+  appear with no code change. Catalog entries an authoritative registry has
+  never confirmed are kept for label resolution but no longer offered as picks.
+
+### Removed
+- The hand-written terminal emulator and `/model` menu scraper, the second CLI
+  process spawned to read `/context`, the `curl` that handled a raw OAuth token,
+  and the process restart behind every model switch.
+
+### Fixed
+- A fresh chat could launch on a different model than the one shown in its
+  header on a cold start.
+- A rewound turn could reappear from the session mirror moments after being
+  removed.
+- Percentages in the context breakdown rendered raw floats ("1.4557999%").
+- The public repository has been buildable again: a dependency added in 0.2.15
+  was missing from its build files.
+
+---
+
 ## [0.2.14] — 2026-07-30
 
 ### Fixed
@@ -844,6 +882,7 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
 [0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
 [0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12

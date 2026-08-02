@@ -6,7 +6,6 @@ import ai.eight24family.conch.agent.AgentSession
 import ai.eight24family.conch.agent.spec.AgentExec
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 import ai.eight24family.conch.agent.spec.ModelReasoningInfo
-import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.di.ServiceLocator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -234,6 +233,24 @@ internal class ChatViewModelModels(
     private val _modelsProbing = MutableStateFlow(false)
     val modelsProbing: StateFlow<Boolean> = _modelsProbing.asStateFlow()
 
+    /** Model keys confirmed by some CLI's own registry (union across servers
+     *  and runs). Drives [hiddenModels]; empty until the first authoritative
+     *  catalog lands, which is the fail-open state. */
+    private val _registryKeys = MutableStateFlow<Set<String>>(emptySet())
+
+    /** Record keys an AUTHORITATIVE catalog just confirmed (union, never
+     *  subtractive — a server on an older CLI may not un-confirm a model
+     *  another server really offers). */
+    private fun confirmRegistryKeys(agentName: String, keys: Set<String>) {
+        if (keys.isEmpty()) return
+        _registryKeys.value = _registryKeys.value + keys
+        scope.launch {
+            runCatching {
+                ServiceLocator.preferences.addRegistryModelKeysForAgent(agentName, keys)
+            }
+        }
+    }
+
     /**
      * True when the list on screen is the CACHE, because the live `/model` read
      * came back empty. Cleared by the next probe that returns anything.
@@ -260,6 +277,28 @@ internal class ChatViewModelModels(
     /** Reasoning effort parsed from the session's JSONL header. */
     private val _sessionInitialReasoning = MutableStateFlow(initialSessionReasoning)
     val sessionInitialReasoning: StateFlow<String?> = _sessionInitialReasoning.asStateFlow()
+
+    /**
+     * Catalog entries that exist for LABEL RESOLUTION only and must not be
+     * offered as choices — TUI-scraper leftovers no registry has confirmed.
+     * The user's own pick / the session's model are never hidden.
+     *
+     * ⚠ Declared HERE, below every flow it reads: Kotlin initialises
+     * properties in source order, so referencing `_sessionInitialModel` from
+     * further up the class would read a null that is not even nullable.
+     */
+    val hiddenModels: StateFlow<Set<String>> = combine(
+        _availableModels, _registryKeys, selectedModel, _sessionInitialModel,
+    ) { catalog, confirmed, pick, sessionModel ->
+        ai.eight24family.conch.data.ModelProvenance.hidden(
+            catalog = catalog.keys,
+            registryConfirmed = confirmed,
+            keepVisible = setOfNotNull(
+                pick?.takeIf { it.isNotBlank() },
+                sessionModel?.takeIf { it.isNotBlank() },
+            ),
+        )
+    }.stateIn(scope, SharingStarted.Eagerly, emptySet())
 
     /**
      * Cold-start hydrate: read whatever the spec's probe reported last time.
@@ -290,6 +329,26 @@ internal class ChatViewModelModels(
             if (_defaultModel.value.isNullOrBlank()) {
                 ServiceLocator.preferences.defaultModelForAgent(agentNow.name).first()
                     ?.let { _defaultModel.value = it }
+            }
+            // Registry provenance survives restarts — without the hydrate the
+            // picker would show scraper leftovers again on every cold start.
+            ServiceLocator.preferences.registryModelKeysForAgent(agentNow.name).first()
+                .takeIf { it.isNotEmpty() }
+                ?.let { _registryKeys.value = _registryKeys.value + it }
+            // Re-arm the spec-level default so the FIRST chat of a cold start
+            // launches on the model its own chip advertises. These globals only
+            // exist in-process; without this the launch resolution starts blind
+            // and guesses from catalog order.
+            if (agentNow == Agent.CLAUDE) {
+                if (ai.eight24family.conch.agent.claude.claudeDefaultModel == null) {
+                    _defaultModel.value?.let {
+                        ai.eight24family.conch.agent.claude.claudeDefaultModel = it
+                    }
+                }
+                if (ai.eight24family.conch.agent.claude.claudeDefaultModelKey == null) {
+                    ServiceLocator.preferences.defaultModelWireKeyForAgent(agentNow.name).first()
+                        ?.let { ai.eight24family.conch.agent.claude.claudeDefaultModelKey = it }
+                }
             }
             // Reasoning catalog: same cold-start treatment as the labels.
             // Spec-encoded blob (agent-agnostic here) — without it the
@@ -354,10 +413,9 @@ internal class ChatViewModelModels(
                 }
             }
         } else {
-        val pty = PtyProbe { session.probeModelMenu() }
         _modelsProbing.value = true
         val map = try {
-            runCatching { spec.probeAvailableModels(exec, pty) }
+            runCatching { spec.probeAvailableModels(exec) }
                 .onFailure { android.util.Log.w(tag, "model probe failed for ${spec.agent}", it) }
                 .getOrDefault(emptyMap())
         } finally {
@@ -372,6 +430,9 @@ internal class ChatViewModelModels(
             val merged = rememberLabels(agentForCache.name, map)
             _availableModels.value = merged
             _modelsStale.value = false
+            // Only an AUTHORITATIVE catalog (the CLI's own registry) may confirm
+            // keys — a scrape or a guess must never promote itself.
+            if (spec.catalogIsAuthoritative) confirmRegistryKeys(agentForCache.name, map.keys)
             scope.launch {
                 ServiceLocator.preferences.setModelLabelsForAgent(agentForCache.name, map)
             }
@@ -435,6 +496,68 @@ internal class ChatViewModelModels(
             .getOrNull()
         android.util.Log.d(tag, "default ${spec.agent} reasoning: $defaultReasoningValue")
         _defaultReasoning.value = defaultReasoningValue
+    }
+
+    /**
+     * Adopt the model catalog from a live session's `initialize` handshake
+     * (see AgentSession.claudeInitState) — the CLI's own registry, arriving
+     * FREE with every persistent-channel launch. Feeds exactly the caches the
+     * probe path feeds (monotonic label merge, prefs, reasoning catalog,
+     * default model, prefetcher freshness), so the picker/topbar cannot tell
+     * the sources apart — except this one is always fresh.
+     */
+    fun adoptClaudeInit(
+        st: ai.eight24family.conch.agent.claude.ClaudeInitState,
+        serverId: String,
+    ) {
+        if (currentAgent.value != Agent.CLAUDE) return
+        val map = ai.eight24family.conch.agent.claude.ClaudeInitState.toPickerMap(st)
+        if (map.isEmpty()) return
+        val agentName = Agent.CLAUDE.name
+        val merged = rememberLabels(agentName, map)
+        _availableModels.value = merged
+        _modelsStale.value = false
+        // The handshake IS the registry — these keys are real choices; whatever
+        // else the catalog carries is a scraper-era leftover.
+        confirmRegistryKeys(agentName, map.keys)
+        scope.launch {
+            ServiceLocator.preferences.setModelLabelsForAgent(agentName, map)
+        }
+        val spec = AgentSpecRegistry[Agent.CLAUDE]
+        // ClaudeSpec.adoptInitState already ran (AgentSession publishes the
+        // handshake through it), so reasoningInfoFor serves the fresh ladder.
+        val rmap = merged.keys.mapNotNull { slug ->
+            spec.reasoningInfoFor(slug)?.let { slug to it }
+        }.toMap()
+        if (rmap.isNotEmpty()) {
+            _reasoningCatalog.value = rmap
+            spec.serializeReasoningCatalog(rmap)?.let { raw ->
+                scope.launch {
+                    ServiceLocator.preferences.setReasoningCatalogForAgent(agentName, raw)
+                }
+            }
+        }
+        ai.eight24family.conch.agent.claude.claudeDefaultModel?.let { def ->
+            _defaultModel.value = def
+            scope.launch {
+                runCatching { ServiceLocator.preferences.setDefaultModelForAgent(agentName, def) }
+            }
+        }
+        // PERSIST THE WIRE KEY TOO. The launch resolution reads the key, not
+        // the label, and it had nothing to read on a cold start — so it fell
+        // through to "first catalog entry" and sent `--model sonnet` under an
+        // "Opus 5 1M" chip (2026-08-02, caught on device).
+        ai.eight24family.conch.agent.claude.claudeDefaultModelKey?.let { k ->
+            scope.launch {
+                runCatching { ServiceLocator.preferences.setDefaultModelWireKeyForAgent(agentName, k) }
+            }
+        }
+        // A handshake IS a probe — keep the sweep from re-spawning a CLI.
+        ai.eight24family.conch.data.ModelCatalogPrefetcher.markProbed(serverId, Agent.CLAUDE)
+        android.util.Log.d(
+            "SshAi-Models",
+            "adopted init catalog: ${map.keys} default=${_defaultModel.value}",
+        )
     }
 
     /**

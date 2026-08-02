@@ -9,7 +9,6 @@ import ai.eight24family.conch.agent.spec.AgentExec
 import ai.eight24family.conch.agent.spec.AgentTopbarUi
 import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.spec.ModelMenuItem
-import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.TopbarModelState
 import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
@@ -276,10 +275,7 @@ fi
      *
      * Source for the endpoint: https://ai.google.dev/api/models
      */
-    override suspend fun probeAvailableModels(
-        exec: AgentExec,
-        pty: PtyProbe?,
-    ): Map<String, String> {
+    override suspend fun probeAvailableModels(exec: AgentExec): Map<String, String> {
         // Fallback for when the REST probe fails (no API key, no
         // OAuth creds yet, free-tier 500 etc.). Without **some** map
         // the picker stays empty and unclickable — which exactly the

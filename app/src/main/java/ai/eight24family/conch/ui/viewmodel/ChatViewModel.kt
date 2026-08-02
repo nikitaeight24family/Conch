@@ -1180,7 +1180,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ServiceLocator.preferences.setApprovalModeFor(agent.name, mode)
             // Apply to the active session so the next send uses the new flag.
             _localSessionId.value?.let { sid ->
-                activeSessions[sid]?.approvalMode = mode
+                val sess = activeSessions[sid] ?: return@let
+                sess.approvalMode = mode
+                // LIVE apply via set_permission_mode — the running process
+                // switches modes in place. A refusal (e.g. bypassPermissions on
+                // a session launched without the bypass flag) falls back to the
+                // launch-params restart on the next turn.
+                launch(Dispatchers.IO) {
+                    if (sess.applyApprovalLive(mode)) {
+                        android.util.Log.i("SshAi-Turn", "approval '$mode' applied live")
+                    }
+                }
             }
         }
     }
@@ -1279,6 +1289,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // ──── Available model display names (probed from claude cli.js) ────
     // All owned by `ChatViewModelModels`.
     val availableModels: StateFlow<Map<String, String>> get() = modelsCoord.availableModels
+
+    /** Catalog entries kept only for label resolution — never offered as picks
+     *  (scraper-era leftovers no CLI registry confirmed). */
+    val hiddenModels: StateFlow<Set<String>> get() = modelsCoord.hiddenModels
     val unavailableModelLabels: StateFlow<Set<String>> get() = modelsCoord.unavailableModelLabels
     val modelsProbing: StateFlow<Boolean> get() = modelsCoord.modelsProbing
     val modelsStale: StateFlow<Boolean> get() = modelsCoord.modelsStale
@@ -1383,6 +1397,39 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 SilentlyTry.fired("SshAi-Chat", "clear drafts after resumeId arrived") {
                     ServiceLocator.historyCache.clearDrafts(serverId, _currentAgent.value)
                 }
+                // PIN THE MODEL THIS CHAT WAS BORN WITH.
+                //
+                // A new chat launches on the server's own default (the ✔ row of
+                // `/model`). That default is a per-agent GLOBAL that any background
+                // probe can rewrite — so with nothing stored for this chat, a later
+                // probe changes what this chat resolves to, `ensureProcess` sees
+                // "launch params changed" and restarts the CLI on a different model.
+                //
+                // That restart is not cosmetic: `--resume` makes Claude re-read the
+                // WHOLE session file, and Anthropic's prompt cache is keyed per
+                // model, so the entire history is re-billed as cache_creation
+                // instead of cache_read — roughly ten times the price. On a session
+                // whose turns read 871k cached tokens, one silent switch costs more
+                // than a day of normal work.
+                //
+                // Writing the born-with model here makes the chat's model a FACT
+                // instead of a re-derivation: from now on `claudePick` answers for
+                // it and nothing but an explicit pick can move it.
+                SilentlyTry.fired("SshAi-Models", "pin born-with model") {
+                    val prefs = ServiceLocator.preferences
+                    if (prefs.selectedModelForChat(rid).first().isNullOrBlank()) {
+                        val born = _localSessionId.value
+                            ?.let { activeSessions[it]?.modelOverride }
+                            ?.takeIf { it.isNotBlank() }
+                        if (born != null) {
+                            prefs.setSelectedModelForChat(rid, born)
+                            android.util.Log.i(
+                                "SshAi-Models",
+                                "new chat $rid pinned to its launch model '$born'",
+                            )
+                        }
+                    }
+                }
             }
         }
         // Drain the pending-send buffer the moment the session reaches
@@ -1486,6 +1533,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private fun preserveUnsyncedUserText(
         current: List<AgentMessage>,
         incoming: List<AgentMessage>,
+        /** Rows the session DELIBERATELY dropped (a rewind). The
+         *  never-lose-the-user's-words rule must not fight an explicit undo:
+         *  without this the display layer put the rewound prompt straight
+         *  back, so the rewind removed 7 rows and the chat still showed them
+         *  (measured on device, 2026-08-02). */
+        isRewoundAway: (String) -> Boolean = { false },
     ): List<AgentMessage> {
         if (current.isEmpty()) return incoming
         val incomingIds = incoming.mapTo(HashSet()) { it.id }
@@ -1497,6 +1550,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val seen = HashMap<String, Int>()
         val survivors = ArrayList<AgentMessage>()
         for (m in current) {
+            if (m is AgentMessage.UserText && isRewoundAway(m.text)) continue
             if (m !is AgentMessage.UserText) continue
             if (m.id in incomingIds) continue            // same message already incoming
             val b = m.text.trim()
@@ -1834,8 +1888,26 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // claudeDefaultModel) and map that label back to its menu key; the
             // arbitrary-first-entry pick stays only as a last resort.
             val claudeModels = modelsCoord.availableModels.value
+            // WHAT WE SHOW MUST BE WHAT WE SEND — and the last resort used to
+            // break exactly that. With no known default KEY (a cold start, or
+            // any launch before the first handshake) this fell through to "the
+            // first catalog entry", whose order is arbitrary and, after the
+            // scraper→registry migration, starts with STALE keys the CLI no
+            // longer offers. Result on device: `--model sonnet` launched under
+            // an "Opus 5 1M" chip (2026-08-02).
+            //
+            // So the fallback now walks the SAME chain the chip does: the known
+            // default LABEL → the catalog entry carrying that label. Only if
+            // even that is unknown do we take the first runnable entry, and
+            // that case now means "we genuinely know nothing", not "we forgot
+            // to persist the key".
+            val defaultLabel = (modelsCoord.defaultModel.value
+                ?: ai.eight24family.conch.agent.claude.claudeDefaultModel)?.takeIf { it.isNotBlank() }
             val claudeRecommended = ai.eight24family.conch.agent.claude.claudeDefaultModelKey
                 ?.takeIf { k -> k.isNotBlank() && (claudeModels[k] ?: k) !in unavail }
+                ?: defaultLabel
+                    ?.takeIf { it !in unavail }
+                    ?.let { label -> claudeModels.entries.firstOrNull { it.value == label }?.key }
                 ?: claudeModels.entries
                     .firstOrNull { (k, label) -> k != "default" && label !in unavail }?.key
             // A conversation that is ALREADY RUNNING on a model keeps it. The
@@ -1856,6 +1928,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             s.modelOverride = (if (isClaude) (claudePick ?: sessionModel ?: claudeRecommended)
                 else (selectedModel.value ?: modelsCoord.currentSessionInitialModel()))
                 ?.takeIf { it.isNotBlank() }
+            // SHOWN-MODEL-IS-SENT-MODEL-1 is decided HERE, so log every input to
+            // the decision. Without this the only symptom is a topbar and a
+            // command line disagreeing, with nothing in the log saying which
+            // source won (exactly how the 2026-08-02 'sonnet launched under an
+            // Opus chip' was invisible until it was reproduced by hand).
+            if (isClaude) {
+                android.util.Log.i(
+                    "SshAi-Models",
+                    "launch model resolve: pick=$claudePick session=$sessionModel " +
+                        "recommended=$claudeRecommended defaultKey=" +
+                        "${ai.eight24family.conch.agent.claude.claudeDefaultModelKey} " +
+                        "catalog=${claudeModels.keys} unavail=$unavail → ${s.modelOverride}",
+                )
+            }
             s.reasoningEffortOverride = (selectedReasoning.value
                 ?: if (isClaude) null else modelsCoord.currentSessionInitialReasoning())
                 ?.takeIf { it.isNotBlank() }
@@ -2029,6 +2115,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         }
                     }
                 }
+                launch {
+                    // The persistent channel's initialize handshake carries the
+                    // CLI's OWN model catalog / default / effort ladder — adopt
+                    // it the moment it lands (and again on every process
+                    // relaunch). For a live chat this replaces the catalog
+                    // probe entirely: same data, zero extra round-trips.
+                    s.claudeInitState.collect { st ->
+                        if (st != null) modelsCoord.adoptClaudeInit(st, serverId)
+                    }
+                }
                 // Track which agent-session id we've already propagated so the
                 // instant-appearance work below runs ONCE per session, not on
                 // every history emit.
@@ -2043,7 +2139,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         // preserveUnsyncedUserText keeps it until the JSONL echo
                         // covers its text, then it drops out — no duplicate.
                         _messagesBySession.update { m ->
-                            m + (localId to preserveUnsyncedUserText(m[localId].orEmpty(), list))
+                            m + (localId to preserveUnsyncedUserText(
+                                m[localId].orEmpty(), list,
+                                isRewoundAway = { t -> s.isSuppressedByRewind(t) },
+                            ))
                         }
                         // ── Resume propagation + instant list appearance ── The
                         // instant the CLI mints this session's id, push it to
@@ -2430,10 +2529,93 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun setModel(model: String?) {
         modelsCoord.setModel(model) { trimmed ->
             _localSessionId.value?.let { sid ->
-                activeSessions[sid]?.modelOverride = trimmed
+                val sess = activeSessions[sid] ?: return@let
+                sess.modelOverride = trimmed
+                // LIVE apply over the control channel (set_model) — the running
+                // process swaps its model in place, no restart, no session
+                // re-read. On failure the override above still lands via the
+                // launch-params restart on the next turn (the old path).
+                viewModelScope.launch(Dispatchers.IO) {
+                    if (sess.applyModelLive(trimmed)) {
+                        android.util.Log.i("SshAi-Models", "model '$trimmed' applied live via set_model")
+                    }
+                }
             }
         }
     }
+
+    /** A model switch waiting for the user to accept the cache cost. */
+    data class PendingModelSwitch(
+        val model: String?,
+        val label: String,
+        /** Anthropic's dialog serves both; only the noun and the applied value
+         *  differ. `effort` non-null means this is an effort change. */
+        val effort: String? = null,
+        val isEffort: Boolean = false,
+    )
+
+    private val _pendingModelSwitch = MutableStateFlow<PendingModelSwitch?>(null)
+    val pendingModelSwitch: StateFlow<PendingModelSwitch?> = _pendingModelSwitch.asStateFlow()
+
+    /** Output tokens when the user last accepted a switch — Anthropic's
+     *  `cacheMissAckedAtOutputTokens`. See [ModelSwitchWarning]. */
+    @Volatile private var cacheMissAckedAtOutputTokens: Long? = null
+
+    /**
+     * The picker calls THIS, not [setModel]. Switching model invalidates the
+     * per-model prompt cache, so the whole history is re-read and re-billed on
+     * the next message; the warning makes that cost visible BEFORE it is paid,
+     * and fires exactly when Anthropic's own CLI shows it.
+     */
+    fun requestSetModel(model: String?, label: String) {
+        val warn = ModelSwitchWarning.shouldWarn(
+            next = model,
+            current = modelsCoord.selectedModel.value
+                ?: _localSessionId.value?.let { activeSessions[it]?.modelOverride },
+            hasMessages = messages.value.any {
+                it is AgentMessage.UserText || it is AgentMessage.AssistantText
+            },
+            outputTokens = costStats.value.outputTokens,
+            ackedAtTokens = cacheMissAckedAtOutputTokens,
+            resolve = { slug -> modelsCoord.availableModels.value[slug] ?: slug },
+        )
+        if (warn) _pendingModelSwitch.value = PendingModelSwitch(model, label)
+        else setModel(model)
+    }
+
+    fun confirmModelSwitch() {
+        val pending = _pendingModelSwitch.value ?: return
+        cacheMissAckedAtOutputTokens = costStats.value.outputTokens
+        _pendingModelSwitch.value = null
+        if (pending.effort != null) setReasoning(pending.effort)
+        if (!pending.isEffort) setModel(pending.model)
+    }
+
+    /**
+     * Effort changes bust the cache exactly like model changes — Anthropic's own
+     * dialog is the SAME component with "effort level" swapped in for "model",
+     * and the gate this reuses is literally the one their effort slider calls.
+     * Budget-mapped levels now apply LIVE over the control channel
+     * (set_max_thinking_tokens); the cache-bust economics are the same either
+     * way, so the warning stays.
+     */
+    fun requestSetReasoning(effort: String?, label: String) {
+        val warn = ModelSwitchWarning.shouldWarn(
+            next = effort,
+            current = modelsCoord.selectedReasoning.value,
+            hasMessages = messages.value.any {
+                it is AgentMessage.UserText || it is AgentMessage.AssistantText
+            },
+            outputTokens = costStats.value.outputTokens,
+            ackedAtTokens = cacheMissAckedAtOutputTokens,
+        )
+        if (warn) {
+            _pendingModelSwitch.value =
+                PendingModelSwitch(model = null, label = label, effort = effort, isEffort = true)
+        } else setReasoning(effort)
+    }
+
+    fun cancelModelSwitch() { _pendingModelSwitch.value = null }
 
     /** Pin a reasoning-effort level (Codex's `low|medium|high|xhigh`, Claude's
      *  `low|medium|high|max`) to this chat. `null` clears the pin. Same isolation
@@ -2441,7 +2623,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun setReasoning(effort: String?) {
         modelsCoord.setReasoning(effort) { trimmed ->
             _localSessionId.value?.let { sid ->
-                activeSessions[sid]?.reasoningEffortOverride = trimmed
+                val sess = activeSessions[sid] ?: return@let
+                sess.reasoningEffortOverride = trimmed
+                // LIVE apply (set_max_thinking_tokens) for budget-mapped levels;
+                // xhigh/ultracode still take the restart path on the next turn.
+                viewModelScope.launch(Dispatchers.IO) {
+                    if (sess.applyReasoningLive(trimmed)) {
+                        android.util.Log.i("SshAi-Models", "effort '$trimmed' applied live")
+                    }
+                }
             }
         }
     }
@@ -2569,6 +2759,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // FAST: cheap source paints within a few hundred ms (Codex rollout
             // snapshot with projected resets / Claude's cached value)...
             UsageProbe.fetch(serverId, agent, fast = true)?.let { _usage.value = it }
+            // Claude with a LIVE control channel: `get_usage` over the running
+            // process — the CLI's own numbers, free (no extra ssh channel, no
+            // curl, no token handling). Rides the same channel the turns use.
+            if (agent == Agent.CLAUDE) {
+                val sess = _localSessionId.value?.let { activeSessions[it] }
+                val payload = sess?.fetchUsageLive()
+                if (payload != null) {
+                    UsageProbe.reportFromControlPayload(payload.toString())?.let { rep ->
+                        _usage.value = rep
+                        UsageProbe.remember(serverId, agent, rep)
+                        return@launch
+                    }
+                }
+            }
             // ...then LIVE refines. Retry on null (= no warm connection yet) up
             // to ~9s so the bar fills the moment the transport is ready; succeeds
             // on the first try in the common case (connection already warm).
@@ -2592,13 +2796,202 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // Prefer the resume id; fall back to this chat's local session id (a
         // brand-new chat has no resume id yet, but its jsonl exists on disk).
         val rid = _resumeId.value ?: _localSessionId.value ?: return
-        UsageProbe.cachedContext(rid)?.let { _contextBreakdown.value = it; return }
+        // Instant paint from the cache; the live read below still runs so the
+        // numbers refresh (the cached copy goes stale with every turn).
+        UsageProbe.cachedContext(rid)?.let { _contextBreakdown.value = it }
         if (_contextLoading.value) return
         _contextLoading.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val r = UsageProbe.fetchContextBreakdown(serverId, rid)
-            _contextBreakdown.value = r
+            // LIVE channel first: `get_context_usage` asks the RUNNING process —
+            // instant and exact, no second CLI spawn, no session copy. Falls
+            // back to the legacy copy-probe for mirrored / one-shot sessions.
+            val live = _localSessionId.value?.let { activeSessions[it] }
+                ?.fetchContextUsageLive()
+                ?.let { UsageProbe.contextFromControlPayload(it) }
+                ?.takeIf { it.isNotEmpty() }
+            if (live != null) {
+                UsageProbe.rememberContext(rid, live)
+                _contextBreakdown.value = live
+                _contextLoading.value = false
+                return@launch
+            }
+            // No live channel. The slow copy-probe only runs when NOTHING is on
+            // screen — a cached breakdown beats a 15-30s CLI spawn.
+            if (_contextBreakdown.value == null) {
+                _contextBreakdown.value = UsageProbe.fetchContextBreakdown(serverId, rid)
+            }
             _contextLoading.value = false
+        }
+    }
+
+    // ── @-mention file suggestions (Claude control channel) ────────────────
+    // Server-side fuzzy search over the CLI's own file index. Debounced; only
+    // meaningful while the persistent channel is up — otherwise stays empty
+    // and the prompt bar simply shows nothing.
+    private val _fileSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val fileSuggestions: StateFlow<List<String>> = _fileSuggestions.asStateFlow()
+    private var mentionJob: Job? = null
+
+    /** Called by the prompt bar whenever the trailing @-token changes; null =
+     *  no mention being typed → clears the strip. */
+    fun updateMentionQuery(query: String?) {
+        mentionJob?.cancel()
+        if (query == null || _currentAgent.value != Agent.CLAUDE) {
+            _fileSuggestions.value = emptyList()
+            return
+        }
+        mentionJob = viewModelScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(180) // debounce typing
+            val sess = _localSessionId.value?.let { activeSessions[it] }
+            val res = sess?.fileSuggestions(query)
+            // A dead/refused channel yields null — keep the strip EMPTY, never
+            // stale results for a different query.
+            _fileSuggestions.value = res.orEmpty().take(8)
+        }
+    }
+
+    // ── Session rename (rename_session over the control channel) ──────────
+    /** Optimistic title override so the topbar/list reflect the new name
+     *  immediately (the server-side listing catches up on its next sweep). */
+    private val _renamedTitle = MutableStateFlow<String?>(null)
+    val renamedTitle: StateFlow<String?> = _renamedTitle.asStateFlow()
+
+    /** Rename the current session on the server. Claude-only (the CLI
+     *  persists it as a custom-title transcript record; shows in
+     *  `claude --resume` and our sessions list). */
+    fun renameSession(title: String) {
+        val trimmed = title.trim().take(140)
+        if (trimmed.isBlank() || _currentAgent.value != Agent.CLAUDE) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val sess = _localSessionId.value?.let { activeSessions[it] } ?: return@launch
+            if (sess.renameSession(trimmed)) {
+                _renamedTitle.value = trimmed
+                android.util.Log.i("SshAi-Turn", "session renamed to '$trimmed'")
+            } else {
+                android.util.Log.w("SshAi-Turn", "rename_session failed (channel down or refused)")
+            }
+        }
+    }
+
+    /** One-line outcome notice for chat-level actions (rewind succeeded /
+     *  failed). Deliberately a BANNER, not a chat row: it is app feedback
+     *  about the user's own action, not part of the transcript, so it must
+     *  not be replayed on every reopen. */
+    private val _chatNotice = MutableStateFlow<String?>(null)
+    val chatNotice: StateFlow<String?> = _chatNotice.asStateFlow()
+    fun dismissChatNotice() { _chatNotice.value = null }
+
+    // ── Rewind (/rewind) ──────────────────────────────────────────────────
+    // Two SEPARATE steps, deliberately: the conversation rewind is reversible
+    // (the discarded branch stays in the transcript, nothing on disk moves),
+    // the FILE rewind overwrites the user's working tree and is therefore
+    // never implicit — it always shows what it would change first.
+
+    /** The rewind sheet's state for one user turn. */
+    data class RewindTarget(
+        val recordUuid: String,
+        /** The prompt text, so the sheet can name what it rewinds to. */
+        val preview: String,
+        /** Dry-run result: what a FILE rewind would restore. null = not
+         *  probed yet; canRewind=false carries the CLI's own reason. */
+        val files: ai.eight24family.conch.agent.FileRewindResult? = null,
+        val probing: Boolean = false,
+    )
+
+    private val _rewindTarget = MutableStateFlow<RewindTarget?>(null)
+    val rewindTarget: StateFlow<RewindTarget?> = _rewindTarget.asStateFlow()
+
+    /** Text the composer should adopt after a rewind (the rewound prompt,
+     *  handed back for editing — same as the CLI). Consumed by the screen. */
+    private val _rewindPrefill = MutableStateFlow<String?>(null)
+    val rewindPrefill: StateFlow<String?> = _rewindPrefill.asStateFlow()
+    fun consumeRewindPrefill() { _rewindPrefill.value = null }
+
+    /**
+     * Long-press on a user row → open the rewind sheet, resolve the anchor if
+     * the row doesn't carry one, and dry-run what a FILE rewind would touch.
+     *
+     * [recordUuid] is null for a bubble the server hasn't echoed back to us
+     * yet (every message the moment it is sent, and any row in a session that
+     * was reopened while still alive). Rather than refuse the gesture on
+     * exactly the turns a user most wants to undo, we ask the server for the
+     * anchor. Only if THAT fails is there genuinely nothing to rewind to.
+     */
+    fun openRewind(recordUuid: String?, preview: String) {
+        if (_currentAgent.value != Agent.CLAUDE) return
+        val text = preview
+        _rewindTarget.value = RewindTarget(recordUuid.orEmpty(), preview.take(120), probing = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val sess = _localSessionId.value?.let { activeSessions[it] }
+            val anchor = recordUuid?.takeIf { it.isNotBlank() }
+                ?: sess?.resolveUserRecordUuid(text)
+            if (anchor.isNullOrBlank()) {
+                _rewindTarget.value = null
+                _chatNotice.value =
+                    "Can't rewind to that message yet — the server hasn't recorded it"
+                return@launch
+            }
+            _rewindTarget.update { cur ->
+                cur?.copy(recordUuid = anchor)
+            }
+            val dry = sess?.rewindFiles(anchor, dryRun = true)
+            _rewindTarget.update { cur ->
+                if (cur?.recordUuid != anchor) cur else cur.copy(files = dry, probing = false)
+            }
+        }
+    }
+
+    fun dismissRewind() { _rewindTarget.value = null }
+
+    /** Step 1: conversation only. Nothing on disk is touched. */
+    fun rewindConversation() {
+        val target = _rewindTarget.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val sess = _localSessionId.value?.let { activeSessions[it] }
+            val res = sess?.rewindConversation(target.recordUuid)
+            if (res?.ok == true) {
+                _rewindPrefill.value = res.prefillText
+                _rewindTarget.value = null
+            } else {
+                // Never silently swallow: the CLI's own reason ("turn running",
+                // "target not found") is what tells the user what to do next.
+                _chatNotice.value = "Rewind failed — ${res?.error ?: "no live session"}"
+                _rewindTarget.update { it?.copy(probing = false) }
+            }
+        }
+    }
+
+    /** Step 2: FILES. Only ever reached from an explicit confirm on a sheet
+     *  that already listed the files by name. */
+    fun rewindFilesConfirmed() {
+        val target = _rewindTarget.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val sess = _localSessionId.value?.let { activeSessions[it] }
+            val res = sess?.rewindFiles(target.recordUuid, dryRun = false)
+            if (res?.canRewind == true) {
+                val n = target.files?.filesChanged?.size ?: 0
+                val filesMsg = if (n > 0) "Restored $n file(s) to before this turn"
+                    else "Files restored to before this turn"
+                // Files are back; the conversation still holds the turn that
+                // produced them, so rewind that too — otherwise the chat claims
+                // work that no longer exists on disk.
+                val conv = sess.rewindConversation(target.recordUuid)
+                if (conv.ok) {
+                    _rewindPrefill.value = conv.prefillText
+                    _chatNotice.value = filesMsg
+                } else {
+                    // HALF-DONE, and the user must know WHICH half: the disk is
+                    // rolled back but the transcript still contains the turn.
+                    // Silently reporting success here would leave the chat
+                    // describing work that no longer exists.
+                    _chatNotice.value =
+                        "$filesMsg — but the conversation was NOT rewound (${conv.error ?: "refused"})"
+                }
+                _rewindTarget.value = null
+            } else {
+                _chatNotice.value = "File rewind failed — ${res?.error ?: "no live session"}"
+                _rewindTarget.update { it?.copy(probing = false) }
+            }
         }
     }
 
@@ -2658,6 +3051,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         "explicit pick '$chosen' re-applied (was '${sess.modelOverride}')",
                     )
                     sess.modelOverride = chosen
+                    // Push the late-arriving pick onto the RUNNING process too —
+                    // without this the live session keeps its old model until the
+                    // next launch-params restart.
+                    launch(Dispatchers.IO) { sess.applyModelLive(chosen) }
                 }
             }
         }

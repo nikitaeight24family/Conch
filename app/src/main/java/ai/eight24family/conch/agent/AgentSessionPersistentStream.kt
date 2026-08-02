@@ -12,6 +12,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.contentOrNull
 import net.schmizz.sshj.connection.channel.direct.Session
 import ai.eight24family.conch.ssh.startStreamSession
 import java.io.BufferedReader
@@ -32,8 +33,16 @@ import java.util.concurrent.atomic.AtomicInteger
  *    surfaced as chat cards and answered with `control_response`s;
  *  - Stop sends a real `interrupt` control request instead of killing
  *    the process;
- *  - mid-chat model/effort/approval changes restart the process with
- *    `--resume` (cheap, transparent — the session lives server-side).
+ *  - mid-chat model/effort/approval changes go over the wire LIVE
+ *    (`set_model` / `set_max_thinking_tokens` / `set_permission_mode`)
+ *    with no restart; only picks the wire can't express (an unknown
+ *    effort level, a refused bypass) fall back to the old
+ *    restart-with-`--resume` path via the LaunchParams comparison;
+ *  - the `initialize` handshake's response is parsed ([onInitState]) —
+ *    the CLI's own model catalog / commands / subagents / account —
+ *    and `get_usage` / `get_context_usage` / `file_suggestions` /
+ *    `rename_session` ride the same channel (no curl with a raw OAuth
+ *    token, no second `claude -p /context` process, no TUI scraping).
  *
  * This is what makes the app interactive-capable at parity with the
  * CLI's own TUI. Wire shapes live in [ClaudeControlWire]; verified
@@ -67,6 +76,11 @@ internal class AgentSessionPersistentStream(
     /** Live reasoning-token feed (`system/thinking_tokens` →
      *  estimated_tokens). null clears the row at turn end. */
     private val onThinkingTokens: (Long?) -> Unit = {},
+    /** Parsed `initialize` handshake response — model catalog, slash
+     *  commands, subagents, account — republished on every process launch.
+     *  The CLI's own registry; replaces the /model TUI scrape as the
+     *  catalog source for live chats. */
+    private val onInitState: (ai.eight24family.conch.agent.claude.ClaudeInitState) -> Unit = {},
 ) {
     private val tag = "SshAi-Persist"
 
@@ -108,6 +122,14 @@ internal class AgentSessionPersistentStream(
     private val pendingControls =
         java.util.concurrent.ConcurrentHashMap<String, ClaudeControlWire.ControlRequest>()
 
+    /** request_id → awaiter for a control_response to a request WE sent
+     *  (initialize / set_model / get_usage / …). Ids are unique per request,
+     *  so a late response from a torn-down process can only ever complete its
+     *  own stale deferred — never a newer request's. Cleared (completed null)
+     *  on teardown so callers never hang on a dead process. */
+    private val pendingClientRequests =
+        java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<ClaudeControlWire.ControlResponse?>>()
+
     /** True iff a CLI→client control_request (AskUserQuestion / permission) is live
      *  and blocked on the user. The tail-poll's turn-state detector reads this for
      *  WAITING-FOR-USER — control_requests are intercepted before the parser and
@@ -116,7 +138,12 @@ internal class AgentSessionPersistentStream(
     fun hasPendingControl(): Boolean = pendingControls.isNotEmpty()
 
     private val reqCounter = AtomicInteger(0)
-    private var turnSeq = 0
+    // @Volatile: written by whichever coroutine calls ensureProcess() (a new
+    // runTurn, possibly on a different IO thread than an OLDER reader that is
+    // still winding down), read by that older reader's own coroutine in
+    // startReader's finally. Plain-var writes are not guaranteed visible
+    // across threads without a memory barrier.
+    @Volatile private var turnSeq = 0
 
     /**
      * Execute one turn over the persistent channel.
@@ -143,14 +170,23 @@ internal class AgentSessionPersistentStream(
                 return@withContext false
             }
             val done = CompletableDeferred<Boolean>()
-            turnDone = done
             lastReaderActivityMs = System.currentTimeMillis()
             // Where this turn's output starts, so the silence backstop can tell
             // "produced nothing" from "the reader wedged but the file mirror
             // already delivered the reply".
             val historyAtTurnStart = history.history.value.size
             val line = AgentSpecRegistry[server.agent].encodeUserTurn(text)
-            if (!writeLine(line)) {
+            // The live-turn token flips ATOMICALLY with the stdin write, under the
+            // same lock the async interrupt writer takes. An interrupt minted for
+            // the PREVIOUS turn either wins this lock — and is written while it
+            // still owns the channel — or loses it and finds a token it does not
+            // own, so it is dropped instead of aborting this turn. Monitors are
+            // reentrant, so writeLine's own `synchronized(writeLock)` is fine.
+            val sent = synchronized(writeLock) {
+                turnDone = done
+                writeLine(line)
+            }
+            if (!sent) {
                 // stdin write failed → process/transport died between
                 // ensureProcess and the write. Same silent-reconnect
                 // semantics as the one-shot ABORT paths.
@@ -313,8 +349,30 @@ internal class AgentSessionPersistentStream(
             // initialize handshake — the Agent SDK ALWAYS sends this first.
             // It registers the session and (critically) declares which
             // dialog kinds we render; some control flows degrade / fail
-            // closed without it. Fire-and-log: the reader prints the ack.
+            // closed without it. The RESPONSE carries the CLI's own model
+            // catalog / commands / account — captured async and republished
+            // via [onInitState] (the reader routes it by request id).
             val initId = "init-${reqCounter.incrementAndGet()}-${UUID.randomUUID().toString().take(8)}"
+            val initDone = CompletableDeferred<ClaudeControlWire.ControlResponse?>()
+            pendingClientRequests[initId] = initDone
+            scope.launch {
+                val resp = withTimeoutOrNull(INIT_RESPONSE_TIMEOUT_MS) { initDone.await() }
+                pendingClientRequests.remove(initId)
+                val payload = resp?.takeIf { it.ok }?.payload ?: run {
+                    if (resp != null) android.util.Log.w(tag, "initialize error: ${resp.error}")
+                    return@launch
+                }
+                SilentlyTry.fired(tag, "publish init state") {
+                    val st = ai.eight24family.conch.agent.claude.ClaudeInitState.parse(payload)
+                    android.util.Log.d(
+                        tag,
+                        "initialize: models=${st.models.map { it.value }} " +
+                            "commands=${st.commands.size} agents=${st.agents.size} " +
+                            "account=${st.account?.subscriptionType ?: "?"}",
+                    )
+                    onInitState(st)
+                }
+            }
             writeLine(ClaudeControlWire.encodeInitialize(initId))
             true
         } catch (t: Throwable) {
@@ -380,7 +438,10 @@ internal class AgentSessionPersistentStream(
     }
 
     private fun startReader(cmd: Session.Command) {
-        val myTag = "p${turnSeq}_"
+        // Both the log tag and the ownership fence for this reader's whole
+        // lifetime — see the finally block below and the terminal-line branch.
+        val myGen = turnSeq
+        val myTag = "p${myGen}_"
         readerJob = scope.launch {
             val spec = AgentSpecRegistry[server.agent]
             try {
@@ -393,10 +454,12 @@ internal class AgentSessionPersistentStream(
                             rawTail.addLast(line.take(1200))
                             while (rawTail.size > 12) rawTail.removeFirst()
                         }
-                        // Live reasoning counter — transient UI state, never
-                        // a chat row. Exact-key match so estimated_tokens_delta
-                        // can't shadow it.
-                        if (line.contains("\"thinking_tokens\"")) {
+                        // Live reasoning counter — transient UI state, never a
+                        // chat row. Gen-gated like turnDone below: an orphaned
+                        // reader still draining a torn-down process's buffered
+                        // stdout must not paint "thinking" over a NEW turn that
+                        // has already answered.
+                        if (myGen == turnSeq && line.contains("\"thinking_tokens\"")) {
                             THINKING_TOKENS_RX.find(line)?.groupValues?.get(1)?.toLongOrNull()
                                 ?.let { onThinkingTokens(it) }
                         }
@@ -411,8 +474,17 @@ internal class AgentSessionPersistentStream(
                             continue
                         }
                         if (line.startsWith("{") && line.contains("\"control_response\"")) {
-                            // Ack for our own interrupt/etc. Nothing to render.
-                            android.util.Log.d(tag, "control ack: ${line.take(160)}")
+                            // Response to a request WE sent — route to its awaiter
+                            // (set_model ack, get_usage payload, initialize state).
+                            // Unmatched ids (e.g. an interrupt ack after its turn
+                            // ended) are just logged.
+                            val resp = ClaudeControlWire.parseControlResponse(line)
+                            val awaiter = resp?.let { pendingClientRequests.remove(it.requestId) }
+                            if (awaiter != null) {
+                                awaiter.complete(resp)
+                            } else {
+                                android.util.Log.d(tag, "control ack: ${line.take(160)}")
+                            }
                             continue
                         }
                         val parsedMsgs = spec.parseStreamLine(line, myTag)
@@ -460,7 +532,14 @@ internal class AgentSessionPersistentStream(
                             // interrupt IS honoured ends the turn with the channel
                             // still alive.
                             pendingControls.keys.toList().forEach { retireControl(it) }
-                            turnDone?.complete(true)
+                            // Only if THIS reader's process is still the current one.
+                            // A torn-down process's stdout can keep draining buffered
+                            // bytes after a newer process has already been launched
+                            // (teardownProcess()/readerJob.cancel() cannot interrupt a
+                            // blocking readLine()) — completing turnDone here would
+                            // resolve the NEW turn's deferred with THIS old line's
+                            // verdict.
+                            if (myGen == turnSeq) turnDone?.complete(true)
                         } else if (line.contains("\"total_cost_usd\"") || line.contains("\"num_turns\"")) {
                             // Turn-final ACCOUNTING that nothing called terminal.
                             // Only an envelope that ends a turn carries these. Log
@@ -478,11 +557,29 @@ internal class AgentSessionPersistentStream(
             } finally {
                 val tail = synchronized(rawTail) { rawTail.joinToString("  ⏎  ") }
                 android.util.Log.w(tag, "reader EOF — process gone. last stdout: $tail")
-                procAlive = false
-                // Any cards still waiting for an answer are dead with the
-                // process — freeze them so the user isn't tapping a void.
-                pendingControls.keys.toList().forEach { retireControl(it) }
-                turnDone?.complete(false)
+                // ⚠ EVERYTHING in this block only applies if THIS reader still
+                // owns the CURRENT process. `readerJob?.cancel()` (teardownProcess)
+                // cannot interrupt a thread blocked in `BufferedReader.readLine()`
+                // on a live socket — it has to wait for the transport to actually
+                // notice the channel is gone, which measured 13s after a Stop-
+                // escalation kill on 2026-07-30. If the user has already re-sent in
+                // that window, ensureProcess() has ALREADY launched a new process
+                // with a new turnSeq and a new turnDone for the NEW turn — an
+                // orphaned reader reaching this finally must not touch ANY of that
+                // turn's state (user, 2026-07-31, second time: a duplicated prompt
+                // appended after an answer already existed, and the thinking
+                // indicator stuck on after a real answer had landed — both explained
+                // by an old reader's `turnDone?.complete(false)` falsely failing a
+                // turn its own real reader was still in the middle of answering).
+                if (myGen == turnSeq) {
+                    procAlive = false
+                    // Any cards still waiting for an answer are dead with the
+                    // process — freeze them so the user isn't tapping a void.
+                    pendingControls.keys.toList().forEach { retireControl(it) }
+                    turnDone?.complete(false)
+                } else {
+                    android.util.Log.d(tag, "orphaned reader EOF ignored — turnSeq moved on ($myGen -> $turnSeq)")
+                }
             }
         }
     }
@@ -617,9 +714,23 @@ internal class AgentSessionPersistentStream(
      *  a result, so the normal turn bookkeeping completes. Launched on
      *  the session's IO scope: callers include the MAIN-thread Stop
      *  button, and socket writes on main throw NetworkOnMainThread. */
-    fun interrupt() {
+    fun interrupt(target: CompletableDeferred<Boolean>? = turnDone) {
         val id = "int-${reqCounter.incrementAndGet()}-${UUID.randomUUID().toString().take(8)}"
-        scope.launch { writeLine(ClaudeControlWire.encodeInterrupt(id)) }
+        scope.launch {
+            synchronized(writeLock) {
+                // The wire has no turn addressing: the CLI aborts whatever is in
+                // flight when it READS the line. So the only thing that can stop an
+                // interrupt from killing the user's NEXT prompt is checking, while
+                // holding the write lock, that the turn it was minted for still owns
+                // the channel (user, 2026-07-31: stop -> re-send -> the re-send came
+                // back as `result:stopped` with 0 output tokens).
+                if (turnDone !== target) {
+                    android.util.Log.d(tag, "interrupt $id dropped — its turn already ended")
+                } else {
+                    writeLine(ClaudeControlWire.encodeInterrupt(id))
+                }
+            }
+        }
     }
 
     /**
@@ -630,15 +741,50 @@ internal class AgentSessionPersistentStream(
      */
     fun cancelTurn() {
         sshLifecycle.userCancelled = true
-        interrupt()
+        // The turn Stop is aimed at — IF one has started writing to the process
+        // yet. `turnDone` is assigned inside runTurn only after
+        // ensureProcess()/backfillCwdIfNeeded() return, which can legitimately
+        // take seconds (spawning `claude --resume` against a large session file
+        // is not instant). Stop pressed in that window used to fall through to
+        // `val target = turnDone?: return` and do ABSOLUTELY NOTHING — no
+        // interrupt, no escalation armed, state stuck on Working for the rest of
+        // the turn. That was worse than the bug this fencing replaced: the OLD,
+        // pre-fencing code always armed a session-level escalation, so Stop was
+        // guaranteed to un-stick the UI within 4s even in this exact window.
+        // Restore that guarantee as the fallback, while keeping the turn-fencing
+        // for the common case where a turn HAS started (so Stop still can't kill
+        // an unrelated later turn — that was yesterday's bug, see the 2026-07-31
+        // note two paragraphs up in git history).
+        val target = turnDone
+        if (target != null) interrupt(target)
         scope.launch {
             kotlinx.coroutines.delay(4_000)
-            if (getState() == SessionState.Working && procAlive) {
-                android.util.Log.w(tag, "interrupt not honored in 4s — killing persistent process")
-                teardownProcess()
-                turnDone?.complete(true)
-                if (getState() == SessionState.Working) onStateChange(SessionState.Running)
+            val escalate = if (target != null) {
+                shouldEscalateKill(
+                    sameTurn = turnDone === target,
+                    victimDone = target.isCompleted,
+                    working = getState() == SessionState.Working,
+                    alive = procAlive,
+                )
+            } else {
+                // Nothing was captured to fence on. Fall back to the plain
+                // session-level check: still Working and the process still up
+                // means Stop's target — whatever eventually started — has not
+                // finished, so kill it. A turn that legitimately started AND
+                // finished inside these 4s is left alone either way, since
+                // getState() would already be back to Running by then.
+                getState() == SessionState.Working && procAlive
             }
+            if (!escalate) {
+                android.util.Log.d(tag, "stop escalation skipped — nothing to kill")
+                return@launch
+            }
+            android.util.Log.w(tag, "interrupt not honored in 4s — killing persistent process")
+            teardownProcess()
+            // The stopped turn, never "whatever is current" — null when Stop was
+            // pressed before any turn had a token to complete.
+            target?.complete(true)
+            if (getState() == SessionState.Working) onStateChange(SessionState.Running)
         }
     }
 
@@ -664,6 +810,176 @@ internal class AgentSessionPersistentStream(
             procAlive = false
             false
         }
+    }
+
+    // ── Client-initiated control requests over the live channel ──────────
+    // (set_model / set_max_thinking_tokens / set_permission_mode /
+    //  get_context_usage / get_usage / file_suggestions / rename_session —
+    //  binary-verified against the 2.1.219 stdin dispatcher.)
+
+    /** Write one request line and await its control_response. null on a dead
+     *  channel / write failure / timeout / teardown. IO-hopped: callers
+     *  include MAIN-thread pickers. */
+    private suspend fun sendControlRequest(
+        encode: (requestId: String) -> String,
+        timeoutMs: Long = CONTROL_RESPONSE_TIMEOUT_MS,
+    ): ClaudeControlWire.ControlResponse? = withContext(Dispatchers.IO) {
+        if (!procAlive) return@withContext null
+        val id = "req-${reqCounter.incrementAndGet()}-${UUID.randomUUID().toString().take(8)}"
+        val done = CompletableDeferred<ClaudeControlWire.ControlResponse?>()
+        pendingClientRequests[id] = done
+        if (!writeLine(encode(id))) {
+            pendingClientRequests.remove(id)
+            return@withContext null
+        }
+        val resp = withTimeoutOrNull(timeoutMs) { done.await() }
+        pendingClientRequests.remove(id)
+        resp
+    }
+
+    /**
+     * LIVE model switch — no process restart, no session re-read, no cache
+     * bust beyond the model change itself. On success [launched] is updated
+     * so the next turn's LaunchParams comparison does NOT restart the
+     * process. Returns false when the channel is down or the CLI refused
+     * (unknown/restricted model) — the caller's modelOverride then takes the
+     * old restart-with---resume path on the next turn, unchanged.
+     */
+    suspend fun trySetModel(model: String?): Boolean {
+        val resp = sendControlRequest({ id -> ClaudeControlWire.encodeSetModel(id, model) })
+        if (resp?.ok != true) {
+            if (resp?.error != null) android.util.Log.w(tag, "set_model refused: ${resp.error}")
+            return false
+        }
+        launched = launched?.copy(model = model?.takeIf { it.isNotBlank() })
+        android.util.Log.i(tag, "set_model applied LIVE: ${model ?: "<default>"}")
+        return true
+    }
+
+    /**
+     * LIVE thinking-budget switch. Only effort levels with a fixed budget
+     * mapping can go over the wire (the CLI's set_max_thinking_tokens takes
+     * an integer); levels we pass as `--effort` (xhigh/ultracode/unknown
+     * future ones) still need the restart path — return false for those.
+     * null = clear back to the CLI's adaptive default.
+     */
+    suspend fun trySetReasoning(effort: String?, budget: Int?): Boolean {
+        // A level we can't express as a budget (xhigh/ultracode) can't be
+        // applied live — only cleared or budget-mapped levels can.
+        if (effort != null && budget == null) return false
+        val resp = sendControlRequest({ id ->
+            ClaudeControlWire.encodeSetMaxThinkingTokens(id, budget)
+        })
+        if (resp?.ok != true) {
+            if (resp?.error != null) android.util.Log.w(tag, "set_max_thinking_tokens refused: ${resp.error}")
+            return false
+        }
+        launched = launched?.copy(reasoning = effort?.takeIf { it.isNotBlank() })
+        android.util.Log.i(tag, "set_max_thinking_tokens applied LIVE: effort=$effort budget=$budget")
+        return true
+    }
+
+    /**
+     * LIVE permission-mode switch. bypassPermissions may be REFUSED by a
+     * session not launched with the bypass flag — false then falls back to
+     * the restart path, which relaunches with the right `--permission-mode`.
+     */
+    suspend fun trySetPermissionMode(
+        mode: ai.eight24family.conch.data.prefs.AgentApprovalMode,
+    ): Boolean {
+        val wire = when (mode) {
+            ai.eight24family.conch.data.prefs.AgentApprovalMode.SAFE -> "default"
+            ai.eight24family.conch.data.prefs.AgentApprovalMode.AUTO -> "acceptEdits"
+            ai.eight24family.conch.data.prefs.AgentApprovalMode.YOLO -> "bypassPermissions"
+        }
+        val resp = sendControlRequest({ id ->
+            ClaudeControlWire.encodeSetPermissionMode(id, wire)
+        })
+        if (resp?.ok != true) {
+            if (resp?.error != null) android.util.Log.w(tag, "set_permission_mode refused: ${resp.error}")
+            return false
+        }
+        launched = launched?.copy(approval = mode)
+        android.util.Log.i(tag, "set_permission_mode applied LIVE: $wire")
+        return true
+    }
+
+    /** `/context` numbers for THIS live session — the same data the CLI's own
+     *  /context grid draws. No second process, no session copy. */
+    suspend fun getContextUsage(): kotlinx.serialization.json.JsonObject? =
+        sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetContextUsage(id) },
+            timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload
+
+    /** Plan-limit windows from the CLI's own cache (rate_limits + session
+     *  cost + subscription_type). No curl, no raw token handling. */
+    suspend fun getUsage(): kotlinx.serialization.json.JsonObject? =
+        sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetUsage(id) },
+            timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload
+
+    /** Server-side fuzzy file search for @-mentions. null = channel down /
+     *  refused (callers show nothing rather than a stale list). */
+    suspend fun fileSuggestions(query: String): List<String>? {
+        val payload = sendControlRequest({ id ->
+            ClaudeControlWire.encodeFileSuggestions(id, query)
+        })?.takeIf { it.ok }?.payload ?: return null
+        return SilentlyTry.logged(tag, "parse file suggestions") {
+            (payload["suggestions"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { s ->
+                ((s as? kotlinx.serialization.json.JsonObject)
+                    ?.get("path") as? kotlinx.serialization.json.JsonPrimitive)?.content
+            }
+        }
+    }
+
+    /** Rename this session's title (persists to the transcript; shows in
+     *  `claude --resume`). */
+    suspend fun renameSession(title: String): Boolean =
+        sendControlRequest({ id ->
+            ClaudeControlWire.encodeRenameSession(id, title)
+        })?.ok == true
+
+    /** Rewind the conversation to just before [targetMessageUuid]. */
+    suspend fun rewindConversation(targetMessageUuid: String): RewindResult {
+        val resp = sendControlRequest({ id ->
+            ClaudeControlWire.encodeRewindConversation(id, targetMessageUuid, true)
+        }, timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS)
+            ?: return RewindResult(false, error = "no live session")
+        if (!resp.ok) return RewindResult(false, error = resp.error)
+        val p = resp.payload
+        fun str(k: String) = (p?.get(k) as? kotlinx.serialization.json.JsonPrimitive)
+            ?.contentOrNull
+        val rewound = (p?.get("rewound") as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content == "true"
+        if (!rewound) return RewindResult(false, error = str("error") ?: "rewind refused")
+        return RewindResult(
+            ok = true,
+            targetMessageUuid = str("targetMessageUuid") ?: targetMessageUuid,
+            prefillText = str("prefillText"),
+        )
+    }
+
+    /** Restore files to their state before [userMessageId]'s turn.
+     *  [dryRun] = report only; nothing on disk is touched. */
+    suspend fun rewindFiles(userMessageId: String, dryRun: Boolean): FileRewindResult {
+        val resp = sendControlRequest({ id ->
+            ClaudeControlWire.encodeRewindFiles(id, userMessageId, dryRun)
+        }, timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS)
+            ?: return FileRewindResult(false, error = "no live session")
+        if (!resp.ok) return FileRewindResult(false, error = resp.error)
+        val p = resp.payload
+        val can = (p?.get("canRewind") as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content == "true"
+        val err = (p?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+        if (!can) return FileRewindResult(false, error = err)
+        val files = (p?.get("filesChanged") as? kotlinx.serialization.json.JsonArray)
+            ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            .orEmpty()
+        fun num(k: String) = (p?.get(k) as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content?.toIntOrNull() ?: 0
+        return FileRewindResult(true, files, num("insertions"), num("deletions"))
     }
 
     /** The tail-poll found our live turn STUCK: the session FILE shows the turn
@@ -699,6 +1015,10 @@ internal class AgentSessionPersistentStream(
         procAlive = false
         launched = null
         pendingControls.clear()
+        // Callers awaiting a control_response from THIS process must not hang
+        // until their timeout — the process is gone, the answer is "no".
+        val awaiting = pendingClientRequests.keys.toList()
+        for (id in awaiting) pendingClientRequests.remove(id)?.complete(null)
     }
 
     companion object {
@@ -720,6 +1040,27 @@ internal class AgentSessionPersistentStream(
                 msg !is AgentMessage.TurnEnd &&
                 !(msg is AgentMessage.AskUserQuestion && msg.readOnly)
 
+        /**
+         * May Stop's 4-second escalation kill the CLI process?
+         *
+         * Pure so the four-way truth table can be tested, because getting it wrong
+         * is expensive in exactly one direction: killing the process takes the
+         * user's CURRENT prompt down with it and nothing respawns it.
+         *
+         * [sameTurn] is the whole guard — the stopped turn must still be the live
+         * one. [victimDone] catches the honoured interrupt whose `finally` has not
+         * run yet, so a Stop that WORKED never escalates. [working] and [alive] are
+         * the original session-level conditions, kept because a killed or finished
+         * process needs no killing; they are necessary but nowhere near sufficient,
+         * which is what the 2026-07-31 incident proved.
+         */
+        internal fun shouldEscalateKill(
+            sameTurn: Boolean,
+            victimDone: Boolean,
+            working: Boolean,
+            alive: Boolean,
+        ): Boolean = sameTurn && !victimDone && working && alive
+
         /** Poll cadence while awaiting a turn's completion (inactivity check). */
         private const val INACTIVITY_CHECK_MS = 60L * 1000
         /** A turn is abandoned only after this much stdout SILENCE (channel
@@ -731,5 +1072,15 @@ internal class AgentSessionPersistentStream(
         /** Exact-key match: `"estimated_tokens":N` (NOT the
          *  `_delta` sibling, whose key string differs). */
         private val THINKING_TOKENS_RX = Regex("\"estimated_tokens\"\\s*:\\s*(\\d+)")
+
+        /** Ack wait for cheap control requests (set_model & co) — the CLI
+         *  answers these inline off its message loop, typically <100 ms. */
+        private const val CONTROL_RESPONSE_TIMEOUT_MS = 10_000L
+        /** get_context_usage / get_usage do real work (token counting over
+         *  the whole conversation; a network fetch on a cold usage cache). */
+        private const val HEAVY_RESPONSE_TIMEOUT_MS = 30_000L
+        /** initialize response — arrives right after launch; generous for
+         *  node cold start on a small VPS. */
+        private const val INIT_RESPONSE_TIMEOUT_MS = 45_000L
     }
 }

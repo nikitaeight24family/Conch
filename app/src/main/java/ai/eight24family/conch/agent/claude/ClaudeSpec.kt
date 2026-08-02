@@ -10,13 +10,11 @@ import ai.eight24family.conch.agent.spec.AgentTopbarUi
 import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.spec.ModelMenuItem
 import ai.eight24family.conch.agent.spec.ModelReasoningInfo
-import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.agent.spec.ReasoningLevel
 import ai.eight24family.conch.agent.spec.TopbarModelState
 import ai.eight24family.conch.agent.spec.TurnSignals
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.util.SilentlyTry
-import kotlin.math.abs
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -72,6 +70,10 @@ object ClaudeSpec : AgentCliSpec {
 
     override val supportsControlProtocol = true
 
+    /** The catalog comes from the `initialize` handshake — the CLI's own
+     *  registry, complete by construction. */
+    override val catalogIsAuthoritative = true
+
     /**
      * Persistent bidirectional channel — the Agent SDK's exact flag set
      * (verified against claude-agent-sdk-python `subprocess_cli.py` and
@@ -82,9 +84,10 @@ object ClaudeSpec : AgentCliSpec {
      * Approval modes map to `--permission-mode` enum values (the
      * streaming path replaces `--dangerously-skip-permissions` with
      * `bypassPermissions`); IS_SANDBOX stays for root servers. Thinking
-     * budget env mirrors [buildExecCommand] — an effort CHANGE mid-chat
-     * restarts the process (env is launch-scoped), which
-     * AgentSessionPersistentStream does via launch-param comparison.
+     * budget env mirrors [buildExecCommand] and seeds the LAUNCH level;
+     * a mid-chat effort change goes over the wire live via
+     * `set_max_thinking_tokens` (budget-mapped levels), falling back to a
+     * launch-param restart only for levels the wire can't express.
      */
     override fun buildPersistentCommand(input: ExecInput): String {
         val resume = input.resumeId?.let { " --resume ${shellEscape(it)}" } ?: ""
@@ -103,7 +106,7 @@ object ClaudeSpec : AgentCliSpec {
             ?.let { "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 MAX_THINKING_TOKENS=$it " } ?: ""
         val effortArg = if (thinkingEnv.isEmpty() && effort != null)
             " --effort ${shellEscape(effort)}" else ""
-        return "${sandboxEnv}${thinkingEnv}stdbuf -oL claude" +
+        return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}stdbuf -oL claude" +
             " --output-format stream-json --input-format stream-json" +
             " --include-partial-messages --verbose" +
             " --permission-prompt-tool stdio" +
@@ -168,11 +171,33 @@ object ClaudeSpec : AgentCliSpec {
             "$approvalArg$resume$modelArg$sessionIdArg$effortArg 2>&1"
     }
 
+    /**
+     * FILE CHECKPOINTS — what makes "the agent trashed my repo and I'm not at
+     * my laptop" recoverable from the phone.
+     *
+     * Interactive `claude` snapshots edited files by default
+     * (`fileCheckpointingEnabled`), but in SDK/headless mode — which is every
+     * launch Conch makes — the same feature is OFF unless this env var is set
+     * (binary-verified gate: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING &&
+     * !CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING`). Without it `rewind_files`
+     * answers "File rewinding is not enabled." forever — proven live, then
+     * proven fixed: with the var set, a dry run reported the changed file and
+     * the apply really restored its previous content (2026-08-02).
+     *
+     * So the app turns it ON: the user gets the same safety net they would
+     * have sitting at the machine. The CLI's own kill switch
+     * (`CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING=1` in their shell profile)
+     * still wins, because it is checked second.
+     */
+    private const val CHECKPOINT_ENV = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1 "
+
     /** UI reasoning level → fixed MAX_THINKING_TOKENS budget. Opus caps at
      *  31999; the ladder is chosen to be clearly distinguishable per level
      *  (≈ the classic think / megathink / ultrathink tiers). null for an
-     *  unknown/blank level → leave the CLI on its adaptive default. */
-    private fun thinkingBudget(effort: String?): Int? = when (effort?.trim()?.lowercase()) {
+     *  unknown/blank level → leave the CLI on its adaptive default.
+     *  Internal: the SAME ladder feeds the live `set_max_thinking_tokens`
+     *  control request (mid-chat effort switch without a restart). */
+    internal fun thinkingBudget(effort: String?): Int? = when (effort?.trim()?.lowercase()) {
         "low" -> 4096
         "medium" -> 12000
         "high" -> 24000
@@ -180,8 +205,30 @@ object ClaudeSpec : AgentCliSpec {
         else -> null
     }
 
-    override fun parseStreamLine(line: String): List<AgentMessage> =
-        ClaudeMessageParser.parse(line)
+    override fun parseStreamLine(line: String): List<AgentMessage> {
+        val msgs = ClaudeMessageParser.parse(line)
+        // Stamp user rows with the JSONL record's own uuid — the anchor the
+        // rewind protocol addresses. Done HERE, at the single Claude parse
+        // choke point, rather than in both parser paths (fast JsonReader +
+        // slow AST). Costs one substring scan, and only for lines that
+        // actually produced a user row.
+        if (msgs.none { it is AgentMessage.UserText }) return msgs
+        val uuid = recordUuidOf(line) ?: return msgs
+        return msgs.map { m ->
+            if (m is AgentMessage.UserText && m.recordUuid == null) m.copy(recordUuid = uuid) else m
+        }
+    }
+
+    /** Top-level `"uuid":"…"` of a JSONL record. Cheap substring read — ids
+     *  are plain hex/dashes and never escaped. */
+    private fun recordUuidOf(line: String): String? {
+        val at = line.indexOf("\"uuid\":\"")
+        if (at < 0) return null
+        val from = at + 8
+        val end = line.indexOf('"', from)
+        if (end <= from) return null
+        return line.substring(from, end)
+    }
 
     override val listSessionsScript: String? = """
 # Make conch's headless sessions show up in the native `claude --resume` picker.
@@ -245,7 +292,12 @@ for f in ~/.claude/projects/*/*.jsonl; do
   # from the title so it can't corrupt the column or the separator.
   # ai-title is regenerated late → also near the END. Same 256KB window + full
   # fallback as model, so a session that has a title never loses it.
-  title=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -ao '"aiTitle":"[^"]*"' | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
+  # A USER-SET title (rename_session / the CLI's own rename — stored as
+  # {"type":"custom-title","customTitle":"…"}) BEATS the auto ai-title:
+  # the user explicitly chose that name.
+  title=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -ao '"customTitle":"[^"]*"' | tail -1 | sed -E 's/.*"customTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
+  [ -z "${'$'}title" ] && title=${'$'}(grep -ao '"customTitle":"[^"]*"' "${'$'}f" 2>/dev/null | tail -1 | sed -E 's/.*"customTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
+  [ -z "${'$'}title" ] && title=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -ao '"aiTitle":"[^"]*"' | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
   [ -z "${'$'}title" ] && title=${'$'}(grep -ao '"aiTitle":"[^"]*"' "${'$'}f" 2>/dev/null | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
   if [ -n "${'$'}title" ]; then preview=${'$'}(printf '%s\037%s' "${'$'}title" "${'$'}candidates"); else preview="${'$'}candidates"; fi
   # 7-col contract: id, mtime, path, model, reasoning(empty), size, preview.
@@ -468,74 +520,95 @@ esac
 """.trimIndent()
 
     /**
-     * Claude doesn't have a non-interactive `models list` command and the
-     * accepted model strings aren't documented. We drive the interactive
-     * `/model` menu via PTY, strip ANSI escapes, and parse the menu rows
-     * GENERICALLY — any `<Family> <version>` name the menu paints becomes
-     * a picker entry, keyed by its synthesized public model id (see
-     * [parseClaudeModelMenu] for the exact contract).
-     *
-     * History: the first implementation grepped for the hardcoded families
-     * Opus/Sonnet/Haiku. The 2026-06 Anthropic release added the new
-     * "Fable" family and the picker silently never showed it — the
-     * original requirement regressed by construction. NEVER hardcode
-     * family names here again; parse whatever the menu shows.
-     *
-     * Cached by ChatViewModel and persisted to prefs so a cold start never
-     * shows a stale list after Anthropic ships a new family.
-     */
-    /**
-     * The model the CLI starts on when we pass no `--model`, i.e. what the
-     * `/model` menu labels "Default (recommended)".
-     *
-     * Free: [parseClaudeModelMenu] already resolved it during the menu probe
-     * and published it, so this costs no extra round-trip. Claude used to
-     * inherit the interface default (`null`) — that is Codex's config.toml
-     * notion — which left the topbar with nothing to show on a fresh chat.
+     * The model the CLI starts on when we pass no `--model` — the resolved
+     * id of the initialize response's "default" row, published by
+     * [adoptInitState]. Costs no extra round-trip.
      */
     override suspend fun probeDefaultModel(exec: AgentExec): String? = claudeDefaultModel
 
-    override suspend fun probeAvailableModels(
-        exec: AgentExec,
-        pty: PtyProbe?,
-    ): Map<String, String> {
-        val raw = pty?.probeModelMenu() ?: return emptyMap()
-        if (raw.isBlank()) return emptyMap()
-        // ALWAYS keep the tail of the RENDERED screen in logcat at DEBUG —
-        // every /model format change so far had to be diagnosed blind.
-        // `adb logcat -s SshAi-Models` shows exactly what the parser saw.
-        // Chunked: logcat truncates ~4K per entry.
-        val screen = renderClaudeTerminal(raw)
-        val cleanTail = screen.takeLast(9000)
-        var offset = 0
-        var chunk = 0
-        while (offset < cleanTail.length) {
-            val end = minOf(offset + 3000, cleanTail.length)
-            android.util.Log.d(
-                "SshAi-Models",
-                "rendered /model screen [$chunk]: ${cleanTail.substring(offset, end)}",
+    /**
+     * Model catalog straight from the CLI's OWN registry: launch a headless
+     * stream-json process in a THROWAWAY cwd, send the `initialize` control
+     * request, and read its response — `models[{value,resolvedModel,
+     * displayName,disabled,supportedEffortLevels}]`, exactly what the Agent
+     * SDK gets. No PTY, no ANSI, no menu scraping, no parse drift when the
+     * TUI restyles (the whole class of «menu format changed AGAIN» bugs).
+     *
+     * The old path drove the interactive `/model` menu over a PTY through a
+     * ~200-line terminal emulator; a live chat now gets this same data FREE
+     * from its persistent channel's handshake ([adoptInitState] is fed by
+     * AgentSessionPersistentStream), and this probe covers the no-chat-open
+     * warm-up (ModelCatalogPrefetcher) with one plain exec.
+     *
+     * The throwaway cwd + project-dir purge preserve the 2026-06-25
+     * invariant: a probe must never litter `claude --resume`.
+     */
+    override suspend fun probeAvailableModels(exec: AgentExec): Map<String, String> {
+        val tag = "SshAi-Models"
+        val initJson =
+            "{\"type\":\"control_request\",\"request_id\":\"cat-probe\"," +
+                "\"request\":{\"subtype\":\"initialize\"}}"
+        val probeCwd = "/tmp/.conch-ctlprobe-${java.util.UUID.randomUUID()}"
+        val script = ai.eight24family.conch.agent.RemoteEnv.PATH_PREAMBLE_INLINE +
+            ai.eight24family.conch.agent.AuthSelector.claudeFullScopePrefix() +
+            "mkdir -p $probeCwd 2>/dev/null; cd $probeCwd; " +
+            "out=\$(printf '%s\\n' ${shellEscape(initJson)} | " +
+            "timeout 40 claude --output-format stream-json --input-format stream-json" +
+            " --verbose 2>/dev/null | grep -m1 '\"control_response\"'); " +
+            "cd /; rm -rf $probeCwd \$HOME/.claude/projects/*conch-ctlprobe* 2>/dev/null; " +
+            "printf '%s\\n' \"\$out\""
+        val raw = exec.exec("bash -lc " + shellEscape(script))
+        val line = raw?.lineSequence()?.firstOrNull { it.contains("\"control_response\"") }?.trim()
+        if (line.isNullOrBlank()) {
+            // Loud on purpose: an empty answer here is indistinguishable from
+            // "no models" downstream, and the caller keeps its cached catalog.
+            android.util.Log.w(tag, "claude initialize probe got no control_response (raw=${raw?.length ?: 0}B)")
+            return emptyMap()
+        }
+        val resp = ClaudeControlWire.parseControlResponse(line)
+        val payload = resp?.takeIf { it.ok }?.payload
+        if (payload == null) {
+            android.util.Log.w(tag, "claude initialize probe error: ${resp?.error ?: "unparseable"}")
+            return emptyMap()
+        }
+        val st = ClaudeInitState.parse(payload)
+        android.util.Log.d(tag, "initialize probe: models=${st.models.map { it.value }}")
+        adoptInitState(st)
+        return ClaudeInitState.toPickerMap(st)
+    }
+
+    /**
+     * Publish an initialize handshake's catalog into the spec-level state the
+     * topbar/picker read: the CLI default (label + wire key), the unavailable
+     * set, and the effort ladder. Called from BOTH sources — the live
+     * persistent channel's handshake and [probeAvailableModels].
+     */
+    internal fun adoptInitState(st: ClaudeInitState) {
+        val (label, key) = ClaudeInitState.defaultModel(st)
+        if (label != null) claudeDefaultModel = label
+        if (key != null) claudeDefaultModelKey = key
+        claudeUnavailableLabels = ClaudeInitState.unavailableLabels(st)
+        val levels = ClaudeInitState.effortLevels(st)
+        if (levels.isNotEmpty()) {
+            // The handshake carries the LADDER but not the current level —
+            // keep whatever default we already knew when it's still offered.
+            val prevDefault = probedEffortInfo?.defaultEffort
+                ?: CLAUDE_REASONING_INFO.defaultEffort
+            probedEffortInfo = ModelReasoningInfo(
+                defaultEffort = when {
+                    prevDefault in levels -> prevDefault
+                    "medium" in levels -> "medium"
+                    else -> levels.first()
+                },
+                levels = levels.map { l ->
+                    ReasoningLevel(
+                        effort = l,
+                        displayName = l.replaceFirstChar { it.uppercase() },
+                        description = CLAUDE_EFFORT_DESCRIPTIONS[l].orEmpty(),
+                    )
+                },
             )
-            offset = end
-            chunk++
         }
-        // The same capture carries the `/effort` slider (when the probe
-        // managed to open it) and the current-effort status line — stash
-        // both so reasoningInfoFor/probeDefaultReasoning serve SERVER
-        // truth instead of a hardcoded ladder.
-        val effort = parseClaudeEffortScreen(screen)
-        if (effort.info != null) probedEffortInfo = effort.info
-        if (effort.current != null) probedCurrentEffort = effort.current
-        android.util.Log.d(
-            "SshAi-Models",
-            "claude effort: current=${effort.current} levels=${effort.info?.levels?.map { it.effort }}",
-        )
-        val parsed = parseClaudeModelMenu(raw)
-        if (parsed.isEmpty()) {
-            // Parse miss = the menu format changed AGAIN. The raw frame is
-            // already in logcat above — this line just makes it loud.
-            android.util.Log.w("SshAi-Models", "claude /model menu parse found nothing")
-        }
-        return parsed
     }
 
     override val customCommandsScript: String? = """
@@ -850,118 +923,6 @@ done
 }
 
 /**
- * Render a raw PTY byte stream into the FINAL SCREEN TEXT — a minimal
- * VT/ANSI terminal emulator (grid of lines, cursor, CSI moves/erases).
- *
- * Why an emulator and not a strip-the-escapes regex: ink (Claude's TUI)
- * paints with cursor-motion ops — `ESC[nC` instead of runs of spaces,
- * absolute/relative jumps to rewrite only the cells that changed between
- * frames. Deleting those sequences GLUES the surviving glyphs together
- * and drops every character the diff skipped: the real capture rendered
- * "Sonnet 4.6" as "onnt 4.6" and "1. Default" as "1.Default", which broke
- * row parsing and corrupted the picker labels (2026-06-10). Interpreting
- * the ops is lossless by construction — we read the screen the way a
- * human does.
- *
- * Supported: CSI cursor (H/f, A/B/C/D, G, d), erase (J/K), CR/LF/BS/TAB,
- * OSC (skipped), other CSI/SGR and stray controls ignored. Later writes
- * overwrite earlier cells, so the LAST paint of each row wins — exactly
- * the dedupe the old "richer capture" heuristic approximated.
- */
-internal fun renderClaudeTerminal(raw: String): String {
-    val maxRows = 500
-    val maxCols = 1000
-    val grid = ArrayList<StringBuilder>()
-    var row = 0
-    var col = 0
-    fun line(r: Int): StringBuilder {
-        while (grid.size <= r) grid.add(StringBuilder())
-        return grid[r]
-    }
-    fun put(ch: Char) {
-        if (col >= maxCols) return
-        val l = line(row)
-        while (l.length < col) l.append(' ')
-        if (col < l.length) l.setCharAt(col, ch) else l.append(ch)
-        col++
-    }
-    var i = 0
-    val n = raw.length
-    while (i < n) {
-        when (val c = raw[i]) {
-            '\u001B' -> {
-                if (i + 1 >= n) break
-                when (raw[i + 1]) {
-                    '[' -> {
-                        var j = i + 2
-                        while (j < n && raw[j] !in '@'..'~') j++
-                        if (j >= n) break
-                        val params = raw.substring(i + 2, j)
-                        fun p(idx: Int, def: Int): Int = params.split(';')
-                            .getOrNull(idx)?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: def
-                        when (raw[j]) {
-                            'H', 'f' -> {
-                                row = (p(0, 1) - 1).coerceIn(0, maxRows - 1)
-                                col = (p(1, 1) - 1).coerceIn(0, maxCols - 1)
-                            }
-                            'A' -> row = (row - p(0, 1)).coerceAtLeast(0)
-                            'B' -> row = (row + p(0, 1)).coerceAtMost(maxRows - 1)
-                            'C' -> col = (col + p(0, 1)).coerceAtMost(maxCols - 1)
-                            'D' -> col = (col - p(0, 1)).coerceAtLeast(0)
-                            'G' -> col = (p(0, 1) - 1).coerceIn(0, maxCols - 1)
-                            'd' -> row = (p(0, 1) - 1).coerceIn(0, maxRows - 1)
-                            'J' -> when (p(0, 0)) {
-                                // 0 = clear below, 1 = clear above, 2/3 = all
-                                0 -> {
-                                    line(row).setLength(minOf(line(row).length, col))
-                                    for (r in row + 1 until grid.size) grid[r].setLength(0)
-                                }
-                                1 -> for (r in 0 until minOf(row, grid.size)) grid[r].setLength(0)
-                                2, 3 -> grid.forEach { it.setLength(0) }
-                            }
-                            'K' -> when (p(0, 0)) {
-                                // 0 = to end of line, 1 = to start, 2 = whole line
-                                0 -> line(row).setLength(minOf(line(row).length, col))
-                                1 -> {
-                                    val l = line(row)
-                                    for (k in 0 until minOf(col + 1, l.length)) l.setCharAt(k, ' ')
-                                }
-                                2 -> line(row).setLength(0)
-                            }
-                            else -> { /* SGR (m), modes (h/l), etc — no layout effect */ }
-                        }
-                        i = j + 1
-                        continue
-                    }
-                    ']' -> {
-                        // OSC … BEL or ESC\
-                        var j = i + 2
-                        while (j < n && raw[j] != '\u0007' &&
-                            !(raw[j] == '\u001B' && j + 1 < n && raw[j + 1] == '\\')
-                        ) j++
-                        i = if (j < n && raw[j] == '\u0007') j + 1 else minOf(j + 2, n)
-                        continue
-                    }
-                    else -> {
-                        i += 2 // single-char escape (ESC 7/8/=/> …)
-                        continue
-                    }
-                }
-            }
-            '\r' -> { col = 0; i++ }
-            '\n' -> { row = (row + 1).coerceAtMost(maxRows - 1); col = 0; i++ }
-            '\b' -> { col = (col - 1).coerceAtLeast(0); i++ }
-            '\t' -> { col = ((col / 8 + 1) * 8).coerceAtMost(maxCols - 1); i++ }
-            else -> {
-                if (c.code >= 0x20 && c.code != 0x7F) put(c)
-                i++
-            }
-        }
-    }
-    return grid.joinToString("\n") { it.toString().trimEnd() }
-}
-
-/**
  * A resolved model display name: `<Family> <ver>[ <1M marker>]`. Family is
  * one capitalized word ("Opus", "Fable", "Mythos"); version may be dotless
  * ("5"). Group 3 captures the 1M-context marker in the three spellings the
@@ -970,97 +931,6 @@ internal fun renderClaudeTerminal(raw: String): String {
 internal val CLAUDE_MODEL_NAME_RX = Regex(
     "\\b([A-Z][a-z]+) (\\d+(?:\\.\\d+)?)( with \\d+M context| \\d+M\\b| \\(\\d+M(?: context)?\\))?",
 )
-
-/**
- * Parse the raw `/model` TUI buffer into an ordered
- * `storedValue → display label` map — mirroring the CLI's own menu 1:1.
- *
- * Real frame this is built against (claude 2.1.170, captured by the user):
- * ```
- *   Select model
- *   Switch between Claude models. Your pick becomes the default for new
- *   sessions. For other/previous model names, specify with --model.
- *
- *     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks
- *   ❯ 2. Fable ✔                Fable 5 · Most capable for your hardest and longest-running tasks · Uses your limits ~2×
- *                               faster than Opus
- *     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks
- *     4. Sonnet (1M context)    Sonnet 4.6 with 1M context · Draws from usage credits · $3/$15 per Mtok
- *     5. Haiku                  Haiku 4.5 · Fastest for quick answers
- * ```
- *
- * Structure, NOT literals, drives the parse:
- *  - a row = `N.` + alias label column + (2+ space gap) + resolved model
- *    name + `·` + description. Wrapped description lines carry no `N.`
- *    and are skipped.
- *  - the LEFT column is the CLI's own alias for `--model`: label letters
- *    lowercased with parentheticals dropped ("Default (recommended)" →
- *    `default`, "Fable" → `fable`, "Opus Plan" → `opusplan`); a `(1M …)`
- *    parenthetical appends the documented `[1m]` suffix ("Sonnet (1M
- *    context)" → `sonnet[1m]`). A label that IS a full model name
- *    ("Opus 4.5") becomes its public id (`claude-opus-4-5`).
- *  - the RIGHT column may be cut off by a narrow PTY — rows still survive
- *    with the label as their display, so the picker never loses entries
- *    to terminal width (the exact failure mode of the first attempt).
- *  - key `"default"` (when present) is NOT a menu row — it's the chip
- *    label for un-pinned chats: the `Using <X> (from settings.json)` pin
- *    from the startup banner when the server has one, else the model the
- *    "Default (recommended)" row resolves to. [ClaudeTopbarUi.menuItems]
- *    skips it — users pick concrete models, never a "Default" word.
- *  - the "Default (recommended)" row's RESOLVED model is surfaced as a
- *    normal concrete entry keyed by public id ("Opus 4.8 with 1M
- *    context" → `claude-opus-4-8[1m]`) — the CLI menu has no other path
- *    to that model.
- *  - insertion order mirrors menu row order (order survives the
- *    StateFlow → labelMemory → prefs round-trip). TUI repaints repeat
- *    rows — the RICHER capture wins (a partial first paint may miss the
- *    resolved column).
- *
- * Everything menu-shaped is gated on the menu header ("Select model") so
- * startup banners ("Fable 5 · Claude Team") and confirm prompts ("1. Yes,
- * proceed") can't masquerade as models. No numbered rows under the header
- * (older CLI) → fall back to scanning for bare model names. No header at
- * all (menu never opened) → at most the `Using <X>` pin, never junk.
- */
-internal fun parseClaudeModelMenu(raw: String): Map<String, String> {
-    if (raw.isBlank()) return emptyMap()
-    val clean = renderClaudeTerminal(raw)
-    // Everything menu-shaped is gated on the menu header: without it,
-    // startup banners ("Fable 5 · Claude Team") and confirm prompts ("1.
-    // Yes, proceed") would masquerade as models. The settings.json `Using
-    // <X>` pin is deliberately IGNORED — we never surface a "default"
-    // anywhere.
-    val headerIdx = sequenceOf("Select model", "Switch between Claude models")
-        .map { clean.indexOf(it) }
-        .filter { it >= 0 }
-        .minOrNull()
-        ?: return emptyMap()  // no menu → no model list; topbar uses the session model
-    val section = clean.substring(headerIdx)
-    var parsed = parseClaudeNumberedRows(section)
-    if (parsed.rows.isEmpty()) parsed = parseClaudeLooseModelNames(section)
-    // Publish the unavailable set (by label) so the topbar skips it and the
-    // picker greys it. Snapshot swap — singleton spec, no per-chat state.
-    claudeUnavailableLabels = parsed.unavailableLabels
-    // Publish the RESOLVED default (a concrete model name) for the topbar. The
-    // picker below still refuses to list a "default" row — see the doc on
-    // [claudeDefaultModel] for why those two are not in conflict.
-    claudeDefaultModel = parsed.defaultResolved
-    claudeDefaultModelKey = parsed.defaultKey
-    // NO "default" entry — the picker shows ONLY concrete models. Drop the
-    // Default-row-SYNTHESIZED entry IFF an explicit row already lists the
-    // same model (that's the twin "Opus 4.8" the user saw). Distinct models
-    // that merely share a resolved label are NOT collapsed.
-    val synthKey = parsed.defaultSynthKey
-    val synthLabel = synthKey?.let { parsed.rows[it] }
-    val dropSynth = synthKey != null && synthLabel != null &&
-        parsed.rows.any { (k, v) -> k != synthKey && v == synthLabel }
-    val out = LinkedHashMap<String, String>()
-    for ((key, label) in parsed.rows) {
-        if (dropSynth && key == synthKey) continue
-        out[key] = label
-    }
-    return out
-}
 
 /** Labels the CLI flagged unavailable in the last `/model` parse. Read by
  *  [ClaudeTopbarUi] to skip them in the chip and grey them in the picker.
@@ -1095,189 +965,6 @@ internal var claudeDefaultModel: String? = null
 @Volatile
 internal var claudeDefaultModelKey: String? = null
 
-/** Rows in menu order + what the "Default (recommended)" row resolved to +
- *  the set of model LABELS the CLI marked unavailable (description column
- *  carried "is currently unavailable" — export-control suspension etc.). */
-private class ClaudeMenuParse(
-    val rows: LinkedHashMap<String, String>,
-    val defaultResolved: String?,
-    val unavailableLabels: Set<String> = emptySet(),
-    /** Key synthesized from the "Default (recommended)" row's resolved model
-     *  (the menu has no explicit row for it on older CLIs). Dropped by
-     *  [parseClaudeModelMenu] IFF an explicit row already lists the same
-     *  model — that's the twin-"Opus 4.8" the user saw. */
-    val defaultSynthKey: String? = null,
-    /** Menu key of the ✔ row — the value that goes on the wire as `--model`. */
-    val defaultKey: String? = null,
-)
-
-/** Markers in a `/model` row's description meaning "this row will NOT run".
- *
- *  ⚠ BILLING TEXT IS NOT AN AVAILABILITY VERDICT. "· Requires usage credits"
- *  was briefly treated as unavailable here — and that was wrong: on a Max plan
- *  Fable 5 IS included, the API answers `unified-status: allowed` and
- *  `claude --model claude-fable-5 --print` returns a real reply. The CLI's own
- *  picker shows that warning off a STALE local profile cache (Anthropic's
- *  desktop app says so verbatim: "Fable 5 is still included with your Max plan.
- *  If you see a prompt to set up usage credits for it, restart Claude Code").
- *  Treating it as dead vetoed a model the user pays for (user, 2026-07-28).
- *
- *  Only two things mean a row genuinely will not run:
- *   1. "<model> is currently unavailable" — export-control suspension,
- *      deprecation;
- *   2. "(disabled)".
- *
- *  Even these only DIM the row — see the picker. We can be wrong, and the
- *  server is the real authority: passing `--model <id>` is the CLI's own
- *  documented path ("For other/previous model names, specify with --model"),
- *  so the user must always be able to try and let the server answer. */
-
-private fun String.marksUnavailable(): Boolean =
-    contains("is currently unavailable", ignoreCase = true) ||
-        contains("(disabled)", ignoreCase = true)
-
-/** Primary path: structured numbered rows (see [parseClaudeModelMenu] doc). */
-private fun parseClaudeNumberedRows(section: String): ClaudeMenuParse {
-    val rowRx = Regex("^[\\s❯›>]*(\\d+)\\.\\s+(\\S.*)$")
-    val rows = LinkedHashMap<String, String>()
-    var defaultResolved: String? = null
-    var defaultKey: String? = null
-    var defaultSynthKey: String? = null
-    val unavailable = HashSet<String>()
-    fun put(key: String, display: String) {
-        val prev = rows[key]
-        // Repaints repeat rows — keep the richer capture.
-        if (prev == null || display.length > prev.length) rows[key] = display
-    }
-    for (line in section.lineSequence()) {
-        val row = rowRx.find(line)?.groupValues?.get(2) ?: continue
-        // ✔ marks the row the CLI is ACTUALLY set to — the user's own stored
-        // pick. It is NOT the same as "Default (recommended)", which is only
-        // Anthropic's suggestion for the account. Reading the recommended row
-        // as the effective model is why the topbar announced "Sonnet 5" on a
-        // box whose CLI banner said it was running Opus.
-        val isChecked = row.contains('✔') || row.contains('✓')
-        val cleaned = row.replace('✔', ' ').replace('✓', ' ')
-        // Columns separated by a run of 2+ spaces; the label itself only
-        // ever contains single spaces ("Default (recommended)").
-        val parts = cleaned.split(Regex(" {2,}"), limit = 2)
-        val label: String
-        val right: String
-        if (parts.size == 2) {
-            label = parts[0].trim()
-            right = parts[1].trim()
-        } else {
-            // Narrow PTY can squeeze the gap to one space — split at the
-            // resolved model name if one is present mid-row.
-            val m = CLAUDE_MODEL_NAME_RX.find(cleaned)
-            if (m != null && m.range.first > 0) {
-                label = cleaned.substring(0, m.range.first).trim()
-                right = cleaned.substring(m.range.first).trim()
-            } else {
-                label = cleaned.trim()
-                right = ""
-            }
-        }
-        if (label.isEmpty() || label.none { it.isLetter() }) continue
-        val key = claudeMenuRowKey(label) ?: continue
-        val resolvedMatch = CLAUDE_MODEL_NAME_RX.find(right)
-        val resolved = (
-            resolvedMatch?.value?.trim()
-                ?: right.substringBefore('·').trim().ifBlank { null }
-            )?.replace(Regex("\\s+"), " ")
-        // CLI flagged this model unavailable in its description column
-        // ("Claude Fable 5 is currently unavailable …"). Record the
-        // resolved label so the topbar skips it and the picker greys it.
-        if (right.marksUnavailable() && resolved != null) unavailable.add(resolved)
-        if (key == "default") {
-            // The "Default (recommended)" ABSTRACTION is never surfaced as a
-            // row/chip — but its RESOLVED model IS a real pickable model, and
-            // on older menus it's the ONLY path to Opus (no explicit "Opus"
-            // row). Surface that concrete model; parseClaudeModelMenu dedups
-            // it against an explicit row of the same model so the picker never
-            // shows twins.
-            if (resolvedMatch != null && resolved != null) {
-                val synthKey = claudeIdFromName(resolvedMatch)
-                put(synthKey, resolved)
-                defaultSynthKey = synthKey
-                // Record WHAT the default resolves to. This was a declared-but
-                // -never-assigned variable, so ClaudeMenuParse.defaultResolved
-                // was permanently null and the topbar had no way to learn the
-                // CLI's own default — which is why a fresh chat showed no model
-                // at all. On this account the menu reads
-                // "1. Default (recommended)  Sonnet 5 · …", so the answer is
-                // Sonnet 5.
-                // Weakest source: only stands if no row is check-marked.
-                if (defaultResolved == null) defaultResolved = resolved
-            }
-            continue
-        }
-        put(key, resolved ?: label)
-        // A check-marked concrete row WINS over "Default (recommended)" — it is
-        // what the CLI will really run, so it overwrites whatever the
-        // recommendation put there. Keep the KEY as well: that is the value the
-        // command line needs, and deriving it back from the label is lossy.
-        if (isChecked && resolved != null) {
-            defaultResolved = resolved
-            defaultKey = key
-        }
-    }
-    return ClaudeMenuParse(rows, defaultResolved, unavailable, defaultSynthKey, defaultKey)
-}
-
-/**
- * Fallback path for menus without numbered rows: scan for bare model
- * names. Pre-2.1.x menus printed full names per row, so this degrades to
- * the original behavior — minus the hardcoded family list.
- */
-private fun parseClaudeLooseModelNames(section: String): ClaudeMenuParse {
-    // Words that pass the family pattern but are never model families.
-    // "Claude Fable 5" in a description must yield "Fable 5", not a
-    // phantom "Claude" family.
-    val stopFamilies = setOf("claude", "version")
-    val rows = LinkedHashMap<String, String>()
-    var defaultResolved: String? = null
-    for (line in section.lineSequence()) {
-        // Case-sensitive \bDefault\b: the header subtitle says "…becomes
-        // the default for new sessions" in lowercase and must not count.
-        val isDefaultRow = line.contains("Default (recommended)") ||
-            Regex("\\bDefault\\b").containsMatchIn(line)
-        for (m in CLAUDE_MODEL_NAME_RX.findAll(line)) {
-            if (m.groupValues[1].lowercase() in stopFamilies) continue
-            val display = m.value.trim().replace(Regex("\\s+"), " ")
-            if (isDefaultRow && defaultResolved == null) defaultResolved = display
-            val id = claudeIdFromName(m)
-            if (!rows.containsKey(id)) rows[id] = display
-        }
-    }
-    return ClaudeMenuParse(rows, defaultResolved)
-}
-
-/**
- * Derive the `--model` value for a menu row from its label column.
- * Generic by construction — a future "Mythos" row maps to `mythos`
- * with zero code changes. Returns null for labels with no letters.
- */
-private fun claudeMenuRowKey(label: String): String? {
-    // A label that IS a full model name ("Opus 4.5") → public id.
-    CLAUDE_MODEL_NAME_RX.matchEntire(label.trim())?.let { return claudeIdFromName(it) }
-    val parens = Regex("\\(([^)]*)\\)").findAll(label).map { it.groupValues[1] }.toList()
-    val base = label.replace(Regex("\\([^)]*\\)"), " ")
-        .filter { it.isLetter() }
-        .lowercase()
-    if (base.isEmpty()) return null
-    if (base == "default") return "default"
-    val oneM = parens.any { it.contains("1m", ignoreCase = true) }
-    return if (oneM) "$base[1m]" else base
-}
-
-/** Parsed `/effort` state: the level the server is currently on + the
- *  full catalog when the slider frame was captured. */
-internal class ClaudeEffortParse(
-    val current: String?,
-    val info: ModelReasoningInfo?,
-)
-
 /** Prose for levels the slider doesn't annotate inline. DESCRIPTIONS
  *  only — the level LIST itself always comes from the server. */
 private val CLAUDE_EFFORT_DESCRIPTIONS = mapOf(
@@ -1286,96 +973,6 @@ private val CLAUDE_EFFORT_DESCRIPTIONS = mapOf(
     "high" to "Deeper reasoning for complex problems",
     "max" to "Maximum reasoning budget",
 )
-
-/**
- * Parse the `/effort` slider out of a rendered screen.
- *
- * Real frame (claude 2.1.170, captured by the user):
- * ```
- * Effort
- *
- *         Faster                                              Smarter
- *         ──────────▲──────────────────────────┊──────────────
- *         low     medium     high     xhigh     max     ultracode
- *                                                       xhigh + workflows
- *
- *  ←/→ to adjust · Enter to confirm · Esc to cancel
- * ```
- * Structure-driven: the ruler line carries `▲` above the ACTIVE level;
- * the line below lists every level word in columns; an optional
- * sub-label line annotates a level by column overlap ("xhigh +
- * workflows" under ultracode). Level words are taken AS-IS — a future
- * level appears with zero code changes.
- *
- * When the slider frame isn't in the capture, the CURRENT level still
- * resolves from the `/model` footer ("● High effort (default)") or the
- * main status line ("● high · /effort").
- */
-internal fun parseClaudeEffortScreen(screen: String): ClaudeEffortParse {
-    val lines = screen.lines()
-    var current: String? = null
-    var info: ModelReasoningInfo? = null
-
-    val rulerIdx = lines.indexOfFirst { it.contains('▲') }
-    if (rulerIdx >= 0) {
-        for (k in rulerIdx + 1..minOf(rulerIdx + 3, lines.lastIndex)) {
-            val tokens = Regex("[a-z][a-z]+").findAll(lines[k])
-                .map { it.value to it.range }
-                .toList()
-            if (tokens.size < 3) continue
-            val markerCol = lines[rulerIdx].indexOf('▲')
-            current = tokens.minByOrNull { (_, r) ->
-                if (markerCol in r) 0
-                else minOf(abs(r.first - markerCol), abs(r.last - markerCol))
-            }?.first
-            // Sub-label right under the level words ("xhigh + workflows"
-            // under ultracode) — attached by column overlap.
-            val subLine = lines.getOrNull(k + 1).orEmpty()
-            val sub = Regex("\\S.*\\S|\\S").find(subLine)
-            fun describe(token: Pair<String, IntRange>): String {
-                if (sub != null &&
-                    sub.range.first <= token.second.last &&
-                    sub.range.last >= token.second.first
-                ) {
-                    return sub.value.trim()
-                }
-                return CLAUDE_EFFORT_DESCRIPTIONS[token.first].orEmpty()
-            }
-            info = ModelReasoningInfo(
-                defaultEffort = current ?: tokens.first().first,
-                levels = tokens.map { t ->
-                    ReasoningLevel(
-                        effort = t.first,
-                        displayName = t.first.replaceFirstChar { it.uppercase() },
-                        description = describe(t),
-                    )
-                },
-            )
-            break
-        }
-    }
-    if (current == null) {
-        Regex("●\\s*([A-Za-z]+)\\s+effort\\b").find(screen)?.let {
-            current = it.groupValues[1].lowercase()
-        }
-    }
-    if (current == null) {
-        Regex("●\\s*([a-z]+)\\s*·\\s*/effort").find(screen)?.let {
-            current = it.groupValues[1].lowercase()
-        }
-    }
-    return ClaudeEffortParse(current, info)
-}
-
-/** `<Family> <ver>` match → public model id (`claude-fable-5`,
- *  `claude-opus-4-8[1m]`) — the documented `--model`-accepted form. */
-private fun claudeIdFromName(m: MatchResult): String = buildString {
-    append("claude-")
-    append(m.groupValues[1].lowercase())
-    append('-')
-    append(m.groupValues[2].replace('.', '-'))
-    if (m.groupValues[3].isNotBlank()) append("[1m]")
-}
 
 /** Normalize a model display label for unavailable-matching: drop the 1M-context
  *  marker (so "Fable 5" from the banner matches "Fable 5 1M" from id-resolution),
@@ -1386,7 +983,7 @@ private fun normModel(s: String): String = s.lowercase()
     .trim()
 
 /**
- * Best-effort reverse of the id synthesis in [parseClaudeModelMenu] —
+ * Best-effort reverse of the CLI id scheme —
  * resolves a stored pick OR a raw model id reported by the session
  * (`system.init`'s `"model"`, the JSONL header) to a readable label.
  * Handles dated ids too: `claude-sonnet-4-5-20250929` → "Sonnet 4.5".
@@ -1517,7 +1114,7 @@ private object ClaudeTopbarUi : AgentTopbarUi {
             // Claude exposes no `defaultModel` — that field is Codex's
             // config.toml notion — and `availableModels` deliberately carries no
             // "default" key either. The resolved default is published separately
-            // by parseClaudeModelMenu as [claudeDefaultModel]: a concrete model
+            // from the initialize handshake as [claudeDefaultModel]: a concrete model
             // name, which is the honest answer to "what starts when we pass no
             // --model".
             ?: usable(claudeDefaultModel)
@@ -1538,10 +1135,17 @@ private object ClaudeTopbarUi : AgentTopbarUi {
         // order. New model families (Fable 5, …) appear with zero code
         // changes — that's the auto-pickup requirement this picker
         // regressed on in 2026-06. Same pattern as CodexTopbarUi.
-        // The "default" key is chip metadata, not a row (see
-        // parseClaudeModelMenu) — users pick models, not a "Default" word.
+        // The "default" key is chip metadata, not a row — users pick
+        // models, not a "Default" word.
         val items = state.availableModels.entries
             .filter { it.key != "default" }
+            // Entries no CLI registry has ever confirmed are leftovers from the
+            // TUI-scraping era — the CLI does not offer them, so picking one is
+            // a coin flip. They stay in availableModels (a chat pinned to an old
+            // alias must still resolve its label) but they are not choices.
+            // Fail-open: with no provenance data at all, hiddenModels is empty
+            // and the picker behaves exactly as before.
+            .filter { it.key !in state.hiddenModels }
             .map { (key, label) ->
                 // reasoningInfoFor returns the same catalog for every slug,
                 // so any key resolves; the chain is just defensive.

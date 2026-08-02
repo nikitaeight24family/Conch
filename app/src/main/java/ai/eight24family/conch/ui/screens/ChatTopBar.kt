@@ -238,6 +238,8 @@ internal fun TerminalTopBar(
     selectedModel: String?,
     observedModel: String?,
     availableModels: Map<String, String>,
+    /** Keys resolvable but NOT choosable — see TopbarModelState.hiddenModels. */
+    hiddenModels: Set<String> = emptySet(),
     unavailableModels: Set<String> = emptySet(),
     observationNewerThanPick: Boolean = true,
     modelsProbing: Boolean,
@@ -262,6 +264,10 @@ internal fun TerminalTopBar(
     onOpenAgents: () -> Unit,
     showSubagentsIcon: Boolean,
     showMemoryIcon: Boolean,
+    /** Shown for agents whose control channel supports rename_session
+     *  (Claude). Opens the rename dialog owned by the host. */
+    showRenameItem: Boolean = false,
+    onRenameSession: () -> Unit = {},
     approvalMode: AgentApprovalMode,
     approvalMenuOpen: Boolean,
     onToggleApprovalMenu: () -> Unit,
@@ -306,6 +312,7 @@ internal fun TerminalTopBar(
         observedModel = observedModel,
         defaultModel = defaultModel,
         availableModels = availableModels,
+        hiddenModels = hiddenModels,
         unavailableModels = unavailableModels,
         observationNewerThanPick = observationNewerThanPick,
         modelsProbing = modelsProbing,
@@ -894,6 +901,22 @@ internal fun TerminalTopBar(
                             onClick = {
                                 onToggleCommandMenu()
                                 onOpenAgents()
+                            }
+                        )
+                    }
+                    if (showRenameItem) {
+                        DropdownMenuItem(
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.Edit,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            },
+                            text = { Text("rename session", style = MaterialTheme.typography.bodyMedium) },
+                            onClick = {
+                                onToggleCommandMenu()
+                                onRenameSession()
                             }
                         )
                     }

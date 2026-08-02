@@ -95,6 +95,14 @@ class AppPreferences(private val context: Context) {
     // process restart produced an empty model chip until something re-probed.
     private fun defaultModelKeyFor(agent: String) =
         stringPreferencesKey("agent_default_model_${agent.uppercase()}_v1")
+
+    /** The WIRE KEY of that same default (`opus[1m]`), not its label. Persisted
+     *  next to the label because the launch resolution needs the key and had
+     *  nothing to read at cold start — it then fell back to the first catalog
+     *  entry, which after the scraper→registry migration is a STALE key, and
+     *  launched `--model sonnet` under an "Opus 5 1M" chip (2026-08-02). */
+    private fun defaultModelWireKeyFor(agent: String) =
+        stringPreferencesKey("agent_default_model_key_${agent.uppercase()}_v1")
     private val userHeldServerIdsKey = stringPreferencesKey("user_held_server_ids")
     private val highRefreshRateKey = booleanPreferencesKey("high_refresh_rate_enabled")
     private val hapticsEnabledKey = booleanPreferencesKey("haptics_enabled")
@@ -210,6 +218,39 @@ class AppPreferences(private val context: Context) {
     suspend fun setDefaultModelForAgent(agent: String, model: String) {
         if (model.isBlank()) return
         context.dataStore.edit { it[defaultModelKeyFor(agent)] = model }
+    }
+
+    /**
+     * Model keys some CLI's OWN REGISTRY has confirmed (the `initialize`
+     * handshake), unioned across servers and app runs. Anything in the catalog
+     * that is NOT here is a leftover of the `/model` TUI-scraping era: kept for
+     * label resolution, never offered as a choice. Union-only — a server whose
+     * CLI is older must never un-confirm a model another server really has.
+     */
+    fun registryModelKeysForAgent(agent: String): Flow<Set<String>> =
+        context.dataStore.data.map { p ->
+            p[registryModelKeysFor(agent)]?.split('\n')?.filter { it.isNotBlank() }?.toSet()
+                ?: emptySet()
+        }
+
+    suspend fun addRegistryModelKeysForAgent(agent: String, keys: Set<String>) {
+        if (keys.isEmpty()) return
+        context.dataStore.edit { p ->
+            val cur = p[registryModelKeysFor(agent)]?.split('\n')?.filter { it.isNotBlank() }.orEmpty()
+            p[registryModelKeysFor(agent)] = (cur.toSet() + keys).joinToString("\n")
+        }
+    }
+
+    private fun registryModelKeysFor(agent: String) =
+        stringPreferencesKey("agent_registry_model_keys_${agent.uppercase()}_v1")
+
+    /** Wire key of the CLI's default model — see [defaultModelWireKeyFor]. */
+    fun defaultModelWireKeyForAgent(agent: String): Flow<String?> =
+        context.dataStore.data.map { p -> p[defaultModelWireKeyFor(agent)]?.takeIf { it.isNotBlank() } }
+
+    suspend fun setDefaultModelWireKeyForAgent(agent: String, key: String) {
+        if (key.isBlank()) return
+        context.dataStore.edit { it[defaultModelWireKeyFor(agent)] = key }
     }
 
     /**

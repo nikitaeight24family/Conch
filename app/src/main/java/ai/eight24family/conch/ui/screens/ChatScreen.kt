@@ -122,7 +122,27 @@ fun ChatScreen(
     val bridgeLog by vm.bridgeLog.collectAsState()
     val bridgeUpdateNotice by vm.bridgeUpdateNotice.collectAsState()
     val attachmentNotice by vm.attachmentNotice.collectAsState()
+    val chatNotice by vm.chatNotice.collectAsState()
     val bridgeHostWarning by vm.bridgeHostWarning.collectAsState()
+    // Rewind: long-press a user row → sheet; on success the rewound prompt
+    // comes back into the composer for editing (same as the CLI).
+    val rewindTarget by vm.rewindTarget.collectAsState()
+    val rewindPrefill by vm.rewindPrefill.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(rewindPrefill) {
+        rewindPrefill?.let {
+            input = it
+            vm.saveInputDraft(it)
+            vm.consumeRewindPrefill()
+        }
+    }
+    rewindTarget?.let { t ->
+        ChatRewindSheet(
+            target = t,
+            onDismiss = { vm.dismissRewind() },
+            onRewindConversation = { vm.rewindConversation() },
+            onRewindFiles = { vm.rewindFilesConfirmed() },
+        )
+    }
     androidx.compose.runtime.LaunchedEffect(bridgeStep) {
         if (bridgeStep == ChatViewModel.BridgeStep.NeedSettings) {
             vm.dismissBridge()
@@ -462,6 +482,14 @@ fun ChatScreen(
                     AttachmentFailureBanner(
                         notice = notice,
                         onDismiss = { vm.dismissAttachmentNotice() },
+                    )
+                }
+                // Outcome of a chat-level action (rewind). App feedback, not a
+                // transcript row — so it is never replayed on reopen.
+                chatNotice?.let { notice ->
+                    AttachmentFailureBanner(
+                        notice = notice,
+                        onDismiss = { vm.dismissChatNotice() },
                     )
                 }
 

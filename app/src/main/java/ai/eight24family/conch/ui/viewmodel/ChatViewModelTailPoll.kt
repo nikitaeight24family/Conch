@@ -766,12 +766,31 @@ internal class ChatViewModelTailPoll(
         val shownSig = hist.asSequence().mapNotNull(::contentDedupSig).toHashSet()
         val fresh = incoming.filter {
             if (it.id in existing) return@filter false
+            // A turn the user just rewound away must not come back from the
+            // file (the delta window can't prove it was abandoned).
+            val body = when (it) {
+                is AgentMessage.UserText -> it.text
+                is AgentMessage.AssistantText -> it.text
+                else -> null
+            }
+            if (body != null && s.isSuppressedByRewind(body)) return@filter false
             // Dedup a user prompt's JSONL echo against the OPTIMISTIC copy that
             // ALREADY made it into history (shownUserTexts) — NOT against
             // `wasRecentlySent`. legit repeats keep their N optimistic copies) AND
             // restores the bubble whenever the optimistic copy is missing.
-            if (it is AgentMessage.UserText)
-                return@filter it.text.trim() !in shownUserTexts
+            if (it is AgentMessage.UserText) {
+                val isEcho = it.text.trim() in shownUserTexts
+                // The echo is dropped (the optimistic bubble already shows it),
+                // but it carries something the optimistic copy never had: the
+                // JSONL record uuid, which is the ONLY handle rewind can use.
+                // Hand it to the row on screen before discarding the echo, or
+                // the messages the user just sent stay un-rewindable until the
+                // chat is reopened.
+                if (isEcho && it.recordUuid != null) {
+                    s.stampUserRecordUuid(it.text, it.recordUuid)
+                }
+                return@filter !isEcho
+            }
             val sig = contentDedupSig(it)
             sig == null || sig !in shownSig
         }
@@ -993,6 +1012,29 @@ internal class ChatViewModelTailPoll(
         val spec = AgentSpecRegistry[agent]
         val out = mutableListOf<AgentMessage>()
         var turnSeq = 0
+        // A rewound branch is still physically in the file (the CLI forks the
+        // chain instead of truncating), so a linear read shows the discarded
+        // turn next to its replacement and the rewind looks like it did
+        // nothing. Resolve the active chain first.
+        //
+        // ⚠ NEVER materialise the lines to do this: a 100 MB rollout is
+        // exactly what this file's per-line decode exists to survive (a
+        // whole-buffer transient OOM-killed the app, 2026-05-29). Pass 1 is
+        // O(1) memory and answers "was there ever a rewind?"; only then does
+        // pass 2 build the uuid→parent map.
+        val offChain = if (agent == Agent.CLAUDE) {
+            val detector = ai.eight24family.conch.agent.claude.ClaudeChainFilter.RewindDetector()
+            ai.eight24family.conch.util.JsonlUtils.forEachLine(
+                buffer.duplicate(), onOversize = { _, _ -> },
+            ) { detector.feed(it) }
+            if (detector.found) {
+                val resolver = ai.eight24family.conch.agent.claude.ClaudeChainFilter.ChainResolver()
+                ai.eight24family.conch.util.JsonlUtils.forEachLine(
+                    buffer.duplicate(), onOversize = { _, _ -> },
+                ) { resolver.feed(it) }
+                resolver.result()
+            } else emptySet()
+        } else emptySet()
         ai.eight24family.conch.util.JsonlUtils.forEachLine(
             buffer,
             onOversize = { head, total ->
@@ -1008,7 +1050,9 @@ internal class ChatViewModelTailPoll(
                 )
             },
         ) { line ->
-            if (line.isNotBlank()) {
+            if (line.isNotBlank() &&
+                !ai.eight24family.conch.agent.claude.ClaudeChainFilter.isOffChain(line, offChain)
+            ) {
                 if (line.contains("\"type\":\"turn.started\"") ||
                     line.contains("\"type\":\"thread.started\"")
                 ) {
@@ -1036,8 +1080,15 @@ internal class ChatViewModelTailPoll(
         val spec = AgentSpecRegistry[agent]
         val out = mutableListOf<AgentMessage>()
         var turnSeq = 0
+        // See the buffer overload: a rewind FORKS the transcript instead of
+        // truncating it, so the abandoned branch must be resolved away.
+        val chain = ai.eight24family.conch.agent.claude.ClaudeChainFilter
+        val offChain = if (agent == Agent.CLAUDE && chain.hasRewind(text.lineSequence())) {
+            chain.offChainUuids(text.lineSequence())
+        } else emptySet()
         for (line in text.lineSequence()) {
             if (line.isBlank()) continue
+            if (chain.isOffChain(line, offChain)) continue
             if (line.contains("\"type\":\"turn.started\"") ||
                 line.contains("\"type\":\"thread.started\"")
             ) {

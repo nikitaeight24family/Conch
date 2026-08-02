@@ -204,6 +204,156 @@ internal object ClaudeControlWire {
         putJsonObject("request") { put("subtype", "interrupt") }
     }.toString()
 
+    // ── Client → CLI control requests (verified against the 2.1.219 binary's
+    //    stdin dispatcher in print.ts — see INVARIANTS 2026-08-02) ──────────
+
+    private fun clientRequest(
+        requestId: String,
+        subtype: String,
+        params: JsonObject? = null,
+    ): String = buildJsonObject {
+        put("type", "control_request")
+        put("request_id", requestId)
+        putJsonObject("request") {
+            put("subtype", subtype)
+            params?.forEach { (k, v) -> put(k, v) }
+        }
+    }.toString()
+
+    /** LIVE model switch — the CLI swaps `mainLoopModelForSession` in place,
+     *  no process restart, no re-read of the session file. `model` null/blank
+     *  → "default" (the CLI resolves it to its effective default). Errors come
+     *  back as a control_response error with the CLI's own message (unknown
+     *  model → suggestion, restricted model → policy text). */
+    fun encodeSetModel(requestId: String, model: String?): String =
+        clientRequest(requestId, "set_model", buildJsonObject {
+            put("model", model?.takeIf { it.isNotBlank() } ?: "default")
+        })
+
+    /** LIVE permission-mode switch. CLI modes (2.1.219): "default",
+     *  "acceptEdits", "plan", "bypassPermissions", "auto", "dontAsk"
+     *  ("manual" aliases default). bypassPermissions can be REFUSED when the
+     *  session wasn't launched with the bypass flag — callers must fall back
+     *  to the restart path on an error verdict. */
+    fun encodeSetPermissionMode(requestId: String, mode: String): String =
+        clientRequest(requestId, "set_permission_mode", buildJsonObject {
+            put("mode", mode)
+        })
+
+    /** LIVE thinking-budget switch — replaces the launch-scoped
+     *  MAX_THINKING_TOKENS env for the rest of the session. null = back to the
+     *  CLI's adaptive default. Schema (binary-verified): max_thinking_tokens
+     *  must be an integer or null. */
+    fun encodeSetMaxThinkingTokens(requestId: String, maxTokens: Int?): String =
+        clientRequest(requestId, "set_max_thinking_tokens", buildJsonObject {
+            put("max_thinking_tokens", maxTokens)
+        })
+
+    /** `/context` data over the wire: `{categories:[{name,tokens}], totalTokens,
+     *  maxTokens, percentage, autoCompactThreshold, ...}` — the same numbers the
+     *  CLI's own /context grid draws, for THIS live session, no session copy. */
+    fun encodeGetContextUsage(requestId: String): String =
+        clientRequest(requestId, "get_context_usage")
+
+    /** Plan-limit windows from the CLI's own cache: `{rate_limits:{five_hour:
+     *  {utilization,resets_at}, seven_day, …, model_scoped:[…]},
+     *  subscription_type, session:{total_cost_usd,…}}`. */
+    fun encodeGetUsage(requestId: String): String =
+        clientRequest(requestId, "get_usage")
+
+    /** Server-side file search for @-mentions: `{query}` →
+     *  `{suggestions:[{path}]}` (the CLI's own fuzzy file index). */
+    fun encodeFileSuggestions(requestId: String, query: String): String =
+        clientRequest(requestId, "file_suggestions", buildJsonObject {
+            put("query", query)
+        })
+
+    /** Rename the session's title (shows in `claude --resume`). Title must be
+     *  non-empty; the CLI persists it to the transcript. */
+    fun encodeRenameSession(requestId: String, title: String): String =
+        clientRequest(requestId, "rename_session", buildJsonObject {
+            put("title", title)
+        })
+
+    /**
+     * Rewind the CONVERSATION to just before [targetMessageUuid] (a `user`
+     * record's uuid from the session JSONL). Response:
+     * `{rewound, targetMessageUuid, prefillText, precedingAssistantUuid}` —
+     * or `{rewound:false, error:"turn running"|"target not found"|
+     * "stale target"|…}`.
+     *
+     * ⚠ VERIFIED LIVE (2026-08-02): this does NOT truncate the session file.
+     * The CLI appends a `last-prompt` record whose `leafUuid` points BACK at
+     * `precedingAssistantUuid`, and the next turn's user record parents onto
+     * that same uuid — the abandoned branch stays in the file forever. Any
+     * consumer that reads the JSONL linearly (our mirror) MUST reconstruct
+     * the active chain — see [ClaudeChainFilter].
+     *
+     * [interruptIfRunning] asks the CLI to abort an in-flight turn first;
+     * without it a running turn is answered with `error:"turn running"`.
+     */
+    fun encodeRewindConversation(
+        requestId: String,
+        targetMessageUuid: String,
+        interruptIfRunning: Boolean,
+    ): String = clientRequest(requestId, "rewind_conversation", buildJsonObject {
+        put("target_message_uuid", targetMessageUuid)
+        put("interrupt_if_running", interruptIfRunning)
+    })
+
+    /**
+     * Restore FILES to their state before [userMessageId]'s turn.
+     * `dry_run` = report only: `{canRewind, filesChanged:[…], insertions,
+     * deletions}`; apply returns `{canRewind:true, skippedLinks?}`.
+     * `{canRewind:false, error}` when the CLI has no checkpoint (or file
+     * checkpointing is off — headless requires
+     * `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, see ClaudeSpec).
+     */
+    fun encodeRewindFiles(
+        requestId: String,
+        userMessageId: String,
+        dryRun: Boolean,
+    ): String = clientRequest(requestId, "rewind_files", buildJsonObject {
+        put("user_message_id", userMessageId)
+        put("dry_run", dryRun)
+    })
+
+    /** One `control_response` from the CLI to a request WE sent. */
+    data class ControlResponse(
+        val requestId: String,
+        val ok: Boolean,
+        /** CLI's error text on an error verdict (null on success). */
+        val error: String?,
+        /** `response.response` payload object on success (may be null — many
+         *  acks carry no payload). */
+        val payload: JsonObject?,
+    )
+
+    /** Parse a `control_response` line. Returns null when [line] isn't one.
+     *  Shape (binary-verified): `{"type":"control_response","response":
+     *  {"subtype":"success"|"error","request_id":…,"response":{…}|,"error":…}}`
+     *  — request_id NESTED inside `response` (the documented asymmetry). */
+    fun parseControlResponse(line: String): ControlResponse? {
+        if (!line.startsWith("{") || !line.contains("\"control_response\"")) return null
+        val obj = SilentlyTry.logged("SshAi-Control", "parse control response") {
+            json.parseToJsonElement(line).jsonObject
+        } ?: return null
+        if (obj["type"]?.jsonPrimitive?.contentOrNull != "control_response") return null
+        val resp = SilentlyTry.logged("SshAi-Control", "read response obj") {
+            obj["response"]?.jsonObject
+        } ?: return null
+        val requestId = resp["request_id"]?.jsonPrimitive?.contentOrNull ?: return null
+        val ok = resp["subtype"]?.jsonPrimitive?.contentOrNull == "success"
+        return ControlResponse(
+            requestId = requestId,
+            ok = ok,
+            error = resp["error"]?.jsonPrimitive?.contentOrNull,
+            payload = SilentlyTry.logged("SshAi-Control", "read response payload") {
+                resp["response"]?.jsonObject
+            },
+        )
+    }
+
     /**
      * The `initialize` handshake the Agent SDK sends FIRST on every
      * session. We declare the dialog kinds we can actually render so the

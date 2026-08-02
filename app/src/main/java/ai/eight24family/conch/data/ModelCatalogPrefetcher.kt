@@ -1,10 +1,8 @@
 package ai.eight24family.conch.data
 
 import ai.eight24family.conch.agent.Agent
-import ai.eight24family.conch.agent.probeClaudeMenuScreens
 import ai.eight24family.conch.agent.spec.AgentExec
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
-import ai.eight24family.conch.agent.spec.PtyProbe
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.ui.viewmodel.ChatViewModelModels
 import ai.eight24family.conch.util.SilentlyTry
@@ -69,8 +67,7 @@ object ModelCatalogPrefetcher {
                 }
             }
         }
-        val pty = PtyProbe { probeClaudeMenuScreens(client) }
-        val map = runCatching { spec.probeAvailableModels(exec, pty) }
+        val map = runCatching { spec.probeAvailableModels(exec) }
             .onFailure { android.util.Log.w(TAG, "catalog warm-up failed for ${spec.agent}", it) }
             .getOrDefault(emptyMap())
         if (map.isEmpty()) return map

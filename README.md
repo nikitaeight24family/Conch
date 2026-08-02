@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.2.14-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.0-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.2.11
+conch ▌ v0.3.0
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -49,38 +49,33 @@ conch ▌ v0.2.11
 
 ---
 
-## What's new in 0.2.11
+## What's new in 0.3.0
 
-- **Voice messages.** Record from the composer and, before you send, play the
-  clip back on a waveform you can scrub. The envelope is decoded from the file,
-  so a clip you attached or received draws the same way one you recorded does.
-- **Live camera in the attachment sheet.** The first grid cell is a viewfinder —
-  tap it and the shot is attached in place, without leaving the app. Recent
-  photos sit beside it, four to a row.
-- **The thinking indicator stops when the turn really ends.** Turn state is now
-  derived on the phone instead of asking your server to project it with `jq`; on
-  a host without a usable `jq` every signal read false and a finished turn could
-  spin forever.
-- **The model you pick is law.** It is read before anything else is resolved and
-  re-applied continuously, so a background probe that learns your server's
-  default can no longer move a running conversation onto a different model.
-- **`conch-bridge audio`** — see the phone-bridge section; it is off by default.
+- **Switch model or effort mid-chat — the running session just changes.** The
+  chat used to restart its CLI process and re-read the whole conversation to
+  honour a pick; now the change is applied to the live process, so it lands at
+  once and the session keeps its place. A pick the wire can't express still
+  falls back to the old restart, silently.
+- **Rewind.** Beside each message you sent there is a quiet ⟲ handle. Tap it and
+  the conversation returns to just before that message, with its text back in
+  the composer to edit and resend. If that turn changed files on your server,
+  the sheet names every one of them and the ± lines first — only then does it
+  offer to restore them. Long-press keeps belonging to the text: selecting and
+  copying work exactly as before.
+- **@ finds files on your server.** Type `@` and a few characters; the
+  suggestions come from the machine the agent runs on, not from a guess.
+- **Rename a session** from the chat's own menu — the name is the one Claude
+  Code itself will show.
+- **Plan limits and context usage come straight from the CLI.** The usage bar
+  and the context breakdown now read the agent's own numbers over the same
+  channel that carries the conversation, instead of a separate probe that could
+  disagree with it.
 
-## What's new in 0.2.8
-
-**Long chats stay in order, and the usage bar tells the truth about limits.**
-
-- **No more scrambled chats after a long session.** Your first message no longer
-  jumps to the bottom, and the top bar keeps showing the model that's actually
-  answering (it used to silently flip to "Sonnet 5"). Under the hood: the app now
-  tells its own harmless housekeeping rewrites apart from a real Claude
-  compaction, so it re-adopts the server's history verbatim instead of shuffling
-  it — and the reading position you left off at is preserved.
-- **Honest usage-limit reset.** When you hit a rate limit, the bar shows the real
-  reset time straight from the CLI's own message ("resets 8:30pm") instead of a
-  stuck "resets now" that never ticked. It works even for `setup-token` logins,
-  where the usage endpoint can't report the reset — a fresh sign-in or a switched
-  account clears it automatically.
+Under the hood this release *removed* four subsystems: a hand-written terminal
+emulator that scraped the `/model` menu, a second CLI process spawned just to
+read `/context`, a `curl` that handled a raw OAuth token, and the process
+restart behind every model switch. The model catalog now comes from the CLI's
+own registry, so a new model family appears with no code change at all.
 
 ---
 

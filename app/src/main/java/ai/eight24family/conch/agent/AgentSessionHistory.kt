@@ -300,6 +300,82 @@ internal class AgentSessionHistory(
     }
 
     /**
+     * Teach an already-rendered user row its JSONL record uuid.
+     *
+     * A prompt is rendered OPTIMISTICALLY the moment it is sent, long before
+     * the CLI writes it to the session file, and the tail-poll then DROPS the
+     * file's echo as a duplicate (that dedup is what keeps the bubble from
+     * appearing twice). The consequence: the row on screen never learned its
+     * record uuid, so rewind — which is addressed BY that uuid — was offered
+     * on every message except the ones the user had just sent, until the chat
+     * was reopened. Stamping the id onto the existing row (same message id,
+     * same position, no re-render of anything else) closes that.
+     *
+     * @return true when a row was stamped.
+     */
+    fun stampUserRecordUuid(text: String, recordUuid: String): Boolean {
+        synchronized(flushLock) {
+            val current = _history.value
+            val body = text.trim()
+            val idx = current.indexOfFirst {
+                it is AgentMessage.UserText && it.recordUuid == null && it.text.trim() == body
+            }
+            if (idx < 0) return false
+            val row = current[idx] as AgentMessage.UserText
+            _history.value = current.set(idx, row.copy(recordUuid = recordUuid))
+            return true
+        }
+    }
+
+    /**
+     * Drop the user row identified by [recordUuid] and EVERYTHING after it —
+     * the on-screen half of a conversation rewind.
+     *
+     * The server side of the rewind does not truncate the session file (the
+     * CLI forks the chain), so this is what makes the discarded turn actually
+     * disappear for the user; a later full re-read stays consistent because
+     * the parse path resolves the active chain (ClaudeChainFilter).
+     *
+     * @return the number of rows removed; 0 when the anchor isn't on screen
+     *  (nothing is touched — never guess at a position).
+     */
+    fun truncateFromUserRecord(recordUuid: String, fallbackText: String? = null): List<AgentMessage> {
+        synchronized(flushLock) {
+            val current = _history.value
+            var cut = current.indexOfFirst {
+                it is AgentMessage.UserText && it.recordUuid == recordUuid
+            }
+            if (cut < 0 && !fallbackText.isNullOrBlank()) {
+                // The row on screen is usually the OPTIMISTIC bubble, which
+                // never carries a record uuid (its file echo is dropped as a
+                // duplicate). Matching only by uuid meant the server rewound
+                // but the discarded turn stayed on screen — the rewind looked
+                // like it half-worked (caught on device, 2026-08-02). Fall back
+                // to the LAST row whose text is the prompt the CLI just handed
+                // back to us, which is precisely the turn we rewound to.
+                val body = fallbackText.trim()
+                cut = current.indexOfLast {
+                    it is AgentMessage.UserText && it.text.trim() == body
+                }
+            }
+            if (cut < 0) return emptyList()
+            val kept = current.subList(0, cut)
+            val listBuilder = persistentListOf<AgentMessage>().builder()
+            val indexBuilder = persistentMapOf<String, Int>().builder()
+            for (m in kept) {
+                listBuilder.add(m)
+                indexBuilder[m.id] = listBuilder.lastIndex
+            }
+            _history.value = listBuilder.build()
+            historyIndex = indexBuilder.build()
+            // The streaming buffer can still hold deltas of the turn we just
+            // discarded; flushing them back would resurrect it.
+            streamingBuffer.clear()
+            return current.subList(cut, current.size).toList()
+        }
+    }
+
+    /**
      * Append messages to history without touching what's already there.
      * Filters out anything whose id is already present (see
      * [loadHistory] for why duplicates show up in JSONL).

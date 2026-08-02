@@ -66,8 +66,22 @@ sealed interface AgentMessage {
     /** Visible assistant turn (one block of text). */
     data class AssistantText(override val id: String, val text: String) : AgentMessage
 
-    /** Visible user turn — locally-rendered or replayed from the saved session. */
-    data class UserText(override val id: String, val text: String) : AgentMessage
+    /**
+     * Visible user turn — locally-rendered or replayed from the saved session.
+     *
+     * [recordUuid] is the JSONL record's own `uuid` when this row came from
+     * the session file; null for a locally-rendered optimistic bubble that
+     * the CLI hasn't written yet. It is the ANCHOR the rewind protocol takes
+     * (`rewind_conversation.target_message_uuid` /
+     * `rewind_files.user_message_id`), so a row without one simply cannot
+     * offer rewind — which is honest: the turn does not exist server-side yet.
+     * Default null keeps every existing construction site valid.
+     */
+    data class UserText(
+        override val id: String,
+        val text: String,
+        val recordUuid: String? = null,
+    ) : AgentMessage
 
     /**
      * One observation about a SUBAGENT (Claude's Task tool spawns these; the

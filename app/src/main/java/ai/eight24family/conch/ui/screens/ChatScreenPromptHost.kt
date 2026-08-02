@@ -95,6 +95,23 @@ internal fun ChatPromptHost(
             onPick = onSlashAcPick,
         )
     }
+    // @-mention file suggestions — server-side search over the CLI's own file
+    // index (Claude control channel). The strip renders only while a trailing
+    // @token is being typed AND the channel returned something.
+    val mentionQuery = ai.eight24family.conch.util.MentionToken.activeQuery(input)
+        ?.takeIf { currentAgent == Agent.CLAUDE }
+    androidx.compose.runtime.LaunchedEffect(mentionQuery) {
+        vm.updateMentionQuery(mentionQuery)
+    }
+    val fileSuggestions by vm.fileSuggestions.collectAsState()
+    if (mentionQuery != null && fileSuggestions.isNotEmpty()) {
+        FileMentionAutocomplete(
+            items = fileSuggestions,
+            onPick = { path ->
+                onInputChange(ai.eight24family.conch.util.MentionToken.complete(input, path))
+            },
+        )
+    }
     // Messages typed mid-turn wait here (visible, cancelable) until the current
     // reply finishes — then they're sent in order.
     if (queuedMessages.isNotEmpty()) {

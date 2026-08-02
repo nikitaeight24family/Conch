@@ -174,7 +174,22 @@ class AgentSession(
         getAuthPrep = { authPrep },
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
         onThinkingTokens = { n -> liveThinkingTokens.value = n },
+        onInitState = { st ->
+            // Publish into the spec-level globals FIRST (default model/key,
+            // unavailable set, effort ladder) so any observer of the flow —
+            // the VM's catalog adopter included — reads warm values.
+            ai.eight24family.conch.agent.claude.ClaudeSpec.adoptInitState(st)
+            _claudeInitState.value = st
+        },
     )
+
+    /** The CLI's own `initialize` handshake data (models / commands /
+     *  subagents / account), republished on every persistent launch. Null
+     *  until the first handshake lands (or on the one-shot fallback). */
+    private val _claudeInitState =
+        MutableStateFlow<ai.eight24family.conch.agent.claude.ClaudeInitState?>(null)
+    internal val claudeInitState: StateFlow<ai.eight24family.conch.agent.claude.ClaudeInitState?> =
+        _claudeInitState.asStateFlow()
 
     /**
      * Codex twin of [persistentStream]: a long-lived `codex app-server`
@@ -510,6 +525,8 @@ class AgentSession(
 
     suspend fun send(text: String, imagePaths: List<String> = emptyList()) {
         val tag = "SshAi-Turn"
+        // A new turn supersedes any rewind: the mirror may speak freely again.
+        rewindSuppressed = emptySet()
         android.util.Log.d(
             tag,
             "send text=${text.length}B images=${imagePaths.size} agent=${server.agent} resume=$resumeId " +
@@ -661,8 +678,6 @@ class AgentSession(
         onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
     ): DownloadOutcome = fileTransfer.downloadFile(remotePath, sink, onProgress)
 
-    suspend fun probeModelMenu(): String? = fileTransfer.probeModelMenu()
-
     suspend fun checkRemoteFileExists(remotePath: String): Boolean =
         fileTransfer.checkRemoteFileExists(remotePath)
 
@@ -713,6 +728,185 @@ class AgentSession(
      *  turn-state detector reads this for WAITING-FOR-USER (never hits the JSONL). */
     fun hasPendingControl(): Boolean = persistentStream.hasPendingControl()
 
+    // ── Live control-channel operations (Claude persistent stream only;
+    //    every one degrades to false/null on the one-shot fallback, and the
+    //    caller's existing restart/probe path takes over unchanged) ────────
+
+    /** Apply a model pick to the RUNNING session via `set_model` — no process
+     *  restart, no session re-read. False → not applied (dead channel / CLI
+     *  refused); the modelOverride the caller set still lands via the launch
+     *  params on the next turn. */
+    suspend fun applyModelLive(model: String?): Boolean =
+        usePersistent() && persistentStream.trySetModel(model)
+
+    /** Apply an effort pick live via `set_max_thinking_tokens` (levels with a
+     *  budget mapping only — xhigh/ultracode still restart). */
+    suspend fun applyReasoningLive(effort: String?): Boolean =
+        usePersistent() && persistentStream.trySetReasoning(
+            effort,
+            ai.eight24family.conch.agent.claude.ClaudeSpec.thinkingBudget(effort),
+        )
+
+    /** Apply an approval-mode change live via `set_permission_mode`. */
+    suspend fun applyApprovalLive(
+        mode: ai.eight24family.conch.data.prefs.AgentApprovalMode,
+    ): Boolean = usePersistent() && persistentStream.trySetPermissionMode(mode)
+
+    /** `/context` numbers for this live session over the control channel —
+     *  null when the channel is down (caller falls back to the copy-probe). */
+    suspend fun fetchContextUsageLive(): kotlinx.serialization.json.JsonObject? =
+        if (usePersistent()) persistentStream.getContextUsage() else null
+
+    /** Plan-limit windows from the CLI's own cache over the control channel. */
+    suspend fun fetchUsageLive(): kotlinx.serialization.json.JsonObject? =
+        if (usePersistent()) persistentStream.getUsage() else null
+
+    /**
+     * Server-side file search for @-mentions.
+     *
+     * PRIMARY: the CLI's own index over the control channel. VERIFIED LIVE
+     * (2.1.220, 2026-08-02) that this answers an EMPTY query with a real
+     * ranked list but returns NOTHING for any typed prefix in headless mode —
+     * the index is populated by the interactive TUI's file watcher, which our
+     * launches never run. Shipping only the primary would have meant a strip
+     * that appears once on "@" and then goes blank the moment the user types,
+     * i.e. a feature that silently does nothing.
+     *
+     * FALLBACK: one bounded listing of the session's cwd, filtered by the
+     * token server-side. Runs ONLY when the CLI's index came back empty for a
+     * non-empty query, so the better source always wins where it works.
+     */
+    suspend fun fileSuggestions(query: String): List<String>? {
+        if (!usePersistent()) return null
+        val fromCli = persistentStream.fileSuggestions(query)
+        if (query.isBlank()) return fromCli
+        if (!fromCli.isNullOrEmpty()) return fromCli
+        // Token is user input heading for a shell — keep it to path-ish
+        // characters and let shellEscape handle the rest.
+        val token = query.take(64)
+        if (token.any { it.isWhitespace() }) return fromCli
+        val cwd = cwdSnapshot?.takeIf { it.isNotBlank() } ?: return fromCli
+        val script = "cd " + shellEscape(cwd) + " 2>/dev/null || exit 0; " +
+            "{ command -v rg >/dev/null 2>&1 && rg --files --hidden -g '!.git' 2>/dev/null " +
+            "|| find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null " +
+            "| sed 's|^\\./||'; } | grep -iF -- " + shellEscape(token) + " | head -8"
+        val out = SilentlyTry.logged("SshAi-Turn", "file suggestion fallback") {
+            execOnLive(loginShell(script))
+        }
+        val hits = out?.lineSequence()
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() && !it.startsWith("bash:") }
+            ?.take(8)
+            ?.toList()
+            .orEmpty()
+        return if (hits.isEmpty()) fromCli else hits
+    }
+
+    /** Rename this session's title on the server (shows in `claude --resume`). */
+    suspend fun renameSession(title: String): Boolean =
+        usePersistent() && persistentStream.renameSession(title)
+
+    /**
+     * Rewind the CONVERSATION to just before the user turn [recordUuid],
+     * then drop that turn and everything after it from the on-screen history.
+     *
+     * Safe and reversible in the sense that matters: nothing on disk changes
+     * (files are a SEPARATE, confirmed step — see [rewindFiles]), and the
+     * discarded branch stays in the server's transcript, it is just no longer
+     * the active chain.
+     */
+    suspend fun rewindConversation(
+        recordUuid: String,
+    ): RewindResult {
+        if (!usePersistent()) {
+            return RewindResult(false, error = "no live session")
+        }
+        val res = persistentStream.rewindConversation(recordUuid)
+        if (res.ok) {
+            val dropped = historyMod.truncateFromUserRecord(
+                res.targetMessageUuid ?: recordUuid,
+                fallbackText = res.prefillText,
+            )
+            // ⚠ THE MIRROR WILL TRY TO PUT IT BACK. The tail-poll parses only
+            // the NEW bytes of the session file, and that window does not
+            // contain the `last-prompt` back-pointer that proves the branch was
+            // abandoned — so the chain filter cannot see it and the discarded
+            // turn is appended straight back onto the chat we just truncated
+            // (measured on device: "dropped 7 row(s)", row back seconds later).
+            // Remember what we removed and refuse it until the next send.
+            rewindSuppressed = dropped.mapNotNullTo(HashSet()) { m ->
+                when (m) {
+                    is AgentMessage.UserText -> m.text.trim()
+                    is AgentMessage.AssistantText -> m.text.trim()
+                    else -> null
+                }?.takeIf { it.isNotEmpty() }
+            }
+            android.util.Log.i(
+                "SshAi-Turn",
+                "rewind: dropped ${dropped.size} row(s) at $recordUuid, " +
+                    "suppressing ${rewindSuppressed.size} body(ies) until next send",
+            )
+        }
+        return res
+    }
+
+    /**
+     * Find the JSONL record uuid of the LAST user turn whose text matches
+     * [text] — the rewind anchor for a row that has none.
+     *
+     * Why this exists: a bubble is rendered optimistically the instant it is
+     * sent, and the file echo that carries the uuid is DROPPED as a duplicate;
+     * a reopened-but-still-alive session is never re-read from the file
+     * either. Depending on the stamp arriving made rewind unavailable on
+     * exactly the messages a user most wants to undo — the ones they just
+     * sent. Asking the server for the anchor makes the gesture deterministic.
+     *
+     * Bounded: reads the tail of the session file, matches on the exact
+     * trimmed text, returns the LAST match (repeated prompts → the newest).
+     */
+    suspend fun resolveUserRecordUuid(text: String): String? {
+        val rid = resumeId ?: return null
+        if (!Regex("^[a-fA-F0-9-]{16,40}$").matches(rid)) return null
+        val body = text.trim().ifBlank { return null }
+        val script = "f=\$(ls \$HOME/.claude/projects/*/" + shellEscape(rid) + "'.jsonl' 2>/dev/null | head -1); " +
+            "[ -n \"\$f\" ] || exit 0; tail -c 2000000 \"\$f\" | grep '\"type\":\"user\"' | tail -200"
+        val out = SilentlyTry.logged("SshAi-Turn", "resolve rewind anchor") {
+            execOnLive(loginShell(script))
+        } ?: return null
+        // Parse app-side (TURN-STATE-IS-LOCAL-1: never depend on jq being on
+        // the box). Last match wins.
+        var found: String? = null
+        for (line in out.lineSequence()) {
+            if (!line.contains("\"type\":\"user\"")) continue
+            val msgs = AgentSpecRegistry[server.agent].parseStreamLine(line)
+            val u = msgs.filterIsInstance<AgentMessage.UserText>()
+                .firstOrNull { it.text.trim() == body } ?: continue
+            found = u.recordUuid ?: found
+        }
+        return found
+    }
+
+    /** Bodies of rows a rewind just removed. The file mirror re-parses only
+     *  fresh bytes and would re-append them; cleared on the next send, when
+     *  the conversation has genuinely moved on. */
+    @Volatile private var rewindSuppressed: Set<String> = emptySet()
+
+    /** True when [text] belongs to a turn the user just rewound away. */
+    fun isSuppressedByRewind(text: String): Boolean =
+        rewindSuppressed.isNotEmpty() && text.trim() in rewindSuppressed
+
+    /** Files-only rewind for the turn [recordUuid]. [dryRun] reports what
+     *  WOULD change and touches nothing. */
+    suspend fun rewindFiles(
+        recordUuid: String,
+        dryRun: Boolean,
+    ): FileRewindResult {
+        if (!usePersistent()) {
+            return FileRewindResult(false, error = "no live session")
+        }
+        return persistentStream.rewindFiles(recordUuid, dryRun)
+    }
+
     /** The tail-poll detected this session's LIVE turn is stuck: [state] is
      *  Working but the authoritative session file says the turn ended and is
      *  frozen. The persistent reader wedged (e.g. a `conch-bridge` loopback tool)
@@ -757,6 +951,12 @@ class AgentSession(
 
     /** Append-only update of history. See [AgentSessionHistory.appendMessages]. */
     fun appendMessages(messages: List<AgentMessage>) = historyMod.appendMessages(messages)
+
+    /** Teach an optimistic user bubble the JSONL record uuid its dropped file
+     *  echo carried — the handle rewind is addressed by. See
+     *  [AgentSessionHistory.stampUserRecordUuid]. */
+    fun stampUserRecordUuid(text: String, recordUuid: String): Boolean =
+        historyMod.stampUserRecordUuid(text, recordUuid)
 }
 
 /** Stable id for the fresh-chat welcome banner. Fixed (not a random UUID) so

@@ -12,7 +12,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,6 +74,7 @@ internal fun ChatTopBarHost(
     val selectedModel by vm.selectedModel.collectAsState()
     val observedModel by vm.observedModel.collectAsState()
     val availableModels by vm.availableModels.collectAsState()
+    val hiddenModels by vm.hiddenModels.collectAsState()
     val unavailableModels by vm.unavailableModelLabels.collectAsState()
     val obsNewerThanPick by vm.observationNewerThanPick.collectAsState()
     val modelsProbing by vm.modelsProbing.collectAsState()
@@ -91,7 +94,11 @@ internal fun ChatTopBarHost(
     // Claude's auto-generated session title (ai-title) — the real title, like the
     // CLI shows. Preferred over the listing preview / first user message.
     val observedTitle by vm.observedTitle.collectAsState()
-    val title = observedTitle?.takeIf { it.isNotBlank() }
+    // A rename the user just performed wins over everything — the server-side
+    // listing catches up on its next sweep.
+    val renamedTitle by vm.renamedTitle.collectAsState()
+    val title = renamedTitle?.takeIf { it.isNotBlank() }
+        ?: observedTitle?.takeIf { it.isNotBlank() }
         ?: remoteSessions.firstOrNull { it.id == resumeId }
             ?.preview?.takeIf { it.isNotBlank() }
         ?: messages.firstOrNull { it is AgentMessage.UserText }
@@ -109,6 +116,44 @@ internal fun ChatTopBarHost(
             else -> "// loading…"
         }
 
+    // Rename-session dialog (rename_session over the live control channel).
+    var renameDialogOpen by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    if (renameDialogOpen) {
+        var renameText by androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf(
+                title.takeIf { !it.startsWith("//") }.orEmpty()
+            )
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { renameDialogOpen = false },
+            title = { Text("Rename session") },
+            text = {
+                androidx.compose.material3.OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    label = { Text("Title") },
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    enabled = renameText.isNotBlank(),
+                    onClick = {
+                        vm.renameSession(renameText)
+                        renameDialogOpen = false
+                    },
+                ) { Text("Rename") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { renameDialogOpen = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     // Bar, then a thin full-width session-title strip stacked below it.
     Column(modifier = Modifier.fillMaxWidth()) {
     TerminalTopBar(
@@ -122,6 +167,7 @@ internal fun ChatTopBarHost(
         selectedModel = selectedModel,
         observedModel = observedModel,
         availableModels = availableModels,
+        hiddenModels = hiddenModels,
         unavailableModels = unavailableModels,
         observationNewerThanPick = obsNewerThanPick,
         modelsProbing = modelsProbing,
@@ -135,9 +181,15 @@ internal fun ChatTopBarHost(
         observedReasoning = observedReasoning,
         modelMenuOpen = modelMenuOpen,
         onToggleModelMenu = onToggleModelMenu,
-        onSelectModel = { m -> vm.setModel(m); onCloseModelMenu() },
+        // requestSetModel, NOT setModel: a switch busts the per-model prompt
+        // cache, so the user is asked first — on Anthropic's own terms.
+        onSelectModel = { m ->
+            vm.requestSetModel(m, availableModels[m] ?: m.orEmpty())
+            onCloseModelMenu()
+        },
         onSelectModelAndReasoning = { m, r ->
-            vm.setModelAndReasoning(m, r)
+            vm.setReasoning(r)
+            vm.requestSetModel(m, availableModels[m] ?: m.orEmpty())
             onCloseModelMenu()
         },
         onOpenServerStats = {
@@ -155,6 +207,8 @@ internal fun ChatTopBarHost(
         onOpenAgents = { onOpenSubagents(vm.localSessionId.value) },
         showSubagentsIcon = currentAgent.supportsSubagents,
         showMemoryIcon = currentAgent.supportsMemory,
+        showRenameItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
+        onRenameSession = { renameDialogOpen = true },
         approvalMode = approvalMode,
         approvalMenuOpen = approvalMenuOpen,
         onToggleApprovalMenu = onToggleApprovalMenu,

@@ -154,10 +154,17 @@ fun AgentPickerScreen(
     // abandoned signer. Net effect: user taps once, dialog appears to
     // ignore it and asks them to tap again.
     //
-    // Subsequent ON_RESUMEs (e.g., user navigated to Keychain and back)
-    // still trigger a refresh when pool is dead AND probing isn't in
-    // flight AND no touch is already requested.
-    var firstResumeSeen by remember { mutableStateOf(false) }
+    // Subsequent ON_RESUMEs (e.g., user navigated to Keychain and back) still
+    // trigger a refresh when pool is dead AND probing isn't in flight AND no
+    // touch is already requested. rememberSaveable, NOT remember: this flag
+    // exists to skip exactly ONE ON_RESUME — the one that races
+    // AgentPickerViewModel.init's own refresh(). With plain `remember` it resets
+    // whenever the composable is rebuilt from scratch (nav back from a chat,
+    // process death, config change), so the FIRST resume after coming back is
+    // swallowed as if it were the init race — and that is the resume that was
+    // supposed to re-arm SK touch on a dead pool. INVARIANTS.md carried this as
+    // and it stayed open until 2026-08-02.
+    var firstResumeSeen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {

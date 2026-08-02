@@ -259,6 +259,56 @@ internal fun SlashAutocomplete(items: List<SlashCommand>, onPick: (SlashCommand)
     }
 }
 
+/**
+ * Suggestion strip for @-mentions — file paths from the SERVER's own fuzzy
+ * index (`file_suggestions` over the live control channel). Same visual
+ * language as [SlashAutocomplete]; long paths keep their TAIL visible (the
+ * filename is what disambiguates, not the root dir).
+ */
+@Composable
+internal fun FileMentionAutocomplete(items: List<String>, onPick: (String) -> Unit) {
+    val cyan = MaterialTheme.colorScheme.primary
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(vertical = 4.dp)
+    ) {
+        items.forEach { path ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(path) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "@",
+                    color = cyan,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
+                Text(
+                    if (path.length > 64) "…" + path.takeLast(63) else path,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+/** One decimal, always — a percentage is a READING, not a raw float. The
+ *  context breakdown used to arrive pre-rounded from a markdown table, so the
+ *  raw `${'$'}{seg.percent}%` render was fine; computing it from the wire's token
+ *  counts exposed "1.4557999%" on screen (caught on device, 2026-08-02). */
+internal fun formatPercent(v: Float): String =
+    String.format(java.util.Locale.US, "%.1f", v)
+
 // ───────────────────────── Empty-state greeting ─────────────────────────
 
 @Composable
@@ -514,7 +564,7 @@ private fun UsagePanel(
                             UsageMeterRow(
                                 label = seg.label,
                                 labelColor = dim,
-                                value = "${seg.tokens} · ${seg.percent}%",
+                                value = "${seg.tokens} · ${formatPercent(seg.percent)}%",
                                 valueColor = dim,
                                 trailing = null,
                                 fraction = (seg.percent / 100f).coerceIn(0f, 1f),
@@ -529,7 +579,7 @@ private fun UsagePanel(
                 UsageMeterRow(
                     label = ctxSummary.label,
                     labelColor = dim,
-                    value = "${ctxSummary.tokens} · ${ctxSummary.percent}%",
+                    value = "${ctxSummary.tokens} · ${formatPercent(ctxSummary.percent)}%",
                     valueColor = dim,
                     trailing = if (ctxDetails.isNotEmpty()) (if (contextDetailsExpanded) "⌄" else "⌃") else null,
                     fraction = (ctxSummary.percent / 100f).coerceIn(0f, 1f),
@@ -1103,15 +1153,21 @@ internal fun PromptBar(
                         cameraLauncher.launch(uri)
                     }
                 }
+                // Live viewfinder only. The recent-photos grid that used to sit
+                // here is gone: it needed READ_MEDIA_IMAGES/VIDEO and Google Play
+                // rejected the app for those (2026-07-30). Photos come from the
+                // system picker, which the gallery tile below launches and which
+                // needs no permission. A tap on the viewfinder opens the camera —
+                // the shot returns through the same handler the camera TILE uses,
+                // so a photo is attached only after he presses the shutter.
                 AttachMediaStrip(
                     enabled = canAttachMore,
-                    onPick = { uri ->
-                        sheetOpen = false
-                        ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment)
-                    },
-                    // Cell zero opens the camera app; the shot comes back through
-                    // the same result handler a tap on the camera TILE uses, so a
-                    // photo is attached only after he presses the shutter.
+                    // The picker hands us URIs it has already granted; ingest each
+                    // one and let IT decide when the user is finished, because it
+                    // supports multi-select and closing on the first tap would
+                    // fight that.
+                    onPick = { uri -> ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment) },
+                    onSelectionDone = { sheetOpen = false },
                     onCameraFallback = if (hasCameraApp(ctx)) launchCamera else null,
                     modifier = Modifier.padding(bottom = 14.dp),
                 )

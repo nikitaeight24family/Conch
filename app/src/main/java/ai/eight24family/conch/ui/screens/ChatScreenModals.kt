@@ -153,4 +153,60 @@ internal fun ChatModalsHost(
             onOpenTerminal = { server?.let { s -> onOpenTerminal(s.id, s.name) } },
         )
     }
+    val pendingSwitch by vm.pendingModelSwitch.collectAsState()
+    pendingSwitch?.let { p ->
+        ModelSwitchDialog(
+            label = p.label,
+            isEffort = p.isEffort,
+            onConfirm = { vm.confirmModelSwitch() },
+            onCancel = { vm.cancelModelSwitch() },
+        )
+    }
+}
+
+/**
+ * The cache-miss warning shown before a model switch. Wording and gating are
+ * Anthropic's own, lifted from their CLI so the two agree — see
+ * [ai.eight24family.conch.ui.viewmodel.ModelSwitchWarning] for the predicate and
+ * why each "don't nag" rule earns its place.
+ */
+@androidx.compose.runtime.Composable
+private fun ModelSwitchDialog(
+    label: String,
+    isEffort: Boolean,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onCancel,
+        title = { androidx.compose.material3.Text(if (isEffort) "Change effort level?" else "Switch model?") },
+        text = {
+            androidx.compose.foundation.layout.Column(
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement
+                    .spacedBy(androidx.compose.ui.unit.Dp(8f)),
+            ) {
+                androidx.compose.material3.Text(
+                    "Your next response will be slower and use more tokens",
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.tertiary,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                )
+                androidx.compose.material3.Text(
+                    "This conversation is cached for the current " +
+                        (if (isEffort) "effort level" else "model") + ". " +
+                        "Switching to $label means the full history gets re-read " +
+                        "on your next message.",
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onConfirm) {
+                androidx.compose.material3.Text("Yes, switch to $label")
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onCancel) {
+                androidx.compose.material3.Text("No, go back")
+            }
+        },
+    )
 }

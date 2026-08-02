@@ -31,25 +31,26 @@
          without NFC or without USB-host can still install the app and
          use software keys. -->
     <!--
-        RECENT-MEDIA STRIP in the attachment sheet.
+        ⛔ NO MEDIA-READ PERMISSIONS. DO NOT ADD THEM BACK.
 
-        ⚠ RESTRICTED BY GOOGLE PLAY. READ_MEDIA_IMAGES / READ_MEDIA_VIDEO may
-        only be requested by an app targeting API 33+ when a system picker is
-        insufficient for CORE functionality, and shipping them REQUIRES a
-        declaration in Play Console explaining why the Android Photo Picker does
-        not suffice. Since 2025-05-28 non-compliance is grounds for removal.
-        See PERMISSION_DECLARATIONS.md.
+        READ_MEDIA_IMAGES / READ_MEDIA_VIDEO / READ_MEDIA_VISUAL_USER_SELECTED
+        were declared on 2026-07-29 to draw our own recent-photos grid inside the
+        attachment sheet. Google Play REJECTED the app for it on 2026-07-30 under
+        the Photo and Video Permissions policy, with enforcement applied — the
+        release was blocked and production stayed on the previous version.
 
-        We ask for them ONLY to draw our own thumbnail strip inside the sheet —
-        the system picker cannot host the camera cell or live inside our UI.
-        Requested by the user with that trade-off stated (2026-07-29).
+        The justification in this comment was factually wrong, which is worth
+        recording so nobody repeats it: it claimed "the system picker cannot host
+        the camera cell or live inside our UI". The EMBEDDED photo picker does
+        exactly that — it renders inside the app's own layout on a SurfaceView,
+        needs no permission at all, and is what Google's rejection points to
+        (androidx.photopicker:photopicker-compose, Android 14 + SDK Extensions 15).
 
-        READ_MEDIA_VISUAL_USER_SELECTED is the Android 14+ "selected photos"
-        grant. It is NOT a substitute: the platform requires it to be paired
-        with one of the two above, it cannot be declared alone.
-
-        REMOVING THESE THREE LINES fully reverts the feature — the sheet falls
-        back to its tile row with no dead UI. Nothing else depends on them.
+        The policy is narrow and we do not clear it: these permissions are for
+        apps whose CORE function a picker cannot serve (a gallery, a photo
+        editor). Ours is a convenience grid in a composer. So the sheet uses the
+        system picker, which needs nothing, and READ_EXTERNAL_STORAGE is gone with
+        them — nothing reads MediaStore any more.
     -->
     <!--
         LIVE VIEWFINDER in the attachment sheet's first cell (Telegram-style).
@@ -79,15 +80,6 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
-    <!-- Android 12L and below had no per-type media permissions. Capped so it
-         is never requested on 13+, where it would be both useless and a second
-         restricted permission on the listing. -->
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
 
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
