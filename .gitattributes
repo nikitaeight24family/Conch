@@ -1,3 +1,13 @@
+# Text is stored LF in this repo, whatever the machine that syncs it uses.
+# The mirror is written by a script running on Windows, and a `git archive`
+# there converted EVERY text file to CRLF once (0.3.1) — harmless for Kotlin,
+# fatal for gradlew: `#!/bin/sh` is not an interpreter, and CI died with
+# "cannot execute: required file not found". Normalising on commit means the
+# blob is right even when the working tree that produced it was not.
+* text=auto
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
 # Shell scripts and the bundled bridge CLI MUST stay LF-only. A CR in a
 # shebang (`#!/usr/bin/env bash\r`) breaks the script when it runs on the
 # user's server / phone. Windows checkouts must never CRLF-convert these,
