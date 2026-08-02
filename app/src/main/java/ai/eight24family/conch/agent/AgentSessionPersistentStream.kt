@@ -748,21 +748,24 @@ internal class AgentSessionPersistentStream(
     }
 
     /**
-     * Cancel a `/loop` that is sleeping between ticks.
+     * Cancel a `/loop` that is sleeping between ticks — by ending the process
+     * that holds its timers.
      *
-     * Nothing is running, so [cancelTurn] is a no-op here (no turn to fence
-     * on, nothing to escalate to) — but the CLI still holds pending wakeups,
-     * and an interrupt is precisely what drops them: `onInterrupt` cancels
-     * every scheduled loop wakeup ("cancelled N pending loop wakeup(s) on user
-     * abort", binary 2.1.219). No escalation: killing the process would work
-     * too, but it would throw away a perfectly good session to stop a timer.
+     * ⚠ AN INTERRUPT DOES NOT DO THIS. The CLI does drop every pending wakeup
+     * on abort, but only on the REPL's own abort path; the stream-json
+     * `interrupt` control aborts the in-flight turn and the queued prompts and
+     * nothing else (binary 2.1.219). Shipping the interrupt as "stop" gave 0.3.1
+     * a stop button that LIED: pressed at 18:48 on the user's own box, the
+     * wakeup still fired at 19:18:00 and ran a whole turn. The loop ended there
+     * only because the model itself chose to stop that tick.
+     *
+     * The wakeups are in-process timers, so ending the process is what ends
+     * them. It costs the session nothing: nothing is running (that is what
+     * "idle" means), and the next send relaunches with `--resume` over the same
+     * prefix the prompt cache already covers.
      */
     fun cancelIdleLoop() {
-        val id = "loopstop-${reqCounter.incrementAndGet()}-${UUID.randomUUID().toString().take(8)}"
-        scope.launch {
-            synchronized(writeLock) { writeLine(ClaudeControlWire.encodeInterrupt(id)) }
-        }
-        onLoopWakeup(null)
+        scope.launch { teardownProcess() }
     }
 
     /**

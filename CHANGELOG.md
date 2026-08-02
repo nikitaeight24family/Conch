@@ -11,6 +11,17 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.2] — 2026-08-03
+
+### Fixed
+- **Stopping a scheduled run really stops it.** 0.3.1 wired the button to the
+  protocol interrupt, which aborts the running turn and the queue — and nothing
+  else: the countdown vanished but the run still fired half an hour later. The
+  wakeups are timers inside the CLI process, so stopping now ends that process;
+  the session resumes on your next message over the same cached prefix.
+
+---
+
 ## [0.3.1] — 2026-08-03
 
 ### Added

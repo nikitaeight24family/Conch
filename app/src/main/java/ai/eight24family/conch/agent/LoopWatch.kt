@@ -16,9 +16,14 @@ package ai.eight24family.conch.agent
  * background cost with no off switch. [Armed] drives a chip with the countdown
  * and a stop.
  *
- * Stopping is the CLI's own path, not ours: an interrupt cancels every pending
- * wakeup (`onInterrupt → cancelled N pending loop wakeup(s) on user abort` in
- * the binary), which is the same control our Stop button already sends.
+ * Stopping ends the PROCESS. The binary does cancel every pending wakeup on
+ * abort — but only on the REPL's own path; the stream-json `interrupt` control
+ * aborts the in-flight turn and the queued prompts and nothing else. 0.3.1
+ * shipped the interrupt as "stop" and the button lied: pressed at 18:48, the
+ * wakeup still fired at 19:18:00 and ran a whole turn. The wakeups are
+ * in-process timers, so AgentSessionPersistentStream.cancelIdleLoop tears the
+ * process down — verified the honest way, by waiting past a deadline that then
+ * did not fire (2026-08-03).
  */
 object LoopWatch {
 
