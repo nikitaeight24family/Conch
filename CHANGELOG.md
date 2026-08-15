@@ -36,6 +36,23 @@ _Nothing yet — see ROADMAP for what's next._
   explanation instead of a library error, and never retries that state in a
   loop. Server detail → fingerprint → **forget** is the way back after you
   rebuild a machine yourself.
+- **A session keeps the model it was started on.** On resume the app sent no
+  `--model` at all and let the CLI decide, so changing the default on the server
+  quietly moved every old conversation to a different model — and a different
+  price per turn — without anyone being asked. The session's own model is named
+  explicitly now. It yields to a newer explicit pick, and to a model that no
+  longer exists (forcing a withdrawn model fails every send; there the provider's
+  own fallback is the right answer).
+- **A new chat records what it was actually born on.** The pin read the model we
+  asked for, which is nothing in the most common case — open a chat, type, send —
+  so those chats had no model to keep. And `+ new session` re-reads the default
+  first: the catalog is cached because the model list rarely changes, but the
+  default is changed by hand and decides what a new chat starts on.
+- **The unread badge counts messages, not lines.** Sessions untouched for weeks
+  showed "1 new": the badge counted every newline past a byte watermark into a
+  file the app rewrites itself, so a tool call, a system row or a compaction
+  merge all read as new messages. It counts user and assistant turns now, and a
+  full-body rewrite rebases the watermark when you had already read to the end.
 - Stop kills a turn running on the server, not just the local view.
 - The reconnect banner reflects the real connection state instead of counting
   attempts over a live link.

@@ -1830,9 +1830,18 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 SilentlyTry.fired("SshAi-Models", "pin born-with model") {
                     val prefs = ServiceLocator.preferences
                     if (prefs.selectedModelForChat(rid).first().isNullOrBlank()) {
-                        val born = _localSessionId.value
-                            ?.let { activeSessions[it]?.modelOverride }
-                            ?.takeIf { it.isNotBlank() }
+                        // What it was ACTUALLY born on — not only what we asked
+                        // for. With no explicit pick we send no `--model` and the
+                        // CLI applies its own default, and this pin used to read
+                        // `modelOverride`, which is null exactly then: the most
+                        // common chat of all — open, type, send — recorded no
+                        // model at all, so it had nothing to keep and drifted with
+                        // the server's default (user 2026-08-16). The session
+                        // reports what it is running; take that.
+                        val born = (
+                            _localSessionId.value?.let { activeSessions[it]?.modelOverride }
+                                ?: modelsCoord.observedModel.value
+                            )?.takeIf { it.isNotBlank() }
                         if (born != null) {
                             prefs.setSelectedModelForChat(rid, born)
                             android.util.Log.i(
@@ -2431,8 +2440,31 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val isExistingChat = resumeIdParam != null
             val claudeModels = modelsCoord.availableModels.value
             val pickBeatsSession = !modelsCoord.observationNewerThanPick.value
+            // A SESSION KEEPS ITS OWN MODEL, whatever the server's default is
+            // today. Sending nothing on resume delegates that to the CLI, which
+            // is only safe while the default never moves: change the default on
+            // the server and every old chat quietly continues on the new model —
+            // a different price per turn, on a conversation the user never
+            // agreed to move (user 2026-08-16). Warning about it would be asking
+            // the user a question the app can answer itself, so instead we name
+            // the session's OWN model explicitly.
+            //
+            // This is NOT the flip that used to cost limits: THAT was a global
+            // pick leaking into an existing chat and switching it (Fable 5),
+            // which forces the CLI to re-read the whole conversation. Naming the
+            // model the session is already on is a no-op — same model, no
+            // re-read — it just stops the answer depending on a server default.
+            //
+            // Order: an explicit pick that is newer than the session wins (the
+            // user just chose); otherwise the session's own last observed model;
+            // and ONLY if that model still exists — a withdrawn model (Fable 5's
+            // suspension) hard-fails every send, so there we send nothing and
+            // let the CLI do the provider's own fallback.
+            val sessionOwnModel = modelsCoord.observedModel.value
+                ?.takeIf { it.isNotBlank() && (claudeModels.isEmpty() || claudeModels.containsKey(it)) }
             s.modelOverride = if (isClaude) {
                 claudePick?.takeIf { it.isNotBlank() && (!isExistingChat || pickBeatsSession) }
+                    ?: sessionOwnModel?.takeIf { isExistingChat }
             } else {
                 (selectedModel.value ?: modelsCoord.currentSessionInitialModel())
                     ?.takeIf { it.isNotBlank() }
@@ -4161,6 +4193,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Start a fresh CLI session, no --resume. */
     fun newSession() {
         modelsCoord.setSessionInitialModel(null)
+        // RE-READ THE DEFAULT FIRST. A new chat with no explicit pick is born on
+        // whatever the CLI's default is at that moment — so the model the top bar
+        // shows before the first send is a claim about the SERVER, and a cached
+        // claim goes stale the moment the default is changed there. The catalog
+        // probe is skipped while it is "fresh", which is right for the model list
+        // (it rarely changes) and wrong for the default (it changes by hand).
+        // Force it on the one action whose outcome depends on it: pressing + new
+        // session. Async — the chat opens now, the chip corrects itself in under
+        // a second, and the session's own `initialize` remains the final word.
+        viewModelScope.launch {
+            val s = _localSessionId.value?.let { activeSessions[it] } ?: return@launch
+            SilentlyTry.fired("SshAi-Models", "refresh default model for new session") {
+                modelsCoord.probeAvailableModels(s, force = true)
+            }
+        }
         startNewChat(_currentAgent.value, resumeIdParam = null)
     }
 

@@ -166,6 +166,13 @@ class HistoryCache internal constructor(private val rootDir: File) {
      * byte, and new readers open the new file.
      */
     fun save(sessionId: String, bytes: ByteArray) {
+        // A save REPLACES the body — a compaction merge, a verbatim re-adopt, a
+        // local repair. The unread watermark is a byte offset into this very
+        // file, so any rewrite moves the goalposts under it. Remember where the
+        // file stood so [rebaseSeenAfterRewrite] can tell "the user had read to
+        // the end and the file was re-laid-out" from "there is genuinely new
+        // content". See the note on that method.
+        val sizeBeforeRewrite = size(sessionId)
         SilentlyTry.fired("SshAi-HistCache", "write session bytes") {
             val target = file(sessionId)
             val tmp = java.io.File(target.parentFile, target.name + ".tmp")
@@ -177,6 +184,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 tmp.delete()
             }
         }
+        if (sizeBeforeRewrite > 0L) rebaseSeenAfterRewrite(sessionId, sizeBeforeRewrite)
         SilentlyTry.fired("SshAi-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
@@ -482,31 +490,80 @@ class HistoryCache internal constructor(private val rootDir: File) {
         return File(dir, "$safe.tasks")
     }
 
-    /** Count '\n' in the cached body BEYOND [fromBytes] — the durable
-     *  "N new lines" for the home badge. Bounded to the last [cap] bytes so a
-     *  giant backlog costs one small read; returns [Int.MAX_VALUE]-safe count
-     *  and never loads the whole file. */
+    /** Count MESSAGE records in the cached body beyond [fromBytes] — the durable
+     *  "N new" for the home badge. Bounded to the last [cap] bytes so a giant
+     *  backlog costs one small read, and never loads the whole file.
+     *
+     * ⚠ MESSAGES, NOT LINES. This counted every '\n', and a rollout line is not a
+     * message: tool calls, tool results, system rows, the model-observed marker
+     * and the CLI's own bookkeeping are all lines. One background metadata write
+     * badged a session the user had read to the end — (2026-08-16). A record
+     * counts only if it is a user or assistant turn.
+     *
+     *  Cheap on purpose: a substring test per line, no JSON parse. Both agents
+     *  write the discriminator near the front of the record, and a false negative
+     *  (an odd shape we don't recognise) under-counts the badge rather than
+     *  inventing one — the failure this method is here to stop. */
     fun newLinesSince(sessionId: String, fromBytes: Long, cap: Long = 512 * 1024): Int {
         val f = file(sessionId)
         val len = f.length()
         if (len <= fromBytes) return 0
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "count new lines", 0) {
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "count new messages", 0) {
             val start = maxOf(fromBytes, len - cap)
-            var count = if (start > fromBytes) 1 else 0  // window clipped → at least "some"
+            var count = 0
             RandomAccessFile(f, "r").use { raf ->
                 raf.seek(start)
-                val buf = ByteArray(64 * 1024)
-                var remaining = len - start
-                val nl = '\n'.code.toByte()
-                while (remaining > 0) {
-                    val n = raf.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
-                    if (n <= 0) break
-                    for (i in 0 until n) if (buf[i] == nl) count++
-                    remaining -= n
+                // Whole lines only: a clipped window starts mid-record, and half a
+                // record is not a message. Skipping the partial first line also
+                // removes the old "window clipped → at least 1" fudge, which
+                // manufactured a badge out of nothing but file size.
+                if (start > fromBytes) raf.readLine()
+                while (true) {
+                    val line = raf.readLine() ?: break
+                    if (isMessageRecord(line)) count++
                 }
             }
             count
         }
+    }
+
+    /** True for a rollout record that represents a turn the user would call a
+     *  message. Everything else in a JSONL rollout — tool_use, tool_result,
+     *  system rows, summaries, the model marker — is bookkeeping. */
+    private fun isMessageRecord(line: String): Boolean {
+        if (line.isEmpty()) return false
+        // Claude rollout: {"type":"user"|"assistant", …}. Codex/Gemini wrap the
+        // same idea one level down as {"payload":{"type":"message","role":…}}.
+        if (line.contains("\"type\":\"assistant\"") || line.contains("\"type\":\"user\"")) {
+            // A tool RESULT is carried inside a "user" record; it is not a message.
+            return !line.contains("\"tool_use_id\"") && !line.contains("\"toolUseResult\"")
+        }
+        return line.contains("\"type\":\"message\"")
+    }
+
+    /**
+     * The cached body was REWRITTEN rather than appended to (a CLI compaction
+     * merged into our mirror) — re-stamp the seen watermark so the rewrite can
+     * not read as unread.
+     *
+     * The watermark is a byte offset into a file we ourselves rewrite. When the
+     * CLI compacts its rollout the app merges the old cache with the new server
+     * body to keep the history, and the merged file is a different size for the
+     * same conversation — measured on device: watermark 694851, merged file
+     * 695605, so 754 bytes of re-laid-out OLD content became "new". If the user
+     * had read to the end before the rewrite, they have read to the end after it.
+     */
+    fun rebaseSeenAfterRewrite(sessionId: String, oldSize: Long) {
+        val seen = seenBytes(sessionId) ?: return
+        if (seen < oldSize) return  // genuinely unread content existed — keep it
+        val f = seenFile(sessionId)
+        SilentlyTry.fired("SshAi-HistCache", "rebase seen watermark after rewrite") {
+            f.writeText(size(sessionId).toString(), Charsets.UTF_8)
+        }
+        android.util.Log.d(
+            "SshAi-HistCache",
+            "rebased seen watermark for ${sessionId.take(8)} after cache rewrite ($seen → ${size(sessionId)})",
+        )
     }
 
     /** Every recorded owner sidecar, keyed by sessionId. Lets global search
