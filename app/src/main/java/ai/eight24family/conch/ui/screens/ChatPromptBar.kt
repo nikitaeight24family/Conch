@@ -15,6 +15,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -954,46 +956,50 @@ internal fun PromptBar(
                     tint = if (canAttachMore) cyan else outline
                 )
             }
-            // Voice message. While recording the button turns into a stop with a
-            // live timer, so the mic is never open without the user seeing it.
-            IconButton(
-                onClick = {
-                    val session = recording
-                    if (session != null) {
-                        session.stop()?.let { f ->
-                            onAddFileAttachment(f, f.name, "audio/mp4", f.length())
+            // The mic MOVED to the attach sheet — starting a recording is a
+            // deliberate act, not something to keep a permanent seat in the
+            // bar (user, 2026-08-03). What stays here is the stop: a live mic
+            // must never be open without a visible way to close it.
+            if (recording != null) {
+                IconButton(
+                    onClick = {
+                        val session = recording
+                        if (session != null) {
+                            session.stop()?.let { f ->
+                                onAddFileAttachment(f, f.name, "audio/mp4", f.length())
+                            }
+                            recording = null
+                        } else if (ai.eight24family.conch.util.AudioRecorder.micGranted(ctx)) {
+                            // Sweep here rather than on a timer: it is the one moment
+                            // we know the user is about to add audio, and yesterday's
+                            // notes are kept only so their player still works.
+                            ai.eight24family.conch.util.AudioRecorder.sweepOld(ctx)
+                            recording = ai.eight24family.conch.util.AudioRecorder.start(ctx, "voice")
+                        } else {
+                            micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                         }
-                        recording = null
-                    } else if (ai.eight24family.conch.util.AudioRecorder.micGranted(ctx)) {
-                        // Sweep here rather than on a timer: it is the one moment
-                        // we know the user is about to add audio, and yesterday's
-                        // notes are kept only so their player still works.
-                        ai.eight24family.conch.util.AudioRecorder.sweepOld(ctx)
-                        recording = ai.eight24family.conch.util.AudioRecorder.start(ctx, "voice")
+                    },
+                    enabled = canAttachMore || recording != null,
+                ) {
+                    if (recording != null) {
+                        Icon(Icons.Default.Stop, contentDescription = "stop recording", tint = MaterialTheme.colorScheme.error)
                     } else {
-                        micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                        Icon(
+                            Icons.Default.Mic,
+                            contentDescription = "record a voice message",
+                            tint = if (canAttachMore) cyan else outline,
+                        )
                     }
-                },
-                enabled = canAttachMore || recording != null,
-            ) {
+                }
                 if (recording != null) {
-                    Icon(Icons.Default.Stop, contentDescription = "stop recording", tint = MaterialTheme.colorScheme.error)
-                } else {
-                    Icon(
-                        Icons.Default.Mic,
-                        contentDescription = "record a voice message",
-                        tint = if (canAttachMore) cyan else outline,
+                    Text(
+                        "%d:%02d".format(recordElapsed / 60, recordElapsed % 60),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(end = 4.dp),
                     )
                 }
-            }
-            if (recording != null) {
-                Text(
-                    "%d:%02d".format(recordElapsed / 60, recordElapsed % 60),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(end = 4.dp),
-                )
             }
             Text(
                 "❯",
@@ -1128,14 +1134,26 @@ internal fun PromptBar(
     }
 
     if (sheetOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { sheetOpen = false },
-            containerColor = MaterialTheme.colorScheme.background
+        // ⚠ IN THE ACTIVITY'S OWN WINDOW. The embedded photo picker draws on a
+        // system surface handed to our window; every container we tried that
+        // opens a NEW window — the modal sheet, then a dialog — degraded its
+        // input. The grid moved a little, never flung, and grew stiffer with
+        // each swipe (user, 2026-08-03). Inline above the prompt bar it is an
+        // ordinary part of the chat screen, and the picker keeps the gesture.
+        androidx.compose.material3.Surface(
+            color = MaterialTheme.colorScheme.background,
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(
+                topStart = 28.dp, topEnd = 28.dp,
+            ),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             // Telegram-shaped: a row of round action tiles instead of a stack of
             // list rows. Camera first — it is the one thing you reach for with
             // the phone already in your hand, and it was missing entirely.
-            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            // No trailing padding: the grid is the last thing in the panel and
+            // a 24dp band under it read as a black stripe at the bottom of the
+            // screen (user, 2026-08-03).
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     "// attach (${attachments.size}/${ChatViewModel.MAX_ATTACHMENTS})",
                     style = MaterialTheme.typography.labelMedium,
@@ -1160,84 +1178,84 @@ internal fun PromptBar(
                 // needs no permission. A tap on the viewfinder opens the camera —
                 // the shot returns through the same handler the camera TILE uses,
                 // so a photo is attached only after he presses the shutter.
+                // The tiles sit BESIDE THE VIEWFINDER, not beside the picker
+                // that lives under it — they line up with the camera cell.
                 AttachMediaStrip(
                     enabled = canAttachMore,
-                    // The picker hands us URIs it has already granted; ingest each
-                    // one and let IT decide when the user is finished, because it
-                    // supports multi-select and closing on the first tap would
-                    // fight that.
                     onPick = { uri -> ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment) },
                     onSelectionDone = { sheetOpen = false },
                     onCameraFallback = if (hasCameraApp(ctx)) launchCamera else null,
                     modifier = Modifier.padding(bottom = 14.dp),
-                )
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    // Camera also stays in the row: the strip is invisible until
-                    // the user grants media access, and the camera must not be
-                    // hidden behind a permission it does not need.
-                    if (hasCameraApp(ctx)) {
-                        item {
-                            AttachTile(
-                                icon = Icons.Default.PhotoCamera,
-                                label = "Camera",
-                                cyan = cyan,
-                                enabled = canAttachMore,
-                            ) { launchCamera() }
-                        }
+                    besideCamera = {
+                        // Emitted straight into the strip's row — as siblings of
+                        // the camera cell, not as a group beside it, so one
+                        // arrangement spaces all four the same.
+                    // Gallery is a tile again: the in-panel grid is gone, and the
+                    // full-screen system picker is the only surface whose
+                    // scrolling is genuinely its own.
+                    AttachTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Default.PhotoLibrary,
+                        label = "Gallery",
+                        cyan = cyan,
+                        enabled = canAttachMore,
+                    ) {
+                        sheetOpen = false
+                        photoLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                        )
                     }
-                    item {
-                        AttachTile(
-                            icon = Icons.Default.PhotoLibrary,
-                            label = "Gallery",
-                            cyan = cyan,
-                            enabled = canAttachMore,
-                        ) {
-                            sheetOpen = false
-                            photoLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                            )
-                        }
-                    }
-                    item {
-                        AttachTile(
-                            icon = Icons.Default.AttachFile,
-                            label = "File",
-                            cyan = cyan,
-                            enabled = canAttachMore,
-                        ) {
-                            sheetOpen = false
-                            fileLauncher.launch(arrayOf("*/*"))
-                        }
+                    AttachTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Default.AttachFile,
+                        label = "File",
+                        cyan = cyan,
+                        enabled = canAttachMore,
+                    ) {
+                        sheetOpen = false
+                        fileLauncher.launch(arrayOf("*/*"))
                     }
                     if (clipboardHasImage(ctx)) {
-                        item {
-                            AttachTile(
-                                icon = Icons.Default.ContentPaste,
-                                label = "Paste",
-                                cyan = cyan,
-                                enabled = canAttachMore,
-                            ) {
-                                sheetOpen = false
-                                pasteImageFromClipboard(ctx, onAddAttachment)
-                            }
-                        }
-                    }
-                    item {
                         AttachTile(
-                            icon = Icons.Default.PhoneAndroid,
-                            label = "This phone",
+                            icon = Icons.Default.ContentPaste,
+                            label = "Paste",
                             cyan = cyan,
-                            enabled = true,
+                            enabled = canAttachMore,
                         ) {
                             sheetOpen = false
-                            onConnectPhone()
+                            pasteImageFromClipboard(ctx, onAddAttachment)
                         }
                     }
-                }
+                    AttachTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Default.Mic,
+                        label = "Voice",
+                        cyan = cyan,
+                        enabled = canAttachMore && recording == null,
+                    ) {
+                        // Closes the sheet and starts recording straight
+                        // away; the bar shows the running timer and the stop.
+                        if (ai.eight24family.conch.util.AudioRecorder.micGranted(ctx)) {
+                            ai.eight24family.conch.util.AudioRecorder.sweepOld(ctx)
+                            recording = ai.eight24family.conch.util.AudioRecorder.start(ctx, "voice")
+                            sheetOpen = false
+                        } else {
+                            sheetOpen = false
+                            micLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                    AttachTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Default.PhoneAndroid,
+                        label = "Phone",
+                        cyan = cyan,
+                        enabled = true,
+                    ) {
+                        sheetOpen = false
+                        onConnectPhone()
+                    }
+                    },
+                )
                 if (!canAttachMore) {
                     Text(
                         "attachment limit reached — send or remove one first",
@@ -1262,13 +1280,16 @@ private fun AttachTile(
     label: String,
     cyan: androidx.compose.ui.graphics.Color,
     enabled: Boolean,
+    /** Passed by the shelf as `Modifier.weight(1f)`: the tile takes an equal
+     *  SHARE of whatever width there is, instead of a size measured on one
+     *  phone. That is what keeps the shelf one tidy row everywhere. */
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     val tint = if (enabled) cyan else MaterialTheme.colorScheme.outline
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .width(72.dp)
+        modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 6.dp)
@@ -1277,7 +1298,7 @@ private fun AttachTile(
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(52.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(tint.copy(alpha = if (enabled) 0.14f else 0.07f))
         ) {
@@ -1286,10 +1307,11 @@ private fun AttachTile(
         Spacer(Modifier.height(6.dp))
         Text(
             label,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             style = MaterialTheme.typography.labelSmall,
             color = if (enabled) MaterialTheme.colorScheme.onSurface
             else MaterialTheme.colorScheme.outline,
-            maxLines = 1,
         )
     }
 }

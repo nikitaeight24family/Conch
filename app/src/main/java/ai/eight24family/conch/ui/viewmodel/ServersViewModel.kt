@@ -74,8 +74,10 @@ class ServersViewModel : ViewModel() {
         }
         viewModelScope.launch {
             while (true) {
-                recomputeConnectivity()
-                delay(1_000)
+                // Foreground only — backgrounded, nobody sees the dots, and the
+                // userHeldIds collector above still catches real changes.
+                if (ai.eight24family.conch.util.AppForeground.isForeground) recomputeConnectivity()
+                delay(if (ai.eight24family.conch.util.AppForeground.isForeground) 1_000 else 5_000)
             }
         }
         // Badge the rows the moment the server list arrives (react to the flow,
@@ -93,6 +95,10 @@ class ServersViewModel : ViewModel() {
         viewModelScope.launch {
             while (true) {
                 delay(4_000)
+                // Foreground only — a disk read per server per 4 s serves no one
+                // while the app is minimized; the servers.collect above refreshes
+                // badges the moment the screen is next relevant.
+                if (!ai.eight24family.conch.util.AppForeground.isForeground) continue
                 val list = servers.value
                 if (list.isNotEmpty()) {
                     _agentStatuses.value = list.associate { it.id to statusCache.load(it.id).statuses }

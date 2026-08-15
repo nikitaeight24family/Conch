@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.2-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.3-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -48,6 +48,34 @@ conch ▌ v0.3.0
   signed build, your choice.
 
 ---
+
+## What's new in 0.3.3
+
+**A dropped link recovers instead of looping.** Reconnect used to evict the
+transport it had just rebuilt, and a chat could adopt a session that was already
+dead — so the app reconnected every few seconds forever, and a message you had
+typed sat there undeliverable. Both are fixed, and a prompt the CLI already took
+is never re-sent: when a process dies mid-turn what is lost is the answer, not
+the turn.
+
+**Servers remember their host key.** The pooled connection accepted a "new" key
+on every connect and never wrote it down. It pins on first use now, refuses a
+changed key with an explanation, and Server detail can forget a pin when you
+rebuilt the machine yourself.
+
+**Task board.** The CLI's own checklist, folded from its task tool and pinned
+above the prompt bar, rendered the way the terminal renders it.
+
+**Subagents and background workflows.** A roster for the agents a turn spawns,
+and a live `name · N/M agents · elapsed` line for a background workflow, read
+from the run's own journal.
+
+**Attachments.** The camera and the full-screen system picker, without the
+embedded-picker header that could not be removed.
+
+**Terminal.** Its own font, pinch to zoom, and history you can scroll.
+
+**Restart the CLI from the chat** when it wedges, without leaving the session.
 
 ## What's new in 0.3.0
 

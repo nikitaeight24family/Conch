@@ -252,48 +252,29 @@ internal class AgentSessionHistory(
             //
             // So: a UserText in the CURRENT history that the incoming list
             // doesn't yet cover is an un-synced optimistic prompt — PRESERVE it.
-            // Count-based per trimmed body (so two identical prompts both
-            // survive, and a synced one isn't double-kept). Appended after the
-            // incoming content — these are the most-recent messages. Once the
-            // JSONL catches up, a later loadHistory sees the incoming copy and
-            // the surplus naturally drops to zero. This is append/upsert/load's
-            // shared invariant now: the user's words are sacred.
+            // ⚠ ONE implementation, shared with the display layer: identity by
+            // [userBodyKey] (the CLI does not store the prompt verbatim), and a
+            // preserved row goes back to ITS OWN PLACE. This used to end in
+            // `incoming + survivors`, which put a prompt from several turns ago
+            // underneath the answer it had already received — see
+            // [mergeUnsyncedUserText] for the full account.
             val current = _history.value
-            val incomingUserCounts = HashMap<String, Int>()
-            for (m in incoming) if (m is AgentMessage.UserText) {
-                val b = m.text.trim()
-                incomingUserCounts[b] = (incomingUserCounts[b] ?: 0) + 1
-            }
-            val incomingIds = incoming.mapTo(HashSet()) { it.id }
-            val seen = HashMap<String, Int>()
-            val survivors = ArrayList<AgentMessage>()
-            for (m in current) {
-                if (m !is AgentMessage.UserText) continue
-                if (m.id in incomingIds) continue            // same message already incoming
-                val b = m.text.trim()
-                val s = seen[b] ?: 0
-                seen[b] = s + 1
-                if (s < (incomingUserCounts[b] ?: 0)) continue // a JSONL copy covers this one
-                survivors.add(m)                              // un-synced optimistic prompt → keep
-            }
+            val merged = mergeUnsyncedUserText(current, incoming)
 
             val listBuilder = persistentListOf<AgentMessage>().builder()
             val indexBuilder = persistentMapOf<String, Int>().builder()
-            for (m in incoming) {
+            for (m in merged) {
+                if (indexBuilder.containsKey(m.id)) continue
                 listBuilder.add(m)
                 indexBuilder[m.id] = listBuilder.lastIndex
             }
-            for (m in survivors) {
-                if (indexBuilder.containsKey(m.id)) continue
-                indexBuilder[m.id] = listBuilder.size
-                listBuilder.add(m)
-            }
             _history.value = listBuilder.build()
             historyIndex = indexBuilder.build()
-            if (survivors.isNotEmpty()) {
+            val preserved = merged.size - incoming.size
+            if (preserved > 0) {
                 android.util.Log.d(
                     "SshAi-Hist",
-                    "loadHistory: preserved ${survivors.size} un-synced user prompt(s) the cache/JSONL hadn't caught up to",
+                    "loadHistory: preserved $preserved un-synced user prompt(s) in place",
                 )
             }
         }
@@ -316,9 +297,12 @@ internal class AgentSessionHistory(
     fun stampUserRecordUuid(text: String, recordUuid: String): Boolean {
         synchronized(flushLock) {
             val current = _history.value
-            val body = text.trim()
+            // Same normalised identity as the dedup that hands us this echo —
+            // an exact match here failed on exactly the prompts whose file form
+            // is decorated, leaving them un-rewindable.
+            val body = userBodyKey(text)
             val idx = current.indexOfFirst {
-                it is AgentMessage.UserText && it.recordUuid == null && it.text.trim() == body
+                it is AgentMessage.UserText && it.recordUuid == null && userBodyKey(it.text) == body
             }
             if (idx < 0) return false
             val row = current[idx] as AgentMessage.UserText
@@ -353,9 +337,9 @@ internal class AgentSessionHistory(
                 // like it half-worked (caught on device, 2026-08-02). Fall back
                 // to the LAST row whose text is the prompt the CLI just handed
                 // back to us, which is precisely the turn we rewound to.
-                val body = fallbackText.trim()
+                val body = userBodyKey(fallbackText)
                 cut = current.indexOfLast {
-                    it is AgentMessage.UserText && it.text.trim() == body
+                    it is AgentMessage.UserText && userBodyKey(it.text) == body
                 }
             }
             if (cut < 0) return emptyList()

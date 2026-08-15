@@ -60,7 +60,9 @@ class AgentsOverviewViewModel : ViewModel() {
     init {
         viewModelScope.launch {
             while (true) {
-                reload()
+                // Foreground only — backgrounded there is no tab to paint, and
+                // this VM outlives the screen (battery).
+                if (ai.eight24family.conch.util.AppForeground.isForeground) reload()
                 delay(2_500)
             }
         }

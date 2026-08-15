@@ -30,6 +30,11 @@ class SessionsCache(private val context: Context) {
 
     private val Context.sessionsDataStore by preferencesDataStore(name = "sessions_cache")
 
+    /** Column / row separators of the stored body, as characters — the editor
+     *  mangles them when they are written as literals in source. */
+    private val TAB = 9.toChar().toString()
+    private val NL = 10.toChar().toString()
+
     data class Snapshot(val sessions: List<RemoteSession>, val cachedAt: Long?)
 
     suspend fun load(serverId: String, agent: Agent): Snapshot {
@@ -162,6 +167,31 @@ class SessionsCache(private val context: Context) {
         }
     }
 
+    /**
+     * Drop ONE row from the cached listing.
+     *
+     * Used when the CLI hands a live chat a NEW session id: the file it was
+     * writing before is superseded, not a second conversation. Claude does
+     * rename/rotate a rollout mid-flight, and the old id then vanishes from
+     * the server listing — but our snapshot kept it, so the same chat sat in
+     * the list TWICE, the ghost row carrying the same title and a timestamp a
+     * minute apart.
+     *
+     * Edits the stored body in place rather than going through [save], which
+     * would re-admit the row through its recent-activity carry-over.
+     */
+    suspend fun removeRow(serverId: String, agent: Agent, sessionId: String) {
+        if (sessionId.isBlank()) return
+        context.sessionsDataStore.edit { p ->
+            val raw = p[key(serverId, agent)] ?: return@edit
+            val lines = raw.lineSequence().toList()
+            if (lines.isEmpty()) return@edit
+            val kept = lines.drop(1).filter { it.substringBefore(TAB) != sessionId }
+            if (kept.size == lines.size - 1) return@edit      // nothing to drop
+            p[key(serverId, agent)] = (listOf(lines.first()) + kept).joinToString(NL)
+        }
+    }
+
     suspend fun forget(serverId: String, agent: Agent) {
         context.sessionsDataStore.edit { it.remove(key(serverId, agent)) }
     }
@@ -173,7 +203,12 @@ class SessionsCache(private val context: Context) {
         /** How long a just-created session is preserved in the cache across a
          *  server listing that doesn't yet include it. Generous enough to bridge
          *  the gap until the next SSH listing catches the new rollout file. */
-        private const val RECENT_WINDOW_MS = 10 * 60_000L
+        /** How long a row missing from a listing may be kept because it was
+         *  just created. It exists for ONE race — a listing that started before
+         *  the session did — which is seconds, not minutes. Ten minutes meant a
+         *  row for a file that never existed sat in the list long enough to be
+         *  deleted by hand and come back. */
+        private const val RECENT_WINDOW_MS = 45_000L
 
         /** Collapse rows sharing a session id, keeping the FIRST occurrence. One
          *  logical Claude session spans several rollout files after a resume/

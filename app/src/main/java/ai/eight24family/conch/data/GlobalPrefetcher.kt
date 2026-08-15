@@ -119,9 +119,24 @@ class GlobalPrefetcher(
         for (server in servers) {
             val client = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id) ?: continue
             val exec = buildPooledExec(client)
-            val agents = SilentlyTry.loggedOrElse(
-                TAG, "load agent status cache", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
-            ) { agentStatusCache.load(server.id).statuses }
+            // Piggy-back a periodic agent RE-probe on the live channel. The
+            // connect-triggered probe was the ONLY refresher, and the service
+            // keeps transports alive for days — so versions / latest / run-state
+            // on the Agents tab froze at connect time and only caught up when
+            // the user opened the tab and its panel probed in front of them.
+            // Every AGENT_REPROBE_MS per server, one exec, no handshake; the tab
+            // observes the cache and repaints on its own.
+            val snapshot = SilentlyTry.logged(TAG, "load status cache for reprobe") {
+                agentStatusCache.load(server.id)
+            }
+            val lastProbe = snapshot?.lastCheckedAt ?: 0L
+            if (System.currentTimeMillis() - lastProbe >= AGENT_REPROBE_MS) {
+                SilentlyTry.fired(TAG, "periodic agent re-probe ${server.name}") {
+                    val probe = ai.eight24family.conch.di.ServiceLocator.agentStatusProbe
+                    probe.probe(exec).getOrNull()?.let { agentStatusCache.save(server.id, it) }
+                }
+            }
+            val agents = (snapshot?.statuses ?: emptyMap())
                 .filter { it.value.installed && it.value.loggedIn }.keys
             for (agent in agents) {
                 val rawList = SilentlyTry.logged(TAG, "periodic list ${server.name}/${agent.name}") {
@@ -131,6 +146,61 @@ class GlobalPrefetcher(
                 historyCache.recordOwners(server.id, agent, rawList)
                 val list = rawList.filter { it.preview.isNotBlank() }
                 if (list.isNotEmpty()) sessionsCache.save(server.id, agent, list)
+                // BACKGROUND MIRROR CATCH-UP. The cache used to grow ONLY inside
+                // an OPEN chat's tail-poll (the sweep fetches a body exactly once,
+                // then never again) — so the unread badge, the done-✓ and the row
+                // preview stayed frozen until the user entered the session. Append
+                // the DELTA for grown, already- cached sessions right here on the
+                // live channel: bounded per session and per sweep, byte-exact (raw
+                // stream + newline trim — a String decode could split a multibyte
+                // char and corrupt the cache), and skipped when an open chat's
+                // poller races us.
+                appendGrownBodies(client, list)
+            }
+        }
+    }
+
+    /** One sweep's incremental cache catch-up for [list] — see call site. */
+    private fun appendGrownBodies(
+        client: net.schmizz.sshj.SSHClient,
+        list: List<ai.eight24family.conch.agent.RemoteSession>,
+    ) {
+        var appended = 0
+        for (s in list) {
+            if (appended >= APPEND_SESSIONS_PER_SWEEP) return
+            val remote = s.sizeBytes ?: continue
+            val cached = historyCache.size(s.id)
+            // Only sessions we already hold (first fetch is the full sweep's
+            // job) that GREW; a shrink (compaction) is the chat-open re-adopt's.
+            if (cached <= 0L || remote <= cached) continue
+            if (remote - cached > APPEND_DELTA_CAP_BYTES) {
+                android.util.Log.d(
+                    TAG,
+                    "  delta ${s.id.take(8)} ${(remote - cached)}B over catch-up cap — chat open will stream it",
+                )
+                continue
+            }
+            SilentlyTry.fired(TAG, "append grown body ${s.id.take(8)}") {
+                val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
+                val sess = client.startSession()
+                val bytes = try {
+                    val proc = sess.exec("tail -c +${cached + 1} $q")
+                    val out = java.io.ByteArrayOutputStream()
+                    proc.inputStream.copyTo(out, 64 * 1024)
+                    proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
+                    out.toByteArray()
+                } finally {
+                    SilentlyTry.fired(TAG, "close append session") { sess.close() }
+                }
+                if (bytes.isEmpty()) return@fired
+                val safe = trimToLastNewline(bytes)
+                if (safe.isEmpty()) return@fired
+                // An open chat's tail-poll may have appended while we fetched —
+                // our delta's offset is then stale; appending would duplicate.
+                if (historyCache.size(s.id) != cached) return@fired
+                historyCache.append(s.id, safe)
+                appended++
+                android.util.Log.d(TAG, "  caught up ${s.id.take(8)} +${safe.size}B (background mirror)")
             }
         }
     }
@@ -219,13 +289,13 @@ class GlobalPrefetcher(
                 // INSTANT a server connects, with no navigation. So probe NOW
                 // over the live connection (SK rides the pooled client → no extra
                 // touch; non-SK handshakes), cache it, then fall through to fetch
-                // its sessions.
-                val isSk = secrets.skKeys.isNotEmpty()
-                val exec = if (isSk) {
-                    ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)?.let { buildPooledExec(it) }
-                } else null
-                if (isSk && exec == null) {
-                    android.util.Log.d(TAG, "skip ${server.name}: SK + no live connection — can't probe in background")
+                // its sessions. Pooled transport only — a background probe must
+                // not open a fresh handshake for ANY auth kind (see
+                // listServerAgent).
+                val exec = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+                    ?.let { buildPooledExec(it) }
+                if (exec == null) {
+                    android.util.Log.d(TAG, "skip ${server.name}: no live pooled connection — can't probe in background")
                     continue
                 }
                 probeAgents(server, secrets, exec)
@@ -279,22 +349,23 @@ class GlobalPrefetcher(
     private suspend fun listServerAgent(
         server: Server, secrets: ServerSecrets, agent: Agent,
     ): List<ai.eight24family.conch.agent.RemoteSession>? {
-        // FIDO servers can't open a fresh SSH in the background (each handshake
-        // needs a physical touch). With a live tap-to-connect client we ride its
-        // channels (no touch); without one, bail — the chat-open path warms it.
-        val isSk = secrets.skKeys.isNotEmpty()
-        val pooledClient = if (isSk) {
-            ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
-        } else null
-        if (isSk && pooledClient == null) {
-            android.util.Log.d(TAG, "  ${server.name}/${agent.name}: skipped (SK key, no live connection)")
+        // POOLED TRANSPORT ONLY — for every auth flavor, not just SK. Non-SK
+        // servers used to fall back to a FRESH handshake per (server, agent)
+        // here, and per session body below — but connectAllPossibleSilently has
+        // already dialed every dialable server, so "no pooled client" means
+        // that connect FAILED (or the user disconnected on purpose): redialing
+        // per-file from a background sweep is the connection storm the user's
+        // fail2ban was banning, for a purely speculative fetch. The chat-open
+        // path still warms anything we skip here.
+        val pooledClient = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+        if (pooledClient == null) {
+            android.util.Log.d(TAG, "  ${server.name}/${agent.name}: skipped (no live pooled connection)")
             return null
         }
-        val pooledExec: (suspend (String) -> String?)? = pooledClient?.let { buildPooledExec(it) }
-        val viaPool = if (pooledExec != null) " (via pooled SSH)" else ""
+        val pooledExec: suspend (String) -> String? = buildPooledExec(pooledClient)
+        val viaPool = " (via pooled SSH)"
 
-        val rawList = if (pooledExec != null) discovery.list(agent, pooledExec)
-        else discovery.list(server, secrets, agent)
+        val rawList = discovery.list(agent, pooledExec)
         // Record the durable owner for EVERY discovered session — including the
         // preview-blank ones dropped from the SessionsCache list below. A search
         // hit can land on any cached session (its body has searchable text even
@@ -304,8 +375,8 @@ class GlobalPrefetcher(
         // Recover owners for sessions the server DELETED server-side (Claude
         // compaction) but still remembers in ~/.claude/history.jsonl: it maps
         // sessionId→project, proving they lived on THIS server, so search can
-        // attribute + open them. Pooled-exec only — both of the user's servers are SK.
-        if (agent == Agent.CLAUDE && pooledExec != null) {
+        // attribute + open them.
+        if (agent == Agent.CLAUDE) {
             SilentlyTry.fired(TAG, "harvest claude history.jsonl owners") {
                 val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(
                     "cat \"\$HOME/.claude/history.jsonl\" 2>/dev/null",
@@ -331,17 +402,14 @@ class GlobalPrefetcher(
         server: Server, secrets: ServerSecrets, agent: Agent,
         list: List<ai.eight24family.conch.agent.RemoteSession>, fetchBodies: Boolean,
     ) {
-        val isSk = secrets.skKeys.isNotEmpty()
-        val pooledClient = if (isSk) {
-            ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
-        } else null
-        if (isSk && pooledClient == null) return
-        val viaPool = if (pooledClient != null) " (via pooled SSH)" else ""
+        // Pooled transport only — same rule (and rationale) as [listServerAgent]:
+        // a background sweep must never open fresh handshakes, for any auth kind.
+        val pooledClient = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id) ?: return
+        val viaPool = " (via pooled SSH)"
 
         // Model + reasoning catalog warm-up — the chat-open probe skips its heavy
-        // PTY pass while this is fresh. No live client → skip; chat-open warms it.
+        // PTY pass while this is fresh.
         val catalogClient = pooledClient
-            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
         // ⚠ GATED like everything else speculative. This is the HEAVIEST thing
         // the sweep does — it allocates a PTY and spawns a full interactive
         // `claude` on the server — and it sat ABOVE the fetchBodies guard, so it
@@ -368,7 +436,7 @@ class GlobalPrefetcher(
         val candidates = list.filter { historyCache.size(it.id) == 0L }
         for (s in candidates) {
             try {
-                if (pooledClient != null) {
+                run {
                     // Stream `cat` straight to the cache file — RAM stays flat
                     // regardless of session size. The old String path
                     // (fetch → toByteArray → trim) allocated 3-4× the file and
@@ -422,29 +490,11 @@ class GlobalPrefetcher(
                     if (written > 0L) {
                         android.util.Log.d(TAG, "    cached history ${s.id.take(8)} (${written}B, streamed)$viaPool")
                     }
-                } else {
-                    // Non-SK servers: no pooled client; fall back to the
-                    // String fetch (these are typically smaller dev hosts).
-                    // Same 4 MB speculative cap as the pooled path — this branch
-                    // had none, so a non-SK host still pulled every uncached
-                    // session whole. Capped at the source, so the transfer AND
-                    // the String it lands in are both bounded.
-                    val raw = discovery.fetchSessionContentCapped(
-                        server, secrets, s.path, PREFETCH_BODY_MAX_BYTES,
-                    ) ?: run {
-                        android.util.Log.d(
-                            TAG,
-                            "    skip body ${s.id.take(8)} — over prefetch cap or unreadable; will fetch on open",
-                        )
-                        continue
-                    }
-                    if (raw.isBlank()) continue
-                    val bytes = raw.toByteArray(Charsets.UTF_8)
-                    val safe = trimToLastNewline(bytes)
-                    if (safe.isEmpty()) continue
-                    historyCache.save(s.id, safe)
-                    android.util.Log.d(TAG, "    cached history ${s.id.take(8)} (${safe.size}B)$viaPool")
                 }
+                // (The old non-pooled String-fetch branch is gone: a fresh
+                // handshake PER SESSION FILE from a background sweep was the
+                // worst of the fail2ban feeders — 80 uncached sessions meant 80
+                // connect+auth+disconnect cycles at 150 ms spacing.)
             } catch (t: Throwable) {
                 android.util.Log.w(TAG, "    history ${s.id.take(8)} failed: ${t.message}")
             }
@@ -596,5 +646,20 @@ class GlobalPrefetcher(
          * session is already treated as "big" everywhere else in the app.
          */
         private const val PREFETCH_BODY_MAX_BYTES: Long = 4_000_000L
+
+        /** How stale a server's agent-status snapshot may get before the
+         *  periodic re-list piggy-backs a re-probe on the live channel.
+         *  Versions/run-state drift on the scale of hours, and each probe
+         *  spawns CLIs server-side — 6 h keeps the Agents tab honest without
+         *  measurable cost. */
+        private const val AGENT_REPROBE_MS: Long = 6L * 60 * 60 * 1000
+
+        /** Background mirror catch-up bounds (see appendGrownBodies): at most
+         *  this many session deltas per (server, agent) per 30 s sweep, and a
+         *  delta bigger than the cap is left for the chat-open streaming path
+         *  (which gzips). Keeps the background cost strictly proportional to
+         *  real growth — a busy turn writes a few KB/s, well inside this. */
+        private const val APPEND_SESSIONS_PER_SWEEP = 8
+        private const val APPEND_DELTA_CAP_BYTES = 512L * 1024
     }
 }

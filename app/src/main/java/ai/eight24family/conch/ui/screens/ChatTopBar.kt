@@ -53,7 +53,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SmartToy
@@ -272,9 +274,14 @@ internal fun TerminalTopBar(
      *  (Claude). Opens the rename dialog owned by the host. */
     showRenameItem: Boolean = false,
     onRenameSession: () -> Unit = {},
+    /** Branch this conversation into a new chat. Null-op unless the session
+     *  actually has an id to inherit from. */
+    onForkChat: () -> Unit = {},
+    showForkItem: Boolean = false,
     /** Manual compaction — shown where the CLI offers `/compact`. */
     showCompactItem: Boolean = false,
     onCompact: () -> Unit = {},
+    onRestartCli: () -> Unit = {},
     approvalMode: AgentApprovalMode,
     approvalMenuOpen: Boolean,
     onToggleApprovalMenu: () -> Unit,
@@ -794,6 +801,7 @@ internal fun TerminalTopBar(
                     menuOpen = approvalMenuOpen,
                     onToggle = onToggleApprovalMenu,
                     onPick = onSelectApproval,
+                    planSupported = agent == Agent.CLAUDE,
                     onAskAgentToRelax = {
                         onAskAgentToRelaxApprovals()
                         onToggleApprovalMenu()
@@ -912,6 +920,20 @@ internal fun TerminalTopBar(
                             }
                         )
                     }
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(
+                                Icons.Filled.RestartAlt,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        text = { Text("restart CLI", style = MaterialTheme.typography.bodyMedium) },
+                        onClick = {
+                            onToggleCommandMenu()
+                            onRestartCli()
+                        }
+                    )
                     if (showCompactItem) {
                         DropdownMenuItem(
                             leadingIcon = {
@@ -925,6 +947,22 @@ internal fun TerminalTopBar(
                             onClick = {
                                 onToggleCommandMenu()
                                 onCompact()
+                            }
+                        )
+                    }
+                    if (showForkItem) {
+                        DropdownMenuItem(
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.CallSplit,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            },
+                            text = { Text("fork into a new chat", style = MaterialTheme.typography.bodyMedium) },
+                            onClick = {
+                                onToggleCommandMenu()
+                                onForkChat()
                             }
                         )
                     }

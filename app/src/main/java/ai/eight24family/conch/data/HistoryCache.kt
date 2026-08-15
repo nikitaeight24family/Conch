@@ -151,8 +151,32 @@ class HistoryCache internal constructor(private val rootDir: File) {
     }
 
     /** Replace the cache for [sessionId] entirely. */
+    /**
+     * ⚠ ATOMIC, NEVER IN PLACE. Readers hold this file MAPPED INTO MEMORY (the
+     * windowed display parse, the search indexer). Rewriting it under them
+     * shortens the mapping's backing, and the next page they touch kills the
+     * process outright: SIGBUS / BUS_ADRERR, no exception, no dialog — the app
+     * simply vanishes and comes back. That is what the user was seeing as, four
+     * times in fifteen minutes on a 28 MB session (crash log, 2026-08-04), and
+     * it took the whole in-memory state with it every time: which chat is
+     * which, whether a turn is running.
+     *
+     * Writing a sibling and renaming over the name keeps the old inode alive
+     * for anyone already reading it: their mapping stays valid to the last
+     * byte, and new readers open the new file.
+     */
     fun save(sessionId: String, bytes: ByteArray) {
-        SilentlyTry.fired("SshAi-HistCache", "write session bytes") { file(sessionId).writeBytes(bytes) }
+        SilentlyTry.fired("SshAi-HistCache", "write session bytes") {
+            val target = file(sessionId)
+            val tmp = java.io.File(target.parentFile, target.name + ".tmp")
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(target)) {
+                // Same directory, so a rename failure means something is badly
+                // wrong; fall back rather than leave the cache missing.
+                target.writeBytes(bytes)
+                tmp.delete()
+            }
+        }
         SilentlyTry.fired("SshAi-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
@@ -200,6 +224,10 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 return@loggedOrElse null
             }
             if (!tmp.renameTo(f)) {
+                // Rename failed (same directory, so this should not happen).
+                // ⚠ copyTo rewrites the SAME file readers may have mapped into
+                // memory — the truncation that kills the process with SIGBUS —
+                // so it is the last resort, not the normal path.
                 tmp.copyTo(f, overwrite = true)
                 tmp.delete()
             }
@@ -232,16 +260,34 @@ class HistoryCache internal constructor(private val rootDir: File) {
      */
     fun saveFromStream(sessionId: String, input: java.io.InputStream): Long {
         val f = file(sessionId)
+        // ⚠ SAME ATOMIC-RENAME DISCIPLINE AS [save] — this was the one writer
+        // still rewriting the target IN PLACE (`f.outputStream()` truncates to
+        // zero, then setLength trims), and it is exactly the crash the header
+        // of [save] documents: the search indexer had the OLD copy mmap'd, the
+        // prefetch streamed a fresh body over the same inode, the mapping's
+        // backing shrank, and the next `DirectByteBuffer.get` died with SIGBUS.
+        // Stream to a sibling, trim the SIBLING, rename over the target: old
+        // readers keep a valid mapping to the last byte, new readers open the
+        // new bytes.
+        val tmp = java.io.File(f.parentFile, f.name + ".stream.tmp")
         try {
-            f.outputStream().use { fos -> input.copyTo(fos, 64 * 1024) }
+            tmp.outputStream().use { fos -> input.copyTo(fos, 64 * 1024) }
         } catch (t: Throwable) {
             android.util.Log.w("SshAi-HistCache", "stream session ${sessionId.take(8)} failed: ${t.message}")
-            SilentlyTry.fired("SshAi-HistCache", "drop partial streamed file") { if (f.exists()) f.delete() }
+            SilentlyTry.fired("SshAi-HistCache", "drop partial streamed tmp") { if (tmp.exists()) tmp.delete() }
             return 0L
         }
-        if (f.length() == 0L) { f.delete(); return 0L }
-        trimFileToLastNewline(f)
-        if (f.length() == 0L) { f.delete(); return 0L }
+        if (tmp.length() == 0L) { tmp.delete(); return 0L }
+        trimFileToLastNewline(tmp)
+        if (tmp.length() == 0L) { tmp.delete(); return 0L }
+        if (!tmp.renameTo(f)) {
+            // Same directory — rename "can't" fail; the in-place copy is the
+            // documented last resort, not the normal path (see [save]).
+            SilentlyTry.fired("SshAi-HistCache", "fallback copy streamed tmp") {
+                tmp.copyTo(f, overwrite = true)
+                tmp.delete()
+            }
+        }
         SilentlyTry.fired("SshAi-HistCache", "index session after stream") {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
@@ -352,6 +398,115 @@ class HistoryCache internal constructor(private val rootDir: File) {
     private fun ownerFile(sessionId: String): File {
         val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         return File(dir, "$safe.owner")
+    }
+
+    // ───────────────────── seen watermark sidecar ─────────────────────
+    //
+    // DURABLE half of the home "N new" badge. SessionSeenTracker's message
+    // counts die with the process ("resets on restart, which is fine" — it
+    // stopped being fine: a turn that ran while the app was dead showed no
+    // unread, no working, no done-mark after relaunch; user 2026-08-10).
+    // The watermark is the CACHED BODY SIZE (bytes) at the moment the user
+    // last had the chat on screen — bytes because that's the one unit that
+    // survives restarts on both sides (historyCache.size ↔ listing sizeBytes).
+
+    /** Local mtime of the cached body — when OUR mirror last grew (open-chat
+     *  poller or the background catch-up). The freshest "is this session
+     *  being written RIGHT NOW" signal there is: no server clock skew, no
+     *  listing lag. 0 when nothing is cached. */
+    fun lastWriteMs(sessionId: String): Long = file(sessionId).lastModified()
+
+    /** Cached-body byte size the user had seen at last view; null = never
+     *  viewed (never badge a session the user hasn't opened at all). */
+    fun seenBytes(sessionId: String): Long? {
+        val f = seenFile(sessionId)
+        if (!f.exists()) return null
+        return SilentlyTry.logged("SshAi-HistCache", "read seen watermark") {
+            f.readText(Charsets.UTF_8).trim().toLongOrNull()
+        }
+    }
+
+    /** Stamp the watermark. Monotonic — a stale writer (background collector
+     *  of a chat the user already left) can't roll a fresher view back. */
+    fun markSeenBytes(sessionId: String, bytes: Long) {
+        SilentlyTry.fired("SshAi-HistCache", "write seen watermark") {
+            val f = seenFile(sessionId)
+            val prev = if (f.exists()) f.readText(Charsets.UTF_8).trim().toLongOrNull() ?: 0L else -1L
+            if (bytes > prev) f.writeText(bytes.toString(), Charsets.UTF_8)
+        }
+    }
+
+    private fun seenFile(sessionId: String): File {
+        val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(dir, "$safe.seen")
+    }
+
+    // ───────────────────── task-name sidecar ─────────────────────
+    //
+    // The chat's task board folds the DISPLAY window (~2 MB tail). On a long
+    // session the TaskCreate calls scroll out of that window and only the
+    // TaskUpdate {id, status} rows remain — the board degraded to "task #4".
+    // The CLI never forgets because its list is server-side state. This
+    // sidecar is our durable id→subject dictionary per session: every
+    // subject the fold ever learns is recorded once and survives windowing
+    // AND restarts.
+
+    /** Known task subjects for [sessionId]: taskId → subject. */
+    fun taskNames(sessionId: String): Map<String, String> {
+        val f = taskNamesFile(sessionId)
+        if (!f.exists()) return emptyMap()
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read task names", emptyMap()) {
+            f.readLines(Charsets.UTF_8).mapNotNull { line ->
+                val tab = line.indexOf('\t')
+                if (tab <= 0) null else line.substring(0, tab) to line.substring(tab + 1)
+            }.toMap()
+        }
+    }
+
+    /** Merge-write [names] into the sidecar (latest subject wins per id). */
+    fun recordTaskNames(sessionId: String, names: Map<String, String>) {
+        if (names.isEmpty()) return
+        SilentlyTry.fired("SshAi-HistCache", "write task names") {
+            val merged = taskNames(sessionId) + names
+            taskNamesFile(sessionId).writeText(
+                merged.entries.joinToString("\n") { (id, subj) ->
+                    "$id\t${subj.replace('\n', ' ').replace('\t', ' ')}"
+                },
+                Charsets.UTF_8,
+            )
+        }
+    }
+
+    private fun taskNamesFile(sessionId: String): File {
+        val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(dir, "$safe.tasks")
+    }
+
+    /** Count '\n' in the cached body BEYOND [fromBytes] — the durable
+     *  "N new lines" for the home badge. Bounded to the last [cap] bytes so a
+     *  giant backlog costs one small read; returns [Int.MAX_VALUE]-safe count
+     *  and never loads the whole file. */
+    fun newLinesSince(sessionId: String, fromBytes: Long, cap: Long = 512 * 1024): Int {
+        val f = file(sessionId)
+        val len = f.length()
+        if (len <= fromBytes) return 0
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "count new lines", 0) {
+            val start = maxOf(fromBytes, len - cap)
+            var count = if (start > fromBytes) 1 else 0  // window clipped → at least "some"
+            RandomAccessFile(f, "r").use { raf ->
+                raf.seek(start)
+                val buf = ByteArray(64 * 1024)
+                var remaining = len - start
+                val nl = '\n'.code.toByte()
+                while (remaining > 0) {
+                    val n = raf.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                    if (n <= 0) break
+                    for (i in 0 until n) if (buf[i] == nl) count++
+                    remaining -= n
+                }
+            }
+            count
+        }
     }
 
     /** Every recorded owner sidecar, keyed by sessionId. Lets global search

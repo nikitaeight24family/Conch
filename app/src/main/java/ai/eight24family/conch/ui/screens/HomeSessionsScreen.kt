@@ -497,6 +497,18 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
+                // Work finished here since the last visit → ✓ (clears the
+                // moment the chat is opened). Mutually exclusive with the
+                // spinner by construction (doneUnseen requires !working).
+                if (row.doneUnseen) {
+                    Text(
+                        "✓",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
                 // "N new" badge: messages the agent produced in this session
                 // while the user was elsewhere (SessionSeenTracker delta).
                 if (row.unread > 0) {

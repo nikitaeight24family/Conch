@@ -65,6 +65,17 @@ class AgentBridge(
             // this just polls — `ls` of a missing inbox is a harmless no-op
             // (2>/dev/null). No uninvited writes to anyone's server.
             while (isActive) {
+                // The bridge contract is FOREGROUND-ONLY (CLAUDE.md §11.5:
+                // "When ssh.ai is backgrounded, polling pauses") — but this
+                // loop never actually paused: 1 800 SSH execs/hour/server
+                // around the clock, radio wakeups included, whether or not
+                // anyone could possibly issue a request. Honor the contract:
+                // backgrounded → no exec, long sleep (the CLI's 30 s timeout
+                // already tells the agent "phone may be backgrounded").
+                if (!ai.eight24family.conch.util.AppForeground.isForeground) {
+                    delay(POLL_INTERVAL_BACKGROUND_MS)
+                    continue
+                }
                 runCatching { tick() }
                     .onFailure { android.util.Log.w(tag, "tick failed: ${it.message}") }
                 // Data-saver bumps the inbox poll 2s → 10s. Most users
@@ -285,6 +296,9 @@ class AgentBridge(
         /** Max inline text size before falling back to a separate .data file. */
         private const val INLINE_LIMIT = 8 * 1024
         private const val POLL_INTERVAL_MS = 2_000L
+        /** Backgrounded: no SSH exec at all, just a slow liveness nap so the
+         *  loop resumes ~promptly on foreground. */
+        private const val POLL_INTERVAL_BACKGROUND_MS = 15_000L
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
         // Strict UUID-v4-shape patterns; reject anything else before it reaches the shell.
         private val UUID_REGEX = Regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")

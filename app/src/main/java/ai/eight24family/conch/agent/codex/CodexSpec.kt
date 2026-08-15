@@ -98,6 +98,8 @@ object CodexSpec : AgentCliSpec {
         // The old `--full-auto` flag is deprecated and replaced by this pair
         // of approval/sandbox flags.
         val approvalArg = when (input.approvalMode) {
+            // No plan mode in Codex — read-only + ask is the honest neighbour.
+            AgentApprovalMode.PLAN,
             AgentApprovalMode.SAFE -> " --ask-for-approval untrusted --sandbox read-only"
             AgentApprovalMode.AUTO -> " --ask-for-approval never --sandbox workspace-write"
             AgentApprovalMode.YOLO -> " --dangerously-bypass-approvals-and-sandbox"

@@ -85,6 +85,27 @@ class AgentSession(
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
+    /** Epoch ms when the CURRENT app-driven turn entered Working; 0 when no
+     * turn is running. PROCESS-scoped on purpose: the chat VM dies with the
+     * screen, and a re-entered mid-turn chat used to restart the visible
+     * elapsed timer from the adoption moment. */
+    @Volatile var turnStartedAtMs: Long = 0L
+        private set
+
+    init {
+        scope.launch {
+            var prev: SessionState = SessionState.Idle
+            state.collect { st ->
+                if (st is SessionState.Working && prev !is SessionState.Working) {
+                    turnStartedAtMs = System.currentTimeMillis()
+                } else if (st !is SessionState.Working && prev is SessionState.Working) {
+                    turnStartedAtMs = 0L
+                }
+                prev = st
+            }
+        }
+    }
+
     /**
      * LIVE reasoning-token counter for the in-flight turn — fed by the
      * CLI's `system/thinking_tokens` events (estimated_tokens), cleared
@@ -131,7 +152,7 @@ class AgentSession(
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
         getState = { _state.value },
         getResumeId = { resumeId },
-        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getReasoningOverride = { reasoningEffortOverride },
@@ -165,13 +186,14 @@ class AgentSession(
         },
         getState = { _state.value },
         getResumeId = { resumeId },
-        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getReasoningOverride = { reasoningEffortOverride },
         getApprovalMode = { approvalMode },
         loginShell = ::loginShell,
         getAuthPrep = { authPrep },
+        getForkOnce = { forkOnce },
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
         onThinkingTokens = { n -> liveThinkingTokens.value = n },
         onInitState = { st ->
@@ -184,6 +206,8 @@ class AgentSession(
         onLoopWakeup = { input ->
             _loopArmed.value = input?.let { LoopWatch.read(it, System.currentTimeMillis()) }
         },
+        onLoopCron = { input -> _loopArmed.value = LoopWatch.readCron(input) },
+        onLoopNotArmed = { _loopNotArmed.value = System.currentTimeMillis() },
     )
 
     /** A `/loop` armed by the CLI in THIS live process — null when no loop is
@@ -195,6 +219,11 @@ class AgentSession(
 
     /** The loop is over — the process is gone, or the user stopped it. */
     internal fun clearLoop() { _loopArmed.value = null }
+
+    /** Timestamp of the last `/loop …` turn that ended having scheduled
+     *  nothing. The chat surfaces it once; 0 = never happened. */
+    private val _loopNotArmed = MutableStateFlow(0L)
+    val loopNotArmed: StateFlow<Long> = _loopNotArmed.asStateFlow()
 
     /** The CLI's own `initialize` handshake data (models / commands /
      *  subagents / account), republished on every persistent launch. Null
@@ -230,7 +259,7 @@ class AgentSession(
         },
         getState = { _state.value },
         getResumeId = { resumeId },
-        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getReasoningOverride = { reasoningEffortOverride },
@@ -265,7 +294,7 @@ class AgentSession(
         },
         getState = { _state.value },
         getResumeId = { resumeId },
-        setResumeId = { newId -> resumeId = newId; onResumeIdAssigned(newId) },
+        setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getApprovalMode = { approvalMode },
@@ -335,6 +364,13 @@ class AgentSession(
 
     /** See [AgentSessionSshLifecycle.isAlive]. */
     fun isAlive(): Boolean = sshLifecycle.isAlive()
+
+    /** True while a CLI process for this chat is actually running, so the
+     *  conversation is still warm in its memory. Ask THIS — not [isAlive] —
+     *  before telling the user anything about what the next turn will cost:
+     *  a transport can be alive (rebuilt by the pool) with no process behind
+     *  it, and that turn re-reads the whole session file. */
+    fun hasLiveCliProcess(): Boolean = persistentStream.processAlive
 
     /** Most recent observed cwd, picked off any system event in history.
      *  Used by the subagents screen to know where to write project-scope
@@ -477,11 +513,30 @@ class AgentSession(
     /** The CLI just assigned this new session its id — bind it to the active
      *  method (once) so future resumes keep using it even if the user later
      *  switches the active method. Then refresh [authPrep]. */
-    private fun onResumeIdAssigned(newId: String?) {
+    private fun onResumeIdAssigned(newId: String?, previousId: String? = null) {
+        // The CLI moved this conversation to a NEW file. The old id is not a
+        // second chat — it is this one, under its former name — so it must
+        // leave the cached listing, or the list shows the same session twice
+        // (the ghost row's file is already gone from the server).
+        if (previousId != null && newId != null && previousId != newId) {
+            scope.launch {
+                SilentlyTry.fired("SshAi-Chat", "retire superseded session id") {
+                    ai.eight24family.conch.di.ServiceLocator.sessionsCache
+                        .removeRow(server.id, server.agent, previousId)
+                }
+            }
+        }
         // A brand-new session just got its id — that's brand-new activity right
         // now. Stamp it so the new chat appears at the top of the list with
         // today's time immediately, instead of waiting for a listing sweep.
-        newId?.let { rid ->
+        // ⚠ ONLY FOR A CHAT THAT WAS BORN NEW. Stamping activity for whatever
+        // id the CLI announces marks it "recently active", and SessionsCache
+        // carries recently-active rows across a listing that doesn't mention
+        // them — which is exactly how ids that never became files stayed in the
+        // list. On a resume the CLI announces a fresh id per launch and writes a
+        // transient rollout our listing sometimes catches; the file is gone
+        // seconds later and the row was immortal (user, 2026-08-03, third time).
+        if (bornNew) newId?.let { rid ->
             ai.eight24family.conch.di.ServiceLocator.sessionActivity.observeLocal(server.id, rid)
         }
         scope.launch {
@@ -543,7 +598,7 @@ class AgentSession(
         android.util.Log.d(
             tag,
             "send text=${text.length}B images=${imagePaths.size} agent=${server.agent} resume=$resumeId " +
-                "state=${_state.value} sshConnected=${sshLifecycle.sshClient?.isConnected} " +
+                "state=${_state.value} sshConnected=${sshLifecycle.liveClient()?.isConnected} " +
                 "scopeActive=${scope.coroutineContext[kotlinx.coroutines.Job]?.isActive == true}"
         )
         // The user is sending a NEW message — if a question card is still open
@@ -595,13 +650,13 @@ class AgentSession(
      * [AgentSessionPromptQueue.markSent] it (so the JSONL echo stays deduped)
      * and [AgentSessionPromptQueue.enqueue] it for exec.
      */
-    fun redeliver(text: String) {
-        android.util.Log.d("SshAi-Turn", "redeliver (echo-free) text=${text.length} resume=$resumeId")
+    fun redeliver(text: String, imagePaths: List<String> = emptyList()) {
+        android.util.Log.d("SshAi-Turn", "redeliver (echo-free) text=${text.length} images=${imagePaths.size} resume=$resumeId")
         promptQueue.markSent(text, resumeId)
-        // emitOnStart=false: the row is already on screen from the original
-        // send (this is the carry-across-reconnect path). emitting again
-        // would double the row — the old bug.
-        promptQueue.enqueue(text, emitOnStart = false)
+        // emitOnStart=false: the row is already on screen (carried across a
+        // reconnect, OR shown optimistically by the ViewModel for a mid-turn
+        // send). Emitting again would double the row.
+        promptQueue.enqueue(text, imagePaths, emitOnStart = false)
     }
 
     /**
@@ -610,8 +665,42 @@ class AgentSession(
      * prompt still queued behind the in-flight one (Stop means "halt
      * everything", not "skip just this turn").
      */
+    /**
+     * Fork on the next launch: inherit this conversation, write to a NEW id
+     * (`--fork-session`). Set when a chat is opened as a fork of another; the
+     * CLI answers with a fresh session_id on its first `system init`, and
+     * [setResumeId] clears the flag there — so the fork is forked exactly once
+     * and every later launch is an ordinary `--resume` of its own session.
+     */
+    @Volatile var forkOnce: Boolean = false
+
+    /** True while the prompt-queue drainer is mid-turn. The VM parks new sends
+     * in its VISIBLE outbox then, instead of handing them to the invisible
+     * internal queue — a message queued behind a wedged turn simply vanished
+     * from the UI. */
+    val drainerBusy: Boolean get() = promptQueue.drainerJob?.isActive == true
+
     /** Stop a `/loop` that is asleep between ticks. Stop-the-turn can't: there
      *  is no turn. The CLI drops its pending wakeups on an interrupt. */
+    /**
+     * Restart the CLI process for this chat.
+     *
+     * Everything the CLI reads only at startup — MCP servers from `.mcp.json`,
+     * a new binary after an update, changed settings — is invisible to a
+     * process that is already running, and ours deliberately outlives every
+     * turn. Until now the only way to get a fresh one was to disconnect the
+     * whole server or kill the app.
+     *
+     * The conversation is untouched: the next send relaunches with `--resume`
+     * over the same prefix the prompt cache already holds. A turn in flight is
+     * ended, same as Stop.
+     */
+    fun restartCli() {
+        clearLoop()
+        if (usePersistent()) persistentStream.cancelTurn() else cancelCurrent()
+        scope.launch { persistentStream.teardownProcess() }
+    }
+
     fun stopLoop() {
         clearLoop()
         if (usePersistent()) persistentStream.cancelIdleLoop() else cancelCurrent()
@@ -855,9 +944,12 @@ class AgentSession(
             // turn is appended straight back onto the chat we just truncated
             // (measured on device: "dropped 7 row(s)", row back seconds later).
             // Remember what we removed and refuse it until the next send.
+            // Normalised, like every other body comparison here: the row we
+            // dropped came from the display, the row the mirror tries to put
+            // back comes from the file, and those two are not byte-identical.
             rewindSuppressed = dropped.mapNotNullTo(HashSet()) { m ->
                 when (m) {
-                    is AgentMessage.UserText -> m.text.trim()
+                    is AgentMessage.UserText -> userBodyKey(m.text)
                     is AgentMessage.AssistantText -> m.text.trim()
                     else -> null
                 }?.takeIf { it.isNotEmpty() }
@@ -888,7 +980,7 @@ class AgentSession(
     suspend fun resolveUserRecordUuid(text: String): String? {
         val rid = resumeId ?: return null
         if (!Regex("^[a-fA-F0-9-]{16,40}$").matches(rid)) return null
-        val body = text.trim().ifBlank { return null }
+        val body = userBodyKey(text).ifBlank { return null }
         val script = "f=\$(ls \$HOME/.claude/projects/*/" + shellEscape(rid) + "'.jsonl' 2>/dev/null | head -1); " +
             "[ -n \"\$f\" ] || exit 0; tail -c 2000000 \"\$f\" | grep '\"type\":\"user\"' | tail -200"
         val out = SilentlyTry.logged("SshAi-Turn", "resolve rewind anchor") {
@@ -901,7 +993,7 @@ class AgentSession(
             if (!line.contains("\"type\":\"user\"")) continue
             val msgs = AgentSpecRegistry[server.agent].parseStreamLine(line)
             val u = msgs.filterIsInstance<AgentMessage.UserText>()
-                .firstOrNull { it.text.trim() == body } ?: continue
+                .firstOrNull { userBodyKey(it.text) == body } ?: continue
             found = u.recordUuid ?: found
         }
         return found
@@ -914,7 +1006,8 @@ class AgentSession(
 
     /** True when [text] belongs to a turn the user just rewound away. */
     fun isSuppressedByRewind(text: String): Boolean =
-        rewindSuppressed.isNotEmpty() && text.trim() in rewindSuppressed
+        rewindSuppressed.isNotEmpty() &&
+            (text.trim() in rewindSuppressed || userBodyKey(text) in rewindSuppressed)
 
     /** Files-only rewind for the turn [recordUuid]. [dryRun] reports what
      *  WOULD change and touches nothing. */

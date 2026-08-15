@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,6 +50,7 @@ fun ChatScreen(
     ) -> Unit = { _, _, _, _ -> },
     /** Server-stats sheet → "open terminal": route to the real shell for this host. */
     onOpenTerminal: (serverId: String, serverName: String) -> Unit = { _, _ -> },
+    onForkChat: (resumeId: String) -> Unit = {},
     /**
      * Phase 2 of the foldable workstream uses this to constrain the chat
      * surface to the right pane of a two-pane layout. Default `Modifier`
@@ -123,6 +127,55 @@ fun ChatScreen(
     val bridgeUpdateNotice by vm.bridgeUpdateNotice.collectAsState()
     val attachmentNotice by vm.attachmentNotice.collectAsState()
     val chatNotice by vm.chatNotice.collectAsState()
+    var costWarning by remember {
+        mutableStateOf<ai.eight24family.conch.ui.viewmodel.ChatViewModel.CostWarning?>(null)
+    }
+    costWarning?.let { w ->
+        val cold = w.kind ==
+            ai.eight24family.conch.ui.viewmodel.ChatViewModel.CostWarning.Kind.COLD_CACHE
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { costWarning = null },
+            icon = {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                )
+            },
+            title = {
+                androidx.compose.material3.Text(
+                    if (cold) "This message re-sends the whole conversation"
+                    else "This session is already running on the server"
+                )
+            },
+            text = {
+                androidx.compose.material3.Text(
+                    if (cold)
+                        "It has been idle over an hour, so the cache has expired. Sending now " +
+                            "pays for the entire conversation again — about ${w.percent}% of the " +
+                            "context window — instead of reading it back cheaply. Compacting " +
+                            "first makes this send, and every later one, far smaller."
+                    else
+                        "Something else is writing this conversation right now. Sending from " +
+                            "here starts a SECOND agent on the same session."
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    vm.acknowledgeCostWarning()
+                    val t = costWarning?.text.orEmpty()
+                    costWarning = null
+                    vm.send(t); input = ""; vm.clearInputDraft()
+                }) { androidx.compose.material3.Text("send anyway") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    costWarning = null
+                    if (cold) vm.requestCompact()
+                }) { androidx.compose.material3.Text(if (cold) "compact first" else "wait") }
+            },
+        )
+    }
     val bridgeHostWarning by vm.bridgeHostWarning.collectAsState()
     // Rewind: long-press a user row → sheet; on success the rewound prompt
     // comes back into the composer for editing (same as the CLI).
@@ -403,6 +456,7 @@ fun ChatScreen(
         topBar = {
             ChatTopBarHost(
                 vm = vm,
+                onForkChat = onForkChat,
                 messages = messages,
                 state = state,
                 remoteWorking = remoteWorking,
@@ -486,12 +540,6 @@ fun ChatScreen(
                 }
                 // Outcome of a chat-level action (rewind). App feedback, not a
                 // transcript row — so it is never replayed on reopen.
-                chatNotice?.let { notice ->
-                    AttachmentFailureBanner(
-                        notice = notice,
-                        onDismiss = { vm.dismissChatNotice() },
-                    )
-                }
 
                 // Sticky-above-scroll: connect chip + search-match
                 // banner live OUTSIDE the verticalScroll Column below.
@@ -585,6 +633,61 @@ fun ChatScreen(
                 // with the chat.
                 PinnedWorkingStatus(vm = vm, state = state, remoteWorking = remoteWorking)
 
+                // HONEST connection state. The silent auto-reconnect stays
+                // silent about mechanics, but the FACTS show: link down, and
+                // whether the user's message is parked for redelivery.
+                val connLost by vm.connectionLost.collectAsState()
+                val queuedN by vm.queuedForReconnect.collectAsState()
+                val reconnAttempt by vm.reconnectAttempt.collectAsState()
+                if (connLost) {
+                    Text(
+                        buildString {
+                            append("⚡ connection lost — reconnecting")
+                            if (reconnAttempt > 0) append(" (attempt $reconnAttempt)")
+                            if (queuedN > 0) append(" · $queuedN message${if (queuedN == 1) "" else "s"} will send when it's back")
+                        },
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.dp),
+                    )
+                } else if (queuedN > 0) {
+                    Text(
+                        "↻ $queuedN message${if (queuedN == 1) "" else "s"} waiting to send",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.dp),
+                    )
+                }
+
+                // Live BACKGROUND tasks (CLI ran a command with run_in_background
+                // / it outgrew its timeout): the turn ends, the CLI sleeps until
+                // the task notification, and the chat used to look DEAD while the
+                // server was legitimately busy.
+                val bgTasks by vm.liveBgTasks.collectAsState()
+                if (bgTasks.isNotEmpty()) {
+                    Text(
+                        buildString {
+                            append("⏳ background · ")
+                            append(bgTasks.first().take(70))
+                            if (bgTasks.size > 1) append("  · +${bgTasks.size - 1} more")
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.dp),
+                    )
+                }
+
+                // Session task board — the CLI's named checklist, pinned in the
+                // same place the terminal keeps it. Folded live from the
+                // transcript in the VM (with the durable name dictionary), tap
+                // to reveal completed.
+                val taskBoardRows by vm.taskBoard.collectAsState()
+                TaskBoardPanel(rows = taskBoardRows)
+
                 // PromptBar lives at the bottom of the content column
                 // (not in Scaffold.bottomBar) so it rises with the
                 // whole chat block via the outer Column's imePadding.
@@ -604,7 +707,16 @@ fun ChatScreen(
                     onSend = {
                         val cmd = input.trim()
                         if (cmd.isNotEmpty() || attachments.isNotEmpty()) {
-                            vm.send(cmd); input = ""; vm.clearInputDraft()
+                            // Ask first when this send costs far more than it
+                            // looks like — and only then take the text. The
+                            // composer keeps it while the question is open, so a
+                            // dialog that never appears cannot swallow a message.
+                            val warn = vm.warnBeforeSend(cmd)
+                            if (warn != null) {
+                                costWarning = warn
+                            } else {
+                                vm.send(cmd); input = ""; vm.clearInputDraft()
+                            }
                         }
                     },
                     serverId = serverId,
@@ -696,6 +808,10 @@ private fun PinnedWorkingStatus(
     // have no idea what ran (user, 2026-07-23).
     val roster by vm.subagents.collectAsState()
     ai.eight24family.conch.ui.components.SubagentRosterRow(roster)
+    // Background workflows (ultracode) — the CLI footer's «name · N/M agents
+    // done · elapsed», polled from the workflow journal on the server.
+    val workflows by vm.liveWorkflows.collectAsState()
+    ai.eight24family.conch.ui.components.WorkflowRosterRow(workflows)
     if (!isWorking) return
     val liveTokens by vm.liveThinkingTokens.collectAsState()
     val remoteTokens by vm.remoteTokens.collectAsState()
@@ -712,7 +828,11 @@ private fun PinnedWorkingStatus(
     // count (mirrored console turn — no live feed).
     val tokens = (liveTokens ?: 0L).takeIf { it > 0L } ?: remoteTokens.takeIf { it > 0L }
     WorkingStatusRow(
-        startMs = remoteTurnStart ?: localStartMs,
+        // Priority: the file's user-event ts (mirror truth) → the process-
+        // scoped AgentSession turn start (survives VM recreation — a re-entered
+        // mid-turn chat used to restart the clock from the adoption moment) →
+        // the per-composition fallback.
+        startMs = remoteTurnStart ?: vm.sessionTurnStartMs().takeIf { it > 0L } ?: localStartMs,
         thinkingTokens = tokens,
         effort = activeEffort,
         thinking = remoteThinking,

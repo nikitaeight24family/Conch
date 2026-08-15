@@ -131,7 +131,7 @@ internal class AgentSessionCodexAppServer(
      *  false ONLY on launch-level failure ([broken] set, prompt NOT
      *  delivered) — caller reruns through the one-shot path. */
     suspend fun runTurn(text: String, imagePaths: List<String> = emptyList()): Boolean = withContext(Dispatchers.IO) {
-        val client = sshLifecycle.sshClient
+        val client = sshLifecycle.liveClient()
         if (client == null || !client.isConnected) {
             android.util.Log.w(tag, "runTurn ABORT: transport down")
             onPromptUndelivered(text)
@@ -139,6 +139,11 @@ internal class AgentSessionCodexAppServer(
             return@withContext true
         }
         onStateChange(SessionState.Working)
+        // Re-arm at turn start: an idle Stop leaves userCancelled=true with no
+        // turn cleanup to reset it, and the stale flag makes THIS turn swallow
+        // its own timeout / process-death error (zombie chat). See the same
+        // guard in the Claude stream + one-shot runner.
+        sshLifecycle.userCancelled = false
         try {
             if (!ensureReady()) return@withContext false
             val tid = threadId ?: run { broken = true; return@withContext false }
@@ -187,8 +192,17 @@ internal class AgentSessionCodexAppServer(
                 interrupt()
                 history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "codex turn timed out"))
             } else if (completed != null && !completed && !sshLifecycle.userCancelled) {
-                android.util.Log.w(tag, "app-server died mid-turn — marking disconnected")
-                onPromptUndelivered(text)
+                // The app-server ANSWERED turn/start above (we are past the
+                // `resp == null` branch and printed a turn id) — so it has the
+                // prompt, in its own thread state, recoverable by resume. What
+                // died with the process is the ANSWER. Re-sending here re-ran
+                // the whole turn on every reconnect, which on a flapping link
+                // is an unbounded loop of paid turns (2026-08-16, same defect
+                // as the Claude persistent stream). Reconnect, don't re-send.
+                android.util.Log.w(
+                    tag,
+                    "app-server died mid-turn after it acked the prompt — reconnect only, NOT re-sending",
+                )
                 onStateChange(SessionState.Failed("disconnected"))
                 return@withContext true
             }
@@ -210,13 +224,15 @@ internal class AgentSessionCodexAppServer(
      *  not a chat prompt, and reusing the (tested) turn body would entangle the
      *  two; the lifecycle (ensureReady → rpc → await turnDone) is mirrored. */
     suspend fun runReview(baseBranch: String?): Boolean = withContext(Dispatchers.IO) {
-        val client = sshLifecycle.sshClient
+        val client = sshLifecycle.liveClient()
         if (client == null || !client.isConnected) {
             android.util.Log.w(tag, "runReview ABORT: transport down")
             onStateChange(SessionState.Failed("disconnected"))
             return@withContext true
         }
         onStateChange(SessionState.Working)
+        // Same stale-cancel re-arm as runTurn.
+        sshLifecycle.userCancelled = false
         try {
             if (!ensureReady()) return@withContext false
             val tid = threadId ?: run { broken = true; return@withContext false }
@@ -267,7 +283,7 @@ internal class AgentSessionCodexAppServer(
         if (procAlive) android.util.Log.d(tag, "auth prep changed → restarting app-server")
         teardownProcess()
 
-        val client = sshLifecycle.sshClient ?: return false
+        val client = sshLifecycle.liveClient() ?: return false
         try {
             // autoExpand: the long-lived app-server JSON-RPC channel is read
             // continuously; protect it from receive-window starvation under
@@ -631,14 +647,41 @@ internal class AgentSessionCodexAppServer(
     fun cancelTurn() {
         sshLifecycle.userCancelled = true
         interrupt()
+        // ⚠ FENCE THE ESCALATION TO THE TURN STOP WAS AIMED AT.
+        //
+        // This used to escalate on `getState() == Working && procAlive` — "the
+        // session is busy", not "the turn I was told to stop is still running".
+        // Four seconds is long enough for the user to read the half-answer, hit
+        // Stop and type the correction, and their NEW turn is what the timer
+        // then killed: measured on the user's own device (2026-08-06) — Stop at
+        // 13:41:43, a new turn started 13:41:44.8, "killing app-server" at
+        // 13:41:47.5, app-server dead mid-turn. The Claude path was fenced for
+        // exactly this on 2026-07-31 (`shouldEscalateKill`); the fix was never
+        // carried across to Codex or Gemini, which is why Stop still eats the
+        // next turn here.
+        val target = turnDone
         scope.launch {
             kotlinx.coroutines.delay(4_000)
-            if (getState() == SessionState.Working && procAlive) {
-                android.util.Log.w(tag, "interrupt not honored in 4s — killing app-server")
-                teardownProcess()
-                turnDone?.complete(true)
-                if (getState() == SessionState.Working) onStateChange(SessionState.Running)
+            val escalate = if (target != null) {
+                AgentSessionPersistentStream.shouldEscalateKill(
+                    sameTurn = turnDone === target,
+                    victimDone = target.isCompleted,
+                    working = getState() == SessionState.Working,
+                    alive = procAlive,
+                )
+            } else {
+                // Stop landed before any turn had a token to fence on — keep the
+                // old session-level guarantee so Stop still un-sticks the UI.
+                getState() == SessionState.Working && procAlive
             }
+            if (!escalate) {
+                android.util.Log.d(tag, "stop escalation skipped — the stopped turn is already over")
+                return@launch
+            }
+            android.util.Log.w(tag, "interrupt not honored in 4s — killing app-server")
+            teardownProcess()
+            target?.complete(true)
+            if (getState() == SessionState.Working) onStateChange(SessionState.Running)
         }
     }
 
@@ -671,7 +714,7 @@ internal class AgentSessionCodexAppServer(
             android.util.Log.w(
                 tag,
                 "stdin write failed: ${t.javaClass.name}: ${t.message} " +
-                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.sshClient?.isConnected} alive=$procAlive",
+                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.liveClient()?.isConnected} alive=$procAlive",
                 t,
             )
             procAlive = false

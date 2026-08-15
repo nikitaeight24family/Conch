@@ -62,6 +62,27 @@ object SessionStateMachine {
         data object Reset : Event
     }
 
+    /**
+     * May a chat ADOPT a session sitting in [state] as its live session?
+     *
+     * "The transport is up" ([AgentSession.isAlive]) is not the same question,
+     * and answering with it is what produced the 2026-08-16 reconnect livelock.
+     * `isAlive()` reads `liveClient()`, which RE-BINDS a session onto whatever
+     * transport the pool currently holds — so a session left behind in
+     * `Failed("disconnected")` starts reporting "alive" the instant the pool
+     * reconnects, even though nothing restarted it and its state is terminal.
+     *
+     * Adoptable = the session can still carry a turn: `Idle`, `Bootstrapping`,
+     * `Running`, `Working`. `Failed`/`Closed` are terminal here — only an
+     * explicit [Event.Reset] (a rebuild) leaves them, so adopting one hands the
+     * chat a state it can never move out of.
+     */
+    fun isAdoptable(state: SessionState): Boolean = when (state) {
+        is SessionState.Failed, SessionState.Closed -> false
+        SessionState.Idle, is SessionState.Bootstrapping,
+        SessionState.Running, SessionState.Working -> true
+    }
+
     fun transition(current: SessionState, event: Event): SessionState = when (event) {
         is Event.Bootstrap -> when (current) {
             // Bootstrap can fire from Idle (cold start), Bootstrapping

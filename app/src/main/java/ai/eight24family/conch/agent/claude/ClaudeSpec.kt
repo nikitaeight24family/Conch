@@ -90,10 +90,15 @@ object ClaudeSpec : AgentCliSpec {
      * launch-param restart only for levels the wire can't express.
      */
     override fun buildPersistentCommand(input: ExecInput): String {
-        val resume = input.resumeId?.let { " --resume ${shellEscape(it)}" } ?: ""
+        // `--fork-session` only means anything alongside `--resume`: it says
+        // "inherit this conversation, then write to a NEW id". Building it into
+        // the resume fragment keeps the two impossible to separate.
+        val fork = if (input.forkSession) " --fork-session" else ""
+        val resume = input.resumeId?.let { " --resume ${shellEscape(it)}$fork" } ?: ""
         val modelArg = input.model?.takeIf { it.isNotBlank() }
             ?.let { " --model ${shellEscape(it)}" } ?: ""
         val approvalArg = when (input.approvalMode) {
+            AgentApprovalMode.PLAN -> " --permission-mode plan"
             AgentApprovalMode.SAFE -> "" // default mode → every tool prompts via can_use_tool
             AgentApprovalMode.AUTO -> " --permission-mode acceptEdits"
             AgentApprovalMode.YOLO -> " --permission-mode bypassPermissions"
@@ -138,10 +143,15 @@ object ClaudeSpec : AgentCliSpec {
 
     override fun buildExecCommand(input: ExecInput): String {
         val escapedText = shellEscape(input.text)
-        val resume = input.resumeId?.let { " --resume ${shellEscape(it)}" } ?: ""
+        // `--fork-session` only means anything alongside `--resume`: it says
+        // "inherit this conversation, then write to a NEW id". Building it into
+        // the resume fragment keeps the two impossible to separate.
+        val fork = if (input.forkSession) " --fork-session" else ""
+        val resume = input.resumeId?.let { " --resume ${shellEscape(it)}$fork" } ?: ""
         val modelArg = input.model?.takeIf { it.isNotBlank() }
             ?.let { " --model ${shellEscape(it)}" } ?: ""
         val approvalArg = when (input.approvalMode) {
+            AgentApprovalMode.PLAN -> " --permission-mode plan"
             AgentApprovalMode.SAFE -> ""    // CLI prompts; in --print mode unanswered prompts may stall
             AgentApprovalMode.AUTO -> " --permission-mode acceptEdits"
             AgentApprovalMode.YOLO -> " --dangerously-skip-permissions"
@@ -302,6 +312,13 @@ for f in ~/.claude/projects/*/*.jsonl; do
   [ -f "${'$'}f" ] || continue
   id="${'$'}{f##*/}"
   id="${'$'}{id%.jsonl}"
+  # A rollout with no conversation in it is not a session. Claude leaves
+  # these behind — a launch that never got a turn writes a couple of hundred
+  # bytes of header and an inherited title, and the list then shows it as
+  # another copy of the chat it came from (user, 2026-08-03, counting to four).
+  # 1 KB is far below any real first turn.
+  sz=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
+  [ "${'$'}{sz:-0}" -lt 1024 ] && continue
   mtime=${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || stat -f %m "${'$'}f" 2>/dev/null)
   size=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
   # Model: every assistant turn stamps `message.model`. Take the LAST REAL

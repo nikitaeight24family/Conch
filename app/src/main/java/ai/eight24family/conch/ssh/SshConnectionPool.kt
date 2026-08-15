@@ -56,8 +56,17 @@ class SshConnectionPool {
 
     /** Per-server live entry, alive iff `client.isConnected`. The
      *  `refCount` field is mutated only while the per-server lock is
-     *  held (see [perServerLock]). */
-    private data class Entry(val client: SSHClient, var refCount: Int)
+     *  held (see [perServerLock]).
+     *
+     *  [openedAtMs] is the transport's birthday, and it is what stops
+     *  [evictPoisoned] from killing a transport that CANNOT be the poisoned
+     *  one because it did not exist yet when the turn failed. See the
+     *  livelock note on [evictPoisoned]. */
+    private data class Entry(
+        val client: SSHClient,
+        var refCount: Int,
+        val openedAtMs: Long = System.currentTimeMillis(),
+    )
 
     /** Holds entries by server id. ConcurrentHashMap so [peek] and
      *  [aliveCount] are lock-free reads — those run from the UI
@@ -116,6 +125,12 @@ class SshConnectionPool {
             }
             android.util.Log.d(TAG, "acquire(${server.id}) MISS — opening new SSH (touch needed for SK)")
             val fresh = openAndAuthenticate(server, secrets, skSigner)
+            // openAndAuthenticate can only throw AFTER handing us a connected
+            // client if auth failed — and a client that never lands in the
+            // pool is a LEAKED live socket the server has to reap on its own
+            // (LoginGraceTime timeout → a preauth line fail2ban counts).
+            // openAndAuthenticate owns that cleanup now (see its catch), so a
+            // throw out of it never leaves a socket behind.
             pool[server.id] = Entry(fresh, 1)
             return fresh
         }
@@ -134,7 +149,10 @@ class SshConnectionPool {
             if (entry.refCount <= 0) {
                 android.util.Log.d(TAG, "  refcount hit zero — disconnecting client")
                 pool.remove(serverId)
-                SilentlyTry.fired("SshAi-Pool", "disconnect on release") { entry.client.disconnect() }
+                // Off-thread: the chat's retry path releases from Main, where a
+                // synchronous disconnect() throws NetworkOnMainThreadException
+                // and the socket survives the "close". See [closeAsync].
+                closeAsync(entry.client, "disconnect on release")
             }
         }
     }
@@ -154,13 +172,64 @@ class SshConnectionPool {
      * reconnect authenticates with the enrolled ephemeral device key, so there
      * is NO FIDO tap. The user should never have to disconnect/reconnect by
      * hand to clear this — that is exactly what seamless reconnect is for.
+     *
+     * ⚠ [minAgeMs] — DO NOT EVICT A TRANSPORT YOUNGER THAN THE FAILURE.
+     * This method evicts by `serverId`, i.e. whatever is in the pool *now* —
+     * which is not necessarily the transport that failed. A caller reacting to
+     * a Failed("disconnected") runs SECONDS after the fact, and by then the
+     * ephemeral reconnect / service watchdog may have already built a fresh,
+     * healthy transport. Evicting that one is not a recovery, it is the
+     * failure: the rebuilt chat session comes up on a corpse, goes
+     * Failed("disconnected") again, the ladder fires another retry, and the app
+     * destroys a working connection every ~4 s forever — reconnecting,
+     * re-parsing the whole session file and never reaching Running, so the
+     * user's queued message can never be delivered (livelock measured on
+     * device 2026-08-16: 15 evictions/min, CPU 55→72 °C, chat frozen on
+     * «⚡ connection lost» ⇄ «↻ 1 message waiting to send»).
+     *
+     * So a caller that only knows "a turn failed a while ago" passes
+     * [minAgeMs] and the pool keeps anything newer than that. A caller that
+     * just failed ON the pooled client itself (the MaxSessions path in
+     * [ai.eight24family.conch.agent.AgentSessionSshLifecycle]) has proven that
+     * exact transport bad and passes 0.
      */
-    fun evictPoisoned(serverId: String, reason: String) {
+    fun evictPoisoned(serverId: String, reason: String, minAgeMs: Long = 0L) {
         val lock = perServerLock[serverId] ?: return
         synchronized(lock) {
-            val entry = pool.remove(serverId) ?: return
-            android.util.Log.w(TAG, "evictPoisoned($serverId) — $reason; transport dropped for rebuild")
-            SilentlyTry.fired("SshAi-Pool", "disconnect poisoned client") { entry.client.disconnect() }
+            val entry = pool[serverId] ?: return
+            val ageMs = System.currentTimeMillis() - entry.openedAtMs
+            if (!shouldEvictPoisoned(ageMs, minAgeMs)) {
+                android.util.Log.i(
+                    TAG,
+                    "evictPoisoned($serverId) SKIPPED — $reason, but the pooled transport is only " +
+                        "${ageMs}ms old (< ${minAgeMs}ms): it postdates the failure, so it is a " +
+                        "rebuild, not the corpse. Keeping it."
+                )
+                return
+            }
+            pool.remove(serverId)
+            android.util.Log.w(TAG, "evictPoisoned($serverId) — $reason; transport dropped for rebuild (age=${ageMs}ms)")
+            closeAsync(entry.client, "disconnect poisoned client")
+        }
+    }
+
+    /**
+     * Close a transport OFF the caller's thread.
+     *
+     * `disconnect()` does socket I/O. The chat's retry path calls into the pool
+     * from Main, where that throws `NetworkOnMainThreadException` — which
+     * [SilentlyTry] swallows, so the socket was NEVER ACTUALLY CLOSED. Every
+     * reconnect cycle then leaked a socket, an sshj Reader thread and a
+     * server-side sshd session, and leaked sshd sessions are precisely what
+     * trips the `MaxSessions` ceiling [evictPoisoned] exists to clear (one
+     * swallowed NetworkOnMainThreadException per cycle in the 2026-08-16
+     * logcat). The entry is already out of the map by the time we get here, so
+     * nothing can hand this client out again while it closes.
+     */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun closeAsync(client: SSHClient, why: String) {
+        GlobalScope.launch(Dispatchers.IO) {
+            SilentlyTry.fired(TAG, why) { client.disconnect() }
         }
     }
 
@@ -392,6 +461,41 @@ class SshConnectionPool {
      *  server already being brought up by one run is skipped by the other. */
     private val silentConnectInFlight = ConcurrentHashMap.newKeySet<String>()
 
+    /** serverId → (consecutive silent-dial failures, epoch ms of the last one).
+     *  SILENT dials only — the 20 s service watchdog + every-foreground
+     *  connectAllPossibleSilently used to redial a failing server forever with
+     *  ZERO backoff: 3 full handshakes/minute against stale creds is a fail2ban
+     *  ban in under two minutes, and once banned the 15 s connect timeouts kept
+     *  refreshing the ban — the phone could never recover on its own. Explicit
+     *  user connects NEVER consult this (they must try NOW), and a success or a
+     *  network change clears it. */
+    private data class SilentFailStreak(val count: Int, val lastMs: Long)
+    private val silentFails = ConcurrentHashMap<String, SilentFailStreak>()
+
+    /** True when [sid] may be silently dialed: no failure streak, or its
+     *  exponential cool-down (40 s · 2^(n-1), capped 15 min) has passed. */
+    private fun silentCooldownPassed(sid: String): Boolean {
+        val f = silentFails[sid] ?: return true
+        val shift = (f.count - 1).coerceIn(0, 5)          // 40s → 80s → … → 21m20s pre-cap
+        val waitMs = (40_000L shl shift).coerceAtMost(15 * 60_000L)
+        return System.currentTimeMillis() - f.lastMs >= waitMs
+    }
+
+    private fun noteSilentDialResult(sid: String, ok: Boolean) {
+        if (ok) {
+            silentFails.remove(sid)
+        } else {
+            val cur = silentFails[sid]
+            silentFails[sid] = SilentFailStreak((cur?.count ?: 0) + 1, System.currentTimeMillis())
+        }
+    }
+
+    /** New default network / explicit user action → the world changed; every
+     *  server deserves a fresh immediate try. */
+    fun resetSilentBackoff() {
+        silentFails.clear()
+    }
+
     suspend fun connectAllPossibleSilently() {
         val repo = ai.eight24family.conch.di.ServiceLocator.serverRepository
         val servers = SilentlyTry.loggedOrElse(TAG, "list servers for silent auto-connect", emptyList<Server>()) {
@@ -403,25 +507,34 @@ class SshConnectionPool {
         kotlinx.coroutines.coroutineScope {
             for (server in servers) {
                 if (peek(server.id) != null) continue              // already live
+                if (!silentCooldownPassed(server.id)) continue     // failing lately — let it cool down
                 if (!silentConnectInFlight.add(server.id)) continue // another run is bringing it up
                 launch {
+                    // Only an ATTEMPTED dial feeds the backoff: an SK server
+                    // without a device key is skipped, not failed.
+                    var attempted = false
                     try {
                         SilentlyTry.fired(TAG, "silent auto-connect ${server.id}") {
                             val secrets = repo.getSecrets(server.id)
                             if (secrets.skKeys.isNotEmpty()) {
                                 // FIDO: silent ONLY via an enrolled device key.
-                                if (EphemeralSshKey.exists(server.id) && userConnectEphemeral(server) != null) {
-                                    android.util.Log.d(TAG, "silent auto-connect: SK ${server.name} up via device key")
+                                if (EphemeralSshKey.exists(server.id)) {
+                                    attempted = true
+                                    if (userConnectEphemeral(server) != null) {
+                                        android.util.Log.d(TAG, "silent auto-connect: SK ${server.name} up via device key")
+                                    }
                                 } else {
                                     android.util.Log.d(TAG, "silent auto-connect: SK ${server.name} skipped — no device key (needs a tap)")
                                 }
                             } else {
                                 // Password / plain key: stored secret, no tap.
+                                attempted = true
                                 userConnect(server, secrets, null)
                                 android.util.Log.d(TAG, "silent auto-connect: ${server.name} up via stored secret")
                             }
                         }
                     } finally {
+                        if (attempted) noteSilentDialResult(server.id, ok = peek(server.id) != null)
                         silentConnectInFlight.remove(server.id)
                     }
                 }
@@ -445,6 +558,10 @@ class SshConnectionPool {
      */
     suspend fun reconnectHeldOnNetworkChange() {
         val repo = ai.eight24family.conch.di.ServiceLocator.serverRepository
+        // A NEW network invalidates every "this server keeps failing" verdict —
+        // the failures may have been the old network's fault (or a fail2ban ban
+        // that the new egress IP isn't subject to). Fresh immediate tries.
+        resetSilentBackoff()
         // Snapshot — userConnect mutates userHeld while it re-acquires.
         for (sid in userHeld.toSet()) {
             if (peek(sid) != null) continue  // transport survived / already back
@@ -487,22 +604,32 @@ class SshConnectionPool {
         val repo = ai.eight24family.conch.di.ServiceLocator.serverRepository
         for (sid in userHeld.toSet()) {
             if (peek(sid) != null) continue              // transport already live
+            // Exponential cool-down: the 20 s watchdog used to redial a
+            // failing server forever (no cap, no backoff, failures swallowed
+            // silently) — the fail2ban feeder. See [silentFails].
+            if (!silentCooldownPassed(sid)) continue
             if (!silentConnectInFlight.add(sid)) continue // another path is on it
+            var attempted = false
             try {
                 SilentlyTry.fired(TAG, "watchdog silent reconnect $sid") {
                     val server = repo.getById(sid) ?: return@fired
                     val secrets = repo.getSecrets(sid)
                     if (secrets.skKeys.isNotEmpty()) {
-                        if (EphemeralSshKey.exists(sid) && userConnectEphemeral(server) != null) {
-                            android.util.Log.d(TAG, "watchdog: restored SK $sid (${server.name}) via device key")
+                        if (EphemeralSshKey.exists(sid)) {
+                            attempted = true
+                            if (userConnectEphemeral(server) != null) {
+                                android.util.Log.d(TAG, "watchdog: restored SK $sid (${server.name}) via device key")
+                            }
                         }
                         // SK without a device key → needs a physical tap; leave it.
                     } else {
+                        attempted = true
                         userConnect(server, secrets, null)
                         android.util.Log.d(TAG, "watchdog: restored $sid (${server.name}) via stored secret")
                     }
                 }
             } finally {
+                if (attempted) noteSilentDialResult(sid, ok = peek(sid) != null)
                 silentConnectInFlight.remove(sid)
             }
         }
@@ -609,23 +736,59 @@ class SshConnectionPool {
         val keepaliveIntervalSec = runBlocking {
             ai.eight24family.conch.di.ServiceLocator.preferences.sshKeepaliveIntervalSec.first()
         }.takeIf { it > 0 }?.coerceIn(15, 120) ?: 30
-        val client = SSHClient(DefaultConfig()).apply {
+        val client = SSHClient(deadPeerDetectingConfig()).apply {
             connectTimeout = TimeUnit.SECONDS.toMillis(connectTimeoutSec.toLong()).toInt()
             timeout = TimeUnit.MINUTES.toMillis(20).toInt()
         }
-        client.addHostKeyVerifier(FingerprintHostKeyVerifier(server.knownHostKey))
-        client.connect(server.host, server.port)
-        client.connection.transport.setTimeoutMs(0)
-        client.connection.keepAlive.keepAliveInterval = keepaliveIntervalSec
-        // Custom auth — sshj's stock ECDSA auth signs via BouncyCastle, which
-        // CANNOT use the hardware AndroidKeyStore key (non-extractable → "no
-        // encoding for EC private key" → auth "Exhausted", proven on-device).
-        // EphemeralEcdsaAuthMethod signs via the AndroidKeyStore JCA provider (TEE)
-        // and encodes the pubkey byte-identically to the enrolled authorized_keys
-        // line, so the server matches it. (Swapping config.keyAlgorithms did NOT
-        // work — KeyedAuthMethod resolves the algorithm from its own queue.)
-        client.auth(server.username, listOf(EphemeralEcdsaAuthMethod(provider.public, provider.private)))
+        val hostKeyVerifier = FingerprintHostKeyVerifier(server.knownHostKey)
+        client.addHostKeyVerifier(hostKeyVerifier)
+        try {
+            client.connect(server.host, server.port)
+        } catch (t: Throwable) {
+            if (hostKeyVerifier.mismatch) hostKeyMismatchError(server, hostKeyVerifier.seenFingerprint)
+            throw t
+        }
+        try {
+            configureKeepAlive(client, keepaliveIntervalSec)
+            // Custom auth — sshj's stock ECDSA auth signs via BouncyCastle, which
+            // CANNOT use the hardware AndroidKeyStore key (non-extractable → "no
+            // encoding for EC private key" → auth "Exhausted", proven on-device).
+            // EphemeralEcdsaAuthMethod signs via the AndroidKeyStore JCA provider (TEE)
+            // and encodes the pubkey byte-identically to the enrolled authorized_keys
+            // line, so the server matches it. (Swapping config.keyAlgorithms did NOT
+            // work — KeyedAuthMethod resolves the algorithm from its own queue.)
+            client.auth(server.username, listOf(EphemeralEcdsaAuthMethod(provider.public, provider.private)))
+        } catch (t: Throwable) {
+            // A throw between connect() and a successful auth used to LEAK the
+            // live socket (nobody held a reference) — the server had to reap it
+            // at LoginGraceTime, logging the preauth-timeout lines fail2ban
+            // counts. Close our half properly.
+            SilentlyTry.fired("SshAi-Pool", "disconnect after failed device-key auth") { client.disconnect() }
+            throw t
+        }
+        pinHostKeyIfUnset(server, hostKeyVerifier)
         return client
+    }
+
+    /** [DefaultConfig] with the KEEP_ALIVE provider: unlike the default
+     *  heartbeat (fire-and-forget SSH_MSG_IGNORE), `keepalive@openssh.com`
+     *  requests EXPECT replies, so a dead peer is detected after
+     *  [KEEPALIVE_MAX_MISSES] silent intervals and the transport closes itself.
+     *  Without this a phone that slept through a network drop held a zombie
+     *  transport forever (`isConnected` stays true on a half-open socket): the
+     *  pool never pruned it, the bridge went deaf, and the server kept a
+     *  hanging session until TCP gave up. Same packet cadence as before — this
+     *  costs nothing extra on the radio. */
+    private fun deadPeerDetectingConfig(): DefaultConfig =
+        DefaultConfig().apply {
+            keepAliveProvider = net.schmizz.keepalive.KeepAliveProvider.KEEP_ALIVE
+        }
+
+    private fun configureKeepAlive(client: SSHClient, intervalSec: Int) {
+        client.connection.transport.setTimeoutMs(0)
+        client.connection.keepAlive.keepAliveInterval = intervalSec
+        (client.connection.keepAlive as? net.schmizz.keepalive.KeepAliveRunner)
+            ?.maxAliveCount = KEEPALIVE_MAX_MISSES
     }
 
     /**
@@ -808,14 +971,26 @@ class SshConnectionPool {
             ai.eight24family.conch.di.ServiceLocator.preferences.sshKeepaliveIntervalSec.first()
         }.takeIf { it > 0 }?.coerceIn(15, 120) ?: 30
 
-        val client = SSHClient(DefaultConfig()).apply {
+        val client = SSHClient(deadPeerDetectingConfig()).apply {
             connectTimeout = TimeUnit.SECONDS.toMillis(connectTimeoutSec.toLong()).toInt()
             timeout = TimeUnit.MINUTES.toMillis(20).toInt()
         }
-        client.addHostKeyVerifier(FingerprintHostKeyVerifier(server.knownHostKey))
-        client.connect(server.host, server.port)
-        client.connection.transport.setTimeoutMs(0)
-        client.connection.keepAlive.keepAliveInterval = keepaliveIntervalSec
+        val hostKeyVerifier = FingerprintHostKeyVerifier(server.knownHostKey)
+        client.addHostKeyVerifier(hostKeyVerifier)
+        try {
+            client.connect(server.host, server.port)
+        } catch (t: Throwable) {
+            // Host-key refusal throws out of connect(), before the socket is
+            // ours to keep — say WHICH failure this was instead of letting the
+            // user read sshj's "Could not verify `ssh-ed25519` host key".
+            if (hostKeyVerifier.mismatch) hostKeyMismatchError(server, hostKeyVerifier.seenFingerprint)
+            throw t
+        }
+        // From here on the socket is LIVE — any throw before auth completes
+        // must disconnect it, or the server reaps it at LoginGraceTime and
+        // fail2ban counts the preauth line (see the catch at the bottom).
+        try {
+        configureKeepAlive(client, keepaliveIntervalSec)
         when (server.authMethod) {
             AuthMethod.PASSWORD -> client.authPassword(server.username, secrets.password ?: error("password required"))
             AuthMethod.KEY -> {
@@ -911,25 +1086,137 @@ class SshConnectionPool {
                 }
             }
         }
+        } catch (t: Throwable) {
+            // The SK-timeout branch above already disconnected before its
+            // error(); disconnect() is idempotent, so covering every other
+            // throw here (auth rejection, signer errors, interrupted waits)
+            // is safe and closes the previously-leaked socket.
+            SilentlyTry.fired("SshAi-Pool", "disconnect after failed auth") { client.disconnect() }
+            throw t
+        }
+        // Auth succeeded — NOW the host key is worth remembering. Until this
+        // line existed the pin was never written and every reconnect re-ran
+        // "trust on first use" against a server it had already met.
+        pinHostKeyIfUnset(server, hostKeyVerifier)
         return client
     }
 
+    /**
+     * TOFU verifier for the pooled paths.
+     *
+     * ⚠ IT MUST REMEMBER. This used to accept any key when [expected] was null
+     * and then throw the fingerprint away, so the pin was never written and the
+     * NEXT connect was a "first" connect again — logcat showed
+     * "TOFU: accepting new host key for 203.0.113.10:22" on EVERY reconnect,
+     * ~15/min during the 2026-08-16 reconnect storm. Trust-on-first-use that
+     * never records the first use is not TOFU, it is trust-on-every-use: the
+     * app displayed a "fingerprint" field it had no intention of checking.
+     * [seenFingerprint] is what the caller pins after auth succeeds; [mismatch]
+     * separates "the host key changed" from an ordinary connect failure so the
+     * user gets told which one happened.
+     */
     private class FingerprintHostKeyVerifier(private val expected: String?) : HostKeyVerifier {
+        @Volatile var seenFingerprint: String? = null
+        @Volatile var mismatch: Boolean = false
+
         override fun verify(hostname: String, port: Int, key: PublicKey): Boolean {
             val fp = net.schmizz.sshj.common.SecurityUtils.getFingerprint(key)
+            seenFingerprint = fp
             // Audit trail: log TOFU acceptance (first connect) and mismatches (potential MITM).
-            if (expected == null) {
-                android.util.Log.i(TAG, "TOFU: accepting new host key for $hostname:$port — fingerprint=$fp")
-                return true
+            return when (hostKeyVerdict(expected, fp)) {
+                HostKeyVerdict.FIRST_USE -> {
+                    android.util.Log.i(TAG, "TOFU: accepting new host key for $hostname:$port — fingerprint=$fp (pinning after auth)")
+                    true
+                }
+                HostKeyVerdict.MATCH -> true
+                HostKeyVerdict.MISMATCH -> {
+                    android.util.Log.w(TAG, "host key mismatch for $hostname:$port — expected=$expected actual=$fp")
+                    mismatch = true
+                    false
+                }
             }
-            if (expected == fp) return true
-            android.util.Log.w(TAG, "host key mismatch for $hostname:$port — expected=$expected actual=$fp")
-            return false
         }
         override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
     }
 
+    /**
+     * Record the host key we just talked to, if this server has no pin yet.
+     *
+     * AFTER a successful auth, never at verify() time: the fingerprint of a
+     * handshake that then fails auth is worth nothing, and pinning it would let
+     * one bad handshake poison every future connect. Auth completing is also
+     * what makes the pin meaningful — an SSH signature covers the session id,
+     * which is derived from this very host key, so a relay in the middle cannot
+     * produce one.
+     *
+     * Fire-and-forget on IO: the connection is already usable and a DB write
+     * must not sit in front of it. Idempotent — re-pinning the same value is a
+     * no-op, so concurrent connects on the same server can't fight.
+     */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun pinHostKeyIfUnset(server: Server, verifier: FingerprintHostKeyVerifier) {
+        if (server.knownHostKey != null) return
+        val fp = verifier.seenFingerprint ?: return
+        GlobalScope.launch(Dispatchers.IO) {
+            SilentlyTry.fired(TAG, "pin host key") {
+                ai.eight24family.conch.di.ServiceLocator.serverRepository
+                    .updateKnownHostKey(server.id, fp)
+                android.util.Log.i(TAG, "pinned host key for ${server.name}: $fp")
+            }
+        }
+    }
+
+    /**
+     * Turn sshj's opaque "Could not verify host key" into something the user can
+     * act on, and mark it as a reason NOT to auto-retry.
+     *
+     * A rotated host key is permanent until a human decides what it means, so
+     * the reconnect ladder must not hammer the server about it — the phrase
+     * "host key" is on [ai.eight24family.conch.ui.viewmodel.ChatViewModelReconnect.shouldAutoRetry]'s
+     * do-not-retry list, and this is the message that carries it.
+     */
+    private fun hostKeyMismatchError(server: Server, actual: String?): Nothing = error(
+        "Host key changed for ${server.host} — this is either the server being rebuilt/moved, " +
+            "or someone sitting in the middle. Expected ${server.knownHostKey?.take(24)}, " +
+            "got ${actual?.take(24)}. Nothing will connect until you decide: if you rebuilt it, " +
+            "open the server → // system → fingerprint → forget, then reconnect."
+    )
+
+    /** What a presented host key means. [FIRST_USE] is an ACCEPT that the caller
+     *  must then PIN — the distinction the pool used to lose, which turned
+     *  trust-on-first-use into trust-on-every-use. */
+    internal enum class HostKeyVerdict { FIRST_USE, MATCH, MISMATCH }
+
     companion object {
         private const val TAG = "SshAi-Pool"
+
+        /** How old a pooled transport must be before a "a turn failed
+         *  disconnected a moment ago" caller is allowed to evict it. Anything
+         *  younger was built AFTER the failure (by the ephemeral reconnect or
+         *  the service watchdog) and is therefore a rebuild, not the corpse.
+         *  5 s covers the whole observed rebuild window — reconnect + hydrate
+         *  measured 1.2–2.4 s on device — while a genuinely poisoned transport
+         *  is normally minutes old, so this never blocks a real eviction. */
+        const val EVICT_MIN_AGE_MS = 5_000L
+
+        /** Pure eviction predicate — see [evictPoisoned]. Split out so the
+         *  "never evict a transport younger than the failure" rule has a test
+         *  that doesn't need a live SSH transport. */
+        internal fun shouldEvictPoisoned(entryAgeMs: Long, minAgeMs: Long): Boolean =
+            entryAgeMs >= minAgeMs
+
+        /** Pure host-key decision — see [FingerprintHostKeyVerifier]. */
+        internal fun hostKeyVerdict(expected: String?, actual: String): HostKeyVerdict = when {
+            expected == null -> HostKeyVerdict.FIRST_USE
+            expected == actual -> HostKeyVerdict.MATCH
+            else -> HostKeyVerdict.MISMATCH
+        }
+
+        /** Unanswered `keepalive@openssh.com` requests before the transport is
+         *  declared dead and closed (interval × misses = detection window;
+         *  30 s default interval → ~90 s). Generous enough that Doze pauses —
+         *  where the keepalive thread doesn't RUN, so nothing is "missed" —
+         *  and slow networks never kill a healthy link. */
+        private const val KEEPALIVE_MAX_MISSES = 3
     }
 }

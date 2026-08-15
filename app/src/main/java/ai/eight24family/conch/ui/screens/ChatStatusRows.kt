@@ -407,11 +407,25 @@ internal fun promptBarStatusHint(
     inputBlank: Boolean,
     attachmentsEmpty: Boolean,
     hasPending: Boolean = false,
+    /** The session file is growing while WE are not running a turn — something
+     *  else owns this conversation right now (a terminal on the server, a
+     *  background agent). */
+    runningElsewhere: Boolean = false,
+    /** No live CLI for this chat and its last turn is older than the prompt
+     *  cache's hour, so the next message pays to re-send the whole
+     *  conversation instead of reading it back. */
+    coldRebuild: Boolean = false,
 ): String? = when {
     // SEAMLESS: while the chat is silently auto-reconnecting (device key), show
     // NOTHING — no "queued", no "failed", no "disconnected". The reconnect must
     // be invisible.
     reconnecting -> null
+    // ⚠ SAY IT BEFORE THE MONEY IS SPENT, NOT AFTER. Both of these are
+    // decisions the user can only make while the message is still unsent.
+    runningElsewhere ->
+        "// this session is running on the server — sending starts a SECOND agent on it"
+    coldRebuild ->
+        "// idle over an hour — the next message re-sends the whole conversation (cache expired)"
     anyUploading -> "// uploading attachment(s)…"
     state is SessionState.Failed ->
         "// agent: failed — ${state.reason.take(60)} · pull-down to retry"

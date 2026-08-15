@@ -201,12 +201,56 @@ class AgentSessionManager(
      * `_history` (including pending UserText that hadn't been ack'd by
      * the CLI yet, the exact bug behind "I sent a message, came back, my
      * message is gone").
+     *
+     * ⚠ ADOPTABLE, not merely alive — see [SessionStateMachine.isAdoptable].
+     * `isAlive()` alone re-binds a dead session onto the pool's newest
+     * transport and reports "alive" for a session parked in
+     * `Failed("disconnected")`; adopting that fed the chat a terminal state on
+     * every reconnect and livelocked the app (2026-08-16).
      */
     fun findByResume(serverId: String, agent: Agent, resumeId: String): AgentSession? {
         val prefix = "$serverId:${agent.name}:"
         return sessions.entries.firstOrNull { (k, v) ->
-            k.startsWith(prefix) && v.agentSessionId == resumeId && v.isAlive()
+            k.startsWith(prefix) && v.agentSessionId == resumeId &&
+                v.isAlive() && SessionStateMachine.isAdoptable(v.state.value)
         }?.value
+    }
+
+    /**
+     * Close every in-memory session for (serverId, agent) attached to
+     * [resumeId] except the chat slot [keepChatId], and report how many died.
+     *
+     * `close(serverId, agent, chatSessionId)` only ever removes ONE key, and a
+     * chat that adopts a session via [findByResume] keeps it under the key of
+     * the chat that CREATED it — so the ViewModel's rebuild path closed a key
+     * that held nothing while the real session object stayed in this map. Each
+     * reconnect left another one behind (four were rebinding themselves onto
+     * the pool's transport per cycle in the 2026-08-16 logcat), every one of
+     * them still holding a pool reference the matching `release` will never
+     * balance. Rebuilding a chat has to reap them by resume id.
+     */
+    fun closeStaleForResume(
+        serverId: String,
+        agent: Agent,
+        resumeId: String,
+        keepChatId: String? = null,
+    ): Int {
+        val prefix = "$serverId:${agent.name}:"
+        val stale = sessions.entries
+            .filter { (k, v) ->
+                k.startsWith(prefix) && v.agentSessionId == resumeId &&
+                    k != key(serverId, agent, keepChatId ?: "")
+            }
+            .map { it.key }
+        for (k in stale) sessions.remove(k)?.close()
+        if (stale.isNotEmpty()) {
+            android.util.Log.d(
+                "SshAi-AgentMgr",
+                "reaped ${stale.size} stale session(s) for resume=${resumeId.take(8)}",
+            )
+            updateCount()
+        }
+        return stale.size
     }
 
     /**
@@ -232,7 +276,8 @@ class AgentSessionManager(
     fun findOrphanBrandNew(serverId: String, agent: Agent): AgentSession? {
         val prefix = "$serverId:${agent.name}:"
         return sessions.entries.firstOrNull { (k, v) ->
-            k.startsWith(prefix) && v.isAlive() && v.agentSessionId == null
+            k.startsWith(prefix) && v.agentSessionId == null &&
+                v.isAlive() && SessionStateMachine.isAdoptable(v.state.value)
         }?.value
     }
 

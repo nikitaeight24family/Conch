@@ -388,6 +388,22 @@ class ServerDetailViewModel(
     /** Toggle seamless reconnect for this server. ON → mint + enroll the device
      *  key now (if connected; else on next connect); OFF → revoke it (strip from
      *  the server + delete locally + drop the silent hold). */
+    /**
+     * Forget this server's pinned host key — the next connect re-pins whatever
+     * it meets (trust on first use).
+     *
+     * This is the ONLY way out of a host-key mismatch, which is a hard refusal:
+     * the pool won't connect and the reconnect ladder deliberately won't retry.
+     * The user reaches it after being told the key changed, so the screen must
+     * make them confirm — "the server was rebuilt" and "someone is in the
+     * middle" look identical from here, and only they know which it is.
+     */
+    fun forgetHostKey() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { repo.forgetKnownHostKey(serverId) }
+        }
+    }
+
     fun setSeamless(enabled: Boolean) {
         viewModelScope.launch {
             prefs.setSeamlessForServer(serverId, enabled)

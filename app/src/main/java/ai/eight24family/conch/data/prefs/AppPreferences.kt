@@ -42,7 +42,16 @@ fun isCrashReportingEnabled(context: Context): Boolean {
  *  • [YOLO]   — bypass all approvals and the sandbox. Fast, dangerous —
  *               only on hosts you trust.
  */
-enum class AgentApprovalMode { SAFE, AUTO, YOLO }
+/**
+ * How much the agent may do without asking.
+ *
+ * [PLAN] is the CLI's own `plan` permission mode: it reads and researches but
+ * changes NOTHING until it has shown you the plan and you accept it. Only
+ * Claude has it — the other CLIs fall back to [SAFE], which is the closest
+ * honest equivalent (everything asks) rather than a mode they'd silently
+ * ignore.
+ */
+enum class AgentApprovalMode { PLAN, SAFE, AUTO, YOLO }
 
 /**
  * Lock-screen visibility for the "tap your security key" notification we
@@ -322,6 +331,60 @@ class AppPreferences(private val context: Context) {
     suspend fun setInputDraft(chatId: String, text: String) {
         context.dataStore.edit { p ->
             if (text.isBlank()) p.remove(inputDraftKey(chatId)) else p[inputDraftKey(chatId)] = text
+        }
+    }
+
+    // ── Per-chat UNSENT QUEUE ── Messages the user pressed send on that could
+    // NOT be handed to the CLI yet (no link, a turn already running, the chat's
+    // session not up). They live in the visible strip above the prompt bar, each
+    // with a ✕ — and they must survive leaving the chat and the process dying,
+    // because in-memory-only was exactly how a typed prompt could vanish without
+    // a trace. Keyed like the input draft: the chat's resume id, or its local id
+    // for a chat that has none yet.
+    //
+    // A queued entry is NOT rendered as a chat bubble — the bubble only ever
+    // appears when a turn actually starts — so restoring one can never double a
+    // message on screen.
+    private fun unsentQueueKey(chatId: String) = stringPreferencesKey("unsent_queue_$chatId")
+
+    /** One parked message: the full prompt, the clean text to show in the strip,
+     *  and any already-uploaded image paths that must travel with it. */
+    data class UnsentMessage(val text: String, val displayText: String, val imagePaths: List<String>)
+
+    suspend fun unsentQueueOnce(chatId: String): List<UnsentMessage> {
+        val raw = context.dataStore.data.first()[unsentQueueKey(chatId)] ?: return emptyList()
+        return SilentlyTry.loggedOrElse("SshAi-Prefs", "parse unsent queue", emptyList()) {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val text = o.optString("t").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val paths = o.optJSONArray("p")
+                UnsentMessage(
+                    text = text,
+                    displayText = o.optString("d").ifBlank { text },
+                    imagePaths = if (paths == null) emptyList()
+                    else (0 until paths.length()).mapNotNull { j -> paths.optString(j).takeIf { it.isNotBlank() } },
+                )
+            }
+        }
+    }
+
+    suspend fun setUnsentQueue(chatId: String, messages: List<UnsentMessage>) {
+        context.dataStore.edit { p ->
+            if (messages.isEmpty()) {
+                p.remove(unsentQueueKey(chatId))
+            } else {
+                val arr = org.json.JSONArray()
+                for (m in messages) {
+                    arr.put(
+                        org.json.JSONObject()
+                            .put("t", m.text)
+                            .put("d", m.displayText)
+                            .put("p", org.json.JSONArray(m.imagePaths)),
+                    )
+                }
+                p[unsentQueueKey(chatId)] = arr.toString()
+            }
         }
     }
 

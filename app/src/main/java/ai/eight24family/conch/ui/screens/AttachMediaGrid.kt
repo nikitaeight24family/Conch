@@ -17,6 +17,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -96,6 +101,10 @@ internal fun AttachMediaStrip(
     onSelectionDone: () -> Unit,
     onCameraFallback: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    /** Rendered to the RIGHT OF THE VIEWFINDER — beside the camera, not beside
+     * The distinction is the whole layout: the tiles must line up with the
+     * camera cell. */
+    besideCamera: (@Composable androidx.compose.foundation.layout.RowScope.() -> Unit)? = null,
 ) {
     if (onCameraFallback == null) return
     val ctx = LocalContext.current
@@ -106,8 +115,27 @@ internal fun AttachMediaStrip(
     ) { camera = cameraGranted(ctx) }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Box(modifier = Modifier.padding(horizontal = 12.dp)) {
-            Box(modifier = Modifier.size(CAMERA_CELL_DP.dp)) {
+        // ⚠ NO WIDTH IS ASSUMED. This ships to every screen Play serves, so the
+        // shelf may never depend on a number measured against one phone: on a
+        // narrow device a fixed row simply pushed the last tile off the edge
+        // (2026-08-04). FlowRow wraps instead of clipping — the tiles take a
+        // second line when they must, and nothing is ever unreachable.
+        // ⚠ PROPORTIONS, NOT MEASUREMENTS. Every size on this shelf is a share
+        // of the width it is actually given: the viewfinder takes a fixed
+        // fraction (clamped so it stays a usable square on a small phone and
+        // does not become a poster on a tablet), and the tiles beside it split
+        // what is left equally. It is one row on every screen Play serves,
+        // nothing is ever clipped, and no number here was measured on one
+        // device — which is exactly what went wrong before (2026-08-04).
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val shelf = maxWidth - 24.dp
+        val cameraW = (shelf * 0.28f).coerceIn(72.dp, 132.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(modifier = Modifier.width(cameraW).aspectRatio(1f)) {
                 CameraCell(
                     enabled = enabled,
                     live = camera,
@@ -115,16 +143,8 @@ internal fun AttachMediaStrip(
                     onFallback = onCameraFallback,
                 )
             }
+            if (besideCamera != null) besideCamera()
         }
-        if (enabled && embeddedPickerSupported()) {
-            EmbeddedPickerPane(
-                onPick = onPick,
-                onSelectionDone = onSelectionDone,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .height(EMBEDDED_PICKER_DP.dp),
-            )
         }
     }
 }
@@ -168,7 +188,7 @@ private const val EMBEDDED_PICKER_DP = 340
 
 /** Side of the viewfinder tile. Matches the old three-column tile on a phone, so
  *  the sheet keeps the proportions the user picked. */
-private const val CAMERA_CELL_DP = 110
+private const val CAMERA_CELL_DP = 88
 
 /**
  * Cell zero: a LIVE viewfinder once CAMERA is granted. Tapping it OPENS THE

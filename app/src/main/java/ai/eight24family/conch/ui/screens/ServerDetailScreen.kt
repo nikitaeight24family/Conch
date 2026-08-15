@@ -104,6 +104,7 @@ fun ServerDetailScreen(
     val err = MaterialTheme.colorScheme.error
 
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmForgetHostKey by remember { mutableStateOf(false) }
     var seamlessHelpOpen by remember { mutableStateOf(false) }
     // 1-Hz ticker for the device-key expiry countdown (only runs while seamless
     // is on, i.e. while the key row is visible).
@@ -164,6 +165,29 @@ fun ServerDetailScreen(
                 }) { Text("Delete", color = err) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+    if (confirmForgetHostKey && s != null) {
+        AlertDialog(
+            onDismissRequest = { confirmForgetHostKey = false },
+            title = { Text("Forget this host key?") },
+            // Says what it costs, not what it is. Forgetting is correct after
+            // YOU rebuilt the machine; it is exactly what an attacker in the
+            // middle needs you to do. Only the user knows which happened.
+            text = {
+                Text(
+                    "The next connection to ${s.host} will trust whatever key it's offered and pin " +
+                        "that instead. Do this if you rebuilt, moved or reinstalled the server. If the " +
+                        "key changed on its own, forgetting it hides a machine-in-the-middle."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmForgetHostKey = false
+                    vm.forgetHostKey()
+                }) { Text("Forget", color = err) }
+            },
+            dismissButton = { TextButton(onClick = { confirmForgetHostKey = false }) { Text("Cancel") } },
         )
     }
     if (seamlessHelpOpen) {
@@ -280,8 +304,26 @@ fun ServerDetailScreen(
             // ── // system (identity + live load; folds in the old status sheet) ──
             SectionLabel("// system")
             InfoRow("auth", s.authMethod.name.lowercase())
+            // The pin, and the only way out of it. A host-key mismatch is a hard
+            // refusal (the pool won't connect, the ladder won't retry), so the
+            // screen that SHOWS the fingerprint has to be the screen that can
+            // drop it — otherwise a server the user legitimately rebuilt is
+            // unreachable from inside the app forever.
             s.knownHostKey?.takeIf { it.isNotBlank() }?.let { fp ->
-                InfoRow("fingerprint", fp.take(48))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.weight(1f, fill = true)) { InfoRow("fingerprint", fp.take(48)) }
+                    TextButton(onClick = { confirmForgetHostKey = true }) {
+                        Text(
+                            "forget",
+                            color = MaterialTheme.colorScheme.outline,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
             HostStats(stats = stats, connected = connected, probing = probing)
 

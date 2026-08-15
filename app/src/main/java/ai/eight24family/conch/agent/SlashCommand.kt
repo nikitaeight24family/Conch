@@ -30,6 +30,19 @@ enum class SlashCommandKind {
      * channel with /compact, 2026-08-03).
      */
     AGENT_BUILTIN,
+    /**
+     * `/bg <task>` — hand a task to a DETACHED agent on the server
+     * (`claude --bg`). It is not tied to this chat's process or to the phone's
+     * connection: close the app, lose the network, the work carries on. The CLI
+     * answers `backgrounded · <id>` immediately and the agent writes an
+     * ordinary session file, so it shows up in the sessions list like any other
+     * chat and can be opened, read, and resumed from there.
+     *
+     * This is the honest form of the "background sessions" ask: `/background`
+     * and `/fork` themselves are `type:"local-jsx"` in the binary — screens of
+     * the terminal UI, with nothing behind them to call from here.
+     */
+    RUN_BACKGROUND,
 }
 
 data class SlashCommand(
@@ -53,6 +66,8 @@ object SlashCommands {
         SlashCommand("agents", "manage subagents (Claude only)",              SlashCommandKind.OPEN_AGENTS),
         SlashCommand("model",  "switch model (use the topbar dropdown)",      SlashCommandKind.OPEN_MODEL_PICKER),
         SlashCommand("review", "code review · /review [base-branch] (Codex)", SlashCommandKind.REVIEW, acceptsArgs = true),
+        SlashCommand("bg",     "run a task in the background · keeps going if you close the app",
+            SlashCommandKind.RUN_BACKGROUND, acceptsArgs = true),
     )
 
     /**

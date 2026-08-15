@@ -65,6 +65,10 @@ data class HomeSessionRow(
     /** Short badge for the blocked state (e.g. "no subscription", "rate limited"),
      *  or null when not blocked. */
     val codeBadge: String? = null,
+    /** Work FINISHED here since the user's last visit: the file grew past the
+     * seen watermark AND the server has gone quiet. Drives the row's ✓ mark —.
+     * Cleared the moment the chat is opened (the watermark catches up). */
+    val doneUnseen: Boolean = false,
 )
 
 /**
@@ -168,7 +172,13 @@ class HomeSessionsViewModel : ViewModel() {
         }
         viewModelScope.launch {
             while (true) {
-                reload()
+                // Home is the nav start destination, so this VM lives as long
+                // as the app process — WITHOUT the foreground gate this walked
+                // every server × agent × cached session off disk every 2.5 s
+                // with the app minimized, forever (battery). The event-driven
+                // collectors below keep the list correct; the periodic walk is
+                // only for a user actually looking at it.
+                if (ai.eight24family.conch.util.AppForeground.isForeground) reload()
                 delay(2_500)
             }
         }
@@ -214,6 +224,12 @@ class HomeSessionsViewModel : ViewModel() {
         viewModelScope.launch {
             val pool = ServiceLocator.sshConnectionPool
             while (true) {
+                // Backgrounded: nobody sees the header — nap coarsely instead
+                // of 100 wakeups/min (same rationale as the reload tick above).
+                if (!ai.eight24family.conch.util.AppForeground.isForeground) {
+                    delay(5_000)
+                    continue
+                }
                 val srv = servers.value
                 val connected = srv.count { pool.peek(it.id) != null }
                 _connectivity.value = Connectivity(connected, pool.connectingIds().size, srv.size)
@@ -229,6 +245,25 @@ class HomeSessionsViewModel : ViewModel() {
     // head only (ai-title sits near the top), take the LAST match, memoise per
     // session (bodies rarely change titles; the reload tick fires every 2.5s).
     private val bodyTitleCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Server-mtime freshness window that counts as "an agent is working in
+     *  this session". CLI writes the rollout continuously mid-turn; 90 s
+     *  covers the 30 s relist cadence + slow moments without flapping. */
+    private val SERVER_WORKING_WINDOW_MS = 90_000L
+
+    /** sessionId → (cached size, seen bytes, count) memo so the 2.5 s reload
+     *  only rescans a file tail when either side actually moved. */
+    private val unreadCache =
+        java.util.concurrent.ConcurrentHashMap<String, Triple<Long, Long, Int>>()
+
+    private fun durableUnreadCached(sessionId: String, seenB: Long): Int {
+        val size = ServiceLocator.historyCache.size(sessionId)
+        if (size <= seenB) return 0
+        unreadCache[sessionId]?.let { (s, b, n) -> if (s == size && b == seenB) return n }
+        val n = ServiceLocator.historyCache.newLinesSince(sessionId, seenB)
+        unreadCache[sessionId] = Triple(size, seenB, n)
+        return n
+    }
     private val aiTitleRe = Regex("\"aiTitle\":\"([^\"]*)\"")
     private fun titleFromBody(sessionId: String): String? {
         bodyTitleCache[sessionId]?.let { return it.ifEmpty { null } }
@@ -319,11 +354,32 @@ class HomeSessionsViewModel : ViewModel() {
                     // re-listed it back into the cache (server `rm` not landed yet).
                     if ("${s.id}:${sess.id}" in tombstones) continue
                     val live = ServiceLocator.agentSessions.findByResume(s.id, agent, sess.id)
-                    val working = live != null &&
+                    val liveWorking = live != null &&
                         live.state.value == ai.eight24family.conch.agent.SessionState.Working
-                    val unread = if (live != null)
+                    // SERVER-driven working — survives an app restart. The
+                    // relist sweep refreshes mtimes every 30 s.
+                    val serverWorking =
+                        System.currentTimeMillis() - sess.lastActiveAt * 1000L < SERVER_WORKING_WINDOW_MS
+                    // Local-cache freshness beats both other signals: the mirror
+                    // file's own mtime moves whenever the poller / background
+                    // catch-up appends — no server clock, no listing lag. It is
+                    // what stops the ✓ from showing over a session that is
+                    // VISIBLY still streaming.
+                    val cacheWorking =
+                        System.currentTimeMillis() - ServiceLocator.historyCache.lastWriteMs(sess.id) < SERVER_WORKING_WINDOW_MS
+                    val working = liveWorking || serverWorking || cacheWorking
+                    // Unread: live message count while this process has the
+                    // session (precise); otherwise the DURABLE byte watermark
+                    // vs the mirrored body — new JSONL lines since last view.
+                    val liveUnread = if (live != null)
                         ai.eight24family.conch.agent.SessionSeenTracker.unread(sess.id, live.history.value.size)
                     else 0
+                    val durableUnread = if (liveUnread > 0) 0 else run {
+                        val seenB = ServiceLocator.historyCache.seenBytes(sess.id)
+                        if (seenB == null) 0 else durableUnreadCached(sess.id, seenB)
+                    }
+                    val unread = maxOf(liveUnread, durableUnread)
+                    val doneUnseen = !working && unread > 0
                     // Single source of truth for "last activity": the persisted,
                     // monotonic SessionActivityStore (fed by local sends/replies +
                     // remote mtime sweeps, maxed at write time). Fall back to the
@@ -353,6 +409,7 @@ class HomeSessionsViewModel : ViewModel() {
                         draftText = draftsByChat[sess.id],
                         codeBlocked = agentBlocked,
                         codeBadge = if (agentBlocked) agentState?.badge else null,
+                        doneUnseen = doneUnseen,
                     )
                 }
             }

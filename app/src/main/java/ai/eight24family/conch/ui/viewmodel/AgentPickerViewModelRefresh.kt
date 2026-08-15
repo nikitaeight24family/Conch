@@ -270,23 +270,31 @@ internal class AgentPickerViewModelRefresh(
                 }
                 // Pre-flight TCP for non-SK paths too — same UX win
                 // (~4 s typed diagnosis vs. 15 s sshj timeout with an
-                // obscure exception class name).
-                val tcp = ai.eight24family.conch.ssh.TcpProbe.probe(server.host, server.port)
-                val diag = ai.eight24family.conch.ssh.ServerDiagnostics.classify(
-                    host = server.host,
-                    port = server.port,
-                    outcome = tcp,
-                    context = ServiceLocator.appContext,
-                )
-                if (diag !is ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Ok) {
-                    android.util.Log.w(
-                        "SshAi-AgentPicker",
-                        "pre-flight diagnosis for ${server.host}:${server.port} → ${diag::class.simpleName}"
+                // obscure exception class name). ONLY on an explicit user
+                // gesture: this used to run on every init/ON_RESUME
+                // navigation too, and each probe is a preauth disconnect in
+                // sshd's log — background refreshes were feeding the user's
+                // fail2ban a steady drip of them until the phone's IP got
+                // banned. An auto refresh has no user staring at a spinner,
+                // so it can afford the slow honest path below instead.
+                if (userTriggered) {
+                    val tcp = ai.eight24family.conch.ssh.TcpProbe.probe(server.host, server.port)
+                    val diag = ai.eight24family.conch.ssh.ServerDiagnostics.classify(
+                        host = server.host,
+                        port = server.port,
+                        outcome = tcp,
+                        context = ServiceLocator.appContext,
                     )
-                    if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
-                        diagnosisMut.value = diag
+                    if (diag !is ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Ok) {
+                        android.util.Log.w(
+                            "SshAi-AgentPicker",
+                            "pre-flight diagnosis for ${server.host}:${server.port} → ${diag::class.simpleName}"
+                        )
+                        if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
+                            diagnosisMut.value = diag
+                        }
+                        return@launch
                     }
-                    return@launch
                 }
                 probe.probe(server, secrets)
                     .onSuccess { result ->

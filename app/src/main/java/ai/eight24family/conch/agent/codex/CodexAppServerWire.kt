@@ -283,6 +283,8 @@ internal object CodexAppServerWire {
      * byte-identical semantics with the exec flags.
      */
     fun approvalToPolicy(mode: AgentApprovalMode): Pair<String, String> = when (mode) {
+        // Codex has no plan mode — fall back to asking, never to acting.
+        AgentApprovalMode.PLAN,
         AgentApprovalMode.SAFE -> "on-request" to "workspace-write"
         AgentApprovalMode.AUTO -> "never" to "workspace-write"
         AgentApprovalMode.YOLO -> "never" to "danger-full-access"

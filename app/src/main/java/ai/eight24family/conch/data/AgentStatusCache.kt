@@ -91,7 +91,14 @@ class AgentStatusCache(private val context: Context) {
                 // a BLOCK verdict (no subscription / trial ended / …) survives
                 // restart/re-entry instead of reverting to a false "ready" until the
                 // next probe. Missing (older rows) / empty ⇒ null (unknown).
-                claudeState = ClaudeRunState.fromToken(parts.getOrNull(8)),
+                // RATE_LIMITED/NEAR_LIMIT are TRANSIENT: expire them at read
+                // time the moment their own resets_at passes — this cache has
+                // no TTL, so a spent window otherwise blocked every surface
+                // (chat banner, send gate, picker badge) long after the reset.
+                claudeState = expireTransient(
+                    ClaudeRunState.fromToken(parts.getOrNull(8)),
+                    parts.getOrNull(9)?.takeIf { it.isNotEmpty() },
+                ),
                 claudeStateData = parts.getOrNull(9)?.takeIf { it.isNotEmpty() },
             )
             if (newestTs == null || ts > newestTs) newestTs = ts
@@ -133,11 +140,15 @@ class AgentStatusCache(private val context: Context) {
                     val newSt = status.claudeState
                     if (newSt == null || newSt == ClaudeRunState.UNKNOWN) {
                         val old = prefs[key(serverId, agent)]?.split('|')
-                        val oldSt = ClaudeRunState.fromToken(old?.getOrNull(8))
+                        val oldData = old?.getOrNull(9)?.takeIf { it.isNotEmpty() }
+                        // Never resurrect a limit verdict whose reset already
+                        // passed — preserving it here was exactly how a stale
+                        // "rate limited" outlived its own reset time.
+                        val oldSt = expireTransient(ClaudeRunState.fromToken(old?.getOrNull(8)), oldData)
                         if (oldSt != null && oldSt != ClaudeRunState.UNKNOWN) {
                             s = status.copy(
                                 claudeState = oldSt,
-                                claudeStateData = old?.getOrNull(9)?.takeIf { it.isNotEmpty() },
+                                claudeStateData = oldData,
                             )
                         }
                     }
@@ -170,6 +181,11 @@ class AgentStatusCache(private val context: Context) {
             for (agent in Agent.entries) prefs.remove(key(serverId, agent))
         }
     }
+
+    /** Null out a transient limit state whose own reset moment has passed
+     *  (see [ClaudeRunState.isExpired]); every other state passes through. */
+    private fun expireTransient(state: ClaudeRunState?, data: String?): ClaudeRunState? =
+        if (ClaudeRunState.isExpired(state, data)) null else state
 
     private fun key(serverId: String, agent: Agent) =
         stringPreferencesKey("status/$serverId/${agent.name}")

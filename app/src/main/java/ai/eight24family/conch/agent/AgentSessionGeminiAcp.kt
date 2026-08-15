@@ -114,7 +114,7 @@ internal class AgentSessionGeminiAcp(
     /** Execute one turn. False ONLY on launch-level failure ([broken]
      *  set, prompt undelivered) — caller reruns via the one-shot path. */
     suspend fun runTurn(text: String, imagePaths: List<String> = emptyList()): Boolean = withContext(Dispatchers.IO) {
-        val client = sshLifecycle.sshClient
+        val client = sshLifecycle.liveClient()
         if (client == null || !client.isConnected) {
             android.util.Log.w(tag, "runTurn ABORT: transport down")
             onPromptUndelivered(text)
@@ -122,10 +122,17 @@ internal class AgentSessionGeminiAcp(
             return@withContext true
         }
         onStateChange(SessionState.Working)
+        // Re-arm at turn start: an idle Stop leaves userCancelled=true and the
+        // stale flag makes THIS turn take the "user Stop — silent" branch on a
+        // real failure (zombie chat). Same guard as Claude/Codex/one-shot.
+        sshLifecycle.userCancelled = false
         try {
             if (!ensureReady()) return@withContext false
             val sid = acpSessionId ?: run { broken = true; return@withContext false }
             turnSeq++
+            // Where this turn's output starts — the discriminator for "did the
+            // agent take the prompt before it died" below.
+            val historyAtTurnStart = history.history.value.size
             val promptId = reqCounter.incrementAndGet()
             val resp = rpc(
                 promptId,
@@ -141,8 +148,20 @@ internal class AgentSessionGeminiAcp(
                     android.util.Log.d(tag, "turn ended after user Stop — silent")
                 }
                 resp == null && !procAlive -> {
-                    android.util.Log.w(tag, "acp process died mid-turn — marking disconnected")
-                    onPromptUndelivered(text)
+                    // Same rule as the Claude/Codex channels: if anything came
+                    // back for this turn, the agent HAD the prompt and only the
+                    // answer died with the process — re-sending would re-run a
+                    // paid turn on every reconnect (2026-08-16). Silence means
+                    // the prompt may never have left, so it still goes back.
+                    if (history.hasAssistantOutputSince(historyAtTurnStart)) {
+                        android.util.Log.w(
+                            tag,
+                            "acp process died mid-turn after it took the prompt — reconnect only, NOT re-sending",
+                        )
+                    } else {
+                        android.util.Log.w(tag, "acp process died mid-turn with no output — handing the prompt back")
+                        onPromptUndelivered(text)
+                    }
                     onStateChange(SessionState.Failed("disconnected"))
                     return@withContext true
                 }
@@ -191,7 +210,7 @@ internal class AgentSessionGeminiAcp(
         if (procAlive) android.util.Log.d(tag, "launch params changed → restarting acp process")
         teardownProcess()
 
-        val client = sshLifecycle.sshClient ?: return false
+        val client = sshLifecycle.liveClient() ?: return false
         try {
             // autoExpand: the long-lived ACP channel is read continuously;
             // protect it from receive-window starvation under shared-transport
@@ -199,6 +218,8 @@ internal class AgentSessionGeminiAcp(
             val sess = client.startStreamSession()
             val modelArg = params.model?.let { " --model " + shellEscape(it) } ?: ""
             val approvalArg = when (params.approval) {
+                // Gemini has no plan mode — the closest truth is "ask about everything".
+                ai.eight24family.conch.data.prefs.AgentApprovalMode.PLAN,
                 ai.eight24family.conch.data.prefs.AgentApprovalMode.SAFE -> " --approval-mode default"
                 ai.eight24family.conch.data.prefs.AgentApprovalMode.AUTO -> " --approval-mode auto_edit"
                 ai.eight24family.conch.data.prefs.AgentApprovalMode.YOLO -> " --approval-mode yolo"
@@ -446,6 +467,12 @@ internal class AgentSessionGeminiAcp(
     fun cancelTurn() {
         sshLifecycle.userCancelled = true
         val sid = acpSessionId
+        // ⚠ Fenced to the turn Stop was aimed at — see the same guard in
+        // AgentSessionCodexAppServer.cancelTurn. Escalating on "the session is
+        // Working" kills whatever is running four seconds later, and four
+        // seconds is exactly long enough for the user to hit Stop and send a
+        // correction, so the kill lands on their NEW turn.
+        val target = turnSeq
         scope.launch {
             pendingPermissions.entries.toList().forEach { (key, pending) ->
                 writeLine(GeminiAcpWire.encodePermissionCancelled(pending.idElement))
@@ -453,6 +480,10 @@ internal class AgentSessionGeminiAcp(
             }
             if (sid != null) writeLine(GeminiAcpWire.encodeCancel(sid))
             kotlinx.coroutines.delay(4_000)
+            if (turnSeq != target) {
+                android.util.Log.d(tag, "stop escalation skipped — a newer turn owns the process now")
+                return@launch
+            }
             if (getState() == SessionState.Working && procAlive) {
                 android.util.Log.w(tag, "cancel not honored in 4s — killing acp process")
                 teardownProcess()
@@ -474,7 +505,7 @@ internal class AgentSessionGeminiAcp(
             android.util.Log.w(
                 tag,
                 "stdin write failed: ${t.javaClass.name}: ${t.message} " +
-                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.sshClient?.isConnected} alive=$procAlive",
+                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.liveClient()?.isConnected} alive=$procAlive",
                 t,
             )
             procAlive = false

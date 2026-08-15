@@ -61,6 +61,22 @@ object TcpProbe {
                 socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
                 val openMs = System.currentTimeMillis() - t0
                 android.util.Log.d(tag, "  ✓ TCP open in ${openMs}ms")
+                // Send OUR identification string BEFORE reading the banner.
+                // A connect that reads sshd's banner and closes without ever
+                // identifying is logged as "Did not receive identification
+                // string from <IP>" — a line fail2ban's ddos/aggressive modes
+                // BAN on, and this probe was the app's only source of it (the
+                // user's own fail2ban kept banning the phone). With an ident
+                // sent, the close is an ordinary preauth disconnect. RFC 4253
+                // allows the client to send its ident first, so this is safe
+                // against non-SSH ports too (they ignore or reset — both
+                // already-handled outcomes).
+                SilentlyTry.fired(tag, "send probe ident") {
+                    socket.getOutputStream().apply {
+                        write("SSH-2.0-ConchProbe\r\n".toByteArray(Charsets.US_ASCII))
+                        flush()
+                    }
+                }
                 // Banner read — best-effort, capped at 16 bytes / bannerTimeoutMs.
                 val banner: ByteArray? = readBanner(socket, bannerTimeoutMs)
                 android.util.Log.d(

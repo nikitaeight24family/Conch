@@ -499,6 +499,14 @@ data class ExecInput(
      * Gemini ignores. Null = use whatever the CLI/model defaults to.
      */
     val reasoningEffort: String? = null,
+    /**
+     * Fork the resumed session instead of continuing it (Claude's
+     * `--fork-session`): the whole conversation is inherited, the CLI mints a
+     * NEW session id, and the original is left exactly as it was. Only ever
+     * true for the FIRST launch of a forked chat — after that the fork has an
+     * id of its own and is an ordinary session.
+     */
+    val forkSession: Boolean = false,
 )
 
 /**

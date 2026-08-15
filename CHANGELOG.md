@@ -11,6 +11,52 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.3] — 2026-08-16
+
+### Fixed
+- **A dropped connection recovers instead of looping.** `retry()` evicted the
+  pooled transport by server id, so it destroyed the healthy connection the
+  silent reconnect had built a second earlier — including on the rescue path
+  whose entry condition is "the connection is live". And a chat could adopt a
+  session already parked in `Failed`, because "is the transport up" was being
+  asked instead of "can this session still carry a turn": the rebuilt chat
+  inherited a dead state every cycle and never reached Running, which is the
+  only moment a parked message is delivered. The app reconnected every few
+  seconds indefinitely, re-reading the whole session file each time, while the
+  message you typed sat there undeliverable.
+- **A prompt the CLI already took is never sent twice.** All three persistent
+  channels treated "the process died mid-turn" as "the prompt never arrived".
+  Once the CLI has it, it is in the rollout and comes back on resume — what
+  died is the answer. On a flapping link every reconnect used to re-run the
+  whole turn. Genuine silence after the write still redelivers.
+- **Servers remember their host key.** The pooled path accepted a "new" host
+  key on every connect and threw the fingerprint away, so nothing was ever
+  pinned and the fingerprint the app displayed was a check that never ran. It
+  now pins after the first successful auth, refuses a changed key with an
+  explanation instead of a library error, and never retries that state in a
+  loop. Server detail → fingerprint → **forget** is the way back after you
+  rebuild a machine yourself.
+- Stop kills a turn running on the server, not just the local view.
+- The reconnect banner reflects the real connection state instead of counting
+  attempts over a live link.
+
+### Added
+- **Task board** — the CLI's own checklist, pinned above the prompt bar and
+  rendered the way the terminal renders it.
+- **Subagent roster** for the agents a turn spawns, and a live
+  `name · N/M agents · elapsed` line for a background workflow, read from the
+  run's own journal rather than guessed from the transcript.
+- **Terminal**: its own font, pinch to zoom, scrollable history.
+- **Restart the CLI from the chat** without leaving the session.
+- Queued messages combine into one prompt; ✕ on a queued row returns its text
+  to the composer instead of discarding it.
+
+### Changed
+- Attachments: the camera plus the full-screen system picker.
+- A turn's timer survives leaving and re-entering the chat.
+
+---
+
 ## [0.3.2] — 2026-08-03
 
 ### Fixed
@@ -914,6 +960,9 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.3
+[0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
+[0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
 [0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13

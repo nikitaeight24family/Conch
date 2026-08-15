@@ -1,6 +1,10 @@
 package ai.eight24family.conch.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -33,6 +37,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
@@ -79,8 +85,33 @@ import androidx.compose.foundation.text.KeyboardOptions
  * value-delta path. The viewport size is measured from the available space
  * and pushed to the PTY (SIGWINCH), so vim/htop/tmux size correctly.
  */
-private val TERM_FONT_SIZE = 13.sp
-private val TERM_LINE_HEIGHT = 16.sp
+/**
+ * Cell metrics in **dp**, deliberately not sp.
+ *
+ * A terminal is a grid, not prose: with `sp` the system font-size setting
+ * multiplies it, and on a phone set to large text the grid collapsed to about
+ * twenty columns — every line wrapped, and the CLI's own layout came apart.
+ * dp keeps the cell tied to the screen's density, which is what decides how
+ * many columns actually fit. Accessibility scaling belongs to the CHAT, where
+ * text reflows.
+ */
+/** Survives leaving the screen; a terminal you have to re-size every time is
+ *  worse than one that is simply too small. */
+private object TerminalPrefs { var scale: Float = 1f }
+
+private val TERM_FONT_DP = 12.dp
+private val TERM_LINE_DP = 15.dp
+
+/**
+ * The app's own monospace face, not the system's.
+ *
+ * `FontFamily.Monospace` on this phone has no box-drawing or status glyphs, so
+ * the CLI's own footer rendered as tofu (`⊠ ⊠ bypass`). JetBrains Mono ships in
+ * the APK already and covers them.
+ */
+private val TERM_FAMILY = FontFamily(
+    androidx.compose.ui.text.font.Font(ai.eight24family.conch.R.font.jetbrains_mono),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,8 +129,16 @@ fun TerminalScreen(
     // Pull focus on entry so a hardware keyboard (DeX) types immediately.
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
 
-    val termStyle = remember {
-        TextStyle(fontFamily = FontFamily.Monospace, fontSize = TERM_FONT_SIZE, lineHeight = TERM_LINE_HEIGHT)
+    val termDensity = LocalDensity.current
+    // PINCH TO SIZE IT. Neither the system font scale nor the display-size
+    // setting can pick a column count that suits a terminal: 44 columns is
+    // comfortable for some output and useless for a TUI that wants 80. The
+    // user's own pinch is the only honest input, and it survives the session.
+    var termScale by rememberSaveable { mutableFloatStateOf(TerminalPrefs.scale) }
+    val termFontSp = with(termDensity) { (TERM_FONT_DP * termScale).toSp() }
+    val termLineSp = with(termDensity) { (TERM_LINE_DP * termScale).toSp() }
+    val termStyle = remember(termFontSp, termLineSp) {
+        TextStyle(fontFamily = TERM_FAMILY, fontSize = termFontSp, lineHeight = termLineSp)
     }
     val defFg = MaterialTheme.colorScheme.onSurface
     val defBg = MaterialTheme.colorScheme.background
@@ -193,7 +232,9 @@ fun TerminalScreen(
                 val charWpx = remember(termStyle, density) {
                     measurer.measure(AnnotatedString("M".repeat(40)), termStyle).size.width / 40f
                 }
-                val lineHpx = remember(termStyle, density) { with(density) { TERM_LINE_HEIGHT.toPx() } }
+                val lineHpx = remember(termStyle, density, termScale) {
+                    with(density) { (TERM_LINE_DP * termScale).toPx() }
+                }
                 val padPx = with(density) { 6.dp.toPx() }
 
                 val cols = (((constraints.maxWidth - padPx) / charWpx).toInt()).coerceIn(20, 400)
@@ -201,14 +242,36 @@ fun TerminalScreen(
 
                 LaunchedEffect(cols, rows) { vm.resize(cols, rows) }
 
+                // SCROLLBACK. The live screen is the last `rows` lines; above it
+                // sits everything that scrolled off. Sticks to the bottom while
+                // the user is at the bottom, and stays put the moment they scroll
+                // up — output arriving must never yank the page out from under
+                // someone reading it.
+                val vScroll = rememberScrollState()
+                var pinned by remember { mutableStateOf(true) }
+                LaunchedEffect(vScroll.value, vScroll.maxValue) {
+                    pinned = vScroll.value >= vScroll.maxValue - lineHpx.toInt()
+                }
+                LaunchedEffect(screen.version) {
+                    if (pinned) vScroll.scrollTo(vScroll.maxValue)
+                }
                 Text(
                     text = renderScreen(screen, defFg, defBg),
                     style = termStyle,
                     softWrap = false,
-                    maxLines = screen.rows,
+                    maxLines = screen.history.size + screen.rows,
                     color = defFg,
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
+                        .verticalScroll(vScroll)
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, _, zoom, _ ->
+                                if (zoom != 1f) {
+                                    termScale = (termScale * zoom).coerceIn(0.5f, 2.5f)
+                                    TerminalPrefs.scale = termScale
+                                }
+                            }
+                        }
                         .padding(horizontal = 3.dp),
                 )
 
@@ -224,7 +287,7 @@ fun TerminalScreen(
                             imeField = nv
                         }
                     },
-                    textStyle = TextStyle(color = Color.Transparent, fontSize = TERM_FONT_SIZE),
+                    textStyle = TextStyle(color = Color.Transparent, fontSize = termFontSp),
                     cursorBrush = SolidColor(Color.Transparent),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Ascii,
@@ -285,30 +348,51 @@ private fun KeyChip(label: String, onClick: () -> Unit) {
 
 /** Build the whole screen as one AnnotatedString — runs of identical style
  *  are coalesced into spans; the cursor cell is rendered as an inverted block. */
+/** Row separator as a char — a literal newline in source gets mangled. */
+private val NL = 10.toChar()
+
 private fun renderScreen(screen: VtScreen, defFg: Color, defBg: Color): AnnotatedString =
     buildAnnotatedString {
+        // Scrollback first, live screen last — ONE continuous block, so what
+        // scrolled away and what is on screen can never disagree about their
+        // order. The cursor never lives up here, hence row = -1.
+        for (row in screen.history) {
+            appendRow(row, -1, screen, defFg, defBg)
+            append(NL)
+        }
         for (y in 0 until screen.rows) {
             val row = screen.lines.getOrNull(y) ?: continue
-            val n = row.ch.size
-            var x = 0
-            while (x < n) {
-                val cursorHere = screen.cursorVisible && y == screen.cursorRow && x == screen.cursorCol
-                val fgI = row.fg[x]; val bgI = row.bg[x]; val fl = row.fl[x]
-                var x2 = x + 1
-                if (!cursorHere) {
-                    while (x2 < n &&
-                        !(screen.cursorVisible && y == screen.cursorRow && x2 == screen.cursorCol) &&
-                        row.fg[x2] == fgI && row.bg[x2] == bgI && row.fl[x2] == fl
-                    ) x2++
-                }
-                withStyle(cellStyle(fgI, bgI, fl, cursorHere, defFg, defBg)) {
-                    append(String(row.ch, x, x2 - x))
-                }
-                x = x2
-            }
-            if (y < screen.rows - 1) append('\n')
+            appendRow(row, y, screen, defFg, defBg)
+            if (y < screen.rows - 1) append(NL)
         }
     }
+
+/** One row as runs of identical style; the cursor cell renders inverted. */
+private fun AnnotatedString.Builder.appendRow(
+    row: ai.eight24family.conch.ui.terminal.VtRow,
+    y: Int,
+    screen: VtScreen,
+    defFg: Color,
+    defBg: Color,
+) {
+    val n = row.ch.size
+    var x = 0
+    while (x < n) {
+        val cursorHere = screen.cursorVisible && y == screen.cursorRow && x == screen.cursorCol
+        val fgI = row.fg[x]; val bgI = row.bg[x]; val fl = row.fl[x]
+        var x2 = x + 1
+        if (!cursorHere) {
+            while (x2 < n &&
+                !(screen.cursorVisible && y == screen.cursorRow && x2 == screen.cursorCol) &&
+                row.fg[x2] == fgI && row.bg[x2] == bgI && row.fl[x2] == fl
+            ) x2++
+        }
+        withStyle(cellStyle(fgI, bgI, fl, cursorHere, defFg, defBg)) {
+            append(String(row.ch, x, x2 - x))
+        }
+        x = x2
+    }
+}
 
 private fun rgb(v: Int): Color = Color((v shr 16) and 0xFF, (v shr 8) and 0xFF, v and 0xFF)
 

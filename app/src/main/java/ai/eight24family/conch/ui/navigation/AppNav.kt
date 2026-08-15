@@ -65,7 +65,7 @@ object Routes {
     // connecting) keeps the live-probe behaviour.
     const val AGENTS = "agents/{serverId}?browse={browse}&login={login}"
     const val SESSIONS = "sessions/{serverId}/{agent}"
-    const val CHAT = "chat/{serverId}/{agent}?resume={resume}&path={path}&model={model}&reasoning={reasoning}&q={q}&mid={mid}&ord={ord}&off={off}"
+    const val CHAT = "chat/{serverId}/{agent}?resume={resume}&path={path}&model={model}&reasoning={reasoning}&fork={fork}&q={q}&mid={mid}&ord={ord}&off={off}"
 
     /** Sentinel `serverId` for a chat opened READ-ONLY from local cache when
      * we no longer know (or never recorded) which server owned the session —
@@ -179,6 +179,9 @@ object Routes {
         // jitter between index-time and chat-open-time can never point
         // at the wrong message. Both null on the normal session-row
         // tap path.
+        /** Open the resumed session as a FORK: the new chat inherits the whole
+         *  conversation and the CLI mints a new id, leaving the original alone. */
+        fork: Boolean = false,
         searchHighlight: String? = null,
         searchHitMsgId: String? = null,
         searchHitOrdinal: Int? = null,
@@ -189,6 +192,7 @@ object Routes {
             if (resumePath != null) add("path=" + URLEncoder.encode(resumePath, "UTF-8"))
             if (sessionModel != null) add("model=" + URLEncoder.encode(sessionModel, "UTF-8"))
             if (sessionReasoning != null) add("reasoning=" + URLEncoder.encode(sessionReasoning, "UTF-8"))
+            if (fork) add("fork=1")
             if (searchHighlight != null) add("q=" + URLEncoder.encode(searchHighlight, "UTF-8").replace("+", "%20"))
             if (searchHitMsgId != null) add("mid=" + URLEncoder.encode(searchHitMsgId, "UTF-8").replace("+", "%20"))
             if (searchHitOrdinal != null) add("ord=$searchHitOrdinal")
@@ -478,6 +482,11 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                     nullable = true
                     defaultValue = null
                 },
+                navArgument("fork") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
                 navArgument("q") {
                     type = NavType.StringType
                     nullable = true
@@ -524,6 +533,12 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                     nav.navigate(Routes.fileViewer(uri.toString(), filename, serverId, remotePath))
                 },
                 onOpenTerminal = { sid, name -> nav.navigate(Routes.terminal(sid, name)) },
+                // Fork: open a NEW chat on the same session id, flagged so the
+                // CLI inherits the conversation and mints its own id. The chat
+                // we came from stays exactly as it was, which is the point.
+                onForkChat = { resumeId ->
+                    nav.navigate(Routes.chat(id, agent, resumeId = resumeId, fork = true))
+                },
             )
         }
         composable(

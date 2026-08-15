@@ -1008,18 +1008,16 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val alreadyCached = window.count { historyCache.size(it.id) > 0L }
         _prefetchProgress.value = PrefetchProgress(done = alreadyCached, total = total)
 
-        // For SK servers we can prefetch ONLY when the pool has a
-        // live client (user already paid for one touch via
-        // tap-to-connect / chat-open). Each fetch then opens a fresh
-        // channel on the existing transport — no new auth, no second
-        // touch. With no live pool client we'd need a fresh handshake
-        // per session = a touch per session = unworkable.
-        val pooledClient: net.schmizz.sshj.SSHClient? = if (secrets.skKeys.isNotEmpty()) {
+        // Prefetch rides the POOLED transport only — for every auth kind, not
+        // just SK. The non-SK fallback opened a FRESH handshake per session
+        // file (N connect+auth+disconnect cycles 150 ms apart — a burst
+        // indistinguishable from a scan, and a fail2ban feeder when creds go
+        // stale). If the pool is down, the silent auto-connect paths own
+        // bringing it up; prefetch just waits for the next visit.
+        val pooledClient: net.schmizz.sshj.SSHClient? =
             ServiceLocator.sshConnectionPool.peek(serverId)
-        } else null
-
-        if (secrets.skKeys.isNotEmpty() && pooledClient == null) {
-            android.util.Log.d("SshAi-Prefetch", "skipped for SK server $serverId (no live pool client)")
+        if (pooledClient == null) {
+            android.util.Log.d("SshAi-Prefetch", "skipped for $serverId (no live pool client)")
             return
         }
 
@@ -1044,24 +1042,20 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     continue
                 }
                 try {
-                    val raw = if (pooledClient != null) {
-                        // Ride the pooled client — fresh channel per fetch,
-                        // no auth round-trip.
-                        val client = pooledClient
-                        discovery.fetchSessionContent(s.path) { cmd ->
-                            SilentlyTry.logged("SshAi-Sessions", "fetch session content for prefetch") {
-                                val sess = client.startSession()
-                                try {
-                                    val proc = sess.exec(cmd)
-                                    val out = java.io.ByteArrayOutputStream()
-                                    proc.inputStream.copyTo(out)
-                                    proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
-                                    String(out.toByteArray(), Charsets.UTF_8)
-                                } finally { SilentlyTry.fired("SshAi-Sessions", "close prefetch session") { sess.close() } }
-                            }
+                    // Ride the pooled client — fresh channel per fetch,
+                    // no auth round-trip.
+                    val client = pooledClient
+                    val raw = discovery.fetchSessionContent(s.path) { cmd ->
+                        SilentlyTry.logged("SshAi-Sessions", "fetch session content for prefetch") {
+                            val sess = client.startSession()
+                            try {
+                                val proc = sess.exec(cmd)
+                                val out = java.io.ByteArrayOutputStream()
+                                proc.inputStream.copyTo(out)
+                                proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
+                                String(out.toByteArray(), Charsets.UTF_8)
+                            } finally { SilentlyTry.fired("SshAi-Sessions", "close prefetch session") { sess.close() } }
                         }
-                    } else {
-                        discovery.fetchSessionContent(server, secrets, s.path)
                     }
                     if (raw.isNullOrBlank()) {
                         android.util.Log.d(tag, "  skip ${s.id.take(8)} (empty/null)")

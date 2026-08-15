@@ -39,6 +39,10 @@ class VtEmulator(cols: Int, rows: Int) {
     companion object {
         const val DEFAULT_COLOR = -1
 
+        /** Lines of history kept above the screen. ~8 screenfuls on a phone,
+         *  bounded so a runaway `yes` can't eat the heap. */
+        const val MAX_SCROLLBACK = 2000
+
         private val ANSI16 = intArrayOf(
             0x000000, 0xCD0000, 0x00CD00, 0xCDCD00, 0x1E90FF, 0xCD00CD, 0x00CDCD, 0xE5E5E5,
             0x7F7F7F, 0xFF0000, 0x00FF00, 0xFFFF00, 0x5C9FFF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
@@ -91,6 +95,18 @@ class VtEmulator(cols: Int, rows: Int) {
     var applicationCursorKeys = false; private set
     var bracketedPaste = false; private set
     private var altScreen = false
+
+    /**
+     * SCROLLBACK — lines that left the top of the screen.
+     *
+     * A terminal without it can only ever show the last screenful, which is
+     * what made ours useless the moment anything printed more than a page.
+     * Only the PRIMARY screen feeds it: a full-screen app on the alt screen
+     * owns its viewport and scrolling ITS repaints would be nonsense — that
+     * is why real terminals don't either. Bounded, so a `yes` loop can't
+     * eat the heap.
+     */
+    private val scrollback = ArrayDeque<VtRow>()
 
     private var version = 0L
 
@@ -429,6 +445,13 @@ class VtEmulator(cols: Int, rows: Int) {
         val cnt = n.coerceAtLeast(1)
         for (i in 0 until cnt) {
             val top = ch[scrollTop]; val topFg = fg[scrollTop]; val topBg = bg[scrollTop]; val topFl = fl[scrollTop]
+            // Keep the line that is about to be overwritten — but only when the
+            // whole screen is scrolling on the primary buffer. A partial scroll
+            // region is a pane inside an app, not conversation history.
+            if (!altScreen && scrollTop == 0 && scrollBottom == rows - 1) {
+                scrollback.addLast(VtRow(top.copyOf(), topFg.copyOf(), topBg.copyOf(), topFl.copyOf()))
+                while (scrollback.size > MAX_SCROLLBACK) scrollback.removeFirst()
+            }
             for (y in scrollTop until scrollBottom) {
                 ch[y] = ch[y + 1]; fg[y] = fg[y + 1]; bg[y] = bg[y + 1]; fl[y] = fl[y + 1]
             }
@@ -482,7 +505,13 @@ class VtEmulator(cols: Int, rows: Int) {
         val out = Array(rows) { y ->
             VtRow(ch[y].copyOf(), fg[y].copyOf(), bg[y].copyOf(), fl[y].copyOf())
         }
-        return VtScreen(cols, rows, out, curRow, curCol, cursorVisible, version)
+        // History travels WITH the frame: the UI renders one continuous block
+        // (scrollback first, live screen last) so the user scrolls a single
+        // list instead of two views that can disagree.
+        val hist = if (altScreen) emptyList() else scrollback.map {
+            VtRow(it.ch.copyOf(), it.fg.copyOf(), it.bg.copyOf(), it.fl.copyOf())
+        }
+        return VtScreen(cols, rows, out, curRow, curCol, cursorVisible, version, hist)
     }
 }
 
@@ -495,6 +524,9 @@ class VtScreen(
     val cursorCol: Int,
     val cursorVisible: Boolean,
     val version: Long,
+    /** Lines that scrolled off the top, oldest first. Empty on the alternate
+     *  screen — a full-screen app owns its viewport. */
+    val history: List<VtRow> = emptyList(),
 )
 
 class VtRow(

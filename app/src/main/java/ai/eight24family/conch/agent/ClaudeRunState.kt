@@ -100,5 +100,19 @@ enum class ClaudeRunState(
             token?.trim()?.takeIf { it.isNotEmpty() }?.let { t ->
                 entries.firstOrNull { it.name == t }
             }
+
+        /** True when a TRANSIENT limit state's own datum says the window has
+         * already reset: [state] is [RATE_LIMITED]/[NEAR_LIMIT] and [data]
+         * parses as an ISO instant that is in the past. These states are
+         * cached with no TTL and re-probes can come back indeterminate (the
+         * save-path then preserves the old verdict) — without this check a
+         * spent window kept blocking the chat HOURS after its own "resets
+         * 4:59 AM" had passed. A datum we can't parse (a CLI phrase like "in
+         * 3h") can't be judged → not expired; */
+        fun isExpired(state: ClaudeRunState?, data: String?, nowMs: Long = System.currentTimeMillis()): Boolean {
+            if (state != RATE_LIMITED && state != NEAR_LIMIT) return false
+            val resetMs = parseIsoInstant(data) ?: return false
+            return resetMs <= nowMs
+        }
     }
 }

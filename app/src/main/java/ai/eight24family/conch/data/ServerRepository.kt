@@ -84,6 +84,21 @@ class ServerRepository(
     }
 
     /**
+     * Drop the pinned host key so the next connect trusts-on-first-use again.
+     *
+     * The user's escape hatch from a legitimate host-key change (server
+     * rebuilt, moved, reinstalled). Without it, pinning would be a one-way door
+     * — every future connect refused with no way back inside the app, which is
+     * why the pin was worth nothing before: the pooled path simply never wrote
+     * one. Deliberately explicit and per-server; nothing clears a pin
+     * automatically.
+     */
+    suspend fun forgetKnownHostKey(id: String) {
+        val current = dao.getById(id) ?: return
+        dao.upsert(current.copy(knownHostKey = null))
+    }
+
+    /**
      * Append [keyId] to the server's enrolled-key list. No-op if it's
      * already attached. Order is preserved so newly added keys sit at
      * the bottom of edit-screen lists.

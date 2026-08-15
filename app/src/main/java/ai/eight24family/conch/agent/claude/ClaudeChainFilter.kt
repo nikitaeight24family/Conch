@@ -95,12 +95,15 @@ internal object ClaudeChainFilter {
         private val userUuids = HashSet<String>()
         private var lastUuid: String? = null
         private var lastLeaf: String? = null
+        /** True once a uuid-carrying record lands AFTER the last `last-prompt`
+         *  marker. See [resolve] — it decides which record is the live tip. */
+        private var recordAfterLeaf = false
 
         fun feed(line: String) {
             if (line.isEmpty() || line[0] != '{') return
             val uuid = readKey(line, UUID_KEY)
             if (uuid == null) {
-                readKey(line, LEAF_KEY)?.let { lastLeaf = it }
+                readKey(line, LEAF_KEY)?.let { lastLeaf = it; recordAfterLeaf = false }
                 return
             }
             val parent = readKey(line, PARENT_KEY).orEmpty()
@@ -109,9 +112,11 @@ internal object ClaudeChainFilter {
             }
             if (line.contains(USER_TYPE)) userUuids.add(uuid)
             lastUuid = uuid
+            recordAfterLeaf = true
         }
 
-        fun result(): Set<String> = resolve(parentOf, childCount, userUuids, lastUuid, lastLeaf)
+        fun result(): Set<String> =
+            resolve(parentOf, childCount, userUuids, lastUuid, lastLeaf, recordAfterLeaf)
     }
 
     /**
@@ -134,6 +139,8 @@ internal object ClaudeChainFilter {
         userUuids: Set<String>,
         lastUuid: String?,
         lastLeaf: String?,
+        /** Did any real record land after the last `last-prompt` marker? */
+        recordAfterLeaf: Boolean,
     ): Set<String> {
         // ⚠ A GENUINE FORK IS THE ONLY LICENCE TO HIDE ANYTHING. A parent with
         // two or more children is what a rewind leaves behind; nothing else
@@ -151,7 +158,21 @@ internal object ClaudeChainFilter {
         // cost of this narrower rule is that a rewind with nothing sent yet
         // reappears if the chat is REOPENED before the next prompt.
         val forkPoints = childCount.filterValues { it > 1 }.keys
-        val leaf = lastLeaf?.takeIf { parentOf.containsKey(it) } ?: lastUuid ?: return emptySet()
+        // ⚠ THE MARKER IS NOT THE TIP. `last-prompt` is ROUTINE bookkeeping —
+        // the CLI writes one naming the current tip after every single turn
+        // (14 of them in one ordinary session on the user's box). Only its
+        // POSITION distinguishes a rewind: a marker with nothing after it may
+        // still name a record the chain moved past, but the moment real
+        // records follow it, THEY are the live tip and the marker is history.
+        // Trusting the marker regardless is what made a freshly sent prompt
+        // vanish from the transcript: the new user record was a child of the
+        // marker's leaf, so it was judged an abandoned branch and hidden —
+        // the user's own message, gone from a chat that was working fine.
+        val leaf = if (recordAfterLeaf) {
+            lastUuid ?: return emptySet()
+        } else {
+            lastLeaf?.takeIf { parentOf.containsKey(it) } ?: lastUuid ?: return emptySet()
+        }
         // Second, equally narrow licence: the CLI's own `leafUuid` names a
         // record that is NOT the last one written. That is a rewind whose
         // replacement turn hasn't been sent yet — no fork exists, so the rule

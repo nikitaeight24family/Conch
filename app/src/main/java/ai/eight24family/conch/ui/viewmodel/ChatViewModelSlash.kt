@@ -50,6 +50,11 @@ internal class ChatViewModelSlash(
     private val postSendUpdate: (newAgentSessionId: String?) -> Unit,
     /** Memory editor display. */
     private val newSession: () -> Unit,
+    /** One-line, dismissible message shown over the chat. */
+    private val notice: (String) -> Unit = {},
+    /** Send text as an ordinary turn through the VM's own send path — bubble,
+     *  visible outbox, cancel — without re-entering slash dispatch. */
+    private val sendAsTurn: (String) -> Unit = {},
 ) {
     private val _customCommands = MutableStateFlow<List<SlashCommand>>(emptyList())
     val customCommands: StateFlow<List<SlashCommand>> = _customCommands.asStateFlow()
@@ -73,13 +78,6 @@ internal class ChatViewModelSlash(
      */
     fun runSlash(text: String): Boolean {
         val (name, args) = SlashCommands.parse(text) ?: return false
-        // Ours + the user's files + everything the CLI itself offers. Anything
-        // we don't recognise is NOT an error: the CLI has its own commands,
-        // skills, and plugins, and it gains more with every release — a phone
-        // client that vets the name can only ever be behind. `/loop` was in the
-        // CLI's own list and we still popped "no such command" over it (user,
-        // 2026-08-03). Unknown → return false so the caller sends the line as a
-        // normal turn and the CLI answers for itself.
         val cmd = SlashCommands.find(name, _customCommands.value + _agentCommands.value)
             ?: return false
         dispatchSlash(cmd, args)
@@ -118,8 +116,16 @@ internal class ChatViewModelSlash(
             SlashCommandKind.CUSTOM -> sendCustom(cmd, args)
             // The CLI runs its own commands from a plain turn — that is how
             // /compact, /context, /doctor and every skill are invoked. We send
-            // exactly what the user would have typed.
+            // exactly what the user would have typed. `/loop` is the one
+            // command that must OUTLIVE this chat, so it does not run inside it
+            // — see [runLoopDetached]. ⚠ NO COMMAND OF THE CLI'S MAY CREATE A
+            // SESSION BEHIND THE USER'S BACK. `/loop` was briefly routed
+            // through `--bg --fork-session` to survive the app closing; it
+            // inherited the conversation, and the fork showed up in the list as
+            // another copy of the chat — four of them before the user counted.
+            // Forking stays where it belongs: the explicit menu item.
             SlashCommandKind.AGENT_BUILTIN -> sendAgentBuiltin(cmd, args)
+            SlashCommandKind.RUN_BACKGROUND -> runInBackground(args)
         }
     }
 
@@ -164,8 +170,7 @@ internal class ChatViewModelSlash(
             }
             val truncated = if (out.length > 60_000) out.take(60_000) + "\n\n[…truncated, ${out.length - 60_000} bytes elided]" else out
             val prompt = "Here is the current `git diff` for review:\n\n```diff\n$truncated\n```"
-            s.send(prompt)
-            postSendUpdate(s.agentSessionId)
+            sendAsTurn(prompt)
         }
     }
 
@@ -184,10 +189,7 @@ internal class ChatViewModelSlash(
         val s = sessionAccess() ?: return
         val agent = currentAgent()
         val prompt = AgentSpecRegistry[agent].disableApprovalsPrompt
-        scope.launch {
-            s.send(prompt)
-            postSendUpdate(s.agentSessionId)
-        }
+        sendAsTurn(prompt)
     }
 
     /**
@@ -215,20 +217,52 @@ internal class ChatViewModelSlash(
               .github/copilot-instructions.md if they exist.
             - Verify with me before finalising.
         """.trimIndent()
-        scope.launch {
-            s.send(prompt)
-            postSendUpdate(s.agentSessionId)
-        }
+        sendAsTurn(prompt)
     }
 
     /** Run one of the CLI's own commands the way the CLI runs them: as the
      *  literal `/name args` turn the user would have typed. */
     private fun sendAgentBuiltin(cmd: SlashCommand, args: String) {
-        val s = sessionAccess() ?: return
         val line = if (args.isBlank()) "/${cmd.name}" else "/${cmd.name} $args"
-        scope.launch {
-            s.send(line)
-            postSendUpdate(s.agentSessionId)
+        sendAsTurn(line)
+    }
+
+    /**
+     * `/bg <task>` — hand the task to a detached agent on the server.
+     *
+     * `claude --bg` returns the moment the job is spawned (`backgrounded ·
+     * <id>`), and the job outlives this chat's process, the SSH channel and the
+     * app: that is the whole point on a phone. The agent writes an ordinary
+     * session file, so it appears in the sessions list by itself — we don't
+     * mirror its output here, we say where it went.
+     */
+    private fun runInBackground(args: String) {
+        val task = args.trim()
+        if (task.isBlank()) {
+            notice("/bg needs a task — e.g. `/bg run the test suite and fix what breaks`")
+            return
+        }
+        val agent = currentAgent()
+        if (agent != Agent.CLAUDE) {
+            // Only Claude has `--bg`. Saying so beats spawning something else.
+            notice("${agent.displayName} has no background mode — this is Claude Code only.")
+            return
+        }
+        val s = sessionAccess() ?: return
+        scope.launch(Dispatchers.IO) {
+            val cwd = observedCwd()
+            val prefix = if (!cwd.isNullOrBlank()) "cd ${shQuote(cwd)} && " else ""
+            val out = s.execOnLive("bash -lc " + shQuote(prefix + "claude --bg " + shQuote(task)))
+                .orEmpty()
+            // "backgrounded · 941a5f38" — the id is what every follow-up
+            // (`claude logs`, `claude stop`) is keyed by, so it is the one
+            // thing worth putting in front of the user.
+            val id = BACKGROUNDED.find(out)?.groupValues?.get(1)
+            notice(
+                if (id != null) "Started in the background · $id — it keeps running if you close the app. It will appear in your sessions list."
+                else out.trim().takeIf { it.isNotBlank() }?.take(180)
+                    ?: "Could not start a background task."
+            )
         }
     }
 
@@ -238,10 +272,7 @@ internal class ChatViewModelSlash(
             .replace("\$ARGUMENTS", args)
             .trim()
         if (body.isBlank()) return
-        scope.launch {
-            s.send(body)
-            postSendUpdate(s.agentSessionId)
-        }
+        sendAsTurn(body)
     }
 
     fun refreshMemory() {
@@ -281,6 +312,10 @@ internal class ChatViewModelSlash(
         val out = session.execOnLive("bash -lc " + shQuote(script)).orEmpty()
         _customCommands.value = spec.parseCustomCommands(out)
     }
+
+    /** `backgrounded · 941a5f38` — the CLI's own confirmation line. The id is
+     *  what `claude logs` / `claude stop` are keyed by. */
+    private val BACKGROUNDED = Regex("""backgrounded\s*·\s*([0-9a-f]{6,})""")
 
     private fun shQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"

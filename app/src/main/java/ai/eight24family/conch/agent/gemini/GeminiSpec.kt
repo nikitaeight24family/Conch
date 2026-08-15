@@ -63,6 +63,7 @@ object GeminiSpec : AgentCliSpec {
         // Gemini approval modes: default / auto_edit / yolo / plan.
         // SAFE/AUTO/YOLO map onto default/auto_edit/yolo.
         val approvalArg = when (input.approvalMode) {
+            AgentApprovalMode.PLAN,
             AgentApprovalMode.SAFE -> " --approval-mode default"
             AgentApprovalMode.AUTO -> " --approval-mode auto_edit"
             AgentApprovalMode.YOLO -> " --approval-mode yolo"

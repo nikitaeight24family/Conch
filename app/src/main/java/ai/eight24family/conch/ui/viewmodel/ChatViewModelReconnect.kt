@@ -43,6 +43,9 @@ internal class ChatViewModelReconnect(
 
     private var reconnectJob: Job? = null
 
+    /** Pending "Running actually held" backoff reset — see [onSessionRunning]. */
+    private var stableJob: Job? = null
+
     fun setStreamStalled(value: String?) {
         _streamStalled.value = value
     }
@@ -98,20 +101,50 @@ internal class ChatViewModelReconnect(
                         // PC happens to still be working.
                         onRunning()
                     }
-                    is SessionState.Failed ->
+                    is SessionState.Failed -> {
+                        // Running didn't hold — cancel the pending backoff reset
+                        // so the ladder keeps counting (see [onSessionRunning]).
+                        stableJob?.cancel()
+                        stableJob = null
                         if (shouldAutoRetry(st.reason)) scheduleReconnect(st.reason)
+                    }
                     else -> {}
                 }
             }
         }
     }
 
-    /** Called from the state collector on every Running tick — healthy again. */
+    /** Called from the state collector on every Running tick — healthy again.
+     *
+     *  The banner clears immediately (the transport IS up — saying otherwise
+     *  over a lit dot is the lie we already fixed), but the ATTEMPT COUNTER
+     *  only resets once Running has HELD for [RUNNING_STABLE_MS]. Resetting on
+     *  the edge meant a rebuild that flipped Running→Failed in the same second
+     *  put the ladder back to attempt=1, so the backoff cycled 1s-2s-5s-10s
+     *  forever instead of growing — the app hammered the server ~15×/min for as
+     *  long as the fault lasted (2026-08-16). A genuine recovery is unaffected:
+     *  it is still Running two seconds later. */
     fun onSessionRunning() {
-        if (_reconnectAttempt.value > 0) {
-            android.util.Log.d("SshAi-Reconnect", "back to Running, resetting attempts")
+        onTransportRecovered()
+        if (_reconnectAttempt.value == 0) return
+        if (stableJob?.isActive == true) return
+        stableJob = scope.launch {
+            delay(RUNNING_STABLE_MS)
+            android.util.Log.d("SshAi-Reconnect", "Running held ${RUNNING_STABLE_MS}ms, resetting attempts")
+            _reconnectAttempt.value = 0
         }
-        _reconnectAttempt.value = 0
+    }
+
+    /**
+     * The TRANSPORT is back (the stuck-session rescue found a live pooled
+     * client), but the session has NOT reported Running. Stop claiming
+     * "reconnecting" and stand the ladder down — and leave the attempt counter
+     * alone. The rescue used to call [onSessionRunning] here, which reset the
+     * ladder to attempt=1 on a session that was still Failed, pinning the
+     * backoff at 1-2 s while the rescue and the ladder took turns tearing the
+     * connection down (2026-08-16).
+     */
+    fun onTransportRecovered() {
         _reconnecting.value = false
         reconnectJob?.cancel()
         reconnectJob = null
@@ -125,6 +158,11 @@ internal class ChatViewModelReconnect(
         if (r.contains("server not found")) return false
         if (r.contains("authentication")) return false
         if (r.contains("auth failed")) return false
+        // A changed host key is not a blip — nothing will connect until a human
+        // decides whether the server was rebuilt or someone is in the middle.
+        // Retrying just hammers the host with a question it can't answer (and
+        // fail2ban counts every attempt). The pool raises this reason.
+        if (r.contains("host key")) return false
         // Hardware-token "I cancelled" is a deliberate user action —
         // looping back into the touch dialog would lock the user out
         // of every other screen until they either complete or
@@ -141,9 +179,18 @@ internal class ChatViewModelReconnect(
         val attempt = _reconnectAttempt.value + 1
         _reconnectAttempt.value = attempt
         _reconnecting.value = true
-        // 1s, 2s, 5s, 10s, 30s, 30s, 30s...
+        // 1s, 2s, 5s, 10s, 30s — then KEEP GROWING (60s, 90s, … cap 5 min)
+        // instead of the old flat 30s forever. A network-level failure (which
+        // is also what a fail2ban DROP looks like) never matches the
+        // shouldAutoRetry blacklist, so this ladder used to hammer a dead/
+        // banning server twice a minute for hours — refreshing the very ban
+        // that caused it, and burning radio the whole time. Growth keeps the
+        // silent auto-reconnect promise (it NEVER gives up) while making the
+        // steady state ~12× cheaper.
         val delays = longArrayOf(1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
-        val waitMs = delays.getOrElse(attempt - 1) { 30_000L }
+        val waitMs = delays.getOrElse(attempt - 1) {
+            (30_000L * (attempt - 4)).coerceAtMost(300_000L)
+        }
         android.util.Log.d(
             "SshAi-Reconnect",
             "scheduling reconnect attempt=$attempt in ${waitMs}ms (reason=$reason)"
@@ -168,5 +215,11 @@ internal class ChatViewModelReconnect(
         }
         _streamStalled.value = null
         lastStreamUpdate[sid] = System.currentTimeMillis()
+    }
+
+    companion object {
+        /** How long `Running` must hold before the reconnect ladder believes it
+         *  and resets its backoff. See [onSessionRunning]. */
+        const val RUNNING_STABLE_MS = 2_000L
     }
 }

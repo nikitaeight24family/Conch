@@ -348,7 +348,18 @@ internal class ChatViewModelTailPoll(
             "turn-state window seeded sid=${sessionId.take(8)} agent=$agent records=${recWindow.size} " +
                 "inFlight=${preSig.inFlight} complete=${preSig.turnComplete}",
         )
-        if (preSig.inFlight) _remoteFileOpen.value = true
+        // ⚠ IN FLIGHT NEEDS A HEARTBEAT, NOT A LEFTOVER. The window's verdict is
+        // "the last record looks unfinished" — true forever for a turn whose
+        // writer died: the process was killed, the app restarted, the work went
+        // to the CLI's own daemon. Nothing then clears it, and the chat sat on
+        // "Imagining… 39m55s" with the server showing no writes for five
+        // minutes and the app's own poller not even running (user, 2026-08-04).
+        // A turn that is genuinely running touches its file; one that has not
+        // been touched in a minute is not running, whatever the last record
+        // looks like.
+        if (preSig.inFlight && (preFrozenMs ?: Long.MAX_VALUE) < STALE_TURN_MS) {
+            _remoteFileOpen.value = true
+        }
         _remoteTurnStartMs.value = preSig.turnStartMs
         _remoteThinking.value = preSig.thinking
         _remoteTokens.value = preSig.tokens
@@ -371,6 +382,9 @@ internal class ChatViewModelTailPoll(
         // another client's RAM.
         var fileTailIsOurs = false
         var idleTicks = 0
+        // Consecutive stat failures (transport down) — drives the extra
+        // backoff sleep in the size==null branch; reset on any success.
+        var statFailStreak = 0
         // Per-turn token accumulator: monotonic within a turn (keyed on the
         // protected turn-start), so a transient 0 from the probe never makes the
         // «↓ tokens» counter flicker; reset when the turn changes or work ends.
@@ -395,13 +409,20 @@ internal class ChatViewModelTailPoll(
             // the delivery path, so that latency is what the user sees between
             // the agent finishing and the words appearing. Sleep in short slices
             // and break out the moment our own turn starts or ends. Costs one
-            // in-memory StateFlow read per second; zero bytes.
+            // in-memory StateFlow read per second; zero bytes. Slice size: 1 s
+            // in the foreground (the turn-edge must cut the sleep short while
+            // someone is watching), but BACKGROUNDED the 1 s slice was pure
+            // battery burn — at the 60 s deep-background cadence the coroutine
+            // still woke 60×/min per open chat with nobody looking. A 5 s slice
+            // keeps background turn-edge latency bounded (queued sends / bridge
+            // turns still get noticed) at 1/5 the wakeups.
+            val sliceMs = if (bgSince != null) TURN_EDGE_CHECK_BG_MS else TURN_EDGE_CHECK_MS
             val wakeAt = System.currentTimeMillis() + interval
             while (System.currentTimeMillis() < wakeAt) {
                 val st = s.state.value
                 if (st is SessionState.Failed || st is SessionState.Closed) return
                 if ((st is SessionState.Working) != lastCurWorking) break
-                delay(minOf(TURN_EDGE_CHECK_MS, wakeAt - System.currentTimeMillis()).coerceAtLeast(1L))
+                delay(minOf(sliceMs, wakeAt - System.currentTimeMillis()).coerceAtLeast(1L))
             }
             val curState = s.state.value
             if (curState is SessionState.Failed || curState is SessionState.Closed) return
@@ -424,8 +445,17 @@ internal class ChatViewModelTailPoll(
                     waitingFromControl = false
                 }
                 idleTicks++
+                // Transport-down BACKOFF. The `isWorking` fast lane bypasses the
+                // idle-tick backoff, so a chat stuck "Working" on a dead
+                // transport kept stat'ing every 5 s forever — pure radio burn
+                // that can't possibly deliver anything. Grow extra sleep with
+                // each consecutive failure (5 s per miss, capped +30 s); one
+                // successful stat resets it below.
+                statFailStreak++
+                delay((statFailStreak.coerceAtMost(6)) * 5_000L)
                 continue
             }
+            statFailStreak = 0
             // Mid-poll SHRINK. A file that got SMALLER is EITHER a real Claude
             // auto-compaction (old turns dropped) OR a benign rewrite that kept all
             // content — most often our OWN listSessionsScript flipping
@@ -574,7 +604,10 @@ internal class ChatViewModelTailPoll(
                 waitingForUser = sig.waitingForUser,
                 turnComplete = sig.turnComplete,
             )
-            val inFlight = probe.inFlight
+            // Same heartbeat rule as the seed: no writes for a minute means the
+            // turn is over, however unfinished the last record looks.
+            val inFlight = probe.inFlight &&
+                (stat.frozenForMs ?: Long.MAX_VALUE) < STALE_TURN_MS
             val turnStart = probe.turnStartMs
             val thinking = probe.thinking
             ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
@@ -709,10 +742,7 @@ internal class ChatViewModelTailPoll(
      *     before the spinner + new text showed up (user, 2026-06-13).
      */
     fun pickPollInterval(isWorking: Boolean, bgForMs: Long, idleTicks: Int): Long {
-        val dataSaver = SilentlyTry.loggedOrElse("SshAi-Chat", "read data saver pref", false) {
-            runBlocking { ServiceLocator.preferences.dataSaverEnabled.first() }
-        }
-        val k = if (dataSaver) 6L else 1L
+        val k = if (dataSaverCached()) 6L else 1L
         return when {
             // A TURN IS RUNNING — full speed, data saver or not. The multiplier
             // was sized when this probe shipped a `tail -n 400 | jq` projection
@@ -746,10 +776,17 @@ internal class ChatViewModelTailPoll(
         // wasRecentlySent window has lapsed — that window expires during a slow
         // reconnect (key prompt + delay), which is exactly when showed up TWICE.
         // Legit repeats stay correct: every send() adds its OWN optimistic copy
-        // first, so the on-screen count always matches the number of sends.
+        // first, so the on-screen count always matches the number of sends. ⚠
+        // Keyed by [userBodyKey], NOT `text.trim()`. The file's copy of a prompt
+        // is not byte-identical to what we sent — Codex appends its own `<image
+        // name=… path=…>` block, and a CLI re-rendering history prefixes `❯ ` and
+        // hard-wraps. Under exact equality those echoes were judged NEW and
+        // appended here, i.e. BELOW the reply they had already received: the
+        // duplicate stuck at the bottom of the chat (a month of reports, fixed
+        // 2026-08-06).
         val shownUserTexts = hist.asSequence()
             .filterIsInstance<AgentMessage.UserText>()
-            .map { it.text.trim() }
+            .map { ai.eight24family.conch.agent.userBodyKey(it.text) }
             .toHashSet()
         // Content signatures of rows already shown whose ID is NOT stable across the
         // two emission paths. The SAME logical AskUserQuestion is tagged
@@ -779,7 +816,7 @@ internal class ChatViewModelTailPoll(
             // `wasRecentlySent`. legit repeats keep their N optimistic copies) AND
             // restores the bubble whenever the optimistic copy is missing.
             if (it is AgentMessage.UserText) {
-                val isEcho = it.text.trim() in shownUserTexts
+                val isEcho = ai.eight24family.conch.agent.userBodyKey(it.text) in shownUserTexts
                 // The echo is dropped (the optimistic bubble already shows it),
                 // but it carries something the optimistic copy never had: the
                 // JSONL record uuid, which is the ONLY handle rewind can use.
@@ -1170,6 +1207,11 @@ internal class ChatViewModelTailPoll(
         ): Boolean = curWorking && sawGrowthThisTurn && turnComplete &&
             !pendingCtl && !waitingForUser && stuckSinceMs >= RECONCILE_STUCK_GRACE_MS
 
+        /** A turn whose file has not been written for this long is not running.
+         *  Long enough that a slow tool call cannot trip it, short enough that a
+         *  dead writer's spinner does not outlive the turn by half an hour. */
+        private const val STALE_TURN_MS = 60_000L
+
         /** How many projected turn-state records to keep. A long tool chain emits
          *  ~2 lines per round; 200 lost the turn-start at scale (audit
          *  2026-06-14), so 400 — the same window the remote `tail -n 400` used. */
@@ -1177,6 +1219,28 @@ internal class ChatViewModelTailPoll(
 
         /** How often the interruptible sleep re-checks for a turn edge. */
         const val TURN_EDGE_CHECK_MS: Long = 1_000L
+
+        /** Same re-check, BACKGROUNDED — 5× coarser: nobody is watching, the
+         *  1 s slice was 60 CPU wakeups/min per open chat at the deep tier. */
+        const val TURN_EDGE_CHECK_BG_MS: Long = 5_000L
+
+        /** Data-saver pref, cached 30 s. [pickPollInterval] runs EVERY poll
+         *  tick of EVERY open chat and used to `runBlocking`-read DataStore
+         *  each time — a disk read + thread block just to learn a flag that
+         *  changes a few times a year. Process-wide on purpose (the pref is
+         *  global); 30 s staleness on a poll-interval multiplier is invisible. */
+        @Volatile private var dataSaverCacheValue = false
+        @Volatile private var dataSaverCacheAtMs = 0L
+        private fun dataSaverCached(): Boolean {
+            val now = System.currentTimeMillis()
+            if (now - dataSaverCacheAtMs < 30_000L) return dataSaverCacheValue
+            val v = SilentlyTry.loggedOrElse("SshAi-Chat", "read data saver pref", false) {
+                runBlocking { ServiceLocator.preferences.dataSaverEnabled.first() }
+            }
+            dataSaverCacheValue = v
+            dataSaverCacheAtMs = now
+            return v
+        }
 
         const val POLL_INTERVAL_MS: Long = 5_000L
         /** Background poll cadence — chat-might-come-back-soon. */

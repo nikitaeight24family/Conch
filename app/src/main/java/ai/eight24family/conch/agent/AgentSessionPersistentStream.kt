@@ -72,6 +72,8 @@ internal class AgentSessionPersistentStream(
     private val getApprovalMode: () -> ai.eight24family.conch.data.prefs.AgentApprovalMode,
     private val loginShell: (String) -> String,
     private val getAuthPrep: () -> String,
+    /** True while this chat still has to FORK the session it resumes. */
+    private val getForkOnce: () -> Boolean = { false },
     private val onPromptUndelivered: (String) -> Unit,
     /** Live reasoning-token feed (`system/thinking_tokens` →
      *  estimated_tokens). null clears the row at turn end. */
@@ -85,6 +87,11 @@ internal class AgentSessionPersistentStream(
      *  arming (or ending) a `/loop`. Read by [LoopWatch]; live-only, because a
      *  pending wakeup dies with the process it was armed in. */
     private val onLoopWakeup: (String?) -> Unit = {},
+    /** Raw input of a `CronCreate` call — an INTERVAL `/loop`. */
+    private val onLoopCron: (String) -> Unit = {},
+    /** A turn that was dispatched as `/loop …` ended without scheduling
+     *  anything. The user asked for a loop and does not have one; say so. */
+    private val onLoopNotArmed: () -> Unit = {},
 ) {
     private val tag = "SshAi-Persist"
 
@@ -101,6 +108,13 @@ internal class AgentSessionPersistentStream(
     @Volatile private var procSession: Session? = null
     @Volatile private var procCmd: Session.Command? = null
     @Volatile private var procAlive = false
+
+    /** Is the CLI process for this chat running RIGHT NOW — i.e. does it still
+     *  hold the conversation in memory. Distinct from "the transport is up":
+     *  the transport can be rebuilt under us while the process it carried is
+     *  long dead, and it is the PROCESS that decides whether the next turn
+     *  re-reads (and re-bills) the whole session file. */
+    val processAlive: Boolean get() = procAlive
     @Volatile private var launched: LaunchParams? = null
     private var readerJob: Job? = null
 
@@ -115,6 +129,12 @@ internal class AgentSessionPersistentStream(
 
     /** Completed when the CURRENT turn's `result` event lands. */
     @Volatile private var turnDone: CompletableDeferred<Boolean>? = null
+
+    /** Did THIS turn schedule anything (either loop flavour)? Read at turn end
+     *  against [loopRequestedThisTurn]. */
+    @Volatile private var armedThisTurn = false
+    /** Was this turn the dispatch of a `/loop …` line? */
+    @Volatile private var loopRequestedThisTurn = false
 
     /** True after a launch-level failure — the session permanently falls
      *  back to the one-shot path (checked by AgentSession's router). */
@@ -158,7 +178,7 @@ internal class AgentSessionPersistentStream(
      *  the same state/history bookkeeping the one-shot runner does.
      */
     suspend fun runTurn(text: String): Boolean = withContext(Dispatchers.IO) {
-        val client = sshLifecycle.sshClient
+        val client = sshLifecycle.liveClient()
         if (client == null || !client.isConnected) {
             android.util.Log.w(tag, "runTurn ABORT: transport down (client=${client != null})")
             onPromptUndelivered(text)
@@ -166,6 +186,15 @@ internal class AgentSessionPersistentStream(
             return@withContext true
         }
         onStateChange(SessionState.Working)
+        // Re-arm the cancel flag at turn start. An idle Stop (no turn running)
+        // sets it and nothing else clears it — the stale `true` then made THIS
+        // turn treat a mid-turn process death as "user cancelled": no error, no
+        // redelivery, zombie chat. The flag means "the user cancelled THIS
+        // turn" — it must not outlive the turn it was aimed at (same rule as
+        // the run-one-shot and Codex paths).
+        sshLifecycle.userCancelled = false
+        armedThisTurn = false
+        loopRequestedThisTurn = text.trimStart().startsWith("/loop")
         try {
             backfillCwdIfNeeded()
             if (!ensureProcess()) {
@@ -201,6 +230,40 @@ internal class AgentSessionPersistentStream(
                 return@withContext true
             }
             android.util.Log.d(tag, "turn sent (${text.length}B) resume=${getResumeId()}")
+            // SEND-ACK WATCHDOG. A half-open transport (Wi-Fi blinked, TCP
+            // never noticed) swallows the stdin write SILENTLY: the CLI never
+            // sees the prompt, no stream event ever comes, and the chat sits
+            // on a spinner forever while the user re-reads their own message.
+            // The keepalive kills such a transport in ~90 s, but nothing
+            // REDELIVERED the prompt. So: if the reader hears NOTHING after
+            // the send for SEND_ACK_TIMEOUT_MS and the file mirror hasn't
+            // delivered output either, probe the transport with a cheap
+            // channel exec; dead (or hung — same thing) → tear down and
+            // complete(false), which routes into the existing undelivered →
+            // silent-reconnect → redeliver pipeline. A merely SLOW CLI passes
+            // the probe and keeps its time.
+            val sentAtMs = System.currentTimeMillis()
+            val ackWatch = scope.launch {
+                kotlinx.coroutines.delay(SEND_ACK_TIMEOUT_MS)
+                if (done.isCompleted) return@launch
+                if (lastReaderActivityMs >= sentAtMs) return@launch
+                if (history.hasAssistantOutputSince(historyAtTurnStart)) return@launch
+                val alive = withTimeoutOrNull(8_000) {
+                    kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
+                        transportAnswers()
+                    }
+                } ?: false
+                if (alive) {
+                    android.util.Log.d(tag, "send unacked but transport answers — CLI is just slow, waiting on")
+                    return@launch
+                }
+                android.util.Log.w(
+                    tag,
+                    "send unacked ${SEND_ACK_TIMEOUT_MS / 1000}s + transport dead — tearing down for redelivery",
+                )
+                teardownProcess()
+                done.complete(false)
+            }
             // INACTIVITY wait, NOT a wall-clock deadline. A research turn
             // (Agent/Task/Workflow subagents) legitimately runs for tens of
             // minutes with the MAIN stream quiet; the old fixed 15-min cap fired
@@ -216,6 +279,7 @@ internal class AgentSessionPersistentStream(
                 if (completed != null) break
                 if (System.currentTimeMillis() - lastReaderActivityMs >= INACTIVITY_TIMEOUT_MS) break
             }
+            ackWatch.cancel()
             if (completed == null) {
                 android.util.Log.w(tag, "turn silent ${INACTIVITY_TIMEOUT_MS / 60000} min — interrupting + tearing down")
                 interrupt()
@@ -242,14 +306,47 @@ internal class AgentSessionPersistentStream(
                 // half of the bug. ensureProcess() will relaunch with --resume.
                 teardownProcess()
             } else if (!completed && !sshLifecycle.userCancelled) {
-                // Reader hit EOF mid-turn — process died without a result.
-                android.util.Log.w(tag, "process died mid-turn — marking disconnected")
-                onPromptUndelivered(text)
+                // Reader hit EOF mid-turn — the process/transport died without a
+                // result. Whether the PROMPT is lost is a different question
+                // from whether the ANSWER is, and answering it wrong costs the
+                // user real money.
+                //
+                // If the reader heard ANYTHING after the write — a stream event,
+                // an assistant token, anything — the CLI took the prompt: it is
+                // in its rollout, and `--resume` brings it back. What died is the
+                // ANSWER. Handing the prompt back here re-ran the whole turn on
+                // every reconnect, and on a flapping radio that is a loop:
+                // connect → re-send → die → connect → re-send, each iteration a
+                // full turn on the session's whole context.
+                //
+                // Only genuine silence keeps the redelivery: nothing came back at
+                // all, so the write may well have died in a local buffer — that
+                // is the half-open-transport case the send-ack watchdog exists
+                // for, and dropping it silently is the older bug.
+                val cliTookIt = lastReaderActivityMs >= sentAtMs ||
+                    history.hasAssistantOutputSince(historyAtTurnStart)
+                if (cliTookIt) {
+                    android.util.Log.w(
+                        tag,
+                        "process died mid-turn, but the CLI had already taken the prompt — " +
+                            "reconnect only, NOT re-sending (the answer is lost, the turn is not)",
+                    )
+                } else {
+                    android.util.Log.w(tag, "process died mid-turn with no ack — prompt never landed, handing it back")
+                    onPromptUndelivered(text)
+                }
                 onStateChange(SessionState.Failed("disconnected"))
                 return@withContext true
             }
             true
         } finally {
+            // A `/loop …` that scheduled nothing is not a loop. The model runs
+            // the task first and arms the next run as the LAST action of the
+            // turn — when it simply doesn't, the chat looks identical to a
+            // healthy loop and the user walks away believing work will carry on
+            // through the night.
+            if (loopRequestedThisTurn && !armedThisTurn) onLoopNotArmed()
+            loopRequestedThisTurn = false
             turnDone = null
             sshLifecycle.userCancelled = false
             onThinkingTokens(null) // turn over → drop the live thinking row
@@ -313,7 +410,7 @@ internal class AgentSessionPersistentStream(
         }
         teardownProcess()
 
-        val client = sshLifecycle.sshClient ?: return false
+        val client = sshLifecycle.liveClient() ?: return false
         val spec = AgentSpecRegistry[server.agent]
         val inner = spec.buildPersistentCommand(
             ExecInput(
@@ -323,6 +420,7 @@ internal class AgentSessionPersistentStream(
                 approvalMode = params.approval,
                 cwdSnapshot = params.cwd,
                 reasoningEffort = params.reasoning,
+                forkSession = getForkOnce(),
             )
         ) ?: run {
             broken = true
@@ -497,10 +595,28 @@ internal class AgentSessionPersistentStream(
                         // draining stdout must not light a countdown over a
                         // process that no longer exists.
                         if (myGen == turnSeq) {
-                            parsedMsgs.asSequence()
-                                .filterIsInstance<AgentMessage.ToolUse>()
-                                .filter { it.toolName == LoopWatch.TOOL }
-                                .forEach { onLoopWakeup(it.input) }
+                            for (tu in parsedMsgs.filterIsInstance<AgentMessage.ToolUse>()) {
+                                when (tu.toolName) {
+                                    // Self-paced: the model names its own delay.
+                                    LoopWatch.TOOL -> { armedThisTurn = true; onLoopWakeup(tu.input) }
+                                    // Interval: `/loop 30m …` schedules a cron job
+                                    // instead, and never touches ScheduleWakeup.
+                                    LoopWatch.CRON_TOOL -> { armedThisTurn = true; onLoopCron(tu.input) }
+                                    LoopWatch.CRON_STOP_TOOL -> onLoopWakeup(null)
+                                }
+                            }
+                        }
+                        // Background-task ledger: the parser upserts one row per
+                        // task ("sysevt-task-<id>", label "task · <status> · …").
+                        // Track which are alive in THIS process so teardown can
+                        // retire them honestly (see retireBackgroundTasks).
+                        for (msg in parsedMsgs) {
+                            if (msg is AgentMessage.EventNote && msg.id.startsWith("sysevt-task-")) {
+                                val taskId = msg.id.removePrefix("sysevt-task-")
+                                val terminalStatus = TASK_TERMINAL_RX.containsMatchIn(msg.label)
+                                if (terminalStatus) liveBackgroundTasks.remove(taskId)
+                                else liveBackgroundTasks.add(taskId)
+                            }
                         }
                         for (msg in parsedMsgs) {
                             // Adopt the id the CLI reports on EVERY launch, not just the first.
@@ -838,7 +954,7 @@ internal class AgentSessionPersistentStream(
             android.util.Log.w(
                 tag,
                 "stdin write failed: ${t.javaClass.name}: ${t.message} " +
-                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.sshClient?.isConnected} " +
+                    "chanOpen=${procSession?.isOpen} connected=${sshLifecycle.liveClient()?.isConnected} " +
                     "alive=$procAlive",
                 t,
             )
@@ -923,6 +1039,7 @@ internal class AgentSessionPersistentStream(
         mode: ai.eight24family.conch.data.prefs.AgentApprovalMode,
     ): Boolean {
         val wire = when (mode) {
+            ai.eight24family.conch.data.prefs.AgentApprovalMode.PLAN -> "plan"
             ai.eight24family.conch.data.prefs.AgentApprovalMode.SAFE -> "default"
             ai.eight24family.conch.data.prefs.AgentApprovalMode.AUTO -> "acceptEdits"
             ai.eight24family.conch.data.prefs.AgentApprovalMode.YOLO -> "bypassPermissions"
@@ -1037,6 +1154,11 @@ internal class AgentSessionPersistentStream(
     /** Close stdin (graceful CLI exit: flush session file, then quit),
      *  then the channel. Safe to call repeatedly. */
     fun teardownProcess() {
+        // Background agents (Agent tool async children) LIVE INSIDE the CLI
+        // process — they die with it, silently, and their chat rows kept
+        // saying "running · in 0 · out 0" forever. Rewrite each live task row
+        // to an honest "interrupted" + say it out loud once.
+        retireBackgroundTasks()
         // Pending `/loop` wakeups live in the process, so they die with it.
         // Clearing here (rather than only on an explicit stop) is what keeps
         // the chip from outliving the loop it describes.
@@ -1059,6 +1181,59 @@ internal class AgentSessionPersistentStream(
         val awaiting = pendingClientRequests.keys.toList()
         for (id in awaiting) pendingClientRequests.remove(id)?.complete(null)
     }
+
+    /** Task ids of background agents the CURRENT process has reported alive
+     *  (task_started/progress without a terminal status). They run inside the
+     *  CLI process and die with it — tracked so teardown can retire their
+     *  rows honestly instead of leaving an eternal "running". */
+    private val liveBackgroundTasks = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Rewrite every live background-task row to "interrupted" (same stable
+     *  id → in-place upsert over the lying "running") and announce the loss
+     *  once. Idempotent: the set is drained on first call. */
+    private fun retireBackgroundTasks() {
+        val victims = liveBackgroundTasks.toList()
+        if (victims.isEmpty()) return
+        liveBackgroundTasks.clear()
+        for (id in victims) {
+            history.emitMsg(
+                AgentMessage.EventNote(
+                    id = "sysevt-task-$id",
+                    label = "task · interrupted — died with the CLI process",
+                    detail = "Background agents run inside the CLI process; this one was killed when " +
+                        "the process ended (SSH drop / restart). Its transcript survives on the " +
+                        "server — ask the agent to resume it.",
+                    tone = AgentMessage.EventNote.Tone.WARN,
+                )
+            )
+        }
+        history.emitMsg(
+            AgentMessage.EventNote(
+                id = "sysevt-bgtask-loss-${System.currentTimeMillis()}",
+                label = "⚠ ${victims.size} background agent(s) interrupted with the CLI process",
+                detail = "Transcripts survive on the server — ask the agent to resume them.",
+                tone = AgentMessage.EventNote.Tone.WARN,
+            )
+        )
+    }
+
+    /** Cheap LIVE-channel liveness probe for the send-ack watchdog: open a
+     *  fresh channel on the EXISTING transport and run `true`. Never dials a
+     *  new connection (that's the reconnect pipeline's job, and a fresh
+     *  handshake here would feed fail2ban). A hang counts as dead — the
+     *  caller wraps this in a timeout and treats null as false. */
+    private fun transportAnswers(): Boolean = runCatching {
+        val client = sshLifecycle.liveClient() ?: return false
+        if (!client.isConnected) return false
+        val sess = client.startSession()
+        try {
+            val cmd = sess.exec("true")
+            cmd.join(5, java.util.concurrent.TimeUnit.SECONDS)
+            true
+        } finally {
+            runCatching { sess.close() }
+        }
+    }.getOrDefault(false)
 
     companion object {
         /**
@@ -1102,6 +1277,20 @@ internal class AgentSessionPersistentStream(
 
         /** Poll cadence while awaiting a turn's completion (inactivity check). */
         private const val INACTIVITY_CHECK_MS = 60L * 1000
+
+        /** How long a freshly-sent prompt may go with ZERO reader activity and
+         * no file-mirror output before the transport is probed — the
+         * half-open-socket protection (see the ack watchdog in runTurn). The
+         * CLI acks a prompt with stream events within a second or two
+         * normally; */
+        private const val SEND_ACK_TIMEOUT_MS = 35_000L
+
+        /** A task row label carrying a TERMINAL status — matches the labels
+         *  the parser builds. `stopped` + «No completion record» included so a
+         *  stopped/orphaned background task retires from the ledger instead of
+         *  counting as alive forever. */
+        private val TASK_TERMINAL_RX =
+            Regex("^task · (completed|failed|killed|interrupted|stopped)\\b|No completion record")
         /** A turn is abandoned only after this much stdout SILENCE (channel
          *  alive but zero output — a wedged process). Deliberately generous:
          *  long research turns must survive, and a truly dead transport surfaces

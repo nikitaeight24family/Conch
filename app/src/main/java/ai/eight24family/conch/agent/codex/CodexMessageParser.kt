@@ -65,17 +65,25 @@ object CodexMessageParser {
      * really CLI-side context injection (AGENTS.md, environment_context,
      * etc.). Hide them from chat and previews.
      */
+    /** Injected-wrapper tag at the start of a "user" payload:
+     *  `<environment_context>`, `<user_instructions>`, `<turn_aborted>`,
+     *  `<system-reminder>`, `<command-name>`, `<recommended_plugins>`, … —
+     *  every wrapper the CLIs inject is a MULTI-WORD lower snake/kebab tag.
+     *  This was an exact-name blacklist, and every codex release that added
+     *  a wrapper we hadn't heard of (latest: `<recommended_plugins>`) leaked
+     *  it into session titles/previews as a garbage first line. The shape is
+     *  the invariant, not the names: a human message virtually never OPENS
+     *  with `<multi_word-tag>`, while pasted HTML/XML opens with single-word
+     *  tags (`<div>`, `<html>`) or capitalized components (`<MyWidget>`),
+     *  which this regex deliberately does not match. */
+    private val syntheticWrapperTag =
+        Regex("^<[a-z][a-z0-9]*(?:[_-][a-z0-9]+)+>")
+
     fun isSyntheticUserText(t: String): Boolean {
         val s = t.trimStart()
         if (s.isEmpty()) return false
-        return s.startsWith("<environment_context>") ||
+        return syntheticWrapperTag.containsMatchIn(s) ||
             s.startsWith("<INSTRUCTIONS>") ||
-            s.startsWith("<user_instructions>") ||
-            s.startsWith("<turn_aborted>") ||
-            s.startsWith("<system-reminder>") ||
-            s.startsWith("<command-name>") ||
-            s.startsWith("<command-message>") ||
-            s.startsWith("<command-args>") ||
             s.startsWith("# AGENTS.md") ||
             s.startsWith("# Skills")
     }
@@ -165,9 +173,12 @@ object CodexMessageParser {
         val input = usage?.string("input_tokens")?.toLongOrNull()
         val output = usage?.string("output_tokens")?.toLongOrNull()
         val cached = usage?.string("cached_input_tokens")?.toLongOrNull()
+        // Guard on > 0 — a zero-usage turn_completed (interrupted / no output)
+        // must read "turn complete", not "tokens · in 0 · out 0" (parity with
+        // the Claude fix, user 2026-08-11).
         val parts = listOfNotNull(
-            input?.let { "in ${k(it)}" },
-            output?.let { "out ${k(it)}" },
+            input?.takeIf { it > 0 }?.let { "in ${k(it)}" },
+            output?.takeIf { it > 0 }?.let { "out ${k(it)}" },
             cached?.takeIf { it > 0 }?.let { "cached ${k(it)}" },
         )
         val label = if (parts.isEmpty()) "turn complete" else "tokens · " + parts.joinToString(" · ")

@@ -227,6 +227,16 @@ internal fun ToolUseLine(name: String, input: String) {
         TodoWriteLine(input)
         return
     }
+    // Claude Code's newer task tools (TaskCreate / TaskUpdate) superseded
+    // TodoWrite as the CLI's working task list — the terminal renders them as
+    // ✔/◼/◻ checklist rows, while here they fell through to the generic "▸
+    // TaskCreate {…json}" line, so tasks were effectively invisible. Same
+    // visual language as TodoWrite; TaskList/TaskGet keep the generic row
+    // (their meat is in the RESULT, which ToolResultLine already shows).
+    if (name == "TaskCreate" || name == "TaskUpdate") {
+        TaskToolLine(name, input)
+        return
+    }
     val amber = MaterialTheme.colorScheme.tertiary
     var expanded by remember { mutableStateOf(false) }
     val hasDetails = input.isNotBlank()
@@ -379,6 +389,304 @@ internal fun TodoWriteLine(input: String) {
                 )
             }
         }
+    }
+}
+
+/**
+ * Render a `TaskCreate` / `TaskUpdate` tool call as a checklist row (the CLI's
+ * task-list affordance, one task per call — unlike TodoWrite these are
+ * incremental, so each call shows the one task it touches).
+ *
+ *   TaskCreate {subject, description, activeForm}   → "◻ subject"
+ *   TaskUpdate {taskId, status?, subject?}          → glyph by status + "#id · …"
+ */
+@Composable
+internal fun TaskToolLine(name: String, input: String) {
+    val amber = MaterialTheme.colorScheme.tertiary
+    val done = MaterialTheme.colorScheme.primary
+    val pending = MaterialTheme.colorScheme.onSurfaceVariant
+    val t = remember(input) { parseTaskToolInput(input) }
+    val creating = name == "TaskCreate"
+    val status = if (creating) "pending" else t.status ?: "updated"
+    val (glyph, color, strike) = when (status) {
+        "completed" -> Triple("✔", done, true)
+        "in_progress" -> Triple("◼", amber, false)
+        "deleted" -> Triple("✕", pending, true)
+        else -> Triple("◻", pending, false)
+    }
+    val label = buildString {
+        t.taskId?.let { append('#').append(it).append(' ') }
+        append(t.subject ?: if (creating) "task" else "task → ${status.replace('_', ' ')}")
+    }
+    Row(
+        verticalAlignment = Alignment.Top,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+    ) {
+        Text(
+            "$glyph ",
+            color = color,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (status == "in_progress") FontWeight.Bold else FontWeight.Normal,
+        )
+        Text(
+            label,
+            color = if (strike) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium,
+            textDecoration = if (strike) androidx.compose.ui.text.style.TextDecoration.LineThrough
+                             else null,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+internal data class TaskToolInput(val subject: String?, val status: String?, val taskId: String?)
+
+/** Tolerant TaskCreate/TaskUpdate-input parser — same fallback contract as
+ *  [parseTodos]: any shape mismatch degrades to nulls, never a crash. */
+internal fun parseTaskToolInput(input: String): TaskToolInput {
+    if (input.isBlank()) return TaskToolInput(null, null, null)
+    val obj = SilentlyTry.logged("SshAi-ToolLines", "parse task tool json") {
+        kotlinx.serialization.json.Json.parseToJsonElement(input) as? kotlinx.serialization.json.JsonObject
+    } ?: return TaskToolInput(null, null, null)
+    fun str(key: String): String? =
+        (obj[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+    return TaskToolInput(subject = str("subject"), status = str("status"), taskId = str("taskId"))
+}
+
+/** One task on the session's task board — folded from the transcript.
+ *  [recentlyCompleted] = its completing update landed AFTER the user's last
+ *  prompt, i.e. it belongs to the CURRENT working stretch. */
+internal data class TaskBoardRow(
+    val taskId: String,
+    val subject: String,
+    val status: String,
+    val recentlyCompleted: Boolean = false,
+)
+
+private val TASK_CREATED_RX = Regex("""^Task #(\d+) created successfully(?::\s*(.*))?""")
+
+/** A TaskList result line: `#12. [in_progress] Subject text` (leading '#'
+ *  optional — be tolerant to CLI formatting drift). */
+private val TASK_LIST_LINE_RX = Regex("""^#?(\d+)\.\s*\[([a-z_]+)\]\s*(.+)$""")
+
+/**
+ * Rebuild the CLI's task list from the transcript: TaskCreate's RESULT line
+ * ("Task #N created successfully: <subject>") binds the id to the subject
+ * (falling back to the paired ToolUse input's subject), TaskUpdate calls move
+ * status / rename / delete. Pure fold over the display list — no extra state
+ * to persist, survives re-entry and resume because the transcript IS the state.
+ *
+ * ⚠ A blind cumulative fold LIES on long sessions: the CLI's list shrinks (the
+ * agent deletes stale tasks), and any deletion outside our parsed window left
+ * ghosts — the phone showed «+16 completed» and struck-through tasks from hours
+ * ago while the terminal showed 9 rows. Two corrections: 1. Every TaskList
+ * RESULT is an authoritative snapshot of the whole list — REPLACE the board with
+ * it (deletions included, wherever they happened). 2. Completed rows are only
+ * "fresh" (struck through in the panel) when their completing update landed
+ * after the user's last prompt; older completions fold into the «… +N completed»
+ * counter, like the CLI.
+ */
+internal fun foldTaskBoard(messages: List<AgentMessage>): List<TaskBoardRow> {
+    val createSubjects = HashMap<String, String>()          // toolUseId → subject
+    val taskListCalls = HashSet<String>()                   // toolUseIds of TaskList
+    val board = LinkedHashMap<String, TaskBoardRow>()       // taskId → row, insertion order
+    val completedAt = HashMap<String, Int>()                // taskId → msg index of completion
+    var lastUserIdx = -1
+    messages.forEachIndexed { idx, m ->
+        when (m) {
+            is AgentMessage.UserText -> lastUserIdx = idx
+            is AgentMessage.ToolUse -> when (m.toolName) {
+                "TaskCreate" -> parseTaskToolInput(m.input).subject?.let { createSubjects[m.id] = it }
+                "TaskList" -> taskListCalls.add(m.id)
+                "TaskUpdate" -> {
+                    val t = parseTaskToolInput(m.input)
+                    val id = t.taskId
+                    if (id != null) {
+                        if (t.status == "deleted") {
+                            board.remove(id)
+                            completedAt.remove(id)
+                        } else {
+                            val prev = board[id]
+                            val status = t.status ?: prev?.status ?: "pending"
+                            if (status == "completed" && prev?.status != "completed") completedAt[id] = idx
+                            board[id] = TaskBoardRow(
+                                taskId = id,
+                                subject = t.subject ?: prev?.subject ?: "task #$id",
+                                status = status,
+                            )
+                        }
+                    }
+                }
+            }
+            is AgentMessage.ToolResult -> if (!m.isError) {
+                if (m.toolUseId in taskListCalls) {
+                    // Authoritative snapshot — rebuild the board from it.
+                    val snapshot = LinkedHashMap<String, TaskBoardRow>()
+                    for (line in m.output.lineSequence()) {
+                        val match = TASK_LIST_LINE_RX.find(line.trim()) ?: continue
+                        val id = match.groupValues[1]
+                        val status = match.groupValues[2]
+                        if (status == "deleted") continue
+                        snapshot[id] = TaskBoardRow(
+                            taskId = id,
+                            subject = match.groupValues[3].trim().ifEmpty { board[id]?.subject ?: "task #$id" },
+                            status = status,
+                        )
+                    }
+                    if (snapshot.isNotEmpty()) {
+                        board.clear()
+                        board.putAll(snapshot)
+                        completedAt.keys.retainAll(snapshot.keys)
+                    }
+                } else {
+                    val first = m.output.lineSequence().firstOrNull().orEmpty().trim()
+                    TASK_CREATED_RX.find(first)?.let { match ->
+                        val id = match.groupValues[1]
+                        if (id !in board) {
+                            val subj = createSubjects[m.toolUseId]
+                                ?: match.groupValues[2].takeIf { it.isNotBlank() }
+                                ?: "task #$id"
+                            board[id] = TaskBoardRow(id, subj, "pending")
+                        }
+                    }
+                }
+            }
+            else -> {}
+        }
+    }
+    return board.values.map { row ->
+        if (row.status == "completed" && (completedAt[row.taskId] ?: -1) > lastUserIdx) {
+            row.copy(recentlyCompleted = true)
+        } else row
+    }
+}
+
+/**
+ * The session task board, PINNED above the prompt bar — the phone twin of the
+ * CLI's checklist widget ("■ current … +2 pending, 4 completed"). The inline
+ * [TaskToolLine] rows show each call as it happens; this panel shows the LIVE
+ * STATE — subjects included — which is what the transcript rows alone can't.
+ * Tap the header to reveal completed rows.
+ */
+@Composable
+internal fun TaskBoardPanel(rows: List<TaskBoardRow>) {
+    if (rows.isEmpty()) return
+    // Mirrors the CLI widget EXACTLY: no header, no star — the list hangs
+    // under the pinned working row with a ⎿ elbow, ■ current, □ pending,
+    // then the first few ✔ completed struck through and "… +N completed" for
+    // the rest. Tap anywhere to unfold all completed; tap again to fold
+    // back.
+    var expandCompleted by rememberSaveable { mutableStateOf(false) }
+    // Collapse-down to a THIN STRIP showing just the main (in-progress) task.
+    // The ▾ chevron on the first row collapses; tapping the strip expands
+    // back.
+    var boardCollapsed by rememberSaveable { mutableStateOf(false) }
+    val amber = MaterialTheme.colorScheme.tertiary
+    val done = MaterialTheme.colorScheme.primary
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    val inProgress = rows.filter { it.status == "in_progress" }
+    val pending = rows.filter { it.status != "in_progress" && it.status != "completed" }
+    val completed = rows.filter { it.status == "completed" }
+    val visiblePending = if (pending.size > 8) pending.take(8) else pending
+    val hiddenPending = pending.size - visiblePending.size
+    // Struck-through rows: ONLY tasks completed in the CURRENT stretch (since
+    // the user's last prompt) — like the CLI. Everything older is just the
+    // «… +N completed» counter; tap unfolds the full history.
+    val fresh = completed.filter { it.recentlyCompleted }
+    val visibleCompleted = if (expandCompleted) completed else fresh.take(5)
+    val hiddenCompleted = completed.size - visibleCompleted.size
+
+    @Composable
+    fun taskRow(glyph: String, glyphColor: Color, text: String, textColor: Color, bold: Boolean, strike: Boolean, first: Boolean) {
+        Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                if (first) "⎿  " else "   ",
+                color = dim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "$glyph ",
+                color = glyphColor,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+            )
+            Text(
+                text,
+                color = textColor,
+                style = MaterialTheme.typography.bodySmall,
+                textDecoration = if (strike) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+
+    if (boardCollapsed) {
+        val main = inProgress.firstOrNull() ?: pending.firstOrNull() ?: rows.first()
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { boardCollapsed = false }
+                .padding(horizontal = 12.dp, vertical = 1.dp),
+        ) {
+            Text("■ ", color = amber, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            Text(
+                main.subject,
+                color = dim,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            val more = rows.size - 1
+            if (more > 0) Text("  +$more ▴", color = dim, style = MaterialTheme.typography.labelSmall)
+            else Text("  ▴", color = dim, style = MaterialTheme.typography.labelSmall)
+        }
+        return
+    }
+    Box(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .clickable { expandCompleted = !expandCompleted },
+    ) {
+        var first = true
+        for (t in inProgress) {
+            taskRow("■", amber, t.subject, MaterialTheme.colorScheme.onSurface, bold = true, strike = false, first = first)
+            first = false
+        }
+        for (t in visiblePending) {
+            taskRow("□", dim, t.subject, dim, bold = false, strike = false, first = first)
+            first = false
+        }
+        if (hiddenPending > 0) {
+            Text("   … +$hiddenPending pending", color = dim, style = MaterialTheme.typography.bodySmall)
+        }
+        for (t in visibleCompleted) {
+            taskRow("✔", done, t.subject, dim, bold = false, strike = true, first = first)
+            first = false
+        }
+        if (hiddenCompleted > 0) {
+            Text("   … +$hiddenCompleted completed", color = dim, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    // Collapse handle — top-right, separate from the body tap (which toggles
+    // the completed history).
+    Text(
+        "▾",
+        color = dim,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .clickable { boardCollapsed = true }
+            .padding(horizontal = 14.dp, vertical = 2.dp),
+    )
     }
 }
 

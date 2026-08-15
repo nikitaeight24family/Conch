@@ -63,7 +63,7 @@ internal class AgentSessionPromptQueue(
         // Garbage-collect entries older than 60 s on every check so the
         // map doesn't grow forever in long sessions.
         recentSends.entries.removeAll { now - it.value > 60_000 }
-        val key = text.trim()
+        val key = userBodyKey(text)  // identity, not raw bytes — see UserBodyKey.kt
         if (recentSends.containsKey(key)) return true
         // Survive a reconnect: retry() builds a FRESH AgentSession (with an empty
         // local recentSends), yet the JSONL echo of a just-sent prompt still
@@ -84,7 +84,7 @@ internal class AgentSessionPromptQueue(
      *  same body within ~60 s are treated as JSONL replay and dropped — both in
      *  this session and (keyed by [resumeId]) across a reconnect. */
     fun markSent(text: String, resumeId: String? = null) {
-        val key = text.trim()
+        val key = userBodyKey(text)  // identity, not raw bytes — see UserBodyKey.kt
         val now = System.currentTimeMillis()
         recentSends[key] = now
         if (resumeId != null) {
@@ -109,17 +109,24 @@ internal class AgentSessionPromptQueue(
      * already in flight.
      */
     fun enqueue(text: String, imagePaths: List<String> = emptyList(), emitOnStart: Boolean = true): Job? {
-        val shouldStartDrainer: Boolean
+        // The add + drainer-liveness check + launch MUST be one atomic block.
+        // Split (add under lock, check, launch outside), there was a real
+        // window: the drainer sees an empty queue and is RETIRING (its job
+        // still `isActive`), enqueue lands the prompt and reads `isActive ==
+        // true` → no new drainer starts → the prompt sits in the queue
+        // forever. Nothing renders (the UserText is emitted at turn-start,
+        // which never comes) — a zombie chat:. Stop makes the window easy to
+        // hit: clearQueue + the interrupted turn ending retires the drainer
+        // right when the user types the follow-up. The drainer now retires
+        // INSIDE queueLock (nulls currentMessageJob before returning), so
+        // either it sees our prompt or we see its retirement — never neither.
         synchronized(queueLock) {
             pendingPrompts.addLast(QueuedPrompt(text, imagePaths, emitOnStart))
-            shouldStartDrainer = currentMessageJob?.isActive != true
-        }
-        if (shouldStartDrainer) {
+            if (currentMessageJob?.isActive == true) return null
             val j = scope.launch { drainPromptQueue() }
             currentMessageJob = j
             return j
         }
-        return null
     }
 
     /**
@@ -151,7 +158,14 @@ internal class AgentSessionPromptQueue(
     private suspend fun drainPromptQueue() {
         while (true) {
             val next = synchronized(queueLock) {
-                if (pendingPrompts.isEmpty()) null else pendingPrompts.removeFirst()
+                if (pendingPrompts.isEmpty()) {
+                    // Retire INSIDE the lock — see [enqueue]. After this line a
+                    // concurrent enqueue starts a fresh drainer instead of
+                    // trusting this one (still `isActive` for a few more μs)
+                    // to pick its prompt up.
+                    currentMessageJob = null
+                    null
+                } else pendingPrompts.removeFirst()
             } ?: return
             android.util.Log.d("SshAi-Turn", "queue: running next prompt (${pendingPrompts.size} more queued)")
             // Emit the UserText NOW (right before the turn starts) — not at

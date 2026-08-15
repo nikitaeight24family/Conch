@@ -16,6 +16,11 @@ import java.io.InputStreamReader
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+/** No FIRST OUTPUT from a freshly-launched turn within this window → probe
+ *  the transport; dead → kill the channel for silent redelivery (the one-shot
+ *  send-ack watchdog — mirrors the persistent stream's SEND_ACK_TIMEOUT_MS). */
+private const val ONE_SHOT_ACK_TIMEOUT_MS = 35_000L
+
 /**
  * Per-turn CLI execution. Pulls a prompt off the queue, builds the
  * full SSH-channel command via the per-agent
@@ -100,7 +105,7 @@ internal class AgentSessionRunOneShot(
         // one's SSH session closes (see the exit handler + the tail below).
         var failoverContinue: Set<String>? = null
         val t0 = System.currentTimeMillis()
-        val client = sshLifecycle.sshClient ?: run {
+        val client = sshLifecycle.liveClient() ?: run {
             // Was a silent return — caller saw the message in history but no
             // working spinner, no error, no output. Now at least logcat tells
             // us the channel was gone before we ever tried to exec.
@@ -123,6 +128,14 @@ internal class AgentSessionRunOneShot(
             return@withContext
         }
         onStateChange(SessionState.Working)
+        // A Stop pressed while NO turn was running (idle chat / during
+        // bootstrap) has nothing to reset the sticky flag — the only reset
+        // used to be the previous turn's cleanup. Carrying that stale `true`
+        // into THIS turn silently swallowed its real errors («swallowed
+        // because userCancelled=true») — a zombie chat: prompt on screen,
+        // no reply, no error, ever. The flag must only ever mean "the user
+        // cancelled THIS turn", so re-arm it at turn start.
+        sshLifecycle.userCancelled = false
         // If we're resuming an existing session but don't have a cwd snapshot
         // yet (history not seeded with a system event from this app boot),
         // ask the server for the cwd. The script is per-CLI — see
@@ -165,6 +178,10 @@ internal class AgentSessionRunOneShot(
         // (stop button, no reply, no spinner — the exact bug). Inside the try now,
         // and a transport failure flips us to Failed → silent auto-reconnect.
         var sess: net.schmizz.sshj.connection.channel.direct.Session? = null
+        // Hoisted ABOVE the try so the catch block can distinguish a
+        // watchdog-killed channel from a genuine failure (see below).
+        val firstOutput = java.util.concurrent.atomic.AtomicBoolean(false)
+        val ackKilled = java.util.concurrent.atomic.AtomicBoolean(false)
         try {
             // autoExpand: this turn's stdout stream is read continuously; protect
             // it from receive-window starvation if a conch-bridge loopback churns
@@ -187,10 +204,43 @@ internal class AgentSessionRunOneShot(
             // replace the generic "<cli> exited with code N" with an
             // actionable single-line message.
             val stdoutTail = StringBuilder()
+            // SEND-ACK WATCHDOG (one-shot flavor). A half-open transport
+            // swallows the exec silently and `cmd.join(15 MINUTES)` sits blind
+            // — the prompt never reaches the CLI, the chat shows a bubble and
+            // eternal silence, and anything sent after it queues invisibly
+            // behind the corpse. Same contract as the persistent stream's
+            // watchdog: no FIRST OUTPUT in 35 s → probe the transport on a
+            // fresh channel; dead/hung → close the turn channel (unblocks
+            // join) and route into undelivered → silent reconnect → redeliver.
+            val ackJob = scope.launch {
+                kotlinx.coroutines.delay(ONE_SHOT_ACK_TIMEOUT_MS)
+                if (firstOutput.get() || sshLifecycle.userCancelled) return@launch
+                val alive = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                    kotlinx.coroutines.runInterruptible {
+                        runCatching {
+                            val probeSess = client.startSession()
+                            try {
+                                probeSess.exec("true").join(5, TimeUnit.SECONDS)
+                                true
+                            } finally {
+                                runCatching { probeSess.close() }
+                            }
+                        }.getOrDefault(false)
+                    }
+                } ?: false
+                if (alive) {
+                    android.util.Log.d(tag, "one-shot unacked but transport answers — CLI just slow, waiting on")
+                    return@launch
+                }
+                android.util.Log.w(tag, "one-shot unacked ${ONE_SHOT_ACK_TIMEOUT_MS / 1000}s + transport dead — closing channel for redelivery")
+                ackKilled.set(true)
+                SilentlyTry.fired(tag, "close unacked turn channel") { sess?.close() }
+            }
             val outJob = scope.launch {
                 BufferedReader(InputStreamReader(cmd.inputStream, Charsets.UTF_8)).use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
+                        firstOutput.set(true)
                         if (line.isBlank()) continue
                         if (line.contains("\"thinking_tokens\"")) {
                             thinkingTokensRx.find(line)?.groupValues?.get(1)?.toLongOrNull()
@@ -254,13 +304,22 @@ internal class AgentSessionRunOneShot(
                 }
             }
             cmd.join(15, TimeUnit.MINUTES)
+            ackJob.cancel()
             outJob.cancel()
             errJob.cancel()
+            if (ackKilled.get()) {
+                // The watchdog killed an unacked turn on a dead transport —
+                // silent-reconnect semantics, same as the ABORT paths above.
+                android.util.Log.w(tag, "unacked turn closed — undelivered + Failed(disconnected)")
+                onPromptUndelivered(text)
+                onStateChange(SessionState.Failed("disconnected"))
+                return@withContext
+            }
             val exit = cmd.exitStatus
             android.util.Log.d(
                 tag,
                 "runOneShot done exit=$exit elapsed=${System.currentTimeMillis() - t0}ms " +
-                    "sshConnected=${sshLifecycle.sshClient?.isConnected}"
+                    "sshConnected=${sshLifecycle.liveClient()?.isConnected}"
             )
             ai.eight24family.conch.data.ServerActivityLog.append(
                 server.id,
@@ -311,6 +370,13 @@ internal class AgentSessionRunOneShot(
                 e.message?.contains("EOF", ignoreCase = true) == true ||
                 e.message?.contains("Broken transport", ignoreCase = true) == true
             when {
+                // Watchdog-killed channel: join threw instead of returning
+                // cleanly — same silent-reconnect + redelivery semantics.
+                ackKilled.get() -> {
+                    android.util.Log.w(tag, "  unacked turn threw after watchdog kill — undelivered + Failed(disconnected)")
+                    onPromptUndelivered(text)
+                    onStateChange(SessionState.Failed("disconnected"))
+                }
                 sshLifecycle.userCancelled ->
                     android.util.Log.d(tag, "  swallowed because userCancelled=true")
                 transportBroken -> {
@@ -370,7 +436,7 @@ internal class AgentSessionRunOneShot(
      *  pooled SSH. Returns the new slot id, or null if there's no other
      *  account to fall back to (then the caller surfaces the limit). */
     private suspend fun switchToNextOAuthSlot(tried: Set<String>): String? {
-        val client = sshLifecycle.sshClient ?: return null
+        val client = sshLifecycle.liveClient() ?: return null
         val exec: suspend (String) -> String? = { cmd ->
             SilentlyTry.logged("SshAi-Turn", "failover vault exec") {
                 val s = client.startSession()

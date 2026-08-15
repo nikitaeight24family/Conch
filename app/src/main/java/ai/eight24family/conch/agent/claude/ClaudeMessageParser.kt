@@ -666,12 +666,18 @@ object ClaudeMessageParser {
                     fun k(n: Long): String =
                         if (n >= 1000) "${"%.1f".format(java.util.Locale.US, n / 1000.0)}k"
                         else n.toString()
+                    // Guard every field on > 0 — a `result` with all-zero usage
+                    // is a degenerate turn (interrupted / cache-only / no
+                    // output), and «tokens · in 0 · out 0 · 0s» is pure noise
+                    // the user rightly called out (2026-08-11). Every sibling
+                    // parser already does this; this one didn't.
+                    val inTotal = (inTok ?: 0) + (cacheRead ?: 0)
                     val statParts = listOfNotNull(
-                        inTok?.let { "in ${k(it + (cacheRead ?: 0))}" },
-                        outTok?.let { "out ${k(it)}" },
+                        inTotal.takeIf { it > 0 }?.let { "in ${k(it)}" },
+                        outTok?.takeIf { it > 0 }?.let { "out ${k(it)}" },
                         cost?.takeIf { it > 0 }
                             ?.let { "$" + "%.4f".format(java.util.Locale.US, it).trimEnd('0').trimEnd('.') },
-                        durMs?.let { "${it / 1000}s" },
+                        durMs?.takeIf { it >= 1000 }?.let { "${it / 1000}s" },
                     )
                     buildList {
                         add(AgentMessage.Result(uuid(), subtype, text))

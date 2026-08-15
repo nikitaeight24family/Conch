@@ -150,7 +150,9 @@ class SlashCommandsTest {
         // Pinning the public catalog so accidental additions (like restoring
         // /help or /init's old shape) get caught in review.
         val names = SlashCommands.BUILT_IN.map { it.name }.toSet()
-        val expected = setOf("clear", "new", "diff", "init", "memory", "agents", "model", "review")
+        // "bg" joined deliberately (2026-08-03): `claude --bg` hands a task to a
+        // detached agent that outlives the app — see BackgroundTaskTest.
+        val expected = setOf("clear", "new", "diff", "init", "memory", "agents", "model", "review", "bg")
         assertEquals(expected, names)
     }
 

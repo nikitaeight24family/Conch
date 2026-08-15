@@ -47,8 +47,11 @@ internal class AgentSessionSshLifecycle(
     private val ssh: SshClient,
     private val scope: CoroutineScope,
 ) {
-    @Volatile var sshClient: SSHClient? = null
-        private set
+    /** ⚠ PRIVATE ON PURPOSE — read the transport through [liveClient] only.
+     *  This field is the captured client and goes stale whenever the pool
+     *  rebuilds the transport; every consumer that read it kept talking to a
+     *  corpse. Making it private is what stops that from coming back. */
+    @Volatile private var sshClient: SSHClient? = null
 
     /**
      * Live SSH `Session` (channel) that the in-flight `runOneShot` is
@@ -78,6 +81,11 @@ internal class AgentSessionSshLifecycle(
      * "Premature EOF" or "channel #0 EOF" looking like a server crash.
      */
     @Volatile var userCancelled = false
+
+    /** Epoch ms of the last FAILED fresh-handshake fallback in [execOnLive];
+     *  0 when the last one succeeded. Rate-limits the fallback to one failed
+     *  handshake per minute — see the comment at the call site. */
+    @Volatile private var lastFallbackFailMs = 0L
 
     /**
      * Set by the chat-open path right BEFORE we first call
@@ -109,8 +117,10 @@ internal class AgentSessionSshLifecycle(
      */
     fun isAlive(): Boolean {
         if (!scope.isActive) return false
-        val client = sshClient ?: return false
-        return client.isConnected
+        // [liveClient], not the captured field: the pool rebuilding the transport
+        // under us is a RECOVERY, not a death. Reading the corpse here made the
+        // reaper close sessions whose server was connected and working.
+        return liveClient()?.isConnected == true
     }
 
     /**
@@ -131,10 +141,37 @@ internal class AgentSessionSshLifecycle(
      * a second reference against the single `release` in [close] and leak the
      * pool's refcount, so this never resurrects a server the user has hung up
      * on; it only notices a transport that already exists.
+     *
+     * ⚠ THIS IS THE ONLY WAY TO READ THE TRANSPORT. The rule was written for
+     * upload/download on 2026-07-30 and applied to those two call sites only —
+     * the SEND path kept reading the field, so on a server whose transport had
+     * been rebuilt every turn aborted with "transport down", every `execOnLive`
+     * fell through to a fresh handshake (impossible without a FIDO tap → null),
+     * and the chat looked dead while the server list showed it connected. The
+     * user's Home server logged 347 such fallbacks against 0 on the other box
+     * (2026-08-04). Nothing may read [sshClient] except this function and the
+     * refcount bookkeeping in [openSshClient] / [close].
+     *
+     * Adopting the pool's client into the field is refcount-NEUTRAL: the pool
+     * counts references per serverId, not per client object, and we only adopt
+     * when we already hold one (`sshClient != null`), so [close]'s single
+     * `release` still balances the single `acquire`. Without adopting, every
+     * later `isAlive`/log/read would keep reporting the corpse.
      */
-    fun liveClient(): SSHClient? =
-        sshClient?.takeIf { it.isConnected }
-            ?: ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+    fun liveClient(): SSHClient? {
+        val captured = sshClient
+        if (captured != null && captured.isConnected) return captured
+        val pooled = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+        if (pooled != null && captured != null && pooled !== captured) {
+            sshClient = pooled
+            android.util.Log.i(
+                "SshAi-AgentSession",
+                "transport rebound to the pool's live client for ${server.name} " +
+                    "(captured one was ${if (captured.isConnected) "replaced" else "dead"})",
+            )
+        }
+        return pooled
+    }
 
     /**
      * Acquire an authenticated [SSHClient] for this AgentSession via
@@ -266,7 +303,7 @@ internal class AgentSessionSshLifecycle(
                 command.startsWith("rm ") -> "file"
             else -> "diag"
         }
-        val client = sshClient
+        val client = liveClient()
         if (client != null && client.isConnected) {
             try {
                 val sess = client.startSession()
@@ -329,7 +366,23 @@ internal class AgentSessionSshLifecycle(
         // the fresh attempt still fails — but it fails LOUDLY now (the
         // caller sees `null`) instead of the symptom looking like an
         // empty server.
+        //
+        // RATE-LIMITED: when the transport is poisoned, EVERY subsystem's
+        // execOnLive fails at once (~20 call sites) and each used to launch
+        // its own fresh handshake — on an SK server with the tag lifted
+        // that's a burst of guaranteed auth failures in the server's log
+        // (fail2ban counts those). One failed fallback handshake per minute
+        // per session is diagnosis enough; a success clears the limiter.
+        val now = System.currentTimeMillis()
+        if (now - lastFallbackFailMs < 60_000L) {
+            android.util.Log.d(
+                "SshAi-AgentSession",
+                "execOnLive fallback suppressed (last fresh-handshake failure ${(now - lastFallbackFailMs) / 1000}s ago)",
+            )
+            return@withContext null
+        }
         val fallback = ssh.execute(server, secrets, command, skSigner).getOrNull()
+        lastFallbackFailMs = if (fallback == null) now else 0L
         ai.eight24family.conch.data.ServerActivityLog.append(
             server.id,
             ai.eight24family.conch.data.ServerActivityLog.Entry(
@@ -350,7 +403,7 @@ internal class AgentSessionSshLifecycle(
      * contents through `cat > path` without bloating the command line.
      */
     suspend fun execOnLiveWithStdin(command: String, stdin: ByteArray): Boolean = withContext(Dispatchers.IO) {
-        val client = sshClient ?: return@withContext false
+        val client = liveClient() ?: return@withContext false
         if (!client.isConnected) return@withContext false
         var sess: Session? = null
         try {

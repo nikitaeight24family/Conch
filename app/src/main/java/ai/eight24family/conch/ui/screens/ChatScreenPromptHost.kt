@@ -1,10 +1,13 @@
 package ai.eight24family.conch.ui.screens
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,7 +26,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -81,6 +87,10 @@ internal fun ChatPromptHost(
     val contextBreakdown by vm.contextBreakdown.collectAsState()
     val contextLoading by vm.contextLoading.collectAsState()
     val claudePlan by vm.claudePlan.collectAsState()
+    // No live CLI and the last turn is older than the cache's hour: the next
+    // message pays to re-send the whole conversation.
+    val coldRebuild by vm.coldCacheRebuild.collectAsState()
+    val runningElsewhere by vm.runningElsewhere.collectAsState()
 
     // Slash-command autocomplete state. Filters built-in + user-defined
     // commands by what's typed after the leading `/` and before any
@@ -157,6 +167,11 @@ internal fun ChatPromptHost(
                 ServiceLocator.sshConnectionPool.peek(serverId) == null
             if (offlineReadOnly) null
             else promptBarStatusHint(
+                // Someone else is writing this session's file while our own
+                // turn is idle — a terminal on the server, or a background
+                // agent. Sending from here would launch a second CLI on it.
+                runningElsewhere = runningElsewhere,
+                coldRebuild = coldRebuild,
                 state = state,
                 anyUploading = anyUploading,
                 reconnecting = reconnecting,
@@ -203,48 +218,78 @@ private fun LoopStrip(
         }
     }
     val left = ((armed.dueAtMs - now.longValue).coerceAtLeast(0L) / 1000L).toInt()
-    val due = when {
+    // An interval loop has a cadence, not a single next moment — counting down
+    // to a time we don't know would be an invention.
+    val due = armed.cadence ?: when {
         left >= 60 -> "next run in ${left / 60}m ${left % 60}s"
         left > 0 -> "next run in ${left}s"
         else -> "running now"
     }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(accent.copy(alpha = 0.08f))
-            .border(1.dp, accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
-            .padding(start = 10.dp, end = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    val shortDue = armed.cadence ?: when {
+        left >= 60 -> "${left / 60}m${left % 60}s"
+        left > 0 -> "${left}s"
+        else -> "now"
+    }
+    // Collapse-to-the-right on tapping the arrows. Collapsed = a compact
+    // right-aligned pill: arrows (tap to expand back) + countdown + stop.
+    // The width animates, so the strip visually slides shut toward the right
+    // edge.
+    var collapsed by rememberSaveable { mutableStateOf(false) }
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+        contentAlignment = Alignment.CenterEnd,
     ) {
-        Icon(
-            Icons.Filled.Autorenew,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(15.dp),
-        )
-        Column(modifier = Modifier.weight(1f).padding(vertical = 6.dp)) {
-            Text(
-                "Loop running · $due",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        Row(
+            modifier = Modifier
+                .then(if (collapsed) Modifier else Modifier.fillMaxWidth())
+                .animateContentSize()
+                .clip(RoundedCornerShape(10.dp))
+                .background(accent.copy(alpha = 0.08f))
+                .border(1.dp, accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                .padding(start = 10.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Filled.Autorenew,
+                contentDescription = if (collapsed) "expand loop strip" else "collapse loop strip",
+                tint = accent,
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { collapsed = !collapsed }
+                    .padding(4.dp),
             )
-            armed.reason?.let { why ->
+            if (collapsed) {
                 Text(
-                    why,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                    shortDue,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
+            } else {
+                Column(modifier = Modifier.weight(1f).padding(vertical = 6.dp)) {
+                    Text(
+                        "Loop running · $due",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    armed.reason?.let { why ->
+                        Text(
+                            why,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
-        }
-        androidx.compose.material3.TextButton(onClick = onStop) {
-            Text("stop", style = MaterialTheme.typography.labelMedium, color = accent)
+            androidx.compose.material3.TextButton(onClick = onStop) {
+                Text("stop", style = MaterialTheme.typography.labelMedium, color = accent)
+            }
         }
     }
 }

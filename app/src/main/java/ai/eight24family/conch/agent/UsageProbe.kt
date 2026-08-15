@@ -188,10 +188,28 @@ object UsageProbe {
     fun cached(serverId: String, agent: Agent): UsageReport? = cache[key(serverId, agent)]
 
     /** Adopt a report obtained elsewhere (the live control channel) into the
-     *  same cache the fetch path warms, so chat re-opens stay instant. */
+     *  same cache the fetch path warms, so chat re-opens stay instant.
+     *
+     * PER-MODEL CARRY-OVER: the per-model "second layer" (seven_day_fable, …)
+     * comes back only on the full-oauth path — the fallback sources (CLI cache,
+     * setup-token) return just the aggregates, and adopting such a report verbatim
+     * made the Fable row FLAP in and out of the limits sheet. When the fresh
+     * report has no per-model windows but the cached one does, carry the cached
+     * ones over — they stay valid until their own reset passes (utilization only
+     * grows between resets; slightly stale beats vanishing). */
     fun remember(serverId: String, agent: Agent, report: UsageReport) {
-        cache[key(serverId, agent)] = report
+        cache[key(serverId, agent)] = withPerModelCarryOver(serverId, agent, report)
         persistToDisk()
+    }
+
+    /** See [remember]. Public-ish so the fetch path applies the same rule. */
+    internal fun withPerModelCarryOver(serverId: String, agent: Agent, fresh: UsageReport): UsageReport {
+        if (fresh.windows.any { it.perModel }) return fresh
+        val now = System.currentTimeMillis()
+        val carried = cache[key(serverId, agent)]?.windows
+            ?.filter { it.perModel && (it.resetAtEpochMs ?: 0L) > now }
+            .orEmpty()
+        return if (carried.isEmpty()) fresh else fresh.copy(windows = fresh.windows + carried)
     }
 
     /**
@@ -315,10 +333,15 @@ object UsageProbe {
             Agent.CODEX -> parseCodex(out)
             Agent.GEMINI -> emptyList()
         }
-        val report = if (windows.isEmpty()) null else UsageReport(
+        val raw = if (windows.isEmpty()) null else UsageReport(
             windows = windows,
             extraUsedUsd = if (agent == Agent.CLAUDE) parseClaudeExtra(out) else null,
         )
+        // Merge BEFORE caching — a fallback-source report without the
+        // per-model layer must not clobber the carried rows (see
+        // [withPerModelCarryOver]); returned merged too, so the caller
+        // displays exactly what the cache holds.
+        val report = raw?.let { withPerModelCarryOver(serverId, agent, it) }
         if (report != null) {
             cache[key(serverId, agent)] = report // keep last good
             persistToDisk()                       // survive restarts → instant on next open
@@ -454,14 +477,30 @@ object UsageProbe {
     }
 
     // ---- Codex: live `codex app-server` account/rateLimits/read (camelCase)
-    //      with a fallback to the latest rollout's snake_case rate_limits.
-    //      Codex windows are product-fixed: primary = 5h, secondary = weekly. ----
+    //      with a fallback to the latest rollout's snake_case rate_limits. ----
+    //
+    // ⚠ `primary` / `secondary` ARE NOT "5-hour" AND "weekly". Those are Claude's
+    // window sizes, and the labels were hard-coded to the KEY, so a bar could read
+    // "5-hour limit · resets Sun 9:03 PM (3d8h)" — a claim its own reset time
+    // disproves (user, 2026-08-06). The payload states the size and this code was
+    // already reading it for the reset maths: on that account
+    // `"primary":{"used_percent":47.0,"window_minutes":10080,…}` — 10080 minutes,
+    // a SEVEN-DAY window sitting under the key we called five-hourly. The label
+    // is derived from that number now.
     private fun parseCodex(out: String): List<UsageWindow> = buildList {
-        codexWindow(out, "primary", "5-hour limit", 5 * 3600L)?.let { add(it) }
-        codexWindow(out, "secondary", "Weekly limit", 7 * 86_400L)?.let { add(it) }
+        codexWindow(out, "primary", "Usage limit", 5 * 3600L)?.let { add(it) }
+        codexWindow(out, "secondary", "Secondary limit", 7 * 86_400L)?.let { add(it) }
     }
 
-    private fun codexWindow(out: String, key: String, label: String, defaultWindowSec: Long): UsageWindow? {
+    /**
+     * @param fallbackLabel used ONLY when the payload does not state the window
+     *   size. It carries NO duration — inventing "5-hour" from a default is the
+     *   bug above. Same rule as the topbar's effort: show the real value or
+     *   nothing (NO-INVENTED-EFFORT-IN-THE-TOPBAR-1).
+     * @param defaultWindowSec still needed for the reset projection, which has to
+     *   pick some cadence; it never reaches the label.
+     */
+    private fun codexWindow(out: String, key: String, fallbackLabel: String, defaultWindowSec: Long): UsageWindow? {
         // First flat "{...}" block under this key. With BOTH the live (camelCase)
         // line and the rollout (snake_case) line present, `find` takes the live
         // one first; if that block is nested/garbage the regex skips it and
@@ -472,11 +511,28 @@ object UsageProbe {
             ?.groupValues?.get(1)?.toFloatOrNull() ?: return null
         // Live app-server calls it "windowDurationMins"; the rollout uses
         // "window_minutes" — match both (and "windowMinutes" for good measure).
-        val windowSec = Regex("\"window[A-Za-z_]*[Mm]in[a-z]*s?\"\\s*:\\s*([0-9]+)").find(body)
-            ?.groupValues?.get(1)?.toLongOrNull()?.let { it * 60 } ?: defaultWindowSec
+        val declaredSec = Regex("\"window[A-Za-z_]*[Mm]in[a-z]*s?\"\\s*:\\s*([0-9]+)").find(body)
+            ?.groupValues?.get(1)?.toLongOrNull()?.takeIf { it > 0L }?.let { it * 60 }
+        val windowSec = declaredSec ?: defaultWindowSec
+        val label = declaredSec?.let(::durationWindowLabel) ?: fallbackLabel
         // Codex shows what's LEFT (like its /status), not what's used.
         val (rt, resetEpochMs) = codexReset(body, windowSec)
         return window(label, used, rt, remaining = true, resetAtEpochMs = resetEpochMs)
+    }
+
+    /** Name a rate-limit window by the duration the provider actually reported.
+     *  Weeks before days before hours, so 10080 min reads "Weekly limit" rather
+     *  than "7-day limit", and an unfamiliar cadence still reads honestly
+     *  ("36-hour limit") instead of borrowing another product's vocabulary. */
+    internal fun durationWindowLabel(sec: Long): String = when {
+        sec <= 0L -> "Usage limit"
+        sec % (7 * 86_400L) == 0L ->
+            (sec / (7 * 86_400L)).let { if (it == 1L) "Weekly limit" else "$it-week limit" }
+        sec % 86_400L == 0L ->
+            (sec / 86_400L).let { if (it == 1L) "Daily limit" else "$it-day limit" }
+        sec % 3_600L == 0L -> "${sec / 3_600L}-hour limit"
+        sec % 60L == 0L -> "${sec / 60L}-minute limit"
+        else -> "Usage limit"
     }
 
     /** Reset text + absolute reset epoch (ms) for a Codex window.

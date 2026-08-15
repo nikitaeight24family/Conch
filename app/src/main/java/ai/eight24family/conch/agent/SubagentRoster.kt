@@ -58,13 +58,29 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     for (m in messages) {
         when (m) {
             is AgentMessage.ToolUse -> {
-                if (!m.toolName.equals("Task", ignoreCase = true)) continue
-                val a = acc.getOrPut(m.id) { Acc() }
-                SilentlyTry.fired("SshAi-Subagents", "parse Task input") {
+                // "Task" is the historical name; the shipped CLI spawns
+                // subagents with a tool literally named "Agent" now (`Agent
+                // {"description":…,"subagent_type":…}`), and the exact-name
+                // check made the whole roster BLIND to every modern fan-out.
+                // Match by SHAPE too: any tool whose input carries
+                // `subagent_type` is an agent spawn, whatever its name.
+                val nameIsAgentish = m.toolName.equals("Task", ignoreCase = true) ||
+                    m.toolName.equals("Agent", ignoreCase = true)
+                if (!nameIsAgentish && !m.input.contains("\"subagent_type\"")) continue
+                var parsedAgent = false
+                SilentlyTry.fired("SshAi-Subagents", "parse agent-spawn input") {
                     val o = rosterJson.parseToJsonElement(m.input).jsonObject
-                    a.type = o["subagent_type"]?.jsonPrimitive?.content ?: a.type
-                    a.task = (o["description"] ?: o["prompt"])?.jsonPrimitive?.content ?: a.task
+                    val type = o["subagent_type"]?.jsonPrimitive?.content
+                    val task = (o["description"] ?: o["prompt"])?.jsonPrimitive?.content
+                    // Shape gate for the non-named path: no subagent_type key in
+                    // the PARSED input → not an agent spawn, skip silently.
+                    if (!nameIsAgentish && type == null) return@fired
+                    parsedAgent = true
+                    val a = acc.getOrPut(m.id) { Acc() }
+                    a.type = type ?: a.type
+                    a.task = task ?: a.task
                 }
+                if (nameIsAgentish && !parsedAgent) acc.getOrPut(m.id) { Acc() }
             }
 
             is AgentMessage.SubagentActivity -> {
@@ -80,8 +96,14 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
             }
 
             is AgentMessage.ToolResult -> {
-                // The Task tool returning IS the agent's completion signal.
-                acc[m.toolUseId]?.done = true
+                // The Task/Agent tool returning IS the completion signal — for
+                // a SYNC run. An ASYNC launch acks instantly ("Async agent
+                // launched successfully … run_in_background") while the agent
+                // keeps working — flipping to ○ on that ack made every async
+                // agent look finished the moment it started. Those complete
+                // via SubagentActivity(done)/task events instead.
+                val a = acc[m.toolUseId]
+                if (a != null && !m.output.contains("Async agent launched")) a.done = true
             }
 
             else -> Unit

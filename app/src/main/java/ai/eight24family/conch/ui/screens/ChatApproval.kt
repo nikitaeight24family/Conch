@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.outlined.Map
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -51,11 +52,16 @@ internal fun ApprovalShield(
      * icon itself, we don't want a redundant shield button beside it.
      */
     showAnchorIcon: Boolean = true,
+    /** Only Claude has a real `plan` permission mode. Offering it where the CLI
+     *  would quietly run in some other mode would be a lie, so the row appears
+     *  only where the wire word exists. */
+    planSupported: Boolean = false,
 ) {
     val cyan = MaterialTheme.colorScheme.primary
     val tertiary = MaterialTheme.colorScheme.tertiary
     val outline = MaterialTheme.colorScheme.outline
     val (icon, tint) = when (mode) {
+        AgentApprovalMode.PLAN -> Icons.Outlined.Map to outline
         AgentApprovalMode.SAFE -> Icons.Outlined.Shield to outline
         AgentApprovalMode.AUTO -> Icons.Filled.Shield to cyan
         AgentApprovalMode.YOLO -> Icons.Filled.Bolt to tertiary
@@ -71,6 +77,16 @@ internal fun ApprovalShield(
             }
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = onToggle) {
+            if (planSupported) {
+                ApprovalRow(
+                    mode = AgentApprovalMode.PLAN,
+                    title = "plan",
+                    subtitle = "research only · nothing changes until you accept the plan",
+                    icon = Icons.Outlined.Map,
+                    selected = mode == AgentApprovalMode.PLAN,
+                    onPick = onPick,
+                )
+            }
             ApprovalRow(
                 mode = AgentApprovalMode.SAFE,
                 title = "safe",
@@ -182,6 +198,7 @@ private fun ApprovalRow(
     val tertiary = MaterialTheme.colorScheme.tertiary
     val outline = MaterialTheme.colorScheme.outline
     val accent = when (mode) {
+        AgentApprovalMode.PLAN -> outline
         AgentApprovalMode.SAFE -> outline
         AgentApprovalMode.AUTO -> cyan
         AgentApprovalMode.YOLO -> tertiary

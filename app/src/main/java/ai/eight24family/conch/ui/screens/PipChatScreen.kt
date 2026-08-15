@@ -105,11 +105,27 @@ fun PipChatScreen(session: AgentSession) {
                 .verticalScroll(scrollState),
         ) {
             val text = currentTurnAssistant?.text.orEmpty()
+            val live = state == SessionState.Working || state is SessionState.Bootstrapping
             when {
                 text.isNotBlank() -> {
+                    // ⚠ SAY WHEN IT IS OVER. This window is glanced at, not read:
+                    // a finished reply with no marking is taken for something
+                    // happening now. A stopped `/loop` left "Next tick at 19:28."
+                    // sitting here, and the user read it as the app announcing a
+                    // tick — for a time long past, on a loop that was cancelled
+                    // (2026-08-03). The text is still worth showing; the claim
+                    // that it is current is not ours to make.
+                    if (!live) {
+                        Text(
+                            "last reply · nothing running",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
                     Text(
                         text,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        color = if (live) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     // Trailing cursor when still streaming — gives the

@@ -9,6 +9,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -62,6 +63,7 @@ internal fun ChatTopBarHost(
     onSearchQueryChange: (String?) -> Unit,
     onOpenStatsSheet: () -> Unit,
     onOpenSubagents: (chatId: String?) -> Unit,
+    onForkChat: (resumeId: String) -> Unit = {},
     onOpenSettings: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -159,6 +161,65 @@ internal fun ChatTopBarHost(
     // Manual compaction — confirmed, with the cost on screen. Compaction
     // rewrites the conversation into a summary: it is not undoable from here,
     // and the next turn re-caches the (now much smaller) context. Say both.
+    // ⚠ THE ONE POPUP THAT EARNS ITS INTERRUPTION. It appears only when the
+    // next message would cost far more than it looks like it should, and it
+    // offers the cheaper way out rather than just an OK.
+    val costWarning by vm.costWarning.collectAsState()
+    costWarning?.let { w ->
+        val cold = w.kind == ChatViewModel.CostWarning.Kind.COLD_CACHE
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { vm.dismissCostWarning() },
+            icon = {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                )
+            },
+            title = {
+                Text(if (cold) "This message re-sends the whole conversation"
+                     else "This session is already running on the server")
+            },
+            text = {
+                Column {
+                    Text(
+                        if (cold)
+                            "It has been idle over an hour, so the provider's cache has " +
+                                "expired. Sending now pays for the entire conversation again — " +
+                                "about ${w.percent}% of the context window — instead of reading " +
+                                "it back cheaply."
+                        else
+                            "Something else is writing this conversation right now — a terminal " +
+                                "on the server, or a background agent. Sending from here starts a " +
+                                "SECOND agent on the same session.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 8.dp))
+                    Text(
+                        if (cold)
+                            "Compacting first replaces the earlier turns with a summary, so this " +
+                                "send — and every later one — carries far less. Nothing leaves the " +
+                                "transcript."
+                        else
+                            "Waiting until it finishes keeps one agent on one conversation.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { if (cold) vm.compactThenSend() else vm.dismissCostWarning() },
+                ) { Text(if (cold) "compact first" else "wait") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.sendAnyway() }) {
+                    Text("send anyway")
+                }
+            },
+        )
+    }
+
     val pendingCompact by vm.pendingCompact.collectAsState()
     pendingCompact?.let { pc ->
         androidx.compose.material3.AlertDialog(
@@ -253,7 +314,13 @@ internal fun ChatTopBarHost(
         onOpenAgents = { onOpenSubagents(vm.localSessionId.value) },
         showSubagentsIcon = currentAgent.supportsSubagents,
         showMemoryIcon = currentAgent.supportsMemory,
+        onRestartCli = { vm.restartCli() },
         showRenameItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
+        // Forking needs a session to inherit: `--fork-session` is meaningless
+        // without `--resume`, so a chat that has never been assigned an id has
+        // nothing to branch from.
+        showForkItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE && resumeId != null,
+        onForkChat = { resumeId?.let { onForkChat(it) } },
         onRenameSession = { renameDialogOpen = true },
         showCompactItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
         onCompact = { vm.requestCompact() },
