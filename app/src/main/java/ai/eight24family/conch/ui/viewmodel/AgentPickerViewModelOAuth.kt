@@ -184,11 +184,13 @@ internal class AgentPickerViewModelOAuth(
                     // google-gemini.github.io/gemini-cli docs).
                     Agent.GEMINI -> "BROWSER=true gemini auth login --oauth"
                 }
-                val loginShellPrefix = "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; " +
-                    "for nd in \$HOME/.nvm/versions/node/*/bin \$HOME/.local/node-*/bin; do " +
-                    "[ -d \"\$nd\" ] && export PATH=\"\$nd:\$PATH\"; done; " +
-                    "[ -s \"\$HOME/.nvm/nvm.sh\" ] && . \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; "
-                val fullCmd = "bash -lc " + shellEscape(loginShellPrefix + cmd)
+                // RemoteEnv owns the PATH story — a hand-rolled copy here had
+                // drifted to a subset (no homebrew/volta/bun/asdf/pnpm/snap),
+                // exactly the failure RemoteEnv's header warns about.
+                val loginShellPrefix = ai.eight24family.conch.agent.RemoteEnv.PATH_PREAMBLE_INLINE + " "
+                val fullCmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+                    "bash -lc " + shellEscape(loginShellPrefix + cmd),
+                )
                 android.util.Log.d(tag, "login($agent) — running with PTY: $fullCmd")
                 // Baseline = the server's clock NOW. Two guards ride on it: (1) the
                 // creds poller ignores a pre-existing (already-logged-in) file, and
@@ -415,7 +417,9 @@ internal class AgentPickerViewModelOAuth(
                                             "touch ~/.profile; " +
                                             "sed -i.bak \"/^export CLAUDE_CODE_OAUTH_TOKEN=/d\" ~/.profile 2>/dev/null || true; " +
                                             "echo \"export CLAUDE_CODE_OAUTH_TOKEN='$safe'\" >> ~/.profile"
-                                        val writeProc = writeSess.exec("bash -lc " + shellEscape(saveCmd))
+                                        val writeProc = writeSess.exec(
+                                            ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(saveCmd)),
+                                        )
                                         writeProc.join(10, java.util.concurrent.TimeUnit.SECONDS)
                                         android.util.Log.d(tag, "login(CLAUDE) — token written to ~/.profile (exit=${writeProc.exitStatus})")
                                     }
@@ -589,7 +593,9 @@ internal class AgentPickerViewModelOAuth(
                     "  \"security\": { \"auth\": { \"selectedType\": \"oauth-personal\" } }\n" +
                     "}\n" +
                     "SETTINGSEOF"
-                val proc = sess.exec("bash -lc " + shellEscape(setupCmd))
+                val proc = sess.exec(
+                    ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(setupCmd)),
+                )
                 proc.join(10, java.util.concurrent.TimeUnit.SECONDS)
                 android.util.Log.d(tag, "gemini setup: settings.json written (exit=${proc.exitStatus})")
             }
@@ -608,14 +614,15 @@ internal class AgentPickerViewModelOAuth(
                         java.util.Collections.emptyMap(),
                     )
                 }
-                val loginShellPrefix = "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; " +
-                    "for nd in \$HOME/.nvm/versions/node/*/bin \$HOME/.local/node-*/bin; do " +
-                    "[ -d \"\$nd\" ] && export PATH=\"\$nd:\$PATH\"; done; " +
-                    "[ -s \"\$HOME/.nvm/nvm.sh\" ] && . \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; "
+                // RemoteEnv owns the PATH story — this hand-rolled copy had
+                // drifted to a subset (see the login() twin).
+                val loginShellPrefix = ai.eight24family.conch.agent.RemoteEnv.PATH_PREAMBLE_INLINE + " "
                 // --skip-trust bypasses "Do you trust the files in this
                 // folder?". Without it, Gemini parks on that prompt and
                 // doesn't start the OAuth flow.
-                val fullCmd = "bash -lc " + shellEscape(loginShellPrefix + "gemini --skip-trust")
+                val fullCmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+                    "bash -lc " + shellEscape(loginShellPrefix + "gemini --skip-trust"),
+                )
                 android.util.Log.d(tag, "gemini login — running: $fullCmd")
                 val proc = sess.exec("$fullCmd 2>&1")
                 loginProcStdin = proc.outputStream
@@ -778,9 +785,11 @@ internal class AgentPickerViewModelOAuth(
             runCatching {
                 pooled.startSession().use { sess ->
                     val proc = sess.exec(
-                        "bash -lc " + shellEscape(
-                            "curl -fsS -m 30 " + shellEscape(callbackUrl) + " >/dev/null 2>&1; " +
-                            "echo \"curl_exit=\$?\""
+                        ai.eight24family.conch.agent.RemoteEnv.portable(
+                            "bash -lc " + shellEscape(
+                                "curl -fsS -m 30 " + shellEscape(callbackUrl) + " >/dev/null 2>&1; " +
+                                "echo \"curl_exit=\$?\""
+                            ),
                         )
                     )
                     val output = proc.inputStream.bufferedReader().readText()
@@ -927,7 +936,9 @@ internal class AgentPickerViewModelOAuth(
         }
         return SilentlyTry.loggedOrElse("SshAi-AgentPicker", "checkAuthOnly probe", false) {
             client.startSession().use { sess ->
-                val proc = sess.exec("bash -lc " + shellEscape(checks))
+                val proc = sess.exec(
+                    ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(checks)),
+                )
                 proc.join(5, java.util.concurrent.TimeUnit.SECONDS)
                 proc.exitStatus == 0
             }

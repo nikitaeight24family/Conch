@@ -420,6 +420,7 @@ internal fun ServerAgentPanel(
     val installOutput by vm.installOutput.collectAsState()
     val installOp by vm.installOp.collectAsState()
     val firstProbeDone by vm.firstProbeDone.collectAsState()
+    val serverOs by vm.serverOs.collectAsState()
     // Browse (the overview / Agents tab) always renders the list from cache; a
     // SK server otherwise gates the list behind a confirmed auth.
     val agentListUnlocked = browse || !isSkServer || authConfirmed
@@ -525,6 +526,7 @@ internal fun ServerAgentPanel(
                         op = installOp[agent],
                         checking = rowChecking,
                         loggingIn = loginNow?.agent == agent && loginNow.submitted,
+                        windowsServer = serverOs == "WINDOWS",
                         onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
                         onInstall = { vm.installAgent(agent) },
                         onLogin = { vm.startLogin(agent) },
@@ -859,6 +861,10 @@ private fun AgentRow(
      *  is running (many seconds). Row shows "signing in…" and its tap is inert
      *  so it can't read as "start over". */
     loggingIn: Boolean = false,
+    /** The OS pre-probe identified this as a Windows OpenSSH server: agents
+     *  can't run there (no sh), so the row says WHY instead of a misleading
+     *  "not installed" (honest detection; support itself is out of scope). */
+    windowsServer: Boolean = false,
     onClick: () -> Unit,
     onInstall: () -> Unit = {},
     onLogin: () -> Unit = {},
@@ -976,6 +982,10 @@ private fun AgentRow(
             installing -> "  ${op?.line ?: "installing…"}"
             loggingIn -> "  signing in… finishing up"
             checking -> "  checking…"
+            // Before the not-installed line: on a Windows box "not installed"
+            // is the wrong claim — the agent may well be installed, WE can't
+            // drive it (every probe/launch is sh). Say the true reason.
+            windowsServer -> "  Windows OpenSSH server — not supported yet"
             status == null -> "  …probing"
             !status.installed -> "  not installed"
             status.updateAvailable ->

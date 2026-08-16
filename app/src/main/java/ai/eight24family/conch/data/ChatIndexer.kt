@@ -111,7 +111,9 @@ object ChatIndexer {
                                 SilentlyTry.logged("SshAi-Indexer", "exec list on pooled") {
                                     val sess = pooled.startSession()
                                     try {
-                                        val proc = sess.exec(cmd)
+                                        // Raw pooled transport — the no-bash rewrite
+                                        // happens HERE (execOnLive-style chokepoint).
+                                        val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                         val out = java.io.ByteArrayOutputStream()
                                         proc.inputStream.copyTo(out)
                                         proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -152,7 +154,7 @@ object ChatIndexer {
                                     SilentlyTry.logged("SshAi-Indexer", "exec fetch on pooled") {
                                         val sess = pooled.startSession()
                                         try {
-                                            val proc = sess.exec(cmd)
+                                            val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                             val out = java.io.ByteArrayOutputStream()
                                             proc.inputStream.copyTo(out)
                                             proc.join(120, java.util.concurrent.TimeUnit.SECONDS)

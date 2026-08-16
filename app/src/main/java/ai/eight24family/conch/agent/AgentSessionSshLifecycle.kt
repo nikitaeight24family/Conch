@@ -287,7 +287,11 @@ internal class AgentSessionSshLifecycle(
      * brand-new SSH handshake — fresh connect is ~10 RTT and on a 250 ms
      * link that's ~3 s, which utterly skews any latency reading.
      */
-    suspend fun execOnLive(command: String): String? = withContext(Dispatchers.IO) {
+    suspend fun execOnLive(rawCommand: String): String? = withContext(Dispatchers.IO) {
+        // Transport chokepoint: every `bash -lc` composed anywhere upstream
+        // gains the no-bash fallback here (Alpine/BusyBox/BSD servers a Play
+        // user may bring). Non-bash-lc commands pass through untouched.
+        val command = RemoteEnv.portable(rawCommand)
         val start = System.currentTimeMillis()
         // Tag the activity-log category by sniffing the command:
         // `cat > … <stdin`-ish, `cat …`, `sha256sum`, `stat`, `pgrep`
@@ -408,7 +412,9 @@ internal class AgentSessionSshLifecycle(
         var sess: Session? = null
         try {
             sess = client.startSession()
-            val cmd = sess.exec(command)
+            // Same portable chokepoint as execOnLive — the stdin twin carried
+            // SubagentService/MemoryService `bash -lc mkdir/cat` writes raw.
+            val cmd = sess.exec(RemoteEnv.portable(command))
             cmd.outputStream.use { it.write(stdin); it.flush() }
             cmd.inputStream.use { it.readBytes() }  // drain
             cmd.join(30, TimeUnit.SECONDS)

@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.3-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.4-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.0
+conch ▌ v0.3.4
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -48,6 +48,34 @@ conch ▌ v0.3.0
   signed build, your choice.
 
 ---
+
+## What's new in 0.3.4
+
+**A session running on the server comes back whole.** Close the app mid-turn,
+reopen, and the chat is live again — the Stop button, the elapsed timer and the
+token count all driven from the session file, and the answer painting straight
+from it. Stop reaches a turn this process no longer owns. A read-only chat
+opened while the link was down upgrades itself to a live mirror the moment the
+transport returns.
+
+**Truthful limits without a live process.** The usage bar reads the CLI's own
+on-disk usage cache, so it stays accurate in an idle chat instead of showing
+whatever the last turn left behind.
+
+**Big sessions open instantly.** The background now mirrors only a session's
+recent tail regardless of its total size, so any chat opens at once from cache
+while traffic stays bounded.
+
+**Runs on more servers.** No-bash, BusyBox, BSD and macOS hosts are handled at
+every remote call; a Windows OpenSSH server is now labelled honestly instead of
+reading as "agent not installed".
+
+**Fixes.** Your prompt shows with the answer on reopen, not a beat behind it.
+Stop reliably halts an owned turn instead of interrupting and cold-restarting.
+A message sent into a running turn waits in the visible queue instead of cutting
+it off. A session's place in the list is its last message, not a stray file
+touch, so idle chats no longer fly to the top or spin a false "working". The
+attach panel closes without attaching, and is compact.
 
 ## What's new in 0.3.3
 

@@ -1,0 +1,5 @@
+Novedades
+• Reabre una sesión en curso y vuelve a estar totalmente activa: Detener, temporizador, recuento de tokens, y la respuesta desde el archivo, aunque cerraras la app a mitad del turno.
+• Los chats grandes se abren al instante; los límites son exactos incluso inactivo.
+• Funciona en más servidores (Alpine/BusyBox/BSD/macOS).
+• Correcciones: Detener para el turno de forma fiable; un mensaje a un turno en curso espera en la cola; sin falso "trabajando".

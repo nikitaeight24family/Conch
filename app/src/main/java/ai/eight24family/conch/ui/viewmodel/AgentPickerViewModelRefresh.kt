@@ -343,7 +343,7 @@ internal class AgentPickerViewModelRefresh(
                     }
                 }
             }
-            probe.probe(execLambda)
+            probe.probe(execLambda, onOs = { os -> cache.saveServerOs(serverId, os.name) })
                 .onSuccess {
                     // withCachedLiveAuth: keep a login we ALREADY verified this
                     // session resolved (no "checking" re-flash on a background
@@ -372,7 +372,7 @@ internal class AgentPickerViewModelRefresh(
             probingMut.value = true
             var ok = false
             val execLambda: suspend (String) -> String? = { cmd -> alive.execOnLive(cmd) }
-            probe.probe(execLambda)
+            probe.probe(execLambda, onOs = { os -> cache.saveServerOs(serverId, os.name) })
                 .onSuccess {
                     val resolved = withCachedLiveAuth(it)
                     val effective = cache.save(serverId, resolved)
@@ -439,7 +439,7 @@ internal class AgentPickerViewModelRefresh(
         probingMut.value = true
         try {
             var settled = false
-            probe.probe(execLambda)
+            probe.probe(execLambda, onOs = { os -> cache.saveServerOs(serverId, os.name) })
                 .onSuccess { result ->
                     val raw = result[agent] ?: return@onSuccess
                     // A determined Claude run-state was reached by curling the
@@ -638,7 +638,7 @@ internal class AgentPickerViewModelRefresh(
                     }
                 }
             }
-            probe.probe(execLambda)
+            probe.probe(execLambda, onOs = { os -> cache.saveServerOs(serverId, os.name) })
                 .onSuccess {
                     val resolved = withCachedLiveAuth(it)
                     val effective = cache.save(serverId, resolved)

@@ -562,18 +562,15 @@ class AgentSession(
      * `ssh user@host`.
      */
     private fun loginShell(cmd: String): String {
-        // PATH preamble — same as AgentStatusProbe. Ensures the CLI
-        // binaries Conch installed (via the official Claude installer,
-        // npm with `prefix=~/.local`, nvm, or a tarball) are visible to
-        // EVERY `bash -lc` we fire — not just the install verification
-        // shell. Debian's default ~/.bashrc bails on non-interactive
-        // shells, so nvm.sh and ~/.local/bin sourced there are
-        // invisible without this prep.
-        val prep = "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; " +
-            "for nd in \$HOME/.nvm/versions/node/*/bin \$HOME/.local/node-*/bin; do " +
-            "[ -d \"\$nd\" ] && export PATH=\"\$nd:\$PATH\"; done; " +
-            "[ -s \"\$HOME/.nvm/nvm.sh\" ] && . \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; "
-        return "bash -lc ${shellEscape(prep + cmd)}"
+        // PATH preamble — the SHARED one (RemoteEnv), which knows every
+        // mainstream install home: npm-prefix/official installer
+        // (~/.local/bin), nvm, Homebrew on macOS, volta, bun, pnpm, asdf,
+        // snap, fnm. A hand-rolled copy here had drifted to a subset once
+        // already. RemoteEnv.portable keeps the whole thing runnable on
+        // servers with NO bash (Alpine/BusyBox, stock BSD) — Play users
+        // bring whatever server they have (2026-08-17).
+        val prep = RemoteEnv.PATH_PREAMBLE_INLINE
+        return RemoteEnv.portable("bash -lc ${shellEscape(prep + cmd)}")
     }
 
     /** Returns true if [text] was just sent locally and is about to be
@@ -706,7 +703,12 @@ class AgentSession(
         if (usePersistent()) persistentStream.cancelIdleLoop() else cancelCurrent()
     }
 
-    fun cancelCurrent() {
+    /** [force] — Stop is aimed at a turn running in OUR OWN persistent process
+     *  that the app's turn tracking has lost (reopened mid-turn: procAlive but
+     *  state desynced off Working). Escalates to tearing our process down on
+     *  `procAlive` alone, so Stop can't no-op into the external pgrep kill (which
+     *  redelivers). See [ChatViewModel.stopCurrent]. */
+    fun cancelCurrent(force: Boolean = false) {
         clearLoop()
         // Stop = "cancel current turn AND drop everything queued behind
         // it". Cancelling just the in-flight turn while letting the
@@ -717,7 +719,7 @@ class AgentSession(
             // Real protocol interrupt — the CLI aborts the turn and emits
             // its result; the stream escalates to a process kill if the
             // interrupt isn't honored within a grace window.
-            persistentStream.cancelTurn()
+            persistentStream.cancelTurn(force)
             return
         }
         if (useCodexAppServer()) {

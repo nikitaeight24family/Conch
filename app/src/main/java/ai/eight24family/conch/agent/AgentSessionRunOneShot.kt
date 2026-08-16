@@ -8,7 +8,6 @@ import ai.eight24family.conch.domain.Server
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
@@ -441,7 +440,7 @@ internal class AgentSessionRunOneShot(
             SilentlyTry.logged("SshAi-Turn", "failover vault exec") {
                 val s = client.startSession()
                 try {
-                    val p = s.exec(cmd)
+                    val p = s.exec(RemoteEnv.portable(cmd))
                     val o = java.io.ByteArrayOutputStream()
                     p.inputStream.copyTo(o)
                     p.join(20, TimeUnit.SECONDS)
@@ -507,28 +506,22 @@ internal class AgentSessionRunOneShot(
     }
 
     /**
-     * Find any process whose argv contains our `resumeId` AND mentions
-     * one of `claude` / `codex` / `gemini` (so we don't INT a random
-     * bash wrapper that happens to mention the id). Send SIGINT for a
-     * graceful shutdown, then SIGTERM after 800 ms if it's still alive.
+     * Kill the server-side process(es) of a turn we no longer own an exec
+     * channel for. Discovery, the full INT→TERM→KILL ladder and the liveness
+     * verdict all live in [RemoteTurnKiller] — ONE server-side exec, shared
+     * with the mirrored-turn stop in ChatViewModel (they had drifted apart;
+     * unified 2026-08-17, and this path gained the KILL rung it never had).
      */
     suspend fun killZombieRemoteTurn() {
         val sid = getResumeId() ?: return
-        val q = shellEscape(sid)
-        val pidScript = "pgrep -af $q 2>/dev/null | " +
-            "awk '\$2 != \"bash\" && \$2 != \"sh\" && /(claude|codex|gemini)/ {print \$1}'"
-        val pids = sshLifecycle.execOnLive("bash -lc " + shellEscape(pidScript))
-            ?.lineSequence()
-            ?.mapNotNull { it.trim().toLongOrNull() }
-            ?.toList()
-            .orEmpty()
-        if (pids.isEmpty()) return
-        android.util.Log.d("SshAi-Turn", "killZombieRemoteTurn pids=$pids")
-        // Polite SIGINT first.
-        sshLifecycle.execOnLive("kill -INT ${pids.joinToString(" ")}")
-        delay(800)
-        // Force kill anything still alive.
-        sshLifecycle.execOnLive("kill -TERM ${pids.joinToString(" ")} 2>/dev/null || true")
+        if (!RemoteTurnKiller.isKillableResumeId(sid)) return
+        val out = sshLifecycle.execOnLive(
+            "bash -lc " + shellEscape(RemoteTurnKiller.killScript(sid)),
+        )
+        android.util.Log.d(
+            "SshAi-Turn",
+            "killZombieRemoteTurn → ${RemoteTurnKiller.parseOutcome(out)}",
+        )
     }
 
     /**

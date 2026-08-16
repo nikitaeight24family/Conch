@@ -118,6 +118,15 @@ data class UsageReport(
      *  this chat). Null for an inference-only setup-token (profile 403s),
      *  Codex/Gemini, API-key mode. */
     val plan: String? = null,
+    /** When the DATA in this report was fetched from Anthropic — set ONLY for
+     *  reports read from the CLI's on-disk cache (`cachedUsageUtilization.
+     *  fetchedAtMs` in ~/.claude.json). Live-channel and curl reports leave it
+     *  null: they are fresh by construction. Consumers use it two ways: the
+     *  probe rejects a cache older than the CLI's own 1-hour trust window, and
+     *  the rate-limited banner refuses to be cleared by a report that carries
+     *  ANY age at all (a 40-min-old 82% must not un-declare a limit the CLI
+     *  hit 10 minutes ago). */
+    val fetchedAtEpochMs: Long? = null,
 ) {
     val primary: UsageWindow? get() = windows.firstOrNull()
 }
@@ -204,12 +213,20 @@ object UsageProbe {
 
     /** See [remember]. Public-ish so the fetch path applies the same rule. */
     internal fun withPerModelCarryOver(serverId: String, agent: Agent, fresh: UsageReport): UsageReport {
-        if (fresh.windows.any { it.perModel }) return fresh
+        // PLAN carry-over first, same reasoning as the windows: only the
+        // full-oauth profile reports subscription_type; a CLI-cache or
+        // setup-token refresh has none, and adopting its null verbatim made
+        // the "Max" chip in the limits sheet vanish until the next full probe.
+        val cachedRep = cache[key(serverId, agent)]
+        val withPlan = if (fresh.plan == null && cachedRep?.plan != null) {
+            fresh.copy(plan = cachedRep.plan)
+        } else fresh
+        if (withPlan.windows.any { it.perModel }) return withPlan
         val now = System.currentTimeMillis()
-        val carried = cache[key(serverId, agent)]?.windows
+        val carried = cachedRep?.windows
             ?.filter { it.perModel && (it.resetAtEpochMs ?: 0L) > now }
             .orEmpty()
-        return if (carried.isEmpty()) fresh else fresh.copy(windows = fresh.windows + carried)
+        return if (carried.isEmpty()) withPlan else withPlan.copy(windows = withPlan.windows + carried)
     }
 
     /**
@@ -349,6 +366,187 @@ object UsageProbe {
         return report
     }
 
+    // ---- Claude: the CLI's OWN on-disk usage cache (~/.claude.json). ----
+    //
+    // Measured 2026-08-17 (claude 2.1.220/2.1.233 binary + the dev server): every
+    // Anthropic API response carries `anthropic-ratelimit-unified-*` headers, and
+    // the CLI persists them into ~/.claude.json as cachedUsageUtilization: {
+    // fetchedAtMs, accountUuid, utilization: { five_hour:{utilization,resets_at},
+    // seven_day:{…}, …,
+    // limits:[{kind,group,percent,resets_at,scope:{model:{display_name}}}],
+    // extra_usage:{…}, spend:{…} } } throttled to ONE write per 5 minutes and
+    // trusted by the CLI itself for 1 hour — its own `get_usage` falls back to
+    // this exact field with source:"persisted". Reading the file is therefore the
+    // SAME truth the control channel returns, minus the need for a live process:
+    // the fix for an idle chat's stale bar. Cleared on logout; absent until the
+    // first API call.
+    //
+    // Wire cost, measured on the dev server: the read is mtime-gated, so an
+    // unchanged file costs ~60 B per poll; a changed 68 KB file ships as
+    // ~24 KB of base64'd gzip (plain-cat fallback for BusyBox hosts). Files
+    // over the size cap are skipped outright — .claude.json also accumulates
+    // project history and can bloat; the bar then falls back to the curl path.
+
+    /** One trust window, same as the CLI's own (LZg=3600000 in the binary): a
+     *  persisted reading older than this is not shown as current. */
+    internal const val CLI_CACHE_TRUST_MS = 3_600_000L
+
+    /** Don't pull a bloated ~/.claude.json down a phone link for a status bar. */
+    private const val CLI_CACHE_MAX_BYTES = 2_097_152L
+
+    /** mtime → parsed report, per server — the "unchanged file costs ~60 B"
+     *  half of the bargain. */
+    private data class CliCacheMemo(val mtime: String, val report: UsageReport?)
+    private val cliCacheMemo = ConcurrentHashMap<String, CliCacheMemo>()
+
+    /** The mtime-gated read: prints `CONCH_UMT:<mtime>,<size>` always, the
+     *  (compressed) body only when the file changed AND fits the cap. */
+    internal fun cliCacheCmd(knownMtime: String): String =
+        "f=\"\$HOME/.claude.json\"; " +
+            "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null); " +
+            "s=\$(stat -c %s \"\$f\" 2>/dev/null || stat -f %z \"\$f\" 2>/dev/null || wc -c < \"\$f\" 2>/dev/null); " +
+            "echo \"CONCH_UMT:\${m:-none},\${s:-0}\"; " +
+            "if [ -n \"\$m\" ] && [ \"\$m\" != \"" + knownMtime + "\" ] && [ \"\${s:-0}\" -le $CLI_CACHE_MAX_BYTES ]; then " +
+            "gzip -c \"\$f\" 2>/dev/null | base64 2>/dev/null || cat \"\$f\"; fi"
+
+    /**
+     * Read the CLI's persisted usage state over the pooled SSH. Returns a
+     * report ONLY when the reading is within [CLI_CACHE_TRUST_MS] of now —
+     * beyond that the caller falls to the curl path, exactly like the CLI
+     * itself stops trusting its persisted value. Null on: no pooled client,
+     * no file, no `cachedUsageUtilization` yet, over-cap file, stale reading.
+     */
+    suspend fun fetchClaudeCliCache(serverId: String): UsageReport? {
+        val last = cliCacheMemo[serverId]
+        val out = execOnServer(serverId, cliCacheCmd(last?.mtime ?: "none"))
+            ?.takeIf { it.isNotBlank() } ?: return null
+        // Digits-or-none ONLY: the mtime is echoed back into the NEXT read's
+        // shell command, so the accepted alphabet is the injection guard.
+        val marker = Regex("CONCH_UMT:([0-9]+|none),(\\d+)").find(out) ?: return null
+        val mtime = marker.groupValues[1]
+        if (mtime == "none") return null
+        val report: UsageReport?
+        if (last != null && last.mtime == mtime) {
+            report = last.report
+        } else {
+            val body = out.substring(marker.range.last + 1).trim()
+            val json = decodeMaybeGzipBase64(body) ?: return null
+            report = reportFromCliCacheJson(json)
+            cliCacheMemo[serverId] = CliCacheMemo(mtime, report)
+        }
+        val fetchedAt = report?.fetchedAtEpochMs ?: return null
+        return report.takeIf { System.currentTimeMillis() - fetchedAt in 0..CLI_CACHE_TRUST_MS }
+    }
+
+    /** The body is either base64'd gzip (GNU/BSD hosts) or plain JSON (the
+     *  cat fallback). Whitespace inside base64 is fine — no -w0 dependency. */
+    private fun decodeMaybeGzipBase64(body: String): String? {
+        if (body.isEmpty()) return null
+        if (body.startsWith("{")) return body
+        return runCatching {
+            val raw = java.util.Base64.getMimeDecoder().decode(body)
+            java.util.zip.GZIPInputStream(raw.inputStream()).use {
+                String(it.readBytes(), Charsets.UTF_8)
+            }
+        }.getOrNull()
+    }
+
+    /** Parse the `cachedUsageUtilization` block out of a raw ~/.claude.json.
+     *  Exposed internal for the fixture test (a REAL capture, 2026-08-17). */
+    internal fun reportFromCliCacheJson(fileJson: String): UsageReport? {
+        val block = braceBlockAfter(fileJson, "\"cachedUsageUtilization\"") ?: return null
+        val fetchedAt = Regex("\"fetchedAtMs\"\\s*:\\s*([0-9]+)").find(block)
+            ?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        // The aggregate windows parse exactly like the oauth endpoint payload
+        // (same shape — the CLI caches that endpoint); the per-model layer here
+        // lives in `limits[]` as scoped entries instead of `model_scoped`.
+        val windows = parseClaude(block) + parseScopedLimits(block)
+        if (windows.isEmpty()) return null
+        return UsageReport(
+            windows = windows,
+            extraUsedUsd = parseClaudeExtra(block),
+            fetchedAtEpochMs = fetchedAt,
+        )
+    }
+
+    /**
+     * `limits[]` → per-model windows. Only entries scoped to a MODEL become
+     * rows (`scope.model.display_name`, e.g. kind=weekly_scoped for Fable) —
+     * the unscoped session/weekly_all entries duplicate `five_hour`/
+     * `seven_day`, which [parseClaude] already produced. `group` names the
+     * cadence ("session"/"weekly"), matching the label style of the endpoint's
+     * per-model window keys (five_hour_opus, seven_day_fable, …).
+     */
+    internal fun parseScopedLimits(block: String): List<UsageWindow> {
+        val arr = bracketBlockAfter(block, "\"limits\"") ?: return emptyList()
+        return jsonObjectsOf(arr).mapNotNull { obj ->
+            val model = braceBlockAfter(obj, "\"model\"") ?: return@mapNotNull null
+            val name = Regex("\"display_name\"\\s*:\\s*\"([^\"]+)\"").find(model)
+                ?.groupValues?.get(1) ?: return@mapNotNull null
+            val pct = Regex("\"percent\"\\s*:\\s*([0-9.]+)").find(obj)
+                ?.groupValues?.get(1)?.toFloatOrNull() ?: return@mapNotNull null
+            val group = Regex("\"group\"\\s*:\\s*\"([a-z_]+)\"").find(obj)?.groupValues?.get(1)
+            val resetEpochMs = windowResetEpochSec(obj)?.let { it * 1000 }
+            val cadence = when (group) {
+                "weekly" -> " · weekly"
+                "session" -> " · 5-hour"
+                else -> ""
+            }
+            window(
+                "$name$cadence", pct,
+                resetEpochMs?.let { secsToText((it - System.currentTimeMillis()) / 1000) }.orEmpty(),
+                resetAtEpochMs = resetEpochMs, perModel = true,
+            )
+        }.toList()
+    }
+
+    /** `{…}` block that follows [key], brace-depth matched, string-aware (a
+     *  quoted `{` inside a disclaimer must not unbalance the scan). Null when
+     *  the key or its object is absent/truncated — a torn mid-write read then
+     *  degrades to "no report" instead of a garbage parse. */
+    private fun braceBlockAfter(json: String, key: String): String? =
+        delimitedBlockAfter(json, key, '{', '}')
+
+    /** `[…]` sibling of [braceBlockAfter]. */
+    private fun bracketBlockAfter(json: String, key: String): String? =
+        delimitedBlockAfter(json, key, '[', ']')
+
+    private fun delimitedBlockAfter(json: String, key: String, open: Char, close: Char): String? {
+        val at = json.indexOf(key).takeIf { it >= 0 } ?: return null
+        val start = json.indexOf(open, at + key.length).takeIf { it >= 0 } ?: return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until json.length) {
+            val c = json[i]
+            when {
+                escaped -> escaped = false
+                c == '\\' -> escaped = true
+                c == '"' -> inString = !inString
+                !inString && c == open -> depth++
+                !inString && c == close -> {
+                    depth--
+                    if (depth == 0) return json.substring(start, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    /** Top-level `{…}` objects of a JSON array body (depth-1 split). */
+    private fun jsonObjectsOf(arrayBlock: String): List<String> {
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < arrayBlock.length) {
+            if (arrayBlock[i] == '{') {
+                val obj = delimitedBlockAfter(arrayBlock.substring(i), "", '{', '}') ?: break
+                out += obj
+                i += obj.length
+            } else i++
+        }
+        return out
+    }
+
     // In-memory cache of the last context breakdown per chat, so re-expanding
     // the panel is instant (the fetch is slow — spawns a CLI).
     private val ctxCache = ConcurrentHashMap<String, List<ContextSegment>>()
@@ -398,7 +596,7 @@ object UsageProbe {
         return SilentlyTry.logged("SshAi-Usage", "fetch usage") {
             val sess = client.startSession()
             try {
-                val proc = sess.exec("bash -lc " + shellEscape(cmd))
+                val proc = sess.exec(RemoteEnv.portable("bash -lc " + shellEscape(cmd)))
                 val out = ByteArrayOutputStream()
                 proc.inputStream.copyTo(out)
                 proc.join(timeoutSec, TimeUnit.SECONDS)
@@ -606,8 +804,9 @@ object UsageProbe {
     // response (percentages + reset times) ever crosses the SSH channel.
     // User-Agent is load-bearing — Anthropic 429s requests without a
     // `claude-code/<ver>` UA — so we mirror the CLI's own header.
-    private val CLAUDE_USAGE_CMD = """
-        export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
+    // PATH comes from RemoteEnv (a hand-rolled subset here missed nvm, so a
+    // claude installed via nvm read VER empty and the UA fell back to 2.0.0).
+    private val CLAUDE_USAGE_CMD = RemoteEnv.PATH_PREAMBLE + """
         C=${'$'}HOME/.claude/.credentials.json
         [ -f "${'$'}C" ] || C=${'$'}HOME/.config/claude/.credentials.json
         TOK=${'$'}(sed -n -E 's/.*"access_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}C" 2>/dev/null | head -1)
@@ -676,8 +875,7 @@ object UsageProbe {
     // the COPY, which we delete; the real session + its token count stay
     // untouched, 0 model tokens since /context is <synthetic>). __RID__ is
     // replaced with the UUID-validated resume id by fetchContextBreakdown.
-    private val CLAUDE_CONTEXT_CMD = """
-        export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
+    private val CLAUDE_CONTEXT_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         RID="__RID__"
         real=${'$'}(ls ${'$'}HOME/.claude/projects/*/${'$'}RID.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}real" ] && exit 0
@@ -686,7 +884,7 @@ object UsageProbe {
         [ -z "${'$'}newid" ] && exit 0
         cp "${'$'}real" "${'$'}dir/${'$'}newid.jsonl"
         sed -i "s/${'$'}RID/${'$'}newid/g" "${'$'}dir/${'$'}newid.jsonl"
-        echo "/context" | timeout 50 claude -p --resume "${'$'}newid" --output-format json --verbose 2>/dev/null | jq -r ".[1].message.content[0].text" 2>/dev/null
+        echo "/context" | conch_timeout 50 claude -p --resume "${'$'}newid" --output-format json --verbose 2>/dev/null | jq -r ".[1].message.content[0].text" 2>/dev/null
         rm -f "${'$'}dir/${'$'}newid.jsonl"
     """.trimIndent()
 
@@ -707,14 +905,13 @@ object UsageProbe {
     // an older codex / unsupported app-server / cold session still shows a
     // (forward-projected) limit instead of nothing. Slower (~2-3s) — runs in the
     // background to refine the fast value. All server-side; token never crosses.
-    private val CODEX_LIVE_CMD = """
-        export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
+    private val CODEX_LIVE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         if command -v codex >/dev/null 2>&1; then
           { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"sshai","title":"sshai","version":"1.0"}}}'
             sleep 0.4
             printf '%s\n' '{"id":1,"method":"account/rateLimits/read","params":{}}'
             sleep 0.7
-          } | timeout 6 codex app-server 2>/dev/null | grep -i 'ratelimit' | tail -1
+          } | conch_timeout 6 codex app-server 2>/dev/null | grep -i 'ratelimit' | tail -1
         fi
         f=${'$'}(ls -t ${'$'}HOME/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}f" ] && f=${'$'}(ls -t ${'$'}(find ${'$'}HOME/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null) 2>/dev/null | head -1)

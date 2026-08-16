@@ -467,7 +467,9 @@ private suspend fun writeRemote(
     val escaped = shellEscape(remotePath)
     val session = client.startSession()
     try {
-        val cmd = session.exec("bash -lc " + shellEscape("cat > $escaped"))
+        val cmd = session.exec(
+            ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape("cat > $escaped")),
+        )
         cmd.outputStream.use { it.write(content.toByteArray(Charsets.UTF_8)) }
         cmd.join(30, java.util.concurrent.TimeUnit.SECONDS)
         val exit = cmd.exitStatus

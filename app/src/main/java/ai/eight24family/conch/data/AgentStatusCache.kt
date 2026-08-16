@@ -32,7 +32,15 @@ private val Context.statusDataStore by preferencesDataStore(name = "agent_status
 
 class AgentStatusCache(private val context: Context) {
 
-    data class Snapshot(val statuses: Map<Agent, AgentStatus>, val lastCheckedAt: Long?)
+    data class Snapshot(
+        val statuses: Map<Agent, AgentStatus>,
+        val lastCheckedAt: Long?,
+        /** "WINDOWS" when the OS pre-probe identified a Windows OpenSSH server
+         *  (no sh, no uname — every agent probe is meaningless there); null =
+         *  unix-ish or never probed. Own key, not a row field: it is
+         *  server-level, and the per-agent row format stays untouched. */
+        val serverOs: String? = null,
+    )
 
     suspend fun load(serverId: String): Snapshot = parse(serverId, context.statusDataStore.data.first())
 
@@ -103,7 +111,19 @@ class AgentStatusCache(private val context: Context) {
             )
             if (newestTs == null || ts > newestTs) newestTs = ts
         }
-        return Snapshot(statuses = map, lastCheckedAt = newestTs)
+        return Snapshot(
+            statuses = map,
+            lastCheckedAt = newestTs,
+            serverOs = prefs[osKey(serverId)]?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    /** Record the OS pre-probe's verdict (see AgentStatusProbe.classifyOsProbe).
+     *  Persisted so the picker can say "Windows OpenSSH server" instead of a
+     *  misleading "not installed" from the first paint, and honest across
+     *  restarts. A later UNIX verdict overwrites — servers get reinstalled. */
+    suspend fun saveServerOs(serverId: String, os: String) {
+        context.statusDataStore.edit { prefs -> prefs[osKey(serverId)] = os }
     }
 
     /**
@@ -189,6 +209,14 @@ class AgentStatusCache(private val context: Context) {
 
     private fun key(serverId: String, agent: Agent) =
         stringPreferencesKey("status/$serverId/${agent.name}")
+
+    /** Reactive view of the OS verdict — the picker collects this so a
+     *  Windows identification repaints the rows the moment it lands. */
+    fun observeServerOs(serverId: String): Flow<String?> =
+        context.statusDataStore.data.map { it[osKey(serverId)]?.takeIf { v -> v.isNotBlank() } }
+
+    /** Server-level OS verdict from the uname pre-probe. */
+    private fun osKey(serverId: String) = stringPreferencesKey("os/$serverId")
 
     /** Global (server-independent) latest published version per agent. */
     private fun globalLatestKey(agent: Agent) =

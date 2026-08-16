@@ -633,28 +633,19 @@ fun ChatScreen(
                 // with the chat.
                 PinnedWorkingStatus(vm = vm, state = state, remoteWorking = remoteWorking)
 
-                // HONEST connection state. The silent auto-reconnect stays
-                // silent about mechanics, but the FACTS show: link down, and
-                // whether the user's message is parked for redelivery.
-                val connLost by vm.connectionLost.collectAsState()
-                val queuedN by vm.queuedForReconnect.collectAsState()
-                val reconnAttempt by vm.reconnectAttempt.collectAsState()
-                if (connLost) {
+                // Connection state surfaces as WORDS only when waiting might
+                // not help. Reconnects are silent; a short drop shows nothing
+                // (the queue rows above the prompt bar and the server dot
+                // already carry the state); a message queued behind a drop is
+                // a visible row with its text and a ✕, not a counter. The old
+                // «connection lost — reconnecting (attempt N) · N messages
+                // will send…» banner told the user about MECHANICS they could
+                // not act on, flashing on every radio blip.
+                val unreachableLong by vm.serverUnreachableLong.collectAsState()
+                if (unreachableLong) {
                     Text(
-                        buildString {
-                            append("⚡ connection lost — reconnecting")
-                            if (reconnAttempt > 0) append(" (attempt $reconnAttempt)")
-                            if (queuedN > 0) append(" · $queuedN message${if (queuedN == 1) "" else "s"} will send when it's back")
-                        },
+                        "⚡ server unreachable — retrying quietly",
                         color = MaterialTheme.colorScheme.tertiary,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 2,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.dp),
-                    )
-                } else if (queuedN > 0) {
-                    Text(
-                        "↻ $queuedN message${if (queuedN == 1) "" else "s"} waiting to send",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 1.dp),

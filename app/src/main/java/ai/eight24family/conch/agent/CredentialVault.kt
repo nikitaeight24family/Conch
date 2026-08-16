@@ -108,7 +108,13 @@ class CredentialVault(
             "LINE=\$(grep -hE \"^[[:space:]]*export[[:space:]]+$envVar=\" \$HOME/.profile \$HOME/.bashrc \$HOME/.bash_profile 2>/dev/null | tail -1); " +
                 "[ -n \"\$LINE\" ] || { echo NOLIVE; exit 0; }; " +
                 "KEY=\$(printf '%s' \"\$LINE\" | sed -E \"s/^[[:space:]]*export[[:space:]]+$envVar=//; s/^['\\\"]//; s/['\\\"]\$//\"); " +
-                "if [ \${#KEY} -gt 10 ]; then MASK=\"\${KEY:0:6}…\${KEY: -4}\"; else MASK='••••'; fi; " +
+                // POSIX mask — `${KEY:0:6}`/`${KEY: -4}` are bash substring
+                // expansion, the one true bashism the 2026-08-17 sweep found:
+                // under portable()'s `sh -lc` fallback (dash/ash) it is a hard
+                // parse error that kills the whole capture script.
+                "if [ \${#KEY} -gt 10 ]; then " +
+                "MASK=\"\$(printf '%s' \"\$KEY\" | cut -c1-6)…\$(printf '%s' \"\$KEY\" | awk '{print substr(\$0, length(\$0)-3)}')\"; " +
+                "else MASK='••••'; fi; " +
                 "mkdir -p \"$dir\" && printf '%s\\n' \"\$LINE\" > \"$dir/cred\" && " +
                 "printf 'method=api\\nlabel=%s\\ncreated=%s\\nmasked=%s\\n' ${sh(label)} \"\$(date +%s)\" \"\$MASK\" > \"$dir/meta\" && echo OK"
         } else {

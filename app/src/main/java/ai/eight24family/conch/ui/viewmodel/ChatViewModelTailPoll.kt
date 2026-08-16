@@ -137,6 +137,14 @@ internal class ChatViewModelTailPoll(
     ) {
         val cache = ServiceLocator.historyCache
         var lastOffset = initialOffset
+        // TAIL-FIRST cache (Workstream C): local byte 0 sits at this REMOTE
+        // offset (0 = complete mirror). The poller's offsets are remote
+        // already (initialOffset arrives base-adjusted); what changes is the
+        // SHRINK handling below — repair/containment/merge all assume the
+        // local file is a prefix-complete mirror, which a tail-only cache is
+        // not, so those paths are skipped in favour of authoritative
+        // re-adoption (which resets the base via save/saveFromStream).
+        var tailBase = cache.baseOffset(sessionId)
         // When the file first said "turn terminal" — our own fallback clock for
         // the stuck-turn reconcile when the server's mtime can't be read.
         var terminalSeenAtMs: Long? = null
@@ -184,6 +192,7 @@ internal class ChatViewModelTailPoll(
                 // (same as the merge path), the offset jumps to the new size.
                 val written = streamFullToCache(s, sessionId, path)
                 lastOffset = written ?: preSize
+                tailBase = 0L // full re-adopt; saveFromStream cleared the sidecar
                 android.util.Log.i(
                     "SshAi-Tail",
                     "compact STREAMED sid=${sessionId.take(8)} bytes=$written newOffset=$lastOffset",
@@ -194,7 +203,12 @@ internal class ChatViewModelTailPoll(
                 // it on the cache instead of pulling the whole session down just
                 // to re-adopt it. Exact size match only; anything else falls
                 // through to the authoritative path below.
-                val repairedOpen = cache.rewriteEntrypointTags(sessionId)
+                // ⚠ Complete mirrors only: on a tail-only cache the repaired
+                // LOCAL length can never equal the remote size (the head is not
+                // here), and the containment test below would compare a headless
+                // local against the full server and mis-classify — go straight
+                // to the authoritative re-adopt instead.
+                val repairedOpen = if (tailBase == 0L) cache.rewriteEntrypointTags(sessionId) else null
                 if (repairedOpen != null && repairedOpen == preSize) {
                     lastOffset = preSize
                     android.util.Log.i(
@@ -206,7 +220,9 @@ internal class ChatViewModelTailPoll(
                 // Same benign-shrink guard as the mid-poll branch: a rewrite that
                 // kept every id (our sdk-cli→cli entrypoint fix) must re-adopt the
                 // server verbatim, NOT run the lossy/offset-desyncing mergeServer.
-                if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
+                if (serverFull.isNotEmpty() &&
+                    (tailBase > 0L || cache.serverContainsAllLocal(sessionId, serverFull))
+                ) {
                     // TRIM to a whole line before storing. `serverFull` is a raw
                     // cat of a file the CLI may be mid-write on, so its tail can
                     // be a partial line — and HistoryCache's contract is that
@@ -217,6 +233,7 @@ internal class ChatViewModelTailPoll(
                     val safeFull = trimToLastNewline(serverFull)
                     cache.save(sessionId, safeFull)
                     lastOffset = safeFull.size.toLong()
+                    tailBase = 0L
                     android.util.Log.i(
                         "SshAi-Tail",
                         "shrink open sid=${sessionId.take(8)} — benign rewrite, re-adopted server verbatim (${serverFull.size}B)",
@@ -225,6 +242,7 @@ internal class ChatViewModelTailPoll(
                     val merged = cache.mergeServer(sessionId, serverFull)
                     if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
                     lastOffset = preSize.toLong()
+                    tailBase = 0L
                     android.util.Log.i(
                         "SshAi-Tail",
                         "compact merged sid=${sessionId.take(8)} mergedBytes=${merged?.size ?: -1} newOffset=$lastOffset",
@@ -357,7 +375,7 @@ internal class ChatViewModelTailPoll(
         // A turn that is genuinely running touches its file; one that has not
         // been touched in a minute is not running, whatever the last record
         // looks like.
-        if (preSig.inFlight && (preFrozenMs ?: Long.MAX_VALUE) < STALE_TURN_MS) {
+        if (heartbeatInFlight(preSig.inFlight, preFrozenMs)) {
             _remoteFileOpen.value = true
         }
         _remoteTurnStartMs.value = preSig.turnStartMs
@@ -479,7 +497,9 @@ internal class ChatViewModelTailPoll(
                 // Only an EXACT size match proves the local copy now equals the
                 // server byte-for-byte; anything else falls through to the
                 // authoritative download path, so a real compaction is unaffected.
-                val repaired = cache.rewriteEntrypointTags(sessionId)
+                // Complete mirrors only — see the open-path twin for why a
+                // tail-only cache must skip the repair/containment shortcuts.
+                val repaired = if (tailBase == 0L) cache.rewriteEntrypointTags(sessionId) else null
                 if (repaired != null && repaired == size) {
                     android.util.Log.i(
                         "SshAi-Tail",
@@ -502,6 +522,7 @@ internal class ChatViewModelTailPoll(
                     if (written != null && written > 0) {
                         cache.load(sessionId)?.use { snap -> s.loadHistory(parseJsonl(snap.buffer, agent)) }
                         lastOffset = written
+                        tailBase = 0L
                         reseedWindow()
                         android.util.Log.i(
                             "SshAi-Tail",
@@ -519,7 +540,9 @@ internal class ChatViewModelTailPoll(
                     )
                 }
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
-                if (serverFull.isNotEmpty() && cache.serverContainsAllLocal(sessionId, serverFull)) {
+                if (serverFull.isNotEmpty() &&
+                    (tailBase > 0L || cache.serverContainsAllLocal(sessionId, serverFull))
+                ) {
                     android.util.Log.i(
                         "SshAi-Tail",
                         "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — benign rewrite, re-adopting server verbatim",
@@ -528,6 +551,7 @@ internal class ChatViewModelTailPoll(
                     val safeFull = trimToLastNewline(serverFull)
                     cache.save(sessionId, safeFull)
                     lastOffset = safeFull.size.toLong()
+                    tailBase = 0L
                 } else {
                     android.util.Log.w(
                         "SshAi-Tail",
@@ -536,6 +560,7 @@ internal class ChatViewModelTailPoll(
                     val merged = cache.mergeServer(sessionId, serverFull)
                     if (merged != null) cache.save(sessionId, merged) // null = local too large to merge; keep file
                     lastOffset = size
+                    tailBase = 0L
                 }
                 // The cache was rewritten wholesale — the incremental record
                 // window no longer describes it.
@@ -606,8 +631,7 @@ internal class ChatViewModelTailPoll(
             )
             // Same heartbeat rule as the seed: no writes for a minute means the
             // turn is over, however unfinished the last record looks.
-            val inFlight = probe.inFlight &&
-                (stat.frozenForMs ?: Long.MAX_VALUE) < STALE_TURN_MS
+            val inFlight = heartbeatInFlight(probe.inFlight, stat.frozenForMs)
             val turnStart = probe.turnStartMs
             val thinking = probe.thinking
             ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
@@ -677,8 +701,7 @@ internal class ChatViewModelTailPoll(
             // (user, 2026-06-28). inFlight already covers the streaming phase, so the
             // supplement was redundant AND the source of the flicker. A reconciled
             // stuck turn also drops curWorking THIS tick so the spinner clears at once.
-            val fileWorking = (curWorking && !liveStuck) || inFlight
-            val working = fileWorking && !pendingCtl
+            val working = fileWorking(curWorking, liveStuck, inFlight) && !pendingCtl
             // Keep polling fast while a turn is in flight OR a question is pending
             // (the user might answer on the PC), so we notice the change within ~5s.
             if (inFlight || pendingCtl) idleTicks = 0
@@ -850,7 +873,10 @@ internal class ChatViewModelTailPoll(
     }
 
     suspend fun statSize(s: AgentSession, path: String): Long? {
-        val inner = "stat -c %s ${shQuote(path)} 2>/dev/null || stat -f %z ${shQuote(path)} 2>/dev/null"
+        // Same GNU → BSD → wc -c cascade as every other size probe — this one
+        // was missing the last resort (2026-08-17 sweep).
+        val q = shQuote(path)
+        val inner = "stat -c %s $q 2>/dev/null || stat -f %z $q 2>/dev/null || wc -c < $q 2>/dev/null"
         val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return null
         return out.trim().lineSequence().firstOrNull { it.isNotBlank() }?.toLongOrNull()
     }
@@ -1008,13 +1034,15 @@ internal class ChatViewModelTailPoll(
      * client (caller keeps the small-file String path). Mirrors GlobalPrefetcher's
      * streaming body fetch.
      */
-    private suspend fun streamFullToCache(s: AgentSession, sessionId: String, path: String): Long? {
+    internal suspend fun streamFullToCache(s: AgentSession, sessionId: String, path: String): Long? {
         val client = ServiceLocator.sshConnectionPool.peek(s.server.id) ?: return null
         // Same wire-compression story as fetchTail, minus the base64: this path
         // owns a raw byte stream, so gzip rides it directly. A full re-adopt of
         // a 100 MB rollout drops to ~10 MB on the link. RAM stays flat — we
         // inflate streaming, never materialising the file.
-        val cmd = "bash -lc " + shQuote("cat ${shQuote(path)} | gzip -c")
+        val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+            "bash -lc " + shQuote("cat ${shQuote(path)} | gzip -c"),
+        )
         return SilentlyTry.loggedOrElse("SshAi-Tail", "stream full file to cache", null) {
             val sess = client.startSession()
             try {
@@ -1207,10 +1235,33 @@ internal class ChatViewModelTailPoll(
         ): Boolean = curWorking && sawGrowthThisTurn && turnComplete &&
             !pendingCtl && !waitingForUser && stuckSinceMs >= RECONCILE_STUCK_GRACE_MS
 
+        /**
+         * The HEARTBEAT rule, extracted pure so it can be pinned: a projected
+         * "in flight" counts only while the file was written recently. The
+         * window's verdict is "the last record looks unfinished" — true forever
+         * for a turn whose writer died (killed process, app restart), which is
+         * how the chat sat on "Imagining… 39m55s" (user, 2026-08-04). An
+         * UNREADABLE mtime (null) reads as NOT in flight on purpose: with no
+         * proof of recency, claiming a live turn is the fake-spinner lie the
+         * 2026-08-17 home-list fix banned.
+         */
+        internal fun heartbeatInFlight(inFlight: Boolean, frozenForMs: Long?): Boolean =
+            inFlight && (frozenForMs ?: Long.MAX_VALUE) < STALE_TURN_MS
+
+        /**
+         * WORKING is DEFINITIVE — our own in-flight turn OR the file's
+         * (heartbeat-gated) verdict. Extracted pure for the same reason as
+         * [shouldReconcileStuckTurn]; the poll loop is untestable around it.
+         * Do NOT add growth-based supplements here: `(grew && !sawTerminal)`
+         * was the "agent stopped, then faked work ~5s" ghost (2026-06-28).
+         */
+        internal fun fileWorking(curWorking: Boolean, liveStuck: Boolean, inFlight: Boolean): Boolean =
+            (curWorking && !liveStuck) || inFlight
+
         /** A turn whose file has not been written for this long is not running.
          *  Long enough that a slow tool call cannot trip it, short enough that a
          *  dead writer's spinner does not outlive the turn by half an hour. */
-        private const val STALE_TURN_MS = 60_000L
+        internal const val STALE_TURN_MS = 60_000L
 
         /** How many projected turn-state records to keep. A long tool chain emits
          *  ~2 lines per round; 200 lost the turn-start at scale (audit

@@ -97,6 +97,9 @@ internal fun isVersionLessThan(a: String, b: String): Boolean {
     return false
 }
 
+/** What kind of machine answered the OS pre-probe. */
+enum class ServerOs { UNIX, WINDOWS }
+
 class AgentStatusProbe(private val ssh: SshClient) {
 
     companion object {
@@ -107,8 +110,52 @@ class AgentStatusProbe(private val ssh: SshClient) {
          *  server's value → it still shows "update" instead of a misleading
          *  "log in" for a CLI that's plainly behind. Process-scoped. */
         private val knownLatest = java.util.concurrent.ConcurrentHashMap<Agent, String>()
+
+        /**
+         * OS pre-probe. Deliberately NOT `bash -lc`, NOT [RemoteEnv.portable]:
+         * on a Windows OpenSSH server the default shell is cmd.exe (sometimes
+         * PowerShell), where any sh wrapper is itself the failure. The plain
+         * command works on every shell:
+         *  - unix sh: `uname -s` prints Linux/Darwin/…;
+         *  - cmd.exe: `uname` is unknown, `2>/dev/null` is a bad path — either
+         *    way the command fails and cmd's own `||` echoes the sentinel;
+         *  - PowerShell 5.1: `||` is a parse error whose message the classifier
+         *    recognises by shape.
+         */
+        const val OS_PROBE_CMD = "uname -s 2>/dev/null || echo CONCH_NO_UNAME"
+
+        /** Windows-shell error shapes, matched on the COMBINED stdout+stderr
+         *  a probe hands back. Kept short and specific — a unix uname output
+         *  can never contain these. */
+        private val WINDOWS_SHAPES = listOf(
+            "CONCH_NO_UNAME",
+            "is not recognized",           // cmd.exe unknown-command wording
+            "CommandNotFoundException",     // PowerShell unknown command
+            "is not a valid statement separator", // PowerShell 5.1 on `||`
+            "cmdlet",                       // PowerShell suggestions text
+            "The system cannot find",       // cmd.exe bad redirect path
+        )
+
+        /**
+         * Classify the pre-probe output. null in → null out (transport failed
+         * — claim nothing). Windows shapes → [ServerOs.WINDOWS]. Anything
+         * non-blank else (uname printed SOMETHING) → [ServerOs.UNIX]. A ran-
+         * but-blank result stays null: PowerShell's parse error lands on
+         * stderr and some transports drop it, but "no evidence" must never
+         * become a Windows verdict that hides real agents on a unix box.
+         */
+        fun classifyOsProbe(out: String?): ServerOs? {
+            if (out == null) return null
+            if (WINDOWS_SHAPES.any { out.contains(it, ignoreCase = true) }) return ServerOs.WINDOWS
+            return if (out.isBlank()) null else ServerOs.UNIX
+        }
     }
 
+    // NOTE: no OS pre-probe on THIS overload on purpose — it opens a fresh
+    // handshake per exec, so a pre-probe would double the handshakes (and
+    // demand a second FIDO touch on SK servers). Windows detection rides the
+    // exec-lambda overload, which every post-connect probe uses — a Windows
+    // server is identified the moment its pooled transport first comes up.
     suspend fun probe(
         server: Server,
         secrets: ServerSecrets,
@@ -140,6 +187,11 @@ class AgentStatusProbe(private val ssh: SshClient) {
      */
     suspend fun probe(
         exec: suspend (cmd: String) -> String?,
+        /** Invoked with the OS pre-probe's verdict when it produced one.
+         *  Callers that persist statuses should persist this too
+         *  (AgentStatusCache.saveServerOs) so the picker can say "Windows
+         *  OpenSSH server" instead of a misleading "not installed". */
+        onOs: (suspend (ServerOs) -> Unit)? = null,
     ): Result<Map<Agent, AgentStatus>> =
         withContext(Dispatchers.IO) {
             // No ServerActivityLog.append here — the caller's exec
@@ -147,6 +199,22 @@ class AgentStatusProbe(private val ssh: SshClient) {
             // already logs every command it dispatches. Adding a
             // second entry per call would produce duplicates in the UI.
             runCatching {
+                // OS pre-probe FIRST: on a Windows OpenSSH server the sh
+                // status script below is pure noise (every agent would read
+                // "not installed" for the wrong reason). One tiny exec; the
+                // verdict is handed to the caller for persistence.
+                val osOut = exec(OS_PROBE_CMD)
+                val os = classifyOsProbe(osOut)
+                if (os != null) onOs?.invoke(os)
+                if (os == ServerOs.WINDOWS) {
+                    android.util.Log.i(
+                        "SshAi-Probe",
+                        "OS pre-probe says WINDOWS (${osOut?.trim()?.take(60)}) — skipping agent script",
+                    )
+                    return@runCatching Agent.entries.associateWith {
+                        AgentStatus(installed = false, loggedIn = false)
+                    }
+                }
                 val out = exec(script()) ?: error("exec returned null — SSH channel may have dropped")
                 parse(out)
             }
@@ -182,8 +250,10 @@ class AgentStatusProbe(private val ssh: SshClient) {
     private fun liveAuthScript(): String? {
         val live = AgentSpecRegistry.all.joinToString("\n") { it.liveAuthProbeLines }.trim()
         if (live.isBlank()) return null
-        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd()
-        return "bash -lc " + shellEscape(pathPrep + "\n" + live)
+        // TIMEOUT_FN: the spec lines guard their CLI invocations with
+        // `conch_timeout` (macOS ships no `timeout` binary at all).
+        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd() + "\n" + RemoteEnv.TIMEOUT_FN
+        return RemoteEnv.portable("bash -lc " + shellEscape(pathPrep + "\n" + live))
     }
 
     private fun script(): String {
@@ -198,9 +268,9 @@ class AgentStatusProbe(private val ssh: SshClient) {
         // invisible to a plain `bash -lc`. Adding them by hand here
         // means the probe sees what's actually installed without
         // requiring any rc-file patching server-side.
-        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd()
+        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd() + "\n" + RemoteEnv.TIMEOUT_FN
         val body = pathPrep + "\n" + AgentSpecRegistry.all.joinToString("\n") { it.statusProbeLines }
-        return "bash -lc " + shellEscape(body)
+        return RemoteEnv.portable("bash -lc " + shellEscape(body))
     }
 
     private fun parse(text: String): Map<Agent, AgentStatus> {

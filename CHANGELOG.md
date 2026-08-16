@@ -11,6 +11,35 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.4] — 2026-08-17
+
+### Added
+- Mirrored-turn ownership: reopening a session running on the server restores
+  the Stop button, elapsed timer and token count from the session file, with
+  the reply painting straight from it — even after the app was closed mid-turn.
+  Stop kills a turn this process no longer owns; a read-only chat upgrades to a
+  live mirror when the transport returns.
+- Truthful usage bar without a live process — reads the CLI's own on-disk usage
+  cache so limits stay accurate in an idle chat.
+- Tail-first mirroring: the background caches only a session's recent tail
+  regardless of total size, so any chat opens instantly from cache with bounded
+  traffic.
+- Broad server portability (no-bash / BusyBox / BSD / macOS) at every remote
+  call, plus honest "Windows OpenSSH server — not supported yet" detection.
+
+### Fixed
+- On reopen, your prompt shows with the answer instead of a beat behind it.
+- Stop routes an owned turn through the stream, so it halts instead of
+  interrupting and cold-restarting the session.
+- A message sent into a running (mirrored) turn waits in the visible queue
+  instead of cutting the turn off.
+- A session's list order and "working" spinner use its last message time, not a
+  stray file-mtime touch, so idle sessions no longer fly to the top or spin
+  falsely.
+- The attach panel can be closed without attaching, and is more compact.
+
+---
+
 ## [0.3.3] — 2026-08-16
 
 ### Fixed

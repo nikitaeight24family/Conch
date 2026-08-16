@@ -163,6 +163,89 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     @Volatile private var connectInFlightSilent = false
     @Volatile private var escalateAfterSilent = false
 
+    /** Watches an offline-read-only chat for the transport coming up by ANY
+     *  path, so it can upgrade itself to a live mirror. See
+     *  [armOfflineUpgradeWatcher]. */
+    private var offlineUpgradeJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * A chat opened while the pool was down paints from cache and has NO
+     * AgentSession and NO tail poller — a turn alive on the server lights
+     * nothing. The on-open silent connect covers only the case where it
+     * SUCCEEDS immediately (its success path re-runs startNewChat); when it
+     * gives up — radio dead at open, or an SK server with no device key — the
+     * chat used to stay read-only forever unless the user backed out and
+     * re-entered (Workstream A #3, 2026-08-17). This watcher closes that:
+     *
+     *  - every few seconds it PEEKS the pool (in-memory, zero network) —
+     *    catches a transport brought up by any other surface: the agent
+     *    picker's tap-to-connect, another chat on the same server, the
+     *    service watchdog's silent reconnect;
+     *  - on a network-RETURN edge it re-fires the same silent connect the
+     *    open did (device-key only — never a FIDO touch; the silent-dial
+     *    backoff inside userConnectEphemeral still governs actual dials, so
+     *    this can't feed fail2ban).
+     *
+     * The upgrade itself is beginSearchOpenedConnect's own success path
+     * (startNewChat re-run → poller armed → fileWorking computed). The loop
+     * only ever calls startNewChat directly when the pool is ALREADY live and
+     * no connect is in flight — the "someone else connected" case, which has
+     * no other trigger.
+     */
+    private fun armOfflineUpgradeWatcher() {
+        offlineUpgradeJob?.cancel()
+        offlineUpgradeJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var wasOnline = ai.eight24family.conch.util.NetworkCost.isOnline()
+            val netJob = launch {
+                ai.eight24family.conch.util.NetworkCost.online.collect { up ->
+                    val cameBack = up && !wasOnline
+                    wasOnline = up
+                    if (cameBack &&
+                        ServiceLocator.sshConnectionPool.peek(serverId) == null &&
+                        !connectInFlightSilent
+                    ) {
+                        android.util.Log.d(
+                            "SshAi-Chat",
+                            "offline-upgrade watcher: network back — retrying silent connect",
+                        )
+                        beginSearchOpenedConnect(silent = true)
+                    }
+                }
+            }
+            try {
+                // Exits via break (upgraded) or cancellation (delay is the
+                // suspension point; onCleared / a fresh open cancels the job).
+                while (true) {
+                    kotlinx.coroutines.delay(3_000)
+                    // Already upgraded (silent connect's own success path ran
+                    // startNewChat, or the user sent and connected)? Done.
+                    if (_localSessionId.value?.let { activeSessions[it] } != null) break
+                    if (ServiceLocator.sshConnectionPool.peek(serverId) == null) continue
+                    // Pool is live but nothing upgraded this chat — a connect
+                    // that's still in flight will do its own re-run; otherwise
+                    // it came up via another surface and we do it here.
+                    if (searchConnCoord.get() == ChatViewModelSearchConn.State.Connecting) continue
+                    android.util.Log.i(
+                        "SshAi-Chat",
+                        "offline-upgrade watcher: pool live — upgrading read-only chat to live mirror",
+                    )
+                    // Same call shape as beginSearchOpenedConnect's success path
+                    // (which also runs on an IO coroutine): carry the read-only
+                    // display so the rebuilt session doesn't blank to stale cache.
+                    startNewChat(
+                        agent = _currentAgent.value,
+                        resumeIdParam = initialResumeId,
+                        resumeFilePath = initialResumePath,
+                        seedMessages = _messagesBySession.value[_localSessionId.value],
+                    )
+                    break
+                }
+            } finally {
+                netJob.cancel()
+            }
+        }
+    }
+
     fun beginSearchOpenedConnect(silent: Boolean = false) {
         if (searchConnCoord.get() == ChatViewModelSearchConn.State.Connecting) {
             if (!silent && connectInFlightSilent) escalateAfterSilent = true
@@ -1096,29 +1179,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         data class Failed(val reason: String) : DownloadStatus
     }
 
-    // ──────── Pending send buffer (session-not-ready-yet) ────────
-    /**
-     * Texts the user tapped send on while the AgentSession was still
-     * bootstrapping. Drained in order the moment the session reaches
-     * `Running`. If a buffered send sits here for more than
-     * [BUFFER_TIMEOUT_MS], it's dropped and the text is emitted on
-     * [returnedText] so ChatScreen can put it back into the input box
-     * (so the user never silently loses what they typed).
-     *
-     * Public mostly so the prompt-bar hint can say "queued — will send
-     * when session is up" when there's something in flight.
-     */
-    private data class PendingSend(
-        val id: String,
-        val text: String,
-        val queuedAt: Long,
-        /** Uploaded image paths to send structurally with this buffered turn. */
-        val imagePaths: List<String> = emptyList(),
-    )
-    private val _pending = MutableStateFlow<List<PendingSend>>(emptyList())
-    val hasPending: StateFlow<Boolean> = _pending
-        .map { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    // ──────── (There is ONE queue.) ────────
+    // Sends parked while the session bootstraps used to live in a separate,
+    // INVISIBLE `_pending` buffer with a 30 s timeout — the user saw only a
+    // "N messages waiting to send" counter, could cancel nothing, and the
+    // timeout teleported text back into the composer mid-thought. Every
+    // undeliverable send now goes through the visible [_outbox] rows below
+    // (text + ✕, drained on Running) — one queue, one behavior (2026-08-17).
+    /** True while something is queued for this chat — the prompt-bar hint.
+     *  `by lazy`: `_outbox` is declared further down this class. */
+    val hasPending: StateFlow<Boolean> by lazy {
+        _outbox.map { it.isNotEmpty() }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }
 
     /**
      * Messages the user sent WHILE a turn was already running. We hold them HERE
@@ -1289,11 +1362,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
-    /** True once we've told the user we're offline; reset when the link returns,
-     *  so a long offline stretch says it once instead of on every send. */
-    @Volatile
-    private var offlineNoticeShown = false
-
     /** Last stuck-session rescue (epoch ms) — cooldown so a failing rebuild
      *  can't spin. See the rescue watcher in init. */
     @Volatile
@@ -1308,7 +1376,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         viewModelScope.launch {
             ai.eight24family.conch.util.NetworkCost.online.collect { up ->
                 if (!up) return@collect
-                offlineNoticeShown = false
                 if (_outbox.value.isEmpty()) return@collect
                 val sid = _localSessionId.value ?: return@collect
                 val s = activeSessions[sid] ?: return@collect
@@ -1336,8 +1403,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             removed = lst.firstOrNull { it.id == id }
             lst.filterNot { it.id == id }
         }
-        removed?.displayText?.takeIf { it.isNotBlank() }?.let {
-            viewModelScope.launch { _returnedText.emit(it) }
+        removed?.let { row ->
+            // The row may carry a crash-insurance draft — the user just
+            // cancelled this text, so it must not resurrect in a composer later.
+            SilentlyTry.fired("SshAi-Chat", "remove cancelled row draft") {
+                ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
+            }
+            row.displayText.takeIf { it.isNotBlank() }?.let {
+                viewModelScope.launch { _returnedText.emit(it) }
+            }
         }
     }
 
@@ -1357,6 +1431,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             emptyList()
         }
         if (claimed.isEmpty()) return
+        // Delivered — drop the crash-insurance drafts these rows carried, or
+        // the next "+ new session" would offer already-sent text in the composer.
+        for (row in claimed) {
+            SilentlyTry.fired("SshAi-Chat", "remove drained row draft") {
+                ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
+            }
+        }
         val combinedText = claimed.joinToString("\n\n") { it.text }
         val combinedImages = claimed.flatMap { it.imagePaths }
         viewModelScope.launch {
@@ -1377,14 +1458,27 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  (retry + the watcher both run on viewModelScope's Main dispatcher). */
     private val pendingRedelivery = MutableStateFlow<List<String>>(emptyList())
 
-    /** «Your message WILL be sent when the connection is back» — the count the
-     * pinned status line shows. Undelivered prompts awaiting silent
-     * redelivery + sends parked while the session bootstraps. The silent
-     * auto-fix stays silent about the MECHANICS; it stops being silent about
-     * the FACT. */
-    val queuedForReconnect: StateFlow<Int> =
-        combine(pendingRedelivery, _pending) { r, p -> r.size + p.size }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    /** The transport has been down CONTINUOUSLY for [UNREACHABLE_QUIET_MS] —
+     *  the only connection state the chat surfaces as text. Reconnects are
+     *  silent; the first minutes of a drop are silent (the queue rows and the
+     *  server dot already say everything); one quiet line appears only when
+     *  the server has been unreachable long enough that the user should know
+     *  waiting might not help (server down / IP banned / DC gone). */
+    val serverUnreachableLong: StateFlow<Boolean> by lazy {
+        kotlinx.coroutines.flow.flow {
+            var downSince = 0L
+            while (true) {
+                val lost = connectionLost.value
+                val now = System.currentTimeMillis()
+                // A blip resets the clock — the banner NEVER fires on a flapping
+                // link, only on a continuous outage (see [unreachableBannerShown]).
+                if (!lost) downSince = 0L else if (downSince == 0L) downSince = now
+                emit(unreachableBannerShown(lost, downSince, now))
+                kotlinx.coroutines.delay(15_000)
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }
 
     /** Honest transport state for the pinned line: the current session sits in
      * Failed / the reconnect ladder is running AND the pool has NO live
@@ -1925,29 +2019,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     outboxKickedFor = sid
                     if (_outbox.value.isNotEmpty()) drainOutbox(s)
                 }
-                // 3. Drain the offline-first-send buffer. Unlike (1) these were
-                //    NOT yet rendered — s.send both renders AND delivers.
-                if (_pending.value.isEmpty()) return@collect
-                val toFlush = _pending.value
-                _pending.value = emptyList()
-                for (p in toFlush) {
-                    s.send(p.text, p.imagePaths)
-                    val newId = s.agentSessionId
-                    if (newId != null && _resumeId.value != newId) {
-                        _resumeId.value = newId
-                        refreshSessions()
-                    }
-                    // Drained — drop this entry from the draft slot.
-                    // If the CLI never came back with a session id
-                    // (s.send threw / dropped silently) this still
-                    // removes the draft so a future "+ new session"
-                    // doesn't re-fire the same prompt unexpectedly.
-                    SilentlyTry.fired("SshAi-Chat", "remove drained draft") {
-                        ServiceLocator.historyCache.removeDraft(
-                            serverId, _currentAgent.value, p.text
-                        )
-                    }
-                }
+                // (3. There is no separate offline-first-send buffer anymore —
+                //    bootstrap-parked sends are ordinary [_outbox] rows and
+                //    were drained by (2) above. One queue, 2026-08-17.)
             }
         }
         // Session-health watchers (stall watchdog + auto-reconnect) live
@@ -2162,7 +2236,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     val t0 = System.currentTimeMillis()
                     val parsed = tailPollCoord.parseJsonl(win.slice, agent)
                     val parseMs = System.currentTimeMillis() - t0
-                    cachedParsed = if (win.windowed) listOf(historyWindowMarker()) + parsed else parsed
+                    // A TAIL-FIRST cache (base > 0) is missing its head even when
+                    // the local file is under the display window — the marker
+                    // must still say so, or a preloaded big session would look
+                    // deceptively complete.
+                    val headMissing = win.windowed ||
+                        ServiceLocator.historyCache.baseOffset(resumeIdParam) > 0L
+                    cachedParsed = if (headMissing) listOf(historyWindowMarker()) + parsed else parsed
                     // Timing on the OPEN path — openRemoteSession is NOT launched, so
                     // this hydrate parse runs on the MAIN thread. If parseMs is high on
                     // a big session, that's the "loaded slowly" jank → move off Main.
@@ -2235,9 +2315,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // sentinel — there's no real server.
             if (serverId != ai.eight24family.conch.ui.navigation.Routes.CACHE_ONLY_SERVER_ID) {
                 beginSearchOpenedConnect(silent = true)
+                // The silent connect only upgrades this chat when it succeeds
+                // RIGHT NOW. If it gives up (radio dead, SK server without a
+                // device key), the watcher below keeps looking for the pool to
+                // come up by any path and upgrades then — a live server-side
+                // turn must light the spinner without the user re-entering the
+                // chat (Workstream A #3).
+                armOfflineUpgradeWatcher()
             }
             return
         }
+        // A previous offline open of this chat may still have its upgrade
+        // watcher running — this open IS the upgrade (or a fresh online open).
+        offlineUpgradeJob?.cancel()
         // Pool already live on open → NO chip at all (it's just connected, like
         // any normal open). It must not say "offline · tap to connect" (the chip
         // defaults to Hidden, not Idle, so it never flashes that), and it must
@@ -2321,21 +2411,35 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     }
                 }
             }
-            // Brand-new chat draft restore (issue #38). Only when we
-            // ARE NOT adopting an existing orphan (its `_history`
-            // already has the pending UserText) and there's no
-            // resumeId (drafts only key on null-resumeId slots).
-            // Restore each draft as a PendingSend so the drain
-            // coroutine fires them the instant SSH reaches Running.
+            // Brand-new chat draft rescue (issue #38) — INTO THE COMPOSER,
+            // NEVER onto the wire. This used to restore each parked text as a
+            // PendingSend, which the drain coroutine AUTO-SENT the moment the
+            // session reached Running. A new session starts EMPTY. The rescued
+            // words go to the input box — read, edit, press send yourself — and
+            // only once they are OFFERED (composer subscribed) is the store
+            // cleared.
             if (existingAlive == null && resumeIdParam == null) {
                 val drafts = SilentlyTry.logged("SshAi-Chat", "load drafts on chat start") {
                     ServiceLocator.historyCache.loadDrafts(serverId, agent)
                 }.orEmpty()
                 if (drafts.isNotEmpty()) {
-                    val restored = drafts.map { txt ->
-                        PendingSend(UUID.randomUUID().toString(), txt, System.currentTimeMillis())
+                    viewModelScope.launch {
+                        // Wait for the composer's collector; a chat abandoned
+                        // before the UI attaches keeps the file for next time —
+                        // clearing on a missed emit would BE the lost message.
+                        val subscribed = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                            _returnedText.subscriptionCount.first { it > 0 }
+                        } != null
+                        if (!subscribed) return@launch
+                        _returnedText.emit(drafts.joinToString("\n\n"))
+                        android.util.Log.i(
+                            "SshAi-Chat",
+                            "restored ${drafts.size} undelivered draft(s) into the composer (never auto-sent)",
+                        )
+                        SilentlyTry.fired("SshAi-Chat", "clear drafts after composer restore") {
+                            ServiceLocator.historyCache.clearDrafts(serverId, agent)
+                        }
                     }
-                    _pending.update { it + restored }
                 }
             }
             val s: AgentSession = existingAlive ?: (sessionsManager.openOrGet(
@@ -2532,46 +2636,42 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val histSeed = if (!seedMessages.isNullOrEmpty() && seedMessages.size >= cachedParsed.size)
                     seedMessages else cachedParsed
                 s.loadHistory(histSeed)
+                // A live turn may have written to the server file since this
+                // cache was saved — the current turn's PROMPT is then only on
+                // the server, and the stale seed shows the reply streaming in
+                // (via the live stream) with no prompt above it until the
+                // tail-poll's catch-up lands a beat later. Own launch so it
+                // never delays the collector/stream wiring below; stat-gated so
+                // a current cache pays only one tiny stat; the compare is in
+                // REMOTE coordinates (base + local len) so a tail-first cache
+                // (Workstream C, base > 0) is not mistaken for "stale" on every
+                // open. Skipped on a reconnect carry (seedMessages) — that
+                // already holds the freshest display.
+                if (resumeFilePath != null && resumeIdParam != null && seedMessages.isNullOrEmpty()) {
+                    val base = ServiceLocator.historyCache.baseOffset(resumeIdParam)
+                    val cachedLen = cachedBytesLen
+                    viewModelScope.launch(Dispatchers.IO) {
+                        val live = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@launch
+                        val serverSize = execPooledText(live, remoteSizeScript(resumeFilePath))
+                            ?.trim()?.toLongOrNull()
+                        if (serverAheadOfCache(serverSize, base, cachedLen)) {
+                            android.util.Log.d(
+                                "SshAi-Chat",
+                                "cache stale on open (server=$serverSize base=$base cached=$cachedLen) — " +
+                                    "refreshing display tail so the in-flight prompt shows with the answer",
+                            )
+                            paintTailFromServer(live, resumeFilePath, s, agent, localId)
+                        }
+                    }
+                }
             } else if (resumeFilePath != null && resumeIdParam != null) {
                 // The display only ever needs the last DISPLAY_TAIL_BYTES (the
                 // full body is still fetched right after, for search + tail-poll
                 // offsets). Best-effort: if the pool isn't live or the tail fetch
                 // misses, we fall straight through to the unchanged full-fetch
                 // below.
-                run {
-                    val tailClient = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@run
-                    val tailCmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(
-                        "tail -c $DISPLAY_TAIL_BYTES -- " + ai.eight24family.conch.agent.shellEscape(resumeFilePath)
-                    )
-                    val tailRaw = withContext(Dispatchers.IO) {
-                        SilentlyTry.logged("SshAi-Chat", "fetch session tail for fast paint") {
-                            val sess = tailClient.startSession()
-                            try {
-                                val proc = sess.exec(tailCmd)
-                                val out = java.io.ByteArrayOutputStream()
-                                proc.inputStream.copyTo(out)
-                                proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
-                                out.toByteArray()
-                            } finally { SilentlyTry.fired("SshAi-Chat", "close tail session") { sess.close() } }
-                        }
-                    }
-                    if (tailRaw == null || tailRaw.isEmpty()) return@run
-                    // `tail -c N` returns exactly N bytes iff the file is larger →
-                    // there ARE earlier turns (show the hidden-history marker) and
-                    // the slab starts mid-line (drop the partial first line).
-                    val windowed = tailRaw.size >= DISPLAY_TAIL_BYTES
-                    val safe = if (windowed) {
-                        val nl = tailRaw.indexOf('\n'.code.toByte())
-                        if (nl in 0 until tailRaw.size - 1) tailRaw.copyOfRange(nl + 1, tailRaw.size) else tailRaw
-                    } else tailPollCoord.trimToLastNewline(tailRaw)
-                    val parsed = tailPollCoord.parseJsonl(safe, agent)
-                    if (parsed.isNotEmpty()) {
-                        val display = if (windowed) listOf(historyWindowMarker()) + parsed else parsed
-                        s.loadHistory(display)
-                        _messagesBySession.update { m ->
-                            if ((m[localId]?.size ?: 0) > display.size) m else m + (localId to display)
-                        }
-                    }
+                ServiceLocator.sshConnectionPool.peek(serverId)?.let {
+                    paintTailFromServer(it, resumeFilePath, s, agent, localId)
                 }
                 // ── PHASE 2 — full body for the cache (unchanged) ──
                 // No cache yet — fetch the full file. Prefer the
@@ -2589,7 +2689,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 SilentlyTry.logged("SshAi-Chat", "fetch session content for chat") {
                                     val sess = pooled.startSession()
                                     try {
-                                        val proc = sess.exec(cmd)
+                                        val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                         val out = java.io.ByteArrayOutputStream()
                                         proc.inputStream.copyTo(out)
                                         proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
@@ -2840,8 +2940,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // Tail-poll the remote JSONL: catch up since the snapshot, then
             // listen for external growth (e.g. the user typed on their PC).
             if (resumeIdParam != null && resumeFilePath != null) {
+                // The poller speaks REMOTE offsets; a tail-first cache's local
+                // length maps to remote only after adding its base origin
+                // (0 for complete mirrors, so this is byte-identical for them).
+                val initialOffset = ServiceLocator.historyCache.baseOffset(resumeIdParam) + cachedBytesLen
                 pollerJobs[localId] = viewModelScope.launch(Dispatchers.IO) {
-                    tailPollCoord.tailPoll(s, agent, resumeIdParam, resumeFilePath, cachedBytesLen)
+                    tailPollCoord.tailPoll(s, agent, resumeIdParam, resumeFilePath, initialOffset)
                 }
             } else {
                 // LATE POLLER ARM — a chat STARTED on the phone has no resume
@@ -2882,7 +2986,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         pollerJobs[localId] = viewModelScope.launch(Dispatchers.IO) {
                             tailPollCoord.tailPoll(
                                 s, agent, sid, p,
-                                ServiceLocator.historyCache.size(sid),
+                                // Base is 0 for phone-born sessions today, but the
+                                // offset contract is base + localLen everywhere.
+                                ServiceLocator.historyCache.baseOffset(sid) +
+                                    ServiceLocator.historyCache.size(sid),
                             )
                         }
                     }
@@ -2920,7 +3027,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Chat", "fetch sessions list (pooled)") {
                             val sess = pooled.startSession()
                             try {
-                                val proc = sess.exec(cmd)
+                                val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                 val out = java.io.ByteArrayOutputStream()
                                 proc.inputStream.copyTo(out)
                                 proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -3098,52 +3205,46 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     queuedAt = System.currentTimeMillis(),
                 )
             }
-            // Say it once per offline stretch, not on every keystroke-send.
-            if (!offlineNoticeShown) {
-                offlineNoticeShown = true
-                _messagesBySession.update { m ->
-                    m + (sid to ((m[sid] ?: emptyList()) + AgentMessage.Error(
-                        UUID.randomUUID().toString(),
-                        "No internet — your message is queued and will send as soon as you're back online.",
-                    )))
-                }
-            }
+            // No error row. The queued message is a VISIBLE row above the
+            // prompt bar with its text and a ✕ — that IS the notice.
             return
         }
 
-        // A turn is already running (or the drainer is winding one down) → hand
-        // the message STRAIGHT to the session's own queue via s.send(), exactly
-        // like the original CLI client: the prompt enters the session, is
-        // rendered in the chat at its turn-start, delivered the moment the
-        // current turn/step finishes, and PERSISTED to the rollout — it can
-        // never be lost.
+        // A turn is already running (or the drainer is winding one down) → the
+        // VISIBLE queue, like every other undeliverable send. The 2026-08-11
+        // design handed it straight into the running session's own queue with an
+        // instant bubble — the words were never lost, but the bubble welded
+        // itself into the MIDDLE of the running turn's transcript and the message
+        // became uncancellable the moment it was typed. A queue row keeps it
+        // visible AND yours until the turn actually ends: text, ✕, editable by
+        // cancel-and-retype.
         //
-        // The old design parked it in a VM-local visible outbox that drained
-        // only on the Working→Running edge — an edge a BACKGROUND/mirrored turn
-        // never hits in-process, so a message typed during a long background
-        // run sat there forever and died on exit. The promptQueue's atomic
-        // handoff (fixed 2026-08-10) already makes the internal queue reliable,
-        // so the whole reason the outbox existed is gone.
-        if (curState is SessionState.Working ||
-            (curState is SessionState.Running && s.drainerBusy)
-        ) {
-            // SHOW IT NOW, deliver echo-free. The session's own queue renders a
-            // queued prompt only at ITS turn-start (after the current turn ends)
-            // — so a plain s.send() mid-turn made the message VANISH from view
-            // until the long turn finished. Seed the bubble into history
-            // immediately (the collector paints it this frame), then redeliver
-            // echo-free so the queue delivers it after the current step WITHOUT
-            // re-rendering. The rollout echo dedupes via markSent — one bubble,
-            // visible instantly, delivered reliably, persisted on the server.
-            val bubble = AgentMessage.UserText(UUID.randomUUID().toString(), finalText)
-            s.appendMessages(listOf(bubble))
-            viewModelScope.launch {
-                s.redeliver(finalText, imagePaths)
-                val newId = s.agentSessionId
-                if (newId != null && _resumeId.value != newId) {
-                    _resumeId.value = newId
-                    refreshSessions()
-                }
+        // ⚠ ALSO the MIRRORED turn. Reopen the app into a session that is running
+        // SERVER-SIDE and our state machine has not caught up — curState is
+        // Running/Idle, NOT Working — but `remoteFileOpen` (the file mirror's "a
+        // turn is in flight" signal) is true. Without this conjunct the send
+        // skipped the queue and hit the hot `s.send()` below, which on a
+        // persistent `--resume` stream INTERRUPTS the running server turn and
+        // starts answering the new prompt from a COLD cache — a full history
+        // re-send and re-bill. A running turn is a running turn whether WE
+        // started it or only mirror it, and a mid-turn send is a visible queue
+        // row either way. It drains on the mirrored turn-end edge (remoteFileOpen
+        // true→false).
+        val mirroredTurnOpen = tailPollCoord.remoteFileOpen.value
+        if (shouldQueueSend(
+                working = curState is SessionState.Working,
+                runningWithBusyDrainer = curState is SessionState.Running && s.drainerBusy,
+                mirroredTurnOpen = mirroredTurnOpen,
+        )) {
+            _outbox.update {
+                it + QueuedMessage(
+                    id = UUID.randomUUID().toString(),
+                    text = finalText,
+                    displayText = trimmed.ifEmpty { finalText },
+                    imagePaths = imagePaths,
+                    thumbs = ready.filter { r -> r.first.isImage }.map { r -> r.first.bytes },
+                    queuedAt = System.currentTimeMillis(),
+                )
             }
             return
         }
@@ -3160,49 +3261,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 }
             }
         } else {
-            // Session is bootstrapping (or just opened, or briefly
-            // reconnecting). Buffer the text and let the state-watcher in
-            // init {} drain it the moment we reach Running. The user's
-            // message is NOT shown in the chat history yet — it's rendered
-            // there only after `s.send()` runs, just like the hot path —
-            // and if the session never comes up, the text returns to the
-            // input box via `returnedText` rather than disappearing.
-            val p = PendingSend(UUID.randomUUID().toString(), finalText, System.currentTimeMillis(), imagePaths)
-            _pending.update { it + p }
-            // Persist into the brand-new-chat draft slot (issue #38).
-            // If the user pops the chat off the back stack right now,
-            // this VM dies and `_pending` (in-memory only) goes with
-            // it. The draft survives — next time a ChatViewModel
-            // opens "+ new session" on the same (serverId, agent),
-            // `startNewChat` restores this text into `_pending` so
-            // the drain coroutine fires it the moment SSH reaches
-            // Running. Skip when `_resumeId` is already set — the
-            // chat has a CLI thread id, future reopens go through
-            // the resume path which carries its own history.
+            // Session is bootstrapping (or briefly reconnecting). The message
+            // goes into the SAME visible queue every other undeliverable send
+            // uses — a row above the prompt bar with its text and a ✕ — never
+            // an invisible buffer. The old design parked it in `_pending`:
+            // nothing on screen but a "N messages waiting to send" counter
+            // with no way to see or cancel WHAT was waiting, plus a 30 s
+            // timeout that yanked the text back into the composer
+            // mid-thought. The init{} watcher drains the queue the moment the
+            // session reaches Running; until then the row is visible and ✕
+            // returns its text to the composer. No timeout — a visible row
+            // waiting is honest.
+            _outbox.update {
+                it + QueuedMessage(
+                    id = UUID.randomUUID().toString(),
+                    text = finalText,
+                    displayText = trimmed.ifEmpty { finalText },
+                    imagePaths = imagePaths,
+                    thumbs = ready.filter { r -> r.first.isImage }.map { r -> r.first.bytes },
+                    queuedAt = System.currentTimeMillis(),
+                )
+            }
+            // Crash insurance for a brand-new chat (issue #38): persist the
+            // text so popping the chat mid-bootstrap doesn't lose it. It comes
+            // back in the COMPOSER of the next "+ new session" — never
+            // auto-sent (2026-08-17). Drained/cancelled rows clean it up.
             if (_resumeId.value == null) {
-                SilentlyTry.fired("SshAi-Chat", "append draft on pending send") {
+                SilentlyTry.fired("SshAi-Chat", "append draft on queued send") {
                     ServiceLocator.historyCache.appendDraft(
                         serverId, _currentAgent.value, finalText
                     )
-                }
-            }
-            viewModelScope.launch {
-                kotlinx.coroutines.delay(BUFFER_TIMEOUT_MS)
-                val stillQueued = _pending.value.any { it.id == p.id }
-                if (stillQueued) {
-                    _pending.update { lst -> lst.filterNot { it.id == p.id } }
-                    _returnedText.emit(p.text)
-                    // Buffer timed out; the text is back in the input
-                    // box via returnedText, so drop it from the draft
-                    // slot — leaving it there would resurrect a stale
-                    // prompt next time the user opens "+ new session".
-                    if (_resumeId.value == null) {
-                        SilentlyTry.fired("SshAi-Chat", "remove timed-out draft") {
-                            ServiceLocator.historyCache.removeDraft(
-                                serverId, _currentAgent.value, p.text
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -3395,7 +3483,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // usage endpoint), honour the reset the CLI printed ("resets 8:30pm").
         // A fresh probe proving we're back UNDER 100% (switched account / limit
         // cleared) overrides it, so a stale limit can't stick past its lift.
-        val probeSaysClear = primary != null && primary.percent < 100
+        // ⚠ "fresh" excludes CLI-cache reports: they carry fetchedAtEpochMs and
+        // may be up to an hour old — a 40-min-old 82% must not un-declare a
+        // limit the CLI hit 10 minutes ago. Live/curl reports (fetchedAt null)
+        // are fresh by construction and keep clearing it.
+        val probeSaysClear = primary != null && primary.percent < 100 &&
+            report?.fetchedAtEpochMs == null
         if (cliReset != null && cliReset > now && !probeSaysClear) {
             // Rate-limited: show the reset as a LOCAL clock time ("resets 10:30 AM")
             // in the user's own zone — not the CLI's foreign-zone "8:30pm".
@@ -3474,6 +3567,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         UsageProbe.remember(serverId, agent, merged)
                         return@launch
                     }
+                }
+                // NO live process (idle chat — get_usage nulls on!procAlive):
+                // the CLI's own persisted usage state in ~/.claude.json is the
+                // same truth, mtime-gated so an unchanged file costs ~60 B.
+                // This tier is what keeps an idle chat's bar honest.
+                UsageProbe.fetchClaudeCliCache(serverId)?.let { rep ->
+                    val merged = UsageProbe.withPerModelCarryOver(serverId, agent, rep)
+                    _usage.value = merged
+                    UsageProbe.remember(serverId, agent, merged)
+                    return@launch
                 }
             }
             // ...then LIVE refines. Retry on null (= no warm connection yet) up
@@ -3943,6 +4046,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             tailPollCoord.remoteFileOpen.collect { remote ->
                 if (wasRemote && !remote) {
                     refreshUsage()
+                    // MIRRORED turn ended → release the visible queue. This is
+                    // the edge the local Working→Running collector never sees
+                    // (the turn ran in another process / on another device),
+                    // and its absence is WHY mid-turn sends used to bypass the
+                    // queue entirely (2026-08-11). With this drain the queue
+                    // covers background turns too, so the bypass is gone and a
+                    // message typed into a busy chat stays a cancelable row
+                    // until the turn is genuinely over (2026-08-17).
+                    val sid = _localSessionId.value
+                    val sess = sid?.let { activeSessions[it] }
+                    if (sess != null && _outbox.value.isNotEmpty() &&
+                        _stateBySession.value[sid] !is SessionState.Working
+                    ) {
+                        drainOutbox(sess)
+                    }
                     launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(6_000)
                         UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { _usage.value = it }
@@ -4005,25 +4123,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun stopCurrent() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid]
-        // MIRRORED / ownerless turn: after an app restart the CLI keeps
-        // working server-side and the chat mirrors it from the file — but
-        // Stop only knew how to cancel an IN-PROCESS turn, so it silently
-        // did NOTHING here. When no app-side turn is Working, kill the
-        // server-side CLI processes attached to this session id instead —
-        // same signal ladder killZombieRemoteTurn uses, ridden over the
-        // pooled transport, with visible feedback either way.
-        if (s == null || s.state.value !is SessionState.Working) {
-            stopMirroredRemoteTurn()
-            s?.cancelCurrent()
-            tailPollCoord.setRemoteFileOpen(false)
-            return
+        // The route is a pure decision (pinned by StopRouteTest). The bug this
+        // fixes: an owned live process routed to the EXTERNAL pgrep kill, which
+        // races our own supervision — it never sets `userCancelled`, so the
+        // send-ack watchdog reads the death as a drop and REDELIVERS the
+        // prompt. An owned process must NEVER take that route.
+        when (stopRoute(
+            sessionExists = s != null,
+            ownsLiveProcess = s?.hasLiveCliProcess() == true,
+            isWorking = s?.state?.value is SessionState.Working,
+        )) {
+            // Owned + our tracking still on the turn → interrupt + escalate.
+            StopRoute.STREAM -> s?.cancelCurrent()
+            // Owned but tracking desynced off Working (reopened mid-turn) →
+            // force: the stream tears ITS OWN process down on procAlive alone,
+            // cleanly, so Stop can't no-op into the external kill.
+            StopRoute.STREAM_FORCE -> s?.cancelCurrent(force = true)
+            // A one-shot turn WE run (no persistent process) → in-channel
+            // INT→TERM→KILL ladder.
+            StopRoute.ONESHOT -> s?.cancelCurrent()
+            StopRoute.EXTERNAL_KILL -> {
+                stopMirroredRemoteTurn()
+                s?.cancelCurrent()
+            }
         }
-        s.cancelCurrent()
         // Kill the working verb NOW. The verb shows on state==Working OR the mirror
-        // poll's remoteFileOpen; cancelCurrent handles the app-driven state, but
-        // the poll flag would keep the gerund up until the next tick re-evaluated
-        // the file. Clear it optimistically; the poll re-lights only on genuine new
-        // growth — e.g. the queued message's own turn starting via drainOutbox.
+        // poll's remoteFileOpen; the branches above handle the app-driven state,
+        // but the poll flag would keep the gerund up until the next tick
+        // re-evaluated the file. Clear it optimistically; the poll re-lights only
+        // on genuine new growth — e.g. the queued message's own turn starting via
+        // drainOutbox.
         tailPollCoord.setRemoteFileOpen(false)
     }
 
@@ -4042,7 +4171,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             "printf '%s %s %s' " +
             "\"\$(grep -c '\"type\":\"result\"' \"\$j\" 2>/dev/null || echo 0)\" " +
             "\"\$(grep -c '\"type\":\"started\"' \"\$j\" 2>/dev/null || echo 0)\" " +
-            "\"\$(stat -c %Y \"\$j\" 2>/dev/null || echo 0)\"; fi"
+            "\"\$(stat -c %Y \"\$j\" 2>/dev/null || stat -f %m \"\$j\" 2>/dev/null || echo 0)\"; fi"
         val out = s.execOnLive("bash -lc " + ai.eight24family.conch.agent.shellEscape(inner))
             ?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val parts = out.split(Regex("\\s+"))
@@ -4053,12 +4182,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     /** See [stopCurrent] — kill the server-side CLI turn for this session id
-     *  when no in-process turn owns it. Best-effort, visible feedback. */
+     * Discovery + INT→TERM→KILL ladder + liveness verdict live in
+     * [ai.eight24family.conch.agent.RemoteTurnKiller] (shared with the
+     * zombie-kill path — the two copies had drifted). The verdict is then
+     * CONFIRMED against the session file: kill -0 proves the pgrep'd processes
+     * died, but a mirrored Codex app-server / Gemini ACP / console-minted REPL
+     * turn carries no resume id in argv, so the only honest test for "did the
+     * TURN stop" is whether anything still writes the JSONL. A button that
+     * silently does nothing is banned, so every branch says what happened. */
     private fun stopMirroredRemoteTurn() {
         val rid = _resumeId.value
-        // Shell-injected — accept only a UUID-shaped id (same guard as the
-        // /context fetch).
-        if (rid == null || !Regex("^[a-fA-F0-9-]{16,40}$").matches(rid)) {
+        val killer = ai.eight24family.conch.agent.RemoteTurnKiller
+        // Shell-injected — accept only a UUID-shaped id.
+        if (!killer.isKillableResumeId(rid)) {
             _chatNotice.value = "Nothing to stop — no running turn found."
             return
         }
@@ -4069,30 +4205,130 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
         _chatNotice.value = "Stopping the server-side turn…"
         viewModelScope.launch(Dispatchers.IO) {
-            val q = ai.eight24family.conch.agent.shellEscape(rid)
-            val pidScript = "pgrep -af $q 2>/dev/null | " +
-                "awk '\$2 != \"bash\" && \$2 != \"sh\" && /(claude|codex|gemini)/ {print \$1}'"
-            val script = "pids=\$($pidScript); " +
-                "if [ -n \"\$pids\" ]; then kill -INT \$pids 2>/dev/null; sleep 1; " +
-                "kill -TERM \$pids 2>/dev/null; echo \"killed:\$pids\"; else echo none; fi"
-            val out = SilentlyTry.logged("SshAi-Chat", "stop mirrored remote turn") {
-                val sess = client.startSession()
-                try {
-                    val proc = sess.exec("bash -lc " + ai.eight24family.conch.agent.shellEscape(script))
-                    val text = proc.inputStream.bufferedReader().readText()
-                    proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
-                    text
-                } finally {
-                    SilentlyTry.fired("SshAi-Chat", "close stop session") { sess.close() }
+            val path = _localSessionId.value?.let { sessionPathMap[it] }
+            val preSize = path?.let { execPooledText(client, remoteSizeScript(it))?.trim()?.toLongOrNull() }
+            val out = execPooledText(client, killer.killScript(rid!!))
+            when (val verdict = killer.parseOutcome(out)) {
+                is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Killed -> {
+                    // Processes confirmed dead — repaint now; the poll would take
+                    // a tick to notice the freeze. The delayed stat below is the
+                    // second writer check only, never a spinner source.
+                    tailPollCoord.setRemoteFileOpen(false)
+                    _chatNotice.value = "Server-side turn stopped."
+                    if (path != null) {
+                        // The dying CLI legitimately flushes a final result record,
+                        // so growth right after the kill proves nothing — wait out
+                        // the flush, then require the file to have gone quiet.
+                        kotlinx.coroutines.delay(2_500)
+                        val mid = execPooledText(client, remoteSizeScript(path))?.trim()?.toLongOrNull()
+                        kotlinx.coroutines.delay(2_000)
+                        val post = execPooledText(client, remoteSizeScript(path))?.trim()?.toLongOrNull()
+                        if (mid != null && post != null && post > mid) {
+                            // Still being written — a writer pgrep can't see.
+                            _chatNotice.value =
+                                "The session is still being written by another process — stop it where it started."
+                        }
+                    }
                 }
-            }
-            _chatNotice.value = when {
-                out == null -> "Couldn't reach the server to stop the turn."
-                out.contains("killed:") -> "Server-side turn stopped."
-                else -> "No running turn found on the server."
+                is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Survived ->
+                    _chatNotice.value = "Couldn't stop the server-side turn — it's still running."
+                ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.NoneFound -> {
+                    // Nothing on the server carries this resume id. For Claude
+                    // that means the turn already ended; for Codex/Gemini the
+                    // mirrored writer (app-server / ACP) never puts the id in
+                    // argv, so we CANNOT kill it — say so instead of pretending.
+                    val stillGrowing = if (path != null && preSize != null) {
+                        val post = execPooledText(client, remoteSizeScript(path))?.trim()?.toLongOrNull()
+                        post != null && post > preSize
+                    } else false
+                    _chatNotice.value = when {
+                        stillGrowing && _currentAgent.value != Agent.CLAUDE ->
+                            "Can't stop a mirrored ${_currentAgent.value.displayName} turn from here — stop it on the machine that started it."
+                        stillGrowing ->
+                            "Can't find the writer — it may be a console session; stop it where it started."
+                        else -> "No running turn found on the server."
+                    }
+                }
+                ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Unreachable ->
+                    _chatNotice.value = "Couldn't reach the server to stop the turn."
             }
         }
     }
+
+    /** Portable remote file-size probe (GNU stat → BSD stat → wc -c), used by
+     *  the stop-confirmation reads above. */
+    private fun remoteSizeScript(path: String): String {
+        val q = ai.eight24family.conch.agent.shellEscape(path)
+        return "stat -c %s $q 2>/dev/null || stat -f %z $q 2>/dev/null || wc -c < $q 2>/dev/null"
+    }
+
+    /**
+     * Paint the chat from the server's CURRENT tail (last [DISPLAY_TAIL_BYTES]).
+     * `loadHistory` MERGES (mergeUnsyncedUserText preserves unsynced rows), so
+     * it is safe to call over a cache seed: it surfaces a live turn's PROMPT
+     * that a stale cache does not hold yet, without doubling anything.
+     */
+    private suspend fun paintTailFromServer(
+        tailClient: net.schmizz.sshj.SSHClient,
+        path: String,
+        s: ai.eight24family.conch.agent.AgentSession,
+        agent: Agent,
+        localId: String,
+    ) {
+        val tailCmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+            "bash -lc " + ai.eight24family.conch.agent.shellEscape(
+                "tail -c $DISPLAY_TAIL_BYTES -- " + ai.eight24family.conch.agent.shellEscape(path)
+            ),
+        )
+        val tailRaw = withContext(Dispatchers.IO) {
+            SilentlyTry.logged("SshAi-Chat", "fetch session tail for fast paint") {
+                val sess = tailClient.startSession()
+                try {
+                    val proc = sess.exec(tailCmd)
+                    val out = java.io.ByteArrayOutputStream()
+                    proc.inputStream.copyTo(out)
+                    proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
+                    out.toByteArray()
+                } finally { SilentlyTry.fired("SshAi-Chat", "close tail session") { sess.close() } }
+            }
+        }
+        if (tailRaw == null || tailRaw.isEmpty()) return
+        // `tail -c N` returns exactly N bytes iff the file is larger → earlier
+        // turns exist (show the marker) and the slab starts mid-line (drop it).
+        val windowed = tailRaw.size >= DISPLAY_TAIL_BYTES
+        val safe = if (windowed) {
+            val nl = tailRaw.indexOf('\n'.code.toByte())
+            if (nl in 0 until tailRaw.size - 1) tailRaw.copyOfRange(nl + 1, tailRaw.size) else tailRaw
+        } else tailPollCoord.trimToLastNewline(tailRaw)
+        val parsed = tailPollCoord.parseJsonl(safe, agent)
+        if (parsed.isNotEmpty()) {
+            val display = if (windowed) listOf(historyWindowMarker()) + parsed else parsed
+            s.loadHistory(display)
+            _messagesBySession.update { m ->
+                if ((m[localId]?.size ?: 0) > display.size) m else m + (localId to display)
+            }
+        }
+    }
+
+    /** One pooled exec channel → stdout text, null on any failure. The stop
+     *  path can't use execOnLive (there may be NO AgentSession at all for a
+     *  mirrored turn), so it rides the pool client directly. */
+    private fun execPooledText(client: net.schmizz.sshj.SSHClient, script: String): String? =
+        SilentlyTry.logged("SshAi-Chat", "stop-path pooled exec") {
+            val sess = client.startSession()
+            try {
+                val proc = sess.exec(
+                    ai.eight24family.conch.agent.RemoteEnv.portable(
+                        "bash -lc " + ai.eight24family.conch.agent.shellEscape(script),
+                    ),
+                )
+                val text = proc.inputStream.bufferedReader().readText()
+                proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                text
+            } finally {
+                SilentlyTry.fired("SshAi-Chat", "close stop session") { sess.close() }
+            }
+        }
 
     /**
      * Pull a file the agent mentioned in its reply down to the phone.
@@ -4365,6 +4601,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val s = activeSessions[localId] ?: return
         val agent = sessionAgentMap[localId] ?: _currentAgent.value
         viewModelScope.launch(Dispatchers.Default) {
+            // TAIL-FIRST cache: the head was never downloaded (base > 0), so
+            // parsing the local file would "load all" into… the same tail the
+            // user is already looking at. The marker tap IS the explicit ask
+            // for the whole rollout — stream the full body (gzip, RAM-flat)
+            // over the pooled client; the save resets the base to 0. With no
+            // live client the tap honestly shows only what is cached (and the
+            // marker stays, because the base is still > 0).
+            if (ServiceLocator.historyCache.baseOffset(resumeId) > 0L) {
+                val path = sessionPathMap[localId]
+                if (path != null) {
+                    withContext(Dispatchers.IO) {
+                        tailPollCoord.streamFullToCache(s, resumeId, path)
+                    }
+                }
+            }
             val full = ServiceLocator.historyCache.load(resumeId)?.use { snap ->
                 tailPollCoord.parseJsonl(
                     ai.eight24family.conch.util.JsonlUtils.trimToLastNewline(snap.buffer), agent,
@@ -4398,18 +4649,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
         }
         // ⚠ NEVER LOSE A MESSAGE THE USER ASKED TO SEND. `pendingRedelivery`
-        // (undelivered prompts awaiting silent reconnect) and `_pending`
-        // (sends parked while SSH bootstraps) live ONLY in this VM — a chat
-        // exited while the link was down took them to the grave. Persist each
-        // to the (server,agent) draft slot; startNewChat restores drafts into
-        // _pending on the next open → the drain coroutine fires them the
-        // moment SSH is up. The VISIBLE outbox is NOT included here — it has
-        // its own per-chat persistence (observeOutboxForPersistence), and
-        // adding it would double the message on restore. Deduped by body.
+        // (undelivered prompts awaiting silent reconnect) lives ONLY in this
+        // VM — a chat exited while the link was down took it to the grave.
+        // Persist to the (server,agent) draft slot; the next "+ new session"
+        // offers it in the COMPOSER (never auto-sent, 2026-08-17). The
+        // VISIBLE outbox is NOT included here — it has its own per-chat
+        // persistence (observeOutboxForPersistence), and bootstrap-parked
+        // rows already wrote their own draft at queue time.
         val agent = _currentAgent.value
         val bodies = LinkedHashSet<String>().apply {
             pendingRedelivery.value.forEach { add(it) }
-            _pending.value.forEach { add(it.text) }
             s?.consumeUndelivered()?.forEach { add(it) }
         }
         for (b in bodies) {
@@ -4463,7 +4712,79 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          * field. 30 s covers a typical SSH handshake retry on a flaky
          * connection without making the user feel stuck.
          */
-        private const val BUFFER_TIMEOUT_MS: Long = 30_000L
+        /** How long the transport must be continuously down before the chat
+         *  says anything about it in words. Below this: silent reconnect, the
+         *  queue rows and the server dot carry the state. */
+        internal const val UNREACHABLE_QUIET_MS: Long = 5 * 60_000L
+
+        /**
+         * The 5-minute quiet-banner gate, pure so the failure matrix can pin it
+         * (Workstream E): the "server unreachable — retrying quietly" line shows
+         * ONLY when the link is currently lost AND has been continuously lost
+         * for at least [UNREACHABLE_QUIET_MS]. [downSince] is 0 whenever the
+         * caller has seen the link up since — so a blip resets it and the banner
+         * never fires on a flapping radio (INVARIANTS 2026-08-17: words about the
+         * connection appear only when waiting might not help).
+         */
+        internal fun unreachableBannerShown(lost: Boolean, downSince: Long, now: Long): Boolean =
+            lost && downSince != 0L && now - downSince >= UNREACHABLE_QUIET_MS
+
+        /**
+         * On open, is the server file genuinely AHEAD of what the cache holds —
+         * i.e. a live turn wrote since the cache was saved, so the current
+         * prompt lives only on the server and the display tail must be refreshed
+         * (see [paintTailFromServer])? Verified fix for the reopen gap. The
+         * compare is in REMOTE coordinates: a tail-first cache (Workstream C)
+         * starts at [baseOffset] > 0, and comparing its short LOCAL length to
+         * the full server size would wrongly read "stale" on every open —
+         * `serverSize > baseOffset + cachedLen` is the correct, base-aware test.
+         * A null server size (stat failed) ⇒ can't tell ⇒ don't refresh.
+         */
+        internal fun serverAheadOfCache(serverSize: Long?, baseOffset: Long, cachedLen: Long): Boolean =
+            serverSize != null && serverSize > baseOffset + cachedLen
+
+        /**
+         * Does a fresh send go to the VISIBLE QUEUE instead of straight to the
+         * CLI? Pure so it can be pinned (SendQueueGateTest). A send is queued
+         * whenever a turn is in flight — OUR OWN ([working], or [running] while
+         * the drainer winds one down) OR a MIRRORED one ([mirroredTurnOpen], the
+         * file says a turn is running even though our state machine hasn't caught
+         * up on reopen). The last conjunct is the fix for (user, 2026-08-17): a
+         * hot send into a reopened live turn interrupts it and cold-restarts.
+         */
+        internal fun shouldQueueSend(
+            working: Boolean,
+            runningWithBusyDrainer: Boolean,
+            mirroredTurnOpen: Boolean,
+        ): Boolean = working || runningWithBusyDrainer || mirroredTurnOpen
+
+        /** How Stop reaches the running turn. */
+        enum class StopRoute { STREAM, STREAM_FORCE, ONESHOT, EXTERNAL_KILL }
+
+        /**
+         * Where does Stop route the halt? Pure so it can be pinned
+         * (StopRouteTest). THE INVARIANT: a turn running in a process WE own
+         * (`ownsLiveProcess`) NEVER routes to [EXTERNAL_KILL] — that external
+         * pgrep kill races our own supervision and, by not setting
+         * `userCancelled`, makes the send-ack watchdog redeliver the prompt, so
+         * Stop stopped for a beat and the turn resumed (user, 2026-08-17). Owned
+         * processes stop through the stream (interrupt + teardown); [STREAM_FORCE]
+         * covers the reopened-mid-turn desync where our tracking fell off
+         * Working while the process kept writing. Only a session with NO live
+         * process of ours — the orphan after a full restart that we merely mirror
+         * — takes the external ladder.
+         */
+        internal fun stopRoute(
+            sessionExists: Boolean,
+            ownsLiveProcess: Boolean,
+            isWorking: Boolean,
+        ): StopRoute = when {
+            !sessionExists -> StopRoute.EXTERNAL_KILL
+            ownsLiveProcess && isWorking -> StopRoute.STREAM
+            ownsLiveProcess -> StopRoute.STREAM_FORCE
+            isWorking -> StopRoute.ONESHOT
+            else -> StopRoute.EXTERNAL_KILL
+        }
 
         /**
          * How long an assistant turn can sit in Working with no fresh

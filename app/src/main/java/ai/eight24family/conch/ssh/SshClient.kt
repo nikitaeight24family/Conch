@@ -121,7 +121,9 @@ open class SshClient {
             authenticate(client, server, secrets, skSigner)
 
             val session = client.startSession()
-            val cmd = session.exec(command)
+            // Same no-bash fallback as the pooled path (RemoteEnv.portable):
+            // a `bash -lc` composed upstream must not die on Alpine/BSD.
+            val cmd = session.exec(ai.eight24family.conch.agent.RemoteEnv.portable(command))
             val out = ByteArrayOutputStream()
             val err = ByteArrayOutputStream()
             cmd.inputStream.copyTo(out)

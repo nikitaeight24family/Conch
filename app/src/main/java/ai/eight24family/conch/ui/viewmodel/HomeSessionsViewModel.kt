@@ -360,13 +360,17 @@ class HomeSessionsViewModel : ViewModel() {
                     // relist sweep refreshes mtimes every 30 s.
                     val serverWorking =
                         System.currentTimeMillis() - sess.lastActiveAt * 1000L < SERVER_WORKING_WINDOW_MS
-                    // Local-cache freshness beats both other signals: the mirror
-                    // file's own mtime moves whenever the poller / background
-                    // catch-up appends — no server clock, no listing lag. It is
-                    // what stops the ✓ from showing over a session that is
-                    // VISIBLY still streaming.
+                    // Local-cache freshness beats both other signals — but only
+                    // LIVE appends count (open chat's poller / a background
+                    // catch-up of a server-hot session). File mtime was the old
+                    // key, and OUR OWN housekeeping writes move it: every
+                    // background catch-up of a cold session lit "working" on a
+                    // chat finished 12+ hours earlier, one 90 s flash per sweep
+                    // (user 2026-08-17). The signal still stops the ✓ over a
+                    // VISIBLY streaming session (2026-08-11) — those appends are
+                    // live by definition.
                     val cacheWorking =
-                        System.currentTimeMillis() - ServiceLocator.historyCache.lastWriteMs(sess.id) < SERVER_WORKING_WINDOW_MS
+                        System.currentTimeMillis() - ServiceLocator.historyCache.lastLiveActivityMs(sess.id) < SERVER_WORKING_WINDOW_MS
                     val working = liveWorking || serverWorking || cacheWorking
                     // Unread: live message count while this process has the
                     // session (precise); otherwise the DURABLE byte watermark
@@ -540,7 +544,9 @@ class HomeSessionsViewModel : ViewModel() {
             }
             val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
                 .deleteSessionCommand(session.id, session.path)
-            val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner)
+            val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+                "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner),
+            )
             SilentlyTry.fired("SshAi-Home", "delete session on server") {
                 val sess = pooled.startSession()
                 try {

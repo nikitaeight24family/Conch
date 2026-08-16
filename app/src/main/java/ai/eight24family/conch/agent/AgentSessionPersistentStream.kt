@@ -220,11 +220,28 @@ internal class AgentSessionPersistentStream(
                 writeLine(line)
             }
             if (!sent) {
-                // stdin write failed → process/transport died between
-                // ensureProcess and the write. Same silent-reconnect
-                // semantics as the one-shot ABORT paths.
-                android.util.Log.w(tag, "runTurn: stdin write failed — marking disconnected")
+                // stdin write failed → the process died between ensureProcess
+                // and the write. WHICH corpse matters: a dead TRANSPORT wants
+                // the silent-reconnect path, but a CLI that died at birth on a
+                // HEALTHY link (expired login, bad flag) explains itself on
+                // stderr — and calling that "disconnected" looped silent
+                // reconnects forever while the chat spun with zero tokens and
+                // the user never learned the one thing that would fix it
+                // (the dev server 2026-08-17: "Not logged in · Please run /login").
                 teardownProcess()
+                val why = cliFailureDiagnosis()
+                if (sshLifecycle.liveClient()?.isConnected == true && why != null) {
+                    android.util.Log.w(tag, "runTurn: CLI died at launch on a live transport — surfacing: $why")
+                    history.emitMsg(
+                        AgentMessage.Error(
+                            UUID.randomUUID().toString(),
+                            "${server.agent.cliCommand}: $why",
+                        )
+                    )
+                    onStateChange(SessionState.Running)
+                    return@withContext true
+                }
+                android.util.Log.w(tag, "runTurn: stdin write failed — marking disconnected")
                 onPromptUndelivered(text)
                 onStateChange(SessionState.Failed("disconnected"))
                 return@withContext true
@@ -322,7 +339,25 @@ internal class AgentSessionPersistentStream(
                 // Only genuine silence keeps the redelivery: nothing came back at
                 // all, so the write may well have died in a local buffer — that
                 // is the half-open-transport case the send-ack watchdog exists
-                // for, and dropping it silently is the older bug.
+                // for, and dropping it silently is the older bug. CLI died on a
+                // LIVE transport with an explanation on stderr → that explanation
+                // IS the answer to this turn. Not a disconnect (nothing to
+                // reconnect), not a redelivery (the CLI will just die again until
+                // the user fixes what stderr names).
+                val whyDead = cliFailureDiagnosis()
+                if (sshLifecycle.liveClient()?.isConnected == true && whyDead != null &&
+                    !history.hasAssistantOutputSince(historyAtTurnStart)
+                ) {
+                    android.util.Log.w(tag, "process died mid-turn on a live transport — surfacing: $whyDead")
+                    history.emitMsg(
+                        AgentMessage.Error(
+                            UUID.randomUUID().toString(),
+                            "${server.agent.cliCommand}: $whyDead",
+                        )
+                    )
+                    onStateChange(SessionState.Running)
+                    return@withContext true
+                }
                 val cliTookIt = lastReaderActivityMs >= sentAtMs ||
                     history.hasAssistantOutputSince(historyAtTurnStart)
                 if (cliTookIt) {
@@ -441,7 +476,9 @@ internal class AgentSessionPersistentStream(
             procAlive = true
             launched = params
             turnSeq++
+            synchronized(errTail) { errTail.clear() }
             startReader(cmd)
+            startErrDrain(cmd)
             android.util.Log.d(
                 tag,
                 "persistent process started resume=${getResumeId()} " +
@@ -489,6 +526,44 @@ internal class AgentSessionPersistentStream(
      *  mid-turn death (the "stdin write failed" + EOF loop, 2026-06-12)
      *  is diagnosable from `adb logcat -s SshAi-Persist` without guessing. */
     private val rawTail = ArrayDeque<String>()
+
+    /** Rolling tail of the process's STDERR. A CLI that dies at birth — an
+     *  expired login, a bad flag — explains itself HERE, and nothing read it:
+     *  the reader saw stdout EOF, the write path said "disconnected", and the
+     *  app silently reconnect-looped over a perfectly healthy transport while
+     *  the chat spun a thinking indicator with zero tokens (the dev server,
+     *  2026-08-17: claude logged out — the LIST preview even showed "Not
+     *  logged in · Please run /login" while the open chat showed nothing). */
+    private val errTail = ArrayDeque<String>()
+
+    private fun startErrDrain(cmd: Session.Command) {
+        scope.launch(Dispatchers.IO) {
+            SilentlyTry.fired(tag, "drain stderr") {
+                BufferedReader(InputStreamReader(cmd.errorStream, Charsets.UTF_8)).use { r ->
+                    while (true) {
+                        val line = r.readLine() ?: break
+                        if (line.isBlank()) continue
+                        synchronized(errTail) {
+                            errTail.addLast(line.take(400))
+                            while (errTail.size > 8) errTail.removeFirst()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Why the CLI process died, in the CLI's own words — stderr first, then
+     *  any non-JSON stdout. Null when there is nothing quotable, which keeps
+     *  the caller on the ordinary disconnected path. */
+    private fun cliFailureDiagnosis(): String? {
+        val err = synchronized(errTail) { errTail.joinToString("\n") }.trim()
+        if (err.isNotEmpty()) return err.take(300)
+        val raw = synchronized(rawTail) {
+            rawTail.filter { !it.trimStart().startsWith("{") }.joinToString("\n")
+        }.trim()
+        return raw.take(300).takeIf { raw.isNotEmpty() }
+    }
 
     // ── Live local-history cache ──────────────────────────────────────
     // Persist the chat to the on-device HistoryCache AS IT STREAMS, so a
@@ -890,7 +965,7 @@ internal class AgentSessionPersistentStream(
      * turn is STILL running after a grace window, kills the whole
      * process — it restarts with `--resume` on the next send.
      */
-    fun cancelTurn() {
+    fun cancelTurn(force: Boolean = false) {
         sshLifecycle.userCancelled = true
         // The turn Stop is aimed at — IF one has started writing to the process
         // yet. `turnDone` is assigned inside runTurn only after
@@ -907,24 +982,38 @@ internal class AgentSessionPersistentStream(
         // an unrelated later turn — that was yesterday's bug, see the 2026-07-31
         // note two paragraphs up in git history).
         val target = turnDone
-        if (target != null) interrupt(target)
+        // FORCE with no tracked turn: the app OWNS this process and the file
+        // says a turn is running, but our turn tracking lost it (reopened
+        // mid-turn — procAlive true, state desynced off Working). Send the
+        // interrupt anyway so the CLI aborts on read; the escalation below then
+        // tears our own process down if it ignores it.
+        if (target != null) interrupt(target) else if (force) interrupt(null)
         scope.launch {
             kotlinx.coroutines.delay(4_000)
-            val escalate = if (target != null) {
-                shouldEscalateKill(
+            val escalate = when {
+                // FORCE the kill on procAlive alone. Stop was routed here BECAUSE
+                // we own a live process and the file says it's mid-turn; the normal
+                // Working gate would skip (state desynced), Stop would no-op, and
+                // the external pgrep kill took over — which, because it never set
+                // userCancelled, let the send-ack watchdog read the death as a drop
+                // and REDELIVER the prompt: (user, 2026-08-17). userCancelled is
+                // set above, so tearing OUR process down is clean and is never
+                // redelivered. clearQueue (in cancelCurrent) means no queued prompt
+                // can start inside the grace.
+                force -> procAlive
+                target != null -> shouldEscalateKill(
                     sameTurn = turnDone === target,
                     victimDone = target.isCompleted,
                     working = getState() == SessionState.Working,
                     alive = procAlive,
                 )
-            } else {
                 // Nothing was captured to fence on. Fall back to the plain
                 // session-level check: still Working and the process still up
                 // means Stop's target — whatever eventually started — has not
                 // finished, so kill it. A turn that legitimately started AND
                 // finished inside these 4s is left alone either way, since
                 // getState() would already be back to Running by then.
-                getState() == SessionState.Working && procAlive
+                else -> getState() == SessionState.Working && procAlive
             }
             if (!escalate) {
                 android.util.Log.d(tag, "stop escalation skipped — nothing to kill")

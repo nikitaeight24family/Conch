@@ -1,0 +1,5 @@
+Neu
+• Öffne eine laufende Sitzung erneut und sie ist wieder voll live — Stopp, Timer, Token-Zähler, Antwort direkt aus der Datei, auch wenn die App mitten im Turn geschlossen wurde.
+• Große Chats öffnen sofort; Limits bleiben auch im Leerlauf korrekt.
+• Läuft auf mehr Servern (Alpine/BusyBox/BSD/macOS).
+• Behoben: Stopp hält den Turn zuverlässig an; eine Nachricht in einen laufenden Turn wartet in der Warteschlange; kein falsches „arbeitet".

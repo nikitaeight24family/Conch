@@ -14,6 +14,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -102,7 +103,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 ai.eight24family.conch.util.SilentlyTry.logged("SshAi-AgentPicker", "vault exec") {
                     val sess = client.startSession()
                     try {
-                        val proc = sess.exec(cmd)
+                        val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                         val out = java.io.ByteArrayOutputStream()
                         proc.inputStream.copyTo(out)
                         proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -443,6 +444,13 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Unix-millis of the LAST successful probe — drives the "checked X ago" UI string. */
     private val _lastCheckedAt = MutableStateFlow<Long?>(null)
     val lastCheckedAt: StateFlow<Long?> = _lastCheckedAt.asStateFlow()
+
+    /** "WINDOWS" when the OS pre-probe identified a Windows OpenSSH server —
+     *  the rows then say so instead of a misleading "not installed" (honest
+     *  detection only; PowerShell discovery is out of scope, 2026-08-17). */
+    val serverOs: StateFlow<String?> = ServiceLocator.agentStatusCache
+        .observeServerOs(serverId)
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
 
     /**
      * Surfaced when pull-to-refresh / first-open fires against a FIDO-keyed

@@ -133,7 +133,8 @@ class GlobalPrefetcher(
             if (System.currentTimeMillis() - lastProbe >= AGENT_REPROBE_MS) {
                 SilentlyTry.fired(TAG, "periodic agent re-probe ${server.name}") {
                     val probe = ai.eight24family.conch.di.ServiceLocator.agentStatusProbe
-                    probe.probe(exec).getOrNull()?.let { agentStatusCache.save(server.id, it) }
+                    probe.probe(exec, onOs = { os -> agentStatusCache.saveServerOs(server.id, os.name) })
+                        .getOrNull()?.let { agentStatusCache.save(server.id, it) }
                 }
             }
             val agents = (snapshot?.statuses ?: emptyMap())
@@ -154,37 +155,75 @@ class GlobalPrefetcher(
                 // live channel: bounded per session and per sweep, byte-exact (raw
                 // stream + newline trim — a String decode could split a multibyte
                 // char and corrupt the cache), and skipped when an open chat's
-                // poller races us.
-                appendGrownBodies(client, list)
+                // poller races us. Re-tails (2 MB each) take the SAME posture as
+                // the body sweep: foreground is already implied by the loop's
+                // gate; metered / data-saver forbids them, the ≤512 KB deltas stay
+                // allowed.
+                val allowRetail = !ai.eight24family.conch.util.NetworkCost.isMetered() &&
+                    !SilentlyTry.loggedOrElse(TAG, "read data saver for re-tail", true) {
+                        ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
+                    }
+                appendGrownBodies(client, list, allowRetail)
             }
         }
     }
 
-    /** One sweep's incremental cache catch-up for [list] — see call site. */
+    /** One sweep's incremental cache catch-up for [list] — see call site.
+     *  [allowRetail] gates the 2 MB re-tail (foreground + unmetered + no data
+     *  saver — the same posture as the body sweep); the ≤512 KB deltas keep
+     *  their original any-network allowance. */
     private fun appendGrownBodies(
         client: net.schmizz.sshj.SSHClient,
         list: List<ai.eight24family.conch.agent.RemoteSession>,
+        allowRetail: Boolean = false,
     ) {
         var appended = 0
+        var retailed = 0
         for (s in list) {
             if (appended >= APPEND_SESSIONS_PER_SWEEP) return
             val remote = s.sizeBytes ?: continue
             val cached = historyCache.size(s.id)
+            // TAIL-BASE AWARE: local length is a remote offset only after adding
+            // the .base origin (0 for complete mirrors — the common case).
+            val base = historyCache.baseOffset(s.id)
+            val remoteOff = base + cached
             // Only sessions we already hold (first fetch is the full sweep's
             // job) that GREW; a shrink (compaction) is the chat-open re-adopt's.
-            if (cached <= 0L || remote <= cached) continue
-            if (remote - cached > APPEND_DELTA_CAP_BYTES) {
-                android.util.Log.d(
-                    TAG,
-                    "  delta ${s.id.take(8)} ${(remote - cached)}B over catch-up cap — chat open will stream it",
-                )
+            if (cached <= 0L || remote <= remoteOff) continue
+            if (remote - remoteOff > APPEND_DELTA_CAP_BYTES) {
+                // Over-cap growth used to freeze the mirror until the user
+                // opened the chat. RE-TAIL instead (bounded: the display tail,
+                // few per sweep, wifi+foreground only): the badge/preview/done
+                // mark stay live however fast the session churns.
+                // ⚠ Never under an ACTIVE mirror: an open chat's poller tracks
+                // its own remote offset, and replacing the file beneath it
+                // desyncs that offset into duplicate appends. A mirror written
+                // in the last few minutes is being tended by someone — and a
+                // poller-tended mirror can't fall this far behind anyway, so
+                // the guard costs nothing in coverage.
+                val locallyIdle = System.currentTimeMillis() -
+                    historyCache.lastWriteMs(s.id) > RETAIL_MIN_LOCAL_IDLE_MS
+                if (allowRetail && locallyIdle && retailed < RETAILS_PER_SWEEP) {
+                    val ok = tailFirstPreload(client, s, remote)
+                    if (ok) retailed++
+                    android.util.Log.d(
+                        TAG,
+                        "  delta ${s.id.take(8)} ${(remote - remoteOff)}B over cap — " +
+                            if (ok) "re-tailed" else "re-tail failed",
+                    )
+                } else {
+                    android.util.Log.d(
+                        TAG,
+                        "  delta ${s.id.take(8)} ${(remote - remoteOff)}B over catch-up cap — chat open will stream it",
+                    )
+                }
                 continue
             }
             SilentlyTry.fired(TAG, "append grown body ${s.id.take(8)}") {
                 val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
                 val sess = client.startSession()
                 val bytes = try {
-                    val proc = sess.exec("tail -c +${cached + 1} $q")
+                    val proc = sess.exec("tail -c +${remoteOff + 1} $q")
                     val out = java.io.ByteArrayOutputStream()
                     proc.inputStream.copyTo(out, 64 * 1024)
                     proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -197,13 +236,57 @@ class GlobalPrefetcher(
                 if (safe.isEmpty()) return@fired
                 // An open chat's tail-poll may have appended while we fetched —
                 // our delta's offset is then stale; appending would duplicate.
+                // (Base can only move via saveTail/save, both of which also
+                // change the size, so the size check covers it.)
                 if (historyCache.size(s.id) != cached) return@fired
-                historyCache.append(s.id, safe)
+                // Live activity ONLY when the server itself says the session is
+                // hot right now — catching up a session that went idle hours ago
+                // is mirror housekeeping, and counting it lit the home list's
+                // "working" spinner on long-dead sessions (2026-08-17).
+                val serverHot =
+                    System.currentTimeMillis() - s.lastActiveAt * 1000L < 90_000L
+                historyCache.append(s.id, safe, liveActivity = serverHot)
                 appended++
                 android.util.Log.d(TAG, "  caught up ${s.id.take(8)} +${safe.size}B (background mirror)")
             }
         }
     }
+
+    /**
+     * Cache ONLY the last [TAIL_PRELOAD_BYTES] of a remote session — the
+     * tail-first path for rollouts over the prefetch cap, and the re-tail for
+     * cached ones that grew past the delta cap. The slab starts mid-record, so
+     * the leading partial line is dropped and the .base origin advanced to the
+     * first kept byte ([HistoryCache.saveTail] then owns atomicity + the seen
+     * rebase). Never marks live activity. Returns success.
+     */
+    private fun tailFirstPreload(
+        client: net.schmizz.sshj.SSHClient,
+        s: ai.eight24family.conch.agent.RemoteSession,
+        remoteBytes: Long,
+    ): Boolean {
+        val start = (remoteBytes - TAIL_PRELOAD_BYTES).coerceAtLeast(0L)
+        val slab = SilentlyTry.loggedOrElse<ByteArray?>(TAG, "fetch tail slab ${s.id.take(8)}", null) {
+            val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
+            val sess = client.startSession()
+            try {
+                val proc = sess.exec("tail -c +${start + 1} $q")
+                val out = java.io.ByteArrayOutputStream()
+                proc.inputStream.copyTo(out, 64 * 1024)
+                proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
+                out.toByteArray()
+            } finally {
+                SilentlyTry.fired(TAG, "close tail slab session") { sess.close() }
+            }
+        } ?: return false
+        if (slab.isEmpty()) return false
+        val (aligned, dropped) = dropLeadingPartialLine(slab, isFileStart = start == 0L)
+        val safe = trimToLastNewline(aligned)
+        if (safe.isEmpty()) return false
+        historyCache.saveTail(s.id, safe, newBase = start + dropped)
+        return true
+    }
+
 
     /** Launch a sweep, cancelling any in-flight/pending one and debouncing
      *  800 ms so a burst of connects coalesces into a single pass. The
@@ -470,14 +553,21 @@ class GlobalPrefetcher(
                         } finally { SilentlyTry.fired(TAG, "close stat session") { sess.close() } }
                     }
                     if (remoteBytes != null && remoteBytes > PREFETCH_BODY_MAX_BYTES) {
+                        // TAIL-FIRST (2026-08-17): a session over the cap used to
+                        // stay entirely uncached — «loading» on open, invisible
+                        // to search, no badge — and the first open then paid for
+                        // the WHOLE rollout. Cache just the display tail instead:
+                        // bounded bytes, instant open, and the open path knows
+                        // the head is missing via the .base sidecar.
+                        val ok = tailFirstPreload(client, s, remoteBytes)
                         android.util.Log.d(
                             TAG,
-                            "    skip body ${s.id.take(8)} — ${remoteBytes}B over prefetch cap " +
-                                "($PREFETCH_BODY_MAX_BYTES B); will fetch on open",
+                            "    tail-first ${s.id.take(8)} — ${remoteBytes}B over cap, " +
+                                if (ok) "cached last $TAIL_PRELOAD_BYTES B" else "tail fetch failed (retry next sweep)",
                         )
                         continue
                     }
-                    val cmd = discovery.catCommand(s.path)
+                    val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(discovery.catCommand(s.path))
                     val written = SilentlyTry.loggedOrElse(TAG, "stream session via pooled SSH", 0L) {
                         val sess = client.startSession()
                         try {
@@ -511,7 +601,10 @@ class GlobalPrefetcher(
         SilentlyTry.logged("SshAi-Prefetch", "exec on pooled client") {
             val sess = client.startSession()
             try {
-                val proc = sess.exec(cmd)
+                // Chokepoint: session-listing scripts are `bash -lc` and rode
+                // this transport raw — on a bash-less host every background
+                // sweep read "no sessions" with no error anywhere.
+                val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                 val out = java.io.ByteArrayOutputStream()
                 proc.inputStream.copyTo(out)
                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
@@ -534,7 +627,11 @@ class GlobalPrefetcher(
         pooledExec: (suspend (String) -> String?)?,
     ) {
         val probe = ai.eight24family.conch.di.ServiceLocator.agentStatusProbe
-        val resolved = (if (pooledExec != null) probe.probe(pooledExec) else probe.probe(server, secrets))
+        val resolved = (
+            if (pooledExec != null) {
+                probe.probe(pooledExec, onOs = { os -> agentStatusCache.saveServerOs(server.id, os.name) })
+            } else probe.probe(server, secrets)
+            )
             .getOrNull() ?: run {
                 android.util.Log.w(TAG, "  ${server.name}: first-contact agent probe failed")
                 return
@@ -645,7 +742,7 @@ class GlobalPrefetcher(
          * Matches ChatViewModelTailPoll.BIG_FILE_STREAM_BYTES: past that point a
          * session is already treated as "big" everywhere else in the app.
          */
-        private const val PREFETCH_BODY_MAX_BYTES: Long = 4_000_000L
+        internal const val PREFETCH_BODY_MAX_BYTES: Long = 4_000_000L
 
         /** How stale a server's agent-status snapshot may get before the
          *  periodic re-list piggy-backs a re-probe on the live channel.
@@ -661,5 +758,30 @@ class GlobalPrefetcher(
          *  real growth — a busy turn writes a few KB/s, well inside this. */
         private const val APPEND_SESSIONS_PER_SWEEP = 8
         private const val APPEND_DELTA_CAP_BYTES = 512L * 1024
+
+        /** How much of a big session the tail-first path mirrors — the same
+         *  window the chat's open path displays (ChatViewModel's
+         *  DISPLAY_TAIL_BYTES), so an instant open never shows less than a
+         *  full-fetch open would have. */
+        internal const val TAIL_PRELOAD_BYTES = 2L * 1024 * 1024
+
+        /** Re-tails per sweep — each is a full [TAIL_PRELOAD_BYTES] transfer,
+         *  so the bound is bytes, not politeness. */
+        internal const val RETAILS_PER_SWEEP = 2
+
+        /** A mirror written more recently than this is considered actively
+         *  tended (open chat's poller) — re-tailing under it would desync the
+         *  poller's remote offset. See the re-tail guard in appendGrownBodies. */
+        internal const val RETAIL_MIN_LOCAL_IDLE_MS = 5L * 60 * 1000
+
+        /** A `tail -c` slab that does not begin at byte 0 starts mid-record —
+         *  half a record is not JSONL. Returns (whole-line bytes, bytes
+         *  dropped from the front). Extracted pure for the unit test. */
+        internal fun dropLeadingPartialLine(slab: ByteArray, isFileStart: Boolean): Pair<ByteArray, Long> {
+            if (isFileStart) return slab to 0L
+            val nl = slab.indexOfFirst { it == '\n'.code.toByte() }
+            if (nl < 0) return ByteArray(0) to slab.size.toLong()
+            return slab.copyOfRange(nl + 1, slab.size) to (nl + 1).toLong()
+        }
     }
 }

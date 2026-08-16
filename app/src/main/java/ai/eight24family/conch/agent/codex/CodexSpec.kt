@@ -198,7 +198,7 @@ CM=""
 # exit 0 with no parsed method (creds in the OS keychain, not auth.json, and
 # wording we don't recognise) → trust the exit code, default ChatGPT.
 # `timeout` guards the shared probe from hanging.
-CS=${'$'}(timeout 8 codex login status 2>&1); CRC=${'$'}?
+CS=${'$'}(conch_timeout 8 codex login status 2>&1); CRC=${'$'}?
 case "${'$'}CS" in *ChatGPT*|*chatgpt*) CM="${'$'}CM chatgpt";; esac
 case "${'$'}CS" in *"API key"*|*"api key"*|*"API-key"*) CM="${'$'}CM api";; esac
 # auth.json shape — always, de-duped so a method already found isn't repeated.

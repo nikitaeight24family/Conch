@@ -230,7 +230,7 @@ if command -v gemini >/dev/null 2>&1; then
     # showed "ready / OAuth"). With the key unset, success means OAuth itself
     # works; failure (401 / "API key not valid" / UNAUTHENTICATED) means it
     # doesn't, and the verdict drops the oauth badge.
-    GLO=${'$'}(unset GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_USE_VERTEXAI; printf 'hi' | timeout 25 gemini --skip-trust --output-format stream-json 2>&1 | head -c 6000)
+    GLO=${'$'}(unset GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_USE_VERTEXAI; printf 'hi' | conch_timeout 25 gemini --skip-trust --output-format stream-json 2>&1 | head -c 6000)
     # NB: a non-interactive gemini with a written-but-unprovisioned oauth cred
     # (Code Assist refused) prints "Manual authorization is required ... the
     # current session is non-interactive" and exits 41 — NOT any of the classic
@@ -296,8 +296,10 @@ fi
         // Single shell pipeline: pick whichever auth is available,
         // curl the catalog, dump JSON to stdout. No-op (empty) if
         // nothing's reachable.
-        val probeCmd = """
-            export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
+        // PATH from RemoteEnv — the hand-rolled subset here was the drift the
+        // RemoteEnv header warns about (curl is coreutils-adjacent, but the
+        // env vars sourced from ~/.profile ride the login-shell PATH story).
+        val probeCmd = ai.eight24family.conch.agent.RemoteEnv.PATH_PREAMBLE + """
             KEY=""
             if [ -n "${'$'}GEMINI_API_KEY" ]; then KEY="${'$'}GEMINI_API_KEY"; fi
             if [ -z "${'$'}KEY" ] && [ -n "${'$'}GOOGLE_API_KEY" ]; then KEY="${'$'}GOOGLE_API_KEY"; fi

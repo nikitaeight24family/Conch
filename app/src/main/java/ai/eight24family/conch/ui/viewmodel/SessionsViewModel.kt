@@ -134,7 +134,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             SilentlyTry.logged("SshAi-Sessions", "reconcile via pooled client") {
                 val sess = client.startSession()
                 try {
-                    val proc = sess.exec(cmd)
+                    val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                     proc.inputStream.readBytes()
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                     ""
@@ -273,7 +273,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (pool)") {
                         val sess = client.startSession()
                         try {
-                            val proc = sess.exec(cmd)
+                            val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                             val out = java.io.ByteArrayOutputStream()
                             proc.inputStream.copyTo(out)
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -350,7 +350,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (fresh)") {
                         val sess = client.startSession()
                         try {
-                            val proc = sess.exec(cmd)
+                            val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                             val out = java.io.ByteArrayOutputStream()
                             proc.inputStream.copyTo(out)
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -637,7 +637,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             SilentlyTry.fired("SshAi-Sessions", "delete session on server") {
                 val sess = pooled.startSession()
                 try {
-                    val proc = sess.exec(cmd)
+                    val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                     proc.inputStream.readBytes()
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 } finally {
@@ -799,7 +799,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val total: Long = SilentlyTry.loggedOrElse("SshAi-Sessions", "stat for download", -1L) {
             val s = pooled.startSession()
             try {
-                val p = s.exec("stat -c %s -- $esc 2>/dev/null || stat -f %z -- $esc 2>/dev/null")
+                val p = s.exec("stat -c %s -- $esc 2>/dev/null || stat -f %z -- $esc 2>/dev/null || wc -c < $esc 2>/dev/null")
                 val o = java.io.ByteArrayOutputStream(); p.inputStream.copyTo(o)
                 p.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 String(o.toByteArray(), Charsets.UTF_8).trim().lines().firstNotNullOfOrNull { it.trim().toLongOrNull() } ?: -1L
@@ -1045,11 +1045,57 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // Ride the pooled client — fresh channel per fetch,
                     // no auth round-trip.
                     val client = pooledClient
+                    // SAME size discipline as the global sweep (2026-08-17):
+                    // this path used to `cat` whole rollouts into a String —
+                    // a 100 MB session is an OOM and a data bill, ring or no
+                    // ring. Over the cap → cache the display TAIL only (the
+                    // .base sidecar tells the open path the head is missing;
+                    // "load all" fetches it on demand).
+                    val remoteBytes = SilentlyTry.loggedOrElse<Long?>("SshAi-Sessions", "stat prefetch size", null) {
+                        val sess = client.startSession()
+                        try {
+                            val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
+                            val p = sess.exec(
+                                "stat -c %s $q 2>/dev/null || stat -f %z $q 2>/dev/null || wc -c < $q 2>/dev/null",
+                            )
+                            val txt = p.inputStream.bufferedReader().readText().trim()
+                            p.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                            txt.toLongOrNull()
+                        } finally { SilentlyTry.fired("SshAi-Sessions", "close stat session") { sess.close() } }
+                    }
+                    if (remoteBytes != null &&
+                        remoteBytes > ai.eight24family.conch.data.GlobalPrefetcher.PREFETCH_BODY_MAX_BYTES
+                    ) {
+                        val start = (remoteBytes - ai.eight24family.conch.data.GlobalPrefetcher.TAIL_PRELOAD_BYTES)
+                            .coerceAtLeast(0L)
+                        val slab = SilentlyTry.loggedOrElse<ByteArray?>("SshAi-Sessions", "fetch tail slab", null) {
+                            val sess = client.startSession()
+                            try {
+                                val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
+                                val p = sess.exec("tail -c +${start + 1} $q")
+                                val out = java.io.ByteArrayOutputStream()
+                                p.inputStream.copyTo(out, 64 * 1024)
+                                p.join(60, java.util.concurrent.TimeUnit.SECONDS)
+                                out.toByteArray()
+                            } finally { SilentlyTry.fired("SshAi-Sessions", "close tail session") { sess.close() } }
+                        }
+                        val (aligned, dropped) = ai.eight24family.conch.data.GlobalPrefetcher
+                            .dropLeadingPartialLine(slab ?: ByteArray(0), isFileStart = start == 0L)
+                        val safeTail = trimToLastNewline(aligned)
+                        if (safeTail.isNotEmpty()) {
+                            historyCache.saveTail(s.id, safeTail, newBase = start + dropped)
+                            android.util.Log.d(tag, "  tail-cached ${s.id.take(8)} (${safeTail.size}B of ${remoteBytes}B)$viaPool")
+                        }
+                        done += 1
+                        _prefetchProgress.update { it?.copy(done = done) }
+                        kotlinx.coroutines.delay(150)
+                        continue
+                    }
                     val raw = discovery.fetchSessionContent(s.path) { cmd ->
                         SilentlyTry.logged("SshAi-Sessions", "fetch session content for prefetch") {
                             val sess = client.startSession()
                             try {
-                                val proc = sess.exec(cmd)
+                                val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                 val out = java.io.ByteArrayOutputStream()
                                 proc.inputStream.copyTo(out)
                                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)

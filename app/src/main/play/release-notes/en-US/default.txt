@@ -1,0 +1,5 @@
+What's new
+• Reopen a running session and it's fully live again — Stop, timer, token count, and the reply painting from the file, even after the app was closed mid-turn.
+• Big chats open instantly; usage limits stay accurate in an idle chat.
+• Runs on more servers (Alpine/BusyBox/BSD/macOS).
+• Fixes: Stop reliably halts the turn; a message into a running turn queues instead of interrupting; no false "working" on idle sessions.

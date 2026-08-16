@@ -306,7 +306,20 @@ for f in ~/.claude/projects/*/*.jsonl; do
   # file is harmless — the next refresh converts it once cold.
   [ -n "${'$'}(find "${'$'}f" -mmin -1 2>/dev/null)" ] && continue
   ctmp="${'$'}f.conchtmp"
-  sed 's/"entrypoint":"sdk-cli"/"entrypoint":"cli"/g' "${'$'}f" > "${'$'}ctmp" 2>/dev/null && mv "${'$'}ctmp" "${'$'}f" 2>/dev/null || rm -f "${'$'}ctmp" 2>/dev/null
+  # ⚠ PRESERVE THE MTIME. This listing sorts by `stat %Y` (below) and feeds it
+  # into the app's activity store — but `mv` swaps in a fresh inode whose mtime
+  # is NOW, so our OWN housekeeping rewrite made an IDLE session look
+  # just-active: sessions the user finished 12+ h ago suddenly flew to the top
+  # of the list with a "just now" time (user, 2026-08-17). `touch -r` copies the
+  # original file's timestamps onto the temp BEFORE the swap, so the rewrite is
+  # invisible to the sort. (One-time per session — the head-grep gate skips it
+  # once the tag is `cli` — but one bad bump is one too many.)
+  if sed 's/"entrypoint":"sdk-cli"/"entrypoint":"cli"/g' "${'$'}f" > "${'$'}ctmp" 2>/dev/null; then
+    touch -r "${'$'}f" "${'$'}ctmp" 2>/dev/null
+    mv "${'$'}ctmp" "${'$'}f" 2>/dev/null || rm -f "${'$'}ctmp" 2>/dev/null
+  else
+    rm -f "${'$'}ctmp" 2>/dev/null
+  fi
 done
 for f in ~/.claude/projects/*/*.jsonl; do
   [ -f "${'$'}f" ] || continue
@@ -320,6 +333,15 @@ for f in ~/.claude/projects/*/*.jsonl; do
   sz=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
   [ "${'$'}{sz:-0}" -lt 1024 ] && continue
   mtime=${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || stat -f %m "${'$'}f" 2>/dev/null)
+  # ACTIVITY = the last MESSAGE time, NOT the file mtime. mtime is bumped by
+  # touches that add no message — `claude --resume` on open, our own entrypoint
+  # rewrite, any process that opens the file — and every such touch flew an idle
+  # session to the top of the list AND lit a false "working" spinner for 90 s.
+  # The last record's timestamp is the truth and is immune to touches. Fall back
+  # to mtime only when nothing parses (edge file).
+  lastts=${'$'}(tail -c 262144 "${'$'}f" 2>/dev/null | grep -oE '"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -1 | sed 's/.*"//')
+  act=${'$'}(date -d "${'$'}{lastts}Z" +%s 2>/dev/null || date -u -jf "%Y-%m-%dT%H:%M:%S" "${'$'}lastts" +%s 2>/dev/null)
+  [ -z "${'$'}act" ] && act=${'$'}mtime
   size=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
   # Model: every assistant turn stamps `message.model`. Take the LAST REAL
   # match — the model the session is CURRENTLY on. EXCLUDE synthetic markers:
@@ -363,7 +385,7 @@ for f in ~/.claude/projects/*/*.jsonl; do
   [ -z "${'$'}title" ] && title=${'$'}(grep -ao '"aiTitle":"[^"]*"' "${'$'}f" 2>/dev/null | tail -1 | sed -E 's/.*"aiTitle":"//; s/"${'$'}//' | tr '\011\036\037\012' '    ')
   if [ -n "${'$'}title" ]; then preview=${'$'}(printf '%s\037%s' "${'$'}title" "${'$'}candidates"); else preview="${'$'}candidates"; fi
   # 7-col contract: id, mtime, path, model, reasoning, size, preview.
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}id" "${'$'}mtime" "${'$'}f" "${'$'}model" "${'$'}reasoning" "${'$'}size" "${'$'}preview"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${'$'}id" "${'$'}act" "${'$'}f" "${'$'}model" "${'$'}reasoning" "${'$'}size" "${'$'}preview"
 done | sort -t'	' -k2 -rn | head -500
 """.trimIndent()
 
@@ -612,10 +634,11 @@ esac
                 "\"request\":{\"subtype\":\"initialize\"}}"
         val probeCwd = "/tmp/.conch-ctlprobe-${java.util.UUID.randomUUID()}"
         val script = ai.eight24family.conch.agent.RemoteEnv.PATH_PREAMBLE_INLINE +
+            ai.eight24family.conch.agent.RemoteEnv.TIMEOUT_FN +
             ai.eight24family.conch.agent.AuthSelector.claudeFullScopePrefix() +
             "mkdir -p $probeCwd 2>/dev/null; cd $probeCwd; " +
             "out=\$(printf '%s\\n' ${shellEscape(initJson)} | " +
-            "timeout 40 claude --output-format stream-json --input-format stream-json" +
+            "conch_timeout 40 claude --output-format stream-json --input-format stream-json" +
             " --verbose 2>/dev/null | grep -m1 '\"control_response\"'); " +
             "cd /; rm -rf $probeCwd \$HOME/.claude/projects/*conch-ctlprobe* 2>/dev/null; " +
             "printf '%s\\n' \"\$out\""

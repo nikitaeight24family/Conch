@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.WindowInsets
@@ -947,13 +948,17 @@ internal fun PromptBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = { sheetOpen = true },
-                enabled = canAttachMore
+                // TOGGLE — tapping the paperclip again CLOSES the panel. It only
+                // ever opened it, so once open with nothing picked there was no
+                // way back out (user, 2026-08-17). Stays tappable while open
+                // even when attachments are full, so it can always close.
+                onClick = { sheetOpen = !sheetOpen },
+                enabled = canAttachMore || sheetOpen
             ) {
                 Icon(
                     Icons.Default.AttachFile,
-                    contentDescription = "attach files",
-                    tint = if (canAttachMore) cyan else outline
+                    contentDescription = if (sheetOpen) "close attach panel" else "attach files",
+                    tint = if (canAttachMore || sheetOpen) cyan else outline
                 )
             }
             // The mic MOVED to the attach sheet — starting a recording is a
@@ -1133,6 +1138,12 @@ internal fun PromptBar(
         }
     }
 
+    // The attach panel is an inline surface in our own window (NOT a system
+    // ModalBottomSheet — see the note below), so nothing dismisses it for free.
+    // Back closes it, the gesture a bottom sheet most obviously answers to
+    // (user, 2026-08-17). The header ✕ and re-tapping the paperclip close it
+    // too.
+    BackHandler(enabled = sheetOpen) { sheetOpen = false }
     if (sheetOpen) {
         // ⚠ IN THE ACTIVITY'S OWN WINDOW. The embedded photo picker draws on a
         // system surface handed to our window; every container we tried that
@@ -1149,17 +1160,17 @@ internal fun PromptBar(
         ) {
             // Telegram-shaped: a row of round action tiles instead of a stack of
             // list rows. Camera first — it is the one thing you reach for with
-            // the phone already in your hand, and it was missing entirely.
-            // No trailing padding: the grid is the last thing in the panel and
-            // a 24dp band under it read as a black stripe at the bottom of the
-            // screen (user, 2026-08-03).
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    "// attach (${attachments.size}/${ChatViewModel.MAX_ATTACHMENTS})",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 12.dp)
-                )
+            // the phone already in your hand, and it was missing entirely. No
+            // trailing padding: the grid is the last thing in the panel and a
+            // 24dp band under it read as a black stripe at the bottom of the
+            // screen (user, 2026-08-03). No header row. The «// attach (N/10)»
+            // label + ✕ were dead space the user told us to cut — (2026-08-17).
+            // The panel still closes without attaching: BACK gesture and
+            // re-tapping the paperclip both dismiss it (the ✕ was the third, now
+            // redundant, path). Minimal top pad — just enough to clear the
+            // rounded corner; the panel is kept as SHORT as possible so its
+            // content sits low, right above the prompt bar.
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
                 // Recent-media strip, camera as cell zero — the Telegram part.
                 // Draws nothing at all without media access, so the tile row
                 // below is a complete menu on its own.
@@ -1185,7 +1196,7 @@ internal fun PromptBar(
                     onPick = { uri -> ingestUri(ctx, uri, onAddAttachment, onAddFileAttachment) },
                     onSelectionDone = { sheetOpen = false },
                     onCameraFallback = if (hasCameraApp(ctx)) launchCamera else null,
-                    modifier = Modifier.padding(bottom = 14.dp),
+                    modifier = Modifier.padding(bottom = 8.dp),
                     besideCamera = {
                         // Emitted straight into the strip's row — as siblings of
                         // the camera cell, not as a group beside it, so one

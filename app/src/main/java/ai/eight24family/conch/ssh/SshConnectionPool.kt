@@ -518,8 +518,10 @@ class SshConnectionPool {
                             val secrets = repo.getSecrets(server.id)
                             if (secrets.skKeys.isNotEmpty()) {
                                 // FIDO: silent ONLY via an enrolled device key.
+                                // (No `attempted` here — userConnectEphemeral
+                                // notes its own dial result now; noting again
+                                // would count one failure twice.)
                                 if (EphemeralSshKey.exists(server.id)) {
-                                    attempted = true
                                     if (userConnectEphemeral(server) != null) {
                                         android.util.Log.d(TAG, "silent auto-connect: SK ${server.name} up via device key")
                                     }
@@ -616,7 +618,8 @@ class SshConnectionPool {
                     val secrets = repo.getSecrets(sid)
                     if (secrets.skKeys.isNotEmpty()) {
                         if (EphemeralSshKey.exists(sid)) {
-                            attempted = true
+                            // No `attempted` — userConnectEphemeral notes its own
+                            // dial result; noting again double-counts a failure.
                             if (userConnectEphemeral(server) != null) {
                                 android.util.Log.d(TAG, "watchdog: restored SK $sid (${server.name}) via device key")
                             }
@@ -678,13 +681,29 @@ class SshConnectionPool {
             if (existing != null && existing.client.isConnected) {
                 existing.client
             } else {
+                // ⚠ THE BACKOFF LIVES HERE, where every silent dial must pass —
+                // not only in the watchdog. The 20 s watchdog got its
+                // exponential cool-down after the last fail2ban ban, but the
+                // chat's reconnect ladder (retry()) calls THIS method directly
+                // and kept dialing on every tick. On a flapping radio each tick
+                // is a TCP connect torn down before auth completes — one
+                // `[preauth]` line in the server's auth.log per attempt, and
+                // those are exactly what fail2ban's aggressive mode counts. An
+                // evening of bad Wi-Fi was a ban. No path may dial silently
+                // faster than the cool-down; a HUMAN action resets it via
+                // [resetSilentBackoff].
+                if (!silentCooldownPassed(server.id)) {
+                    android.util.Log.d(TAG, "ephemeral dial ${server.id} suppressed — cooling down after failures")
+                    return null
+                }
                 if (existing != null) {
-                    SilentlyTry.fired("SshAi-Pool", "disconnect dead before eph") { existing.client.disconnect() }
                     pool.remove(server.id)
+                    closeAsync(existing.client, "disconnect dead before eph")
                 }
                 val fresh = try {
                     openWithProvider(server, provider)
                 } catch (t: Throwable) {
+                    noteSilentDialResult(server.id, ok = false)
                     android.util.Log.w(TAG, "device-key connect failed ${server.id}: ${t.javaClass.simpleName}: ${t.message}")
                     // Auth rejection (Exhausted) = the enrolled line is STALE / wrong
                     // encoding (e.g. minted by an older build). Drop the local key so
@@ -697,6 +716,7 @@ class SshConnectionPool {
                     }
                     return null
                 }
+                noteSilentDialResult(server.id, ok = true)
                 pool[server.id] = Entry(fresh, 1)
                 fresh
             }
@@ -857,11 +877,15 @@ class SshConnectionPool {
         }
     }
 
-    /** One-shot exec on a pooled client, drained + closed. */
+    /** One-shot exec on a pooled client, drained + closed. Transport-level
+     *  [RemoteEnv.portable] chokepoint (same as SshClient.execute): the
+     *  device-key enroll/strip commands are `bash -lc` scripts, and on a
+     *  bash-less host they died silently — seamless reconnect just never
+     *  worked there, with nothing in any log (2026-08-17 sweep). */
     private fun runPoolCommand(client: SSHClient, cmd: String) {
         val sess = client.startSession()
         try {
-            val proc = sess.exec(cmd)
+            val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
             proc.inputStream.readBytes()
             proc.join(20, TimeUnit.SECONDS)
         } finally {

@@ -102,7 +102,9 @@ internal class AgentPickerViewModelApiKey(
             """.trimIndent()
             SilentlyTry.fired("SshAi-AgentPicker", "write api key to ~/.profile") {
                 pooled.startSession().use { sess ->
-                    val proc = sess.exec("bash -lc " + shellEscape(cmd))
+                    val proc = sess.exec(
+                        ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(cmd)),
+                    )
                     proc.join(10, java.util.concurrent.TimeUnit.SECONDS)
                     android.util.Log.d(tag, "submitApiKey($agent) exit=${proc.exitStatus}")
                 }

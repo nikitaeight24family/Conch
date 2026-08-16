@@ -185,6 +185,10 @@ class HistoryCache internal constructor(private val rootDir: File) {
             }
         }
         if (sizeBeforeRewrite > 0L) rebaseSeenAfterRewrite(sessionId, sizeBeforeRewrite)
+        // A save IS the complete remote body (compaction merge, verbatim
+        // re-adopt, repair) — a leftover tail-base from an earlier tail-first
+        // preload would shift every remote-offset computation off by its value.
+        setBaseOffset(sessionId, 0L)
         SilentlyTry.fired("SshAi-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
@@ -247,11 +251,25 @@ class HistoryCache internal constructor(private val rootDir: File) {
     }
 
     /** Append new bytes (typically a tail fetched from the server). */
-    fun append(sessionId: String, newBytes: ByteArray) {
+    fun append(sessionId: String, newBytes: ByteArray, liveActivity: Boolean = true) {
         if (newBytes.isEmpty()) return
         SilentlyTry.fired("SshAi-HistCache", "append session bytes") { file(sessionId).appendBytes(newBytes) }
+        if (liveActivity) liveActivityMs[sessionId] = System.currentTimeMillis()
         SilentlyTry.fired("SshAi-HistCache", "index session after append") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
+
+    /** sessionId → epoch ms of the last append that reflected LIVE agent
+     * output (an open chat's tail-poll / the persistent stream), as opposed
+     * to housekeeping we do to our own mirror. The home list's "working"
+     * spinner keys on THIS, not the file mtime: the background catch-up
+     * appends old content to cold sessions, and mtime-based "working" lit
+     * the spinner on sessions finished 12+ hours earlier — one 90 s flash
+     * per caught-up session, every sweep. In-memory only: after a restart no
+     * session claims live activity it can't prove. */
+    private val liveActivityMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Last LIVE append for [sessionId]; 0 when none this process run. */
+    fun lastLiveActivityMs(sessionId: String): Long = liveActivityMs[sessionId] ?: 0L
 
     /**
      * Stream [input] straight to the cache file for [sessionId] in fixed
@@ -296,6 +314,8 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 tmp.delete()
             }
         }
+        // Same complete-body statement as [save] — see the base reset there.
+        setBaseOffset(sessionId, 0L)
         SilentlyTry.fired("SshAi-HistCache", "index session after stream") {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
@@ -447,6 +467,91 @@ class HistoryCache internal constructor(private val rootDir: File) {
     private fun seenFile(sessionId: String): File {
         val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         return File(dir, "$safe.seen")
+    }
+
+    // ───────────────────── tail-base sidecar ─────────────────────
+    //
+    // TAIL-FIRST MIRRORING (Workstream C, 2026-08-17). A session bigger than
+    // the prefetch cap used to stay entirely uncached — «loading» on open, no
+    // search, no badge — because the only alternative was pulling the whole
+    // rollout, and unbounded prefetch once pulled 3 GB in 4 hours. The middle
+    // way is caching only the DISPLAY TAIL, which changes one axiom: local
+    // byte 0 no longer equals remote byte 0.
+    //
+    // `<safeId>.base` holds that origin: the REMOTE byte offset at which the
+    // local cache file begins. Absent = 0 (a complete-from-zero mirror, the
+    // overwhelmingly common case — nothing changes for it). Every consumer
+    // that turns a local length into a remote offset must add it:
+    //   remoteOffset = baseOffset(id) + localLen
+    // The .seen watermark stays LOCAL-relative on purpose (its consumers are
+    // all local reads); a re-tail that moves the base rebases it in the same
+    // breath — see [saveTail].
+
+    /** Remote byte offset of local byte 0. 0 = complete mirror from the start
+     *  of the remote file (also the answer for "no cache at all"). */
+    fun baseOffset(sessionId: String): Long {
+        val f = baseFile(sessionId)
+        if (!f.exists()) return 0L
+        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read tail base", 0L) {
+            f.readText(Charsets.UTF_8).trim().toLongOrNull() ?: 0L
+        }
+    }
+
+    /** Record where the local file starts in remote coordinates. 0 deletes the
+     *  sidecar — "no sidecar" and "complete mirror" are the same statement. */
+    fun setBaseOffset(sessionId: String, base: Long) {
+        SilentlyTry.fired("SshAi-HistCache", "write tail base") {
+            val f = baseFile(sessionId)
+            if (base <= 0L) f.delete() else f.writeText(base.toString(), Charsets.UTF_8)
+        }
+    }
+
+    private fun baseFile(sessionId: String): File {
+        val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(dir, "$safe.base")
+    }
+
+    /**
+     * Adopt a TAIL slab as the entire cache: atomic replace (same sibling-tmp
+     * discipline as [save] — readers hold the old file mmap'd), then move the
+     * base and REBASE the seen watermark so the user's read position survives
+     * the re-lay-out in remote coordinates:
+     *   newSeenLocal = clamp(oldBase + oldSeenLocal − newBase, 0, newLen).
+     * Without that, every re-tail of a big active session would either badge
+     * the whole tail as unread (seen clamped low) or mark genuinely new bytes
+     * read (seen left at its old local value pointing past them).
+     *
+     * [bytes] must already be whole-line trimmed at BOTH ends by the caller
+     * (the slab starts mid-record; [newBase] must point at the first kept
+     * byte). Never touches liveActivity — a background re-tail is mirror
+     * housekeeping, not agent output (the 2026-08-17 fake-working rule).
+     */
+    fun saveTail(sessionId: String, bytes: ByteArray, newBase: Long) {
+        if (bytes.isEmpty()) return
+        val oldBase = baseOffset(sessionId)
+        val oldSeen = seenBytes(sessionId)
+        SilentlyTry.fired("SshAi-HistCache", "write tail slab") {
+            val target = file(sessionId)
+            val tmp = File(target.parentFile, target.name + ".tmp")
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(target)) {
+                target.writeBytes(bytes)
+                tmp.delete()
+            }
+        }
+        setBaseOffset(sessionId, newBase)
+        if (oldSeen != null) {
+            val rebased = (oldBase + oldSeen - newBase).coerceIn(0L, bytes.size.toLong())
+            // Direct write, not [markSeenBytes]: the LOCAL number may go DOWN
+            // while naming the same remote position, and the monotonic guard
+            // would (correctly, for its own callers) refuse that.
+            SilentlyTry.fired("SshAi-HistCache", "rebase seen after re-tail") {
+                seenFile(sessionId).writeText(rebased.toString(), Charsets.UTF_8)
+            }
+        }
+        SilentlyTry.fired("SshAi-HistCache", "index session after tail save") {
+            ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
+        }
     }
 
     // ───────────────────── task-name sidecar ─────────────────────

@@ -127,11 +127,26 @@ internal fun AttachMediaStrip(
         // what is left equally. It is one row on every screen Play serves,
         // nothing is ever clipped, and no number here was measured on one
         // device — which is exactly what went wrong before (2026-08-04).
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val shelf = maxWidth - 24.dp
-        val cameraW = (shelf * 0.28f).coerceIn(72.dp, 132.dp)
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+        // ⚠ CAP + CENTRE. A portrait phone is under the cap and still fills edge
+        // to edge — unchanged. A WIDE screen (landscape, tablet, unfolded fold)
+        // otherwise flung the camera to the far-left and the tiles to the
+        // far-right with a lake of black in the middle (user, 2026-08-17). Cap
+        // the shelf and let the Box centre it, and hold the camera to a modest
+        // square instead of a poster, so the row is a tight cluster on any
+        // screen.
+        val shelfWidth = minOf(maxWidth, ATTACH_SHELF_MAX_DP)
+        // Hold the camera to roughly a tile's height so the row is one tight
+        // band, not a big dark square (viewfinder-off) with the tiles floating
+        // in its excess height — (user, 2026-08-17). Shorter panel = the whole
+        // strip sits LOWER, since the panel is bottom-anchored under the
+        // weighted message list.
+        val cameraW = ((shelfWidth - 24.dp) * 0.28f).coerceIn(64.dp, 76.dp)
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            modifier = Modifier.width(shelfWidth).padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -189,6 +204,11 @@ private const val EMBEDDED_PICKER_DP = 340
 /** Side of the viewfinder tile. Matches the old three-column tile on a phone, so
  *  the sheet keeps the proportions the user picked. */
 private const val CAMERA_CELL_DP = 88
+
+/** Widest the attach shelf may grow. Beyond this a wide screen just centres the
+ *  cluster instead of spreading the camera and tiles to opposite edges with dead
+ *  black between them (user, 2026-08-17). A portrait phone is under it and fills. */
+private val ATTACH_SHELF_MAX_DP = 520.dp
 
 /**
  * Cell zero: a LIVE viewfinder once CAMERA is granted. Tapping it OPENS THE

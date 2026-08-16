@@ -211,7 +211,10 @@ internal class AgentSessionFileTransfer(
         val escaped = shellEscapeRemotePath(remotePath)
         val total: Long = run {
             val out = sshLifecycle.execOnLive(
-                "if [ -f $escaped ] && [ -r $escaped ]; then stat -c %s $escaped; else echo SSHAI_NOFILE; fi"
+                // GNU stat, then BSD/macOS stat, then POSIX wc — Play users
+                // bring macOS/BSD servers too (2026-08-17).
+                "if [ -f $escaped ] && [ -r $escaped ]; then stat -c %s $escaped 2>/dev/null || " +
+                    "stat -f %z $escaped 2>/dev/null || wc -c < $escaped; else echo SSHAI_NOFILE; fi"
             ) ?: return@withContext AgentSession.DownloadOutcome.Failed("SSH exec failed")
             val trimmed = out.trim()
             if (trimmed.contains("SSHAI_NOFILE")) {

@@ -57,7 +57,10 @@ object ModelCatalogPrefetcher {
             SilentlyTry.logged(TAG, "catalog exec on pooled client") {
                 val sess = client.startSession()
                 try {
-                    val proc = sess.exec(cmd)
+                    // Chokepoint: spec probes compose `bash -lc` scripts; the
+                    // chat path runs them via execOnLive (portable), this
+                    // warm-up path used to bypass the rewrite.
+                    val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                     val out = java.io.ByteArrayOutputStream()
                     proc.inputStream.copyTo(out)
                     proc.join(60, java.util.concurrent.TimeUnit.SECONDS)

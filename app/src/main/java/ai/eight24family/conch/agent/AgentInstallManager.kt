@@ -124,7 +124,12 @@ object AgentInstallManager {
                 var tail = ""
                 SilentlyTry.fired(TAG, "run install bootstrap") {
                     pooled.startSession().use { sess ->
-                        val proc = sess.exec("bash -lc 'cat | bash -s' 2>&1")
+                        // Outer vehicle rides portable() like every transport;
+                        // the INNER `bash -s` interpreter stays — vendor install
+                        // scripts are bash, so installing agents on a bash-less
+                        // host fails with a visible "bash: not found" in the
+                        // install output rather than pretending. Honest limit.
+                        val proc = sess.exec(RemoteEnv.portable("bash -lc 'cat | bash -s'") + " 2>&1")
                         proc.outputStream.use { it.write(script.toByteArray(Charsets.UTF_8)) }
                         val reader = proc.inputStream.bufferedReader()
                         val full = StringBuilder()
@@ -171,22 +176,27 @@ object AgentInstallManager {
      *  never logs you in). No fresh handshake / SK touch. */
     private suspend fun refreshStatus(serverId: String) {
         val pooled = ServiceLocator.sshConnectionPool.peek(serverId) ?: return
-        val fresh = ServiceLocator.agentStatusProbe.probe { cmd ->
-            withContext(Dispatchers.IO) {
-                SilentlyTry.logged(TAG, "post-install probe") {
-                    val sess = pooled.startSession()
-                    try {
-                        val proc = sess.exec(cmd)
-                        val out = java.io.ByteArrayOutputStream()
-                        proc.inputStream.copyTo(out)
-                        proc.join(60, TimeUnit.SECONDS)
-                        String(out.toByteArray(), Charsets.UTF_8)
-                    } finally {
-                        SilentlyTry.fired(TAG, "close post-install probe session") { sess.close() }
+        val fresh = ServiceLocator.agentStatusProbe.probe(
+            // Named: probe() gained a second (onOs) parameter, and a bare
+            // trailing lambda would bind to IT, not to exec.
+            exec = { cmd ->
+                withContext(Dispatchers.IO) {
+                    SilentlyTry.logged(TAG, "post-install probe") {
+                        val sess = pooled.startSession()
+                        try {
+                            val proc = sess.exec(cmd)
+                            val out = java.io.ByteArrayOutputStream()
+                            proc.inputStream.copyTo(out)
+                            proc.join(60, TimeUnit.SECONDS)
+                            String(out.toByteArray(), Charsets.UTF_8)
+                        } finally {
+                            SilentlyTry.fired(TAG, "close post-install probe session") { sess.close() }
+                        }
                     }
                 }
-            }
-        }.getOrNull() ?: return
+            },
+            onOs = { os -> ServiceLocator.agentStatusCache.saveServerOs(serverId, os.name) },
+        ).getOrNull() ?: return
         val old = SilentlyTry.loggedOrElse(TAG, "load old status", emptyMap()) {
             ServiceLocator.agentStatusCache.load(serverId).statuses
         }

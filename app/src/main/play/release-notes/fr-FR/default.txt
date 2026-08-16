@@ -1,0 +1,5 @@
+Nouveautés
+• Rouvrez une session en cours et elle redevient pleinement active : Stop, minuteur, compteur de jetons, et la réponse depuis le fichier, même si l'app a été fermée en plein tour.
+• Les gros chats s'ouvrent instantanément ; les limites restent exactes même inactif.
+• Fonctionne sur plus de serveurs (Alpine/BusyBox/BSD/macOS).
+• Corrections : Stop arrête le tour de façon fiable ; un message pendant un tour attend dans la file ; plus de faux « en cours ».
