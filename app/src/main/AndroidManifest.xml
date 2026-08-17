@@ -119,10 +119,35 @@
             android:name="android.max_aspect"
             android:value="100" />
 
+        <!--
+            ⚠ launchMode MUST stay singleTask. It was `singleTop`, and singleTop
+            only de-dupes an activity that is already on TOP OF THE TARGET TASK —
+            it does not stop a SECOND TASK being created for the same activity.
+            With auto-PiP (onUserLeaveHint below) that happens constantly: the
+            activity in Picture-in-Picture owns a task in the PINNED windowing
+            mode, which the system cannot reuse for a fullscreen launch, so the
+            next launcher tap builds a NEW task with a NEW MainActivity while the
+            old one stays behind. Each round-trip left another card in recents —
+            the user counted EIGHT Conch cards, every one showing a different
+            chat, i.e. eight independent nav stacks and eight sets of ViewModels
+            racing over the same app-scoped AgentSessionManager.
+            `android.allow_multiple_resumed_activities` above let them all stay
+            resumed instead of pausing each other, so nothing ever cleaned them
+            up.
+
+            singleTask means the system reuses the ONE existing instance wherever
+            it lives — pinned PiP task included — and delivers the intent to
+            onNewIntent instead of spawning a sibling. Safe here because the app
+            is single-activity: there is nothing above MainActivity in the task
+            for singleTask's clear-top to destroy, and we read nothing off the
+            launch Intent that a re-delivery could lose. It also makes
+            MULTIPLE_TASK / NEW_DOCUMENT flags from OEM launchers and shortcuts
+            inert.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:resizeableActivity="true"
             android:supportsPictureInPicture="true"
@@ -239,12 +264,13 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- PiP window header actions (Stop turn). The receiver is
-             private to the app — only PendingIntents we mint ourselves
-             can fire it, so we don't need exported=true. -->
-        <receiver
-            android:name=".PipActionReceiver"
-            android:exported="false" />
+        <!-- The PiP header's "Stop turn" action and its receiver are gone on
+             purpose (2026-08-18): a RemoteAction fires with no confirmation, and
+             it sat under the same tap that expands the window, so a reflex
+             mis-tap killed a running turn. Stop lives in the prompt bar, where
+             pressing it is a decision. Do not re-add a receiver here without a
+             control that cannot be hit by accident. -->
+
     </application>
 
     <queries>

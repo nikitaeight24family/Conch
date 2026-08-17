@@ -297,42 +297,15 @@ fun ChatScreen(
     // writer count drops to zero and this flips off.
     val remoteWorking by vm.remoteFileOpen.collectAsState()
 
-    // ── Streaming haptics (user-requested) ── While a turn runs: a NEW tool/action
-    // row → finest Tick; a NEW assistant text row → stronger Tap; the turn
-    // finishing → Confirm (double tap-tap). Seeded on the FIRST non-empty history
-    // so opening a chat never buzzes through existing messages; only rows added
-    // during an active turn buzz.
-    val haptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
-    val seenHaptic = androidx.compose.runtime.remember(vm) { HashSet<String>() }
-    val hapticSeeded = androidx.compose.runtime.remember(vm) { androidx.compose.runtime.mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(messages) {
-        if (!hapticSeeded.value) {
-            if (messages.isNotEmpty()) {
-                messages.forEach { seenHaptic.add(it.id) }
-                hapticSeeded.value = true
-            }
-            return@LaunchedEffect
-        }
-        val working = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
-        for (m in messages.asReversed()) {
-            if (!seenHaptic.add(m.id)) break // hit an already-seen row → older ones below
-            if (!working) continue
-            when (m) {
-                is ai.eight24family.conch.agent.AgentMessage.ToolUse,
-                is ai.eight24family.conch.agent.AgentMessage.ToolResult ->
-                    haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Tick)
-                is ai.eight24family.conch.agent.AgentMessage.AssistantText ->
-                    haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Tap)
-                else -> {}
-            }
-        }
-    }
-    val prevWorkingHaptic = androidx.compose.runtime.remember(vm) { androidx.compose.runtime.mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(state, remoteWorking) {
-        val w = state is ai.eight24family.conch.agent.SessionState.Working || remoteWorking
-        if (prevWorkingHaptic.value && !w) haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Confirm)
-        prevWorkingHaptic.value = w
-    }
+    // ── Streaming haptics ── Moved into the ViewModel (ChatViewModelHaptics).
+    // They were HERE, which tied every buzz to this composable being alive: the
+    // PiP branch below returns before these effects were even declared, so
+    // swiping home turned haptics off exactly when the user has stopped
+    // watching the screen and is relying on feel; and the per-row gate sampled
+    // `working` at arrival time, which is why the FINAL row of a turn — the
+    // answer — was the buzz most often skipped. The VM keeps collecting through
+    // PiP, dialogs and screen-off. (Tap-feedback haptics stay where they belong
+    // — on their own controls.)
 
     // If a buffered send timed out (the session never reached Running within
     // the buffer window), the VM emits the original text back here. Drop it

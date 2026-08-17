@@ -111,23 +111,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        // Construct the haptics manager once; observe the pref to
-        // flip its `enabled` flag at runtime without rebuilding.
-        val haptics = ai.eight24family.conch.ui.haptic.SshAiHaptics(
-            applicationContext,
-            enabled = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read haptics pref", true) {
-                kotlinx.coroutines.runBlocking {
-                    ServiceLocator.preferences.hapticsEnabled.first()
-                }
-            },
-        )
-        lifecycleScope.launch {
-            repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
-                ServiceLocator.preferences.hapticsEnabled.collect {
-                    haptics.enabled = it
-                }
-            }
-        }
+        // ONE app-scoped haptics player, owned by ServiceLocator — the UI just
+        // borrows it through the CompositionLocal below. It must not be built
+        // here: turn-level haptics are fired by ChatViewModel, which outlives
+        // this Activity's composition (and keeps buzzing in PiP, where
+        // ChatScreen stops composing entirely). ServiceLocator also owns the
+        // pref collector, so the Settings toggle still lands instantly without
+        // this Activity being alive to relay it.
+        val haptics = ServiceLocator.haptics
         setContent {
             // App-wide scale: override LocalDensity so every dp/sp
             // gets multiplied uniformly. User configures via Settings
@@ -306,8 +297,25 @@ class MainActivity : ComponentActivity() {
             android.util.Log.d(tag, "skipped: ServiceLocator not initialised")
             return
         }
-        val activeCount = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read activeCount for PiP", 0) {
-            ServiceLocator.agentSessions.activeCount.value
+        // ⚠ A TURN IN FLIGHT, not "a session exists".
+        //
+        // This read used to be `agentSessions.activeCount` — the number of
+        // AgentSession OBJECTS in the manager, which is ≥1 from the first chat
+        // you open until you close the app. So every swipe home, from any
+        // screen, popped a floating window, and since nothing was running it had
+        // nothing to say: it showed whatever chat the recency guess landed on,
+        // scrolled to an old reading anchor. PiP exists for one reason —
+        // watching work you can't watch on screen — so it now opens only when
+        // there IS work.
+        val turnInFlight = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read turn-in-flight for PiP", false) {
+            ServiceLocator.agentSessions.anyTurnInFlight()
+        }
+        // A MIRRORED turn (driven from the console / another device) never flips
+        // our own SessionState.Working, but it is exactly as much "work in
+        // progress" as ours — the file-mirror flag is its Working.
+        val mirroredTurn = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read mirrored turn for PiP", false) {
+            ai.eight24family.conch.ui.window.PipForegroundChat.current.value
+                ?.remoteFileOpen?.value == true
         }
         // Phase 9b: ride a "working" session even if activeCount reads 0.
         // activeCount only counts sessions whose state is Running/Working,
@@ -322,8 +330,8 @@ class MainActivity : ComponentActivity() {
         val loginInProgress = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read login presence for PiP", false) {
             ai.eight24family.conch.ui.viewmodel.AgentPickerViewModel.activeLogin.value != null
         }
-        if (activeCount <= 0 && !loginInProgress) {
-            android.util.Log.d(tag, "skipped: no active sessions (count=$activeCount) and no login")
+        if (!turnInFlight && !mirroredTurn && !loginInProgress) {
+            android.util.Log.d(tag, "skipped: nothing running (no turn in flight, no mirrored turn, no login)")
             return
         }
 
@@ -333,65 +341,34 @@ class MainActivity : ComponentActivity() {
         // clamps to its allowed range (typically 0.42–2.39) so a
         // user-resized PiP window still renders fine; this is just
         // our preferred starting shape.
+        // ⛔ NO ACTIONS IN THE PiP HEADER. DO NOT PUT THE STOP BUTTON BACK.
+        //
+        // There used to be a "Stop turn" RemoteAction here. A PiP header action
+        // is a ~24dp icon inside a ~200dp window, sitting under the same tap the
+        // user makes to expand the window — and a RemoteAction fires
+        // IMMEDIATELY, with no possible confirmation. So the cheapest possible
+        // misfire destroyed the most expensive thing in the app: a running turn,
+        // with its context, its tokens and its minutes.
+        //
+        // The asymmetry decides it: stopping from PiP saves one tap, and an
+        // accidental stop costs a whole turn. Tap the window → the app expands →
+        // Stop is right there in the prompt bar, where a deliberate press is
+        // what it takes. A destructive action never belongs on the gesture the
+        // user makes by reflex.
         val params = PictureInPictureParams.Builder()
             .setAspectRatio(Rational(16, 9))
-            .also { builder ->
-                // Add a "Stop turn" action — only meaningful if the
-                // session is currently generating. We always include
-                // it; the receiver no-ops if state isn't Running.
-                // System will surface it as one of up to 3 icons in
-                // the PiP window header bar.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    SilentlyTry.fired("SshAi-MainActivity", "set PiP stop action") {
-                        builder.setActions(listOf(buildStopAction()))
-                    }
-                }
-            }
             .build()
         val ok = runCatching { enterPictureInPictureMode(params) }
         android.util.Log.d(tag, "enterPictureInPictureMode -> ${ok.getOrNull()} (err=${ok.exceptionOrNull()?.message})")
     }
 
-    /** PiP action that cancels the currently-streaming agent turn.
-     *  Routes through [PipActionReceiver] which knows how to reach
-     *  AgentSessionManager and call cancelCurrent() on the right
-     *  session. Icon is the system stop glyph. */
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
-    private fun buildStopAction(): android.app.RemoteAction {
-        val stopIntent = android.content.Intent(this, PipActionReceiver::class.java)
-            .setAction(PipActionReceiver.ACTION_STOP_TURN)
-        val pending = android.app.PendingIntent.getBroadcast(
-            this, 0, stopIntent,
-            android.app.PendingIntent.FLAG_IMMUTABLE or
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val icon = android.graphics.drawable.Icon.createWithResource(
-            this, android.R.drawable.ic_media_pause,
-        )
-        return android.app.RemoteAction(icon, "Stop", "Stop the current turn", pending)
-    }
 }
 
-/**
- * Broadcast receiver for actions fired from the PiP window header.
- * Currently only [ACTION_STOP_TURN] — calls cancelCurrent() on the
- * most-recently-active session. No-op if no session is generating.
- */
-class PipActionReceiver : android.content.BroadcastReceiver() {
-    override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
-        when (intent.action) {
-            ACTION_STOP_TURN -> {
-                SilentlyTry.fired("SshAi-MainActivity", "PiP stop turn") {
-                    ServiceLocator.agentSessions.findMostRecentlyActive()?.cancelCurrent()
-                }
-            }
-        }
-    }
-
-    companion object {
-        const val ACTION_STOP_TURN = "ai.eight24family.conch.pip.STOP_TURN"
-    }
-}
+// PipActionReceiver is GONE along with the PiP header's Stop action — see the
+// PictureInPictureParams block above for why a destructive control must not sit
+// on the tap the user makes to expand the window. Nothing mints that
+// PendingIntent any more, so the receiver (and its manifest entry) would just be
+// an exported-by-accident way to cancel someone's turn.
 
 @Composable
 private fun Root(isInPip: Boolean) {
@@ -425,45 +402,58 @@ private fun Root(isInPip: Boolean) {
                 .activeLogin.collectAsState().value
             // Prefer the chat the user actually has on screen (published by
             // ChatScreen via PipForegroundChat) so the floating window is the
-            // SAME conversation + reading position they minimized — not a
-            // recency-guessed session whose history may be a different chat.
+            // SAME conversation they minimized — not a recency-guessed session
+            // whose history is a different chat. (Its reading position is NOT
+            // carried over: this window reports progress, and reopening at an old
+            // anchor is what made it show stale replies.)
             val fgChat = ai.eight24family.conch.ui.window.PipForegroundChat
                 .current.collectAsState().value
             Surface(modifier = Modifier.fillMaxSize()) {
                 if (login != null) {
                     ai.eight24family.conch.ui.screens.PipLoginPanel(login)
                 } else if (fgChat != null) {
-                    val msgs = fgChat.messages.collectAsState().value
-                    val st = fgChat.state.collectAsState().value
-                    val anchor = fgChat.readingAnchorMsgId.collectAsState().value
-                    android.util.Log.d(
-                        "SshAi-PiP",
-                        "overlay=FOREGROUND msgs=${msgs.size} anchor=$anchor working=${st is ai.eight24family.conch.agent.SessionState.Working}",
-                    )
-                    ai.eight24family.conch.ui.window.ChatPipView(
-                        messages = msgs,
-                        isWorking = st is ai.eight24family.conch.agent.SessionState.Working,
-                        anchorMsgId = anchor,
-                    )
+                    android.util.Log.d("SshAi-PiP", "overlay=FOREGROUND")
+                    // The whole VM, not a snapshot: the window shows live status
+                    // (verb, elapsed, tokens, agents, queue), which is a dozen
+                    // flows, and the reading anchor is deliberately NOT among
+                    // them — see ChatPipView.
+                    ai.eight24family.conch.ui.window.ChatPipView(fgChat)
                 } else {
-                    // No chat on screen (e.g. PiP entered from the Settings tab
-                    // while a background turn runs) → fall back to the
-                    // most-recently-active session's compact reply view.
-                    val session = androidx.compose.runtime.remember {
-                        SilentlyTry.logged("SshAi-MainActivity", "find most recently active for PiP") {
-                            ServiceLocator.agentSessions.findMostRecentlyActive()
+                    // No chat on screen (PiP entered from another tab while a
+                    // background turn runs). Show the session that is ACTUALLY
+                    // WORKING, re-picked live.
+                    //
+                    // ⚠ It used to be `remember { findMostRecentlyActive() }`:
+                    // `Running` counts as "active" (it only means the session is
+                    // up), and `remember` froze the very first guess for the
+                    // lifetime of the composition. Re-polled because a session's
+                    // state is not a Compose-observable flow; 2 Hz over an
+                    // in-memory map costs nothing and this surface exists for
+                    // seconds at a time.
+                    var session by androidx.compose.runtime.remember {
+                        androidx.compose.runtime.mutableStateOf(
+                            SilentlyTry.logged("SshAi-MainActivity", "find working session for PiP") {
+                                ServiceLocator.agentSessions.findWorkingSession()
+                            }
+                        )
+                    }
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        while (true) {
+                            kotlinx.coroutines.delay(500)
+                            session = SilentlyTry.logged("SshAi-MainActivity", "repoll working session for PiP") {
+                                ServiceLocator.agentSessions.findWorkingSession()
+                            }
                         }
                     }
-                    android.util.Log.d("SshAi-PiP", "overlay=FALLBACK session=${session != null}")
-                    if (session != null) {
-                        ai.eight24family.conch.ui.screens.PipChatScreen(session)
-                    } else {
+                    android.util.Log.d("SshAi-PiP", "overlay=FALLBACK working=${session != null}")
+                    session?.let { ai.eight24family.conch.ui.screens.PipChatScreen(it) }
+                    if (session == null) {
                         androidx.compose.foundation.layout.Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = androidx.compose.ui.Alignment.Center,
                         ) {
                             androidx.compose.material3.Text(
-                                "no active chat",
+                                "nothing running",
                                 color = MaterialTheme.colorScheme.outline,
                                 style = MaterialTheme.typography.bodySmall,
                             )

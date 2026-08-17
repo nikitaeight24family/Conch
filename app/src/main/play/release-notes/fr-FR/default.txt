@@ -1,5 +1,7 @@
 Nouveautés
-• Rouvrez une session en cours et elle redevient pleinement active : Stop, minuteur, compteur de jetons, et la réponse depuis le fichier, même si l'app a été fermée en plein tour.
-• Les gros chats s'ouvrent instantanément ; les limites restent exactes même inactif.
-• Fonctionne sur plus de serveurs (Alpine/BusyBox/BSD/macOS).
-• Corrections : Stop arrête le tour de façon fiable ; un message pendant un tour attend dans la file ; plus de faux « en cours ».
+• Fenêtre flottante refaite : statut en direct (minuteur, jetons, agents, file) au lieu d'une vieille réponse. Elle ne s'ouvre que si quelque chose tourne, et le bouton d'arrêt trop facile à toucher a disparu.
+• « + nouveau chat » ouvre toujours un nouveau chat.
+• L'en-tête affiche le modèle du chat, pas celui d'un sous-agent.
+• Panneau agents : statut, modèle, jetons, outils, durée.
+• La file part à la fin du tour, Stop inclus.
+• Une entrée dans les récents. Triple vibration.

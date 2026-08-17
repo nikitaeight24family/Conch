@@ -26,24 +26,24 @@ import ai.eight24family.conch.util.SilentlyTry
  * vocabularies (iOS HIG's "selection / impact / notification",
  * Material 3 haptics guidance):
  *
- *  - [Tick]      — finest grain. Sliding through a list of options
- *                  (e.g. each PIN digit press, per-character text
- *                  selection). Many of these per second is fine.
- *  - [Tap]       — discrete button press, link tap. "I noticed you
- *                  touched something."
- *  - [Heavy]     — important event the user should physically feel
- *                  even one-handed: NFC tag captured, security
- *                  notification.
- *  - [Confirm]   — positive completion (login succeeded, file saved,
- *                  install done). Slightly emphatic — the user just
- *                  finished a multi-step thing.
- *  - [Reject]    — negative outcome the user needs to notice (wrong
- *                  PIN, connect failed, auth refused). Distinct
- *                  pattern so it's not confused with [Confirm].
- *  - [GestureEnd] — settling of a swipe / fling (pull-to-refresh
- *                  release, drag-drop snap). One-shot soft impulse.
+ * - [Tick] — finest grain. Sliding through a list of options (e.g.
+ * each PIN digit press, per-character text selection). Many of these
+ * per second is fine. - [Tap] — discrete button press, link tap. "I
+ * noticed you touched something." - [Heavy] — important event the user
+ * should physically feel even one-handed: NFC tag captured, security
+ * notification. - [Confirm] — positive completion (login succeeded,
+ * file saved, install done). Slightly emphatic — the user just
+ * finished a multi-step thing. - [Reject] — negative outcome the user
+ * needs to notice (wrong PIN, connect failed, auth refused). Distinct
+ * pattern so it's not confused with [Confirm]. - [GestureEnd] —
+ * settling of a swipe / fling (pull-to-refresh release, drag-drop
+ * snap). One-shot soft impulse. - [TurnEnd] — the agent finished
+ * answering. THREE long pulses, deliberately unlike anything else in
+ * the app: this is the one event the user is waiting on with the phone
+ * in a pocket, so it has to be felt without looking. [Confirm]'s
+ * double tick was too close to an ordinary UI ack to notice.
  */
-enum class SshAiHaptic { Tick, Tap, Heavy, Confirm, Reject, GestureEnd }
+enum class SshAiHaptic { Tick, Tap, Heavy, Confirm, Reject, GestureEnd, TurnEnd }
 
 /**
  * Platform-neutral haptic player. Hidden behind a
@@ -134,6 +134,10 @@ class SshAiHaptics(
         SshAiHaptic.Reject -> null
         // No predefined "settle" — fall through.
         SshAiHaptic.GestureEnd -> null
+        // Deliberately NOT a predefined effect: every predefined one is a
+        // short click, and the point of TurnEnd is length. Falls through to
+        // the triple-pulse waveform.
+        SshAiHaptic.TurnEnd -> null
     }
 
     /** Pre-Q one-shot durations (ms) + amplitude (0..255). */
@@ -144,6 +148,9 @@ class SshAiHaptics(
         SshAiHaptic.Confirm -> 25L to 140  // platform replays oneShot twice via createWaveform — simpler: one pulse
         SshAiHaptic.Reject -> 50L to 220
         SshAiHaptic.GestureEnd -> 14L to 90
+        // Pre-O devices can't do waveforms at all, so the "triple" collapses
+        // to one long buzz. Still unmistakable next to an 18 ms Tap.
+        SshAiHaptic.TurnEnd -> 500L to 255
     }
 
     /**
@@ -168,6 +175,28 @@ class SshAiHaptics(
                 intArrayOf(0, 130, 60, 30),
                 -1,
             )
+            // TurnEnd: three LONG pulses at full amplitude, the third held
+            // longest so the pattern reads as "…and done" rather than a
+            // stutter. ~850 ms end to end — long enough to feel through a
+            // pocket, short enough not to be a ringtone.
+            //
+            // Amplitude array only when the device can honour it: on a
+            // vibrator without amplitude control the platform quantises to
+            // on/off anyway, and a timing-only waveform is the documented
+            // way to say that, so cheap OEM motors give three clean buzzes
+            // instead of one mushy blob.
+            SshAiHaptic.TurnEnd -> {
+                val timings = longArrayOf(0, 220, 130, 220, 130, 280)
+                if (hasAmplitudeControl) {
+                    VibrationEffect.createWaveform(
+                        timings,
+                        intArrayOf(0, 255, 0, 255, 0, 255),
+                        -1,
+                    )
+                } else {
+                    VibrationEffect.createWaveform(timings, -1)
+                }
+            }
             else -> null
         }
     }

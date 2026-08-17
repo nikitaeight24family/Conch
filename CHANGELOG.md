@@ -11,6 +11,40 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.5] — 2026-08-18
+
+### Added
+- The floating (Picture-in-Picture) window is a live status readout: the working
+  verb, the true elapsed time of the turn, the token count, the number of running
+  agents and of queued messages, following the tail of the current turn. It opens
+  only while a turn is actually in flight, and an idle chat's last reply is
+  labelled rather than shown as if it were live.
+- Per-agent telemetry in the agents panel — status (running / completed / failed
+  / killed / queued / paused), model, runtime, tool count and tokens, with the
+  result, the error or the currently-running tool on a second line, and the
+  fan-out's total tokens in the collapsed header.
+- A distinct three-pulse vibration when an answer finishes, felt through a pocket
+  without looking.
+
+### Changed
+- The Stop action was removed from the PiP window header: it sat under the same
+  tap that expands the window and fired with no confirmation, so a mis-tap
+  cancelled a running turn. Stop is in the prompt bar.
+- Turn vibrations moved out of the chat screen, so they no longer stop when the
+  app is backgrounded or floating.
+
+### Fixed
+- "+ new chat" always opens a new chat instead of re-opening the previous
+  never-used one — which also propagated that chat's connect-time hang to every
+  subsequent new chat. Abandoned brand-new chats are closed instead of leaking a
+  CLI process, an SSH channel and a connection reference.
+- The model shown in the top bar is the chat's, not whichever subagent last
+  spoke; subagent turns no longer appear in the transcript either.
+- Messages queued during a turn are always sent once the session is idle,
+  including after Stop.
+- One entry in the recent-apps list instead of a new one for every return from
+  the floating window.
+
 ## [0.3.4] — 2026-08-17
 
 ### Added
@@ -1006,6 +1040,8 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.5
+[0.3.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.4
 [0.3.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.3
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1

@@ -10,7 +10,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * "← 1 agent · ↓ to manage" footer:
  *
  * ```
- * ○ general-purpose  Inventory HPAF gateway core   49s · ↓ 36.6k tokens
+ * ● general-purpose · sonnet  Inventory HPAF gateway core  49s · 6 tools · Grep · 36.6k
  * ```
  */
 data class SubagentRun(
@@ -23,6 +23,24 @@ data class SubagentRun(
     val tokens: Long,
     val elapsedSeconds: Long?,
     val done: Boolean,
+    /** Model the agent actually ran on, alias already resolved by the CLI. */
+    val model: String? = null,
+    /** Tools the agent has invoked so far (`usage.tool_uses`). */
+    val toolUses: Int? = null,
+    /** The tool it called last — what it is doing right now. */
+    val lastTool: String? = null,
+    /**
+     * CLI status: running · completed · failed · killed · queued · paused ·
+     * cancelled. Null when no status event has arrived yet, which is NOT the
+     * same as "running" — the UI shows the distinction rather than guessing.
+     */
+    val status: String? = null,
+    /** The agent's own one-line result. */
+    val summary: String? = null,
+    /** Failure text, when the CLI reported one. */
+    val error: String? = null,
+    /** The agent kept running after the main turn ended. */
+    val backgrounded: Boolean = false,
 )
 
 private val rosterJson = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -33,11 +51,14 @@ private val rosterJson = Json { ignoreUnknownKeys = true; isLenient = true }
  * Pure on purpose: no Android, no coroutines, no clock — so the whole
  * behaviour is unit-testable, and the UI just renders whatever this returns.
  *
- * Three signals are combined, all named after the shipped CLI (2.1.218):
- *  - a `Task` [AgentMessage.ToolUse] carries `subagent_type` + `description`
- *    / `prompt`. Its tool_use id is the roster key.
- *  - [AgentMessage.SubagentActivity] carries the running totals; it points
- *    back with `parentToolUseID`, so it lands on the right row.
+ * Signals combined, all named after the shipped CLI (verified on 2.1.220 by
+ * capturing a real `--print --output-format stream-json` run):
+ *  - a `Task`/`Agent` [AgentMessage.ToolUse] carries `subagent_type` +
+ *    `description` / `prompt`. Its tool_use id is the roster key.
+ *  - [AgentMessage.SubagentActivity] carries the running totals. It arrives
+ *    from three places and points back with whichever key it has: the live
+ *    stream's `parent_tool_use_id` turns, `agent_progress` records, and the
+ *    `task_started/progress/updated/notification` system events.
  *  - the [AgentMessage.ToolResult] for that same tool_use id means the agent
  *    finished — that is what flips ● (running) to ○ (done).
  *
@@ -48,12 +69,28 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     data class Acc(
         var type: String? = null,
         var task: String? = null,
+        /** Sum of per-record `message.usage`. Our own count. */
         var tokens: Long = 0,
+        /** The CLI's own cumulative total, when it reported one. */
+        var totalTokens: Long? = null,
+        var toolUses: Int? = null,
+        var durationMs: Long? = null,
+        var lastTool: String? = null,
+        var model: String? = null,
+        var status: String? = null,
+        var summary: String? = null,
+        var error: String? = null,
+        var backgrounded: Boolean = false,
         var elapsed: Long? = null,
         var done: Boolean = false,
     )
 
     val acc = LinkedHashMap<String, Acc>()
+    // task_id → roster key. `task_updated` — the record that carries the
+    // terminal status and the error — ships task_id ONLY, so without this
+    // pairing (learned from task_started/task_notification, which carry both)
+    // every completion would land nowhere and agents would stay ● forever.
+    val taskKeys = HashMap<String, String>()
 
     for (m in messages) {
         when (m) {
@@ -79,16 +116,38 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
                     val a = acc.getOrPut(m.id) { Acc() }
                     a.type = type ?: a.type
                     a.task = task ?: a.task
+                    // The spawn itself is the CLI's own "model" hint: an
+                    // explicit `model` on the Agent tool input overrides the
+                    // inherited one, and it is the only model signal available
+                    // before the agent's first turn reports.
+                    a.model = o["model"]?.jsonPrimitive?.content ?: a.model
                 }
                 if (nameIsAgentish && !parsedAgent) acc.getOrPut(m.id) { Acc() }
             }
 
             is AgentMessage.SubagentActivity -> {
-                val key = m.parentToolUseId ?: m.agentId ?: continue
+                // Resolve which row this observation belongs to. A record with
+                // a tool_use id names its row directly; a task_id-only record
+                // (task_updated) needs the pairing learned earlier — and if
+                // that task was never introduced as an AGENT (a backgrounded
+                // Bash command is also a "task"), it is not ours to show.
+                val direct = m.parentToolUseId ?: m.agentId
+                val key = direct ?: m.taskId?.let { taskKeys[it] } ?: continue
+                if (direct != null) m.taskId?.let { taskKeys[it] = direct }
                 val a = acc.getOrPut(key) { Acc() }
-                // Activity records report cumulative usage per turn, so the
-                // agent's total is their sum.
+                // Per-record usage is incremental → sum. `total_tokens` is
+                // ALREADY a total → last-wins. Mixing the two up bills the
+                // agent once per progress tick.
                 a.tokens += m.tokens
+                m.totalTokens?.let { a.totalTokens = it }
+                m.toolUses?.let { a.toolUses = it }
+                m.durationMs?.let { a.durationMs = it }
+                m.lastTool?.let { a.lastTool = it }
+                m.model?.let { a.model = it }
+                m.status?.let { a.status = it }
+                m.summary?.let { a.summary = it }
+                m.error?.let { a.error = it }
+                m.backgrounded?.let { a.backgrounded = it }
                 m.elapsedSeconds?.let { a.elapsed = it }
                 m.subagentType?.let { a.type = it }
                 m.task?.let { a.task = it }
@@ -115,9 +174,21 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
             key = key,
             type = a.type,
             task = a.task?.trim()?.replace('\n', ' '),
-            tokens = a.tokens,
-            elapsedSeconds = a.elapsed,
+            // Prefer the CLI's own number so the panel agrees with the CLI;
+            // fall back to what we counted off the stream when no task_progress
+            // has landed yet (short agents finish before the first tick).
+            tokens = a.totalTokens ?: a.tokens,
+            // `duration_ms` keeps ticking for an agent that hasn't produced a
+            // turn in a while, so it beats the per-record elapsed stamp.
+            elapsedSeconds = a.durationMs?.let { it / 1000 } ?: a.elapsed,
             done = a.done,
+            model = a.model,
+            toolUses = a.toolUses,
+            lastTool = a.lastTool,
+            status = a.status,
+            summary = a.summary?.trim()?.replace('\n', ' '),
+            error = a.error?.trim()?.replace('\n', ' '),
+            backgrounded = a.backgrounded,
         )
     }
 }

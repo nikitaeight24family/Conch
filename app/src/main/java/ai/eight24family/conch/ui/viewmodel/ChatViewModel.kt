@@ -1698,6 +1698,24 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // Owned by `ChatViewModelReconnect` — see that file. The public StateFlows
     // / properties below remain part of ChatViewModel's surface for UI subscribers.
     private val reconnectCoord by lazy { ChatViewModelReconnect(viewModelScope) { retry() } }
+
+    /**
+     * Turn haptics — new-row ticks and the three-pulse end-of-answer buzz.
+     *
+     * Lives HERE, not in ChatScreen, because a haptic must not depend on the
+     * chat being composed: the screen stops composing in Picture-in-Picture,
+     * which is precisely when the user has no way to see the answer land. See
+     * [ChatViewModelHaptics].
+     */
+    private val hapticsCoord by lazy {
+        ChatViewModelHaptics(viewModelScope, ServiceLocator.haptics).also {
+            it.install(
+                messages = messages,
+                state = state,
+                remoteWorking = remoteFileOpen,
+            )
+        }
+    }
     /**
      * Local session id whose assistant stream has been silent for longer than
      * [STREAM_STALL_TIMEOUT_MS] while still in `SessionState.Working`.
@@ -1780,6 +1798,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     init {
         // Cold-start hydrate: spec model cache (Claude alias map, Codex slug map etc.)
         modelsCoord.hydrateFromCache()
+        // Arm turn haptics for the whole life of this chat. Touching the lazy
+        // coordinator IS the arming — and it has to happen in an init block that
+        // runs AFTER its declaration (Kotlin initialises in source order), which
+        // is why this isn't up with the first init.
+        hapticsCoord
     }
 
     // NB: NO auto-switch on model-unavailable. We MIRROR the model the
@@ -1884,7 +1907,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             startNewChat(
                 agent = pickedAgent,
                 resumeIdParam = initialResumeId,
-                resumeFilePath = initialResumePath
+                resumeFilePath = initialResumePath,
+                // Opening the chat route with no resume id IS "give me a new
+                // conversation" — from the "+" on the sessions home, or from the
+                // agent picker. Never adopt the previous one. (A cold restore
+                // after process death also lands here, and there is no in-memory
+                // orphan to adopt in that case anyway.)
+                adoptExisting = initialResumeId != null,
             )
             // Read the parked queue BEFORE arming the writer — see the KDoc.
             restoreUnsentQueue()
@@ -2173,7 +2202,35 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         resumeIdParam: String? = null,
         resumeFilePath: String? = null,
         seedMessages: List<AgentMessage>? = null,
+        /**
+         * True only for a REBUILD of a chat that already exists on screen —
+         * `retry()`, the reconnect ladder, the pool-live rescue. Those must
+         * re-attach to the very session they are rebuilding, so they keep the
+         * in-memory adoption lookups.
+         *
+         * False when the USER asked for a new conversation ("+ new chat", the
+         * chat route opened with no resume id). There, adopting the previous
+         * brand-new session is precisely the bug: it re-opens the chat the user
+         * just left instead of a fresh one, and if that one was wedged
+         * mid-bootstrap the new chat inherits the hang. See
+         * [ai.eight24family.conch.agent.AgentSessionManager.reapBrandNewOrphans].
+         */
+        adoptExisting: Boolean = true,
     ) {
+        // Moving to a genuinely new conversation: the slot we are leaving can
+        // never be reached again (nothing resumes a session with no CLI id, and
+        // the orphan lookup that used to is exactly what we're refusing), so
+        // close it here instead of leaving a `claude --print` and an SSH channel
+        // running for nobody. Rebuild paths keep theirs — they re-adopt it.
+        if (!adoptExisting) {
+            val leaving = _localSessionId.value
+            val leavingAgent = leaving?.let { sessionAgentMap[it] } ?: _currentAgent.value
+            if (leaving != null) {
+                SilentlyTry.fired("SshAi-Chat", "close abandoned brand-new session") {
+                    sessionsManager.closeIfBrandNew(serverId, leavingAgent, leaving)
+                }
+            }
+        }
         val localId = UUID.randomUUID().toString()
         sessionAgentMap[localId] = agent
         if (resumeFilePath != null) sessionPathMap[localId] = resumeFilePath
@@ -2354,10 +2411,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // alive in the manager (user popped the chat off the back
             // stack while SSH was bootstrapping). Adopt it — its
             // `_history` holds the pending UserText the user typed.
-            val existingAlive = if (resumeIdParam != null) {
-                sessionsManager.findByResume(serverId, agent, resumeIdParam)
-            } else {
-                sessionsManager.findOrphanBrandNew(serverId, agent)
+            // ⚠ Reuse path 2 is REFUSED for a user-initiated new chat, and the
+            // orphan it would have adopted is reaped instead — see
+            // `reapBrandNewOrphans` for why adopting it handed the user back the
+            // previous chat (and, when that one was wedged, an unkillable hang).
+            val existingAlive = when {
+                resumeIdParam != null -> sessionsManager.findByResume(serverId, agent, resumeIdParam)
+                adoptExisting -> sessionsManager.findOrphanBrandNew(serverId, agent)
+                else -> null
             }
             // ── Hardware security key pre-flight ──
             // If the server is keyed to a FIDO security-key row, we
@@ -4069,6 +4130,54 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 wasRemote = remote
             }
         }
+        // ── QUEUE RELEASE OF LAST RESORT ──
+        //
+        // Every other drain hangs off an EDGE: local Working→Running,
+        // remoteFileOpen true→false, network-back, the once-per-slot kick. Each
+        // is correct and each can be missed, and when one is missed the queue
+        // just sits there — the user's follow-ups visible above the prompt bar,
+        // never sent, with no way to make them go except retyping. Stop is the
+        // easiest way to lose an edge: it force-clears `remoteFileOpen` while
+        // the state is still Working (so the mirrored collector's edge is spent
+        // on a moment when the guard rejects it), and STREAM_FORCE exists
+        // precisely because our tracking can already have fallen off Working —
+        // no edge left to fire at all.
+        //
+        // So: STATE, not edges. When the queue is non-empty and the session has
+        // been genuinely idle for a moment, release it. That is the whole
+        // condition, and it holds however the turn ended.
+        //
+        // ⚠ IDLE MUST BE SUSTAINED. Draining into a turn that is about to start
+        // hands the prompt to the CLI's own invisible queue — the exact thing
+        // this outbox exists to prevent (the 2026-08-11 bypass). `drainerBusy`
+        // stays true for the whole of a turn WE launched even when the state
+        // machine has desynced off Working, so the three-tick hold plus that
+        // flag is what keeps this from firing mid-turn. drainOutbox's take is
+        // atomic, so a real edge and this net can never both send the batch.
+        viewModelScope.launch {
+            var idleTicks = 0
+            while (true) {
+                kotlinx.coroutines.delay(500)
+                val sid = _localSessionId.value
+                val sess = sid?.let { activeSessions[it] }
+                if (sess == null) { idleTicks = 0; continue }
+                val idle = shouldReleaseQueue(
+                    hasQueue = _outbox.value.isNotEmpty(),
+                    working = _stateBySession.value[sid] is SessionState.Working,
+                    drainerBusy = sess.drainerBusy,
+                    mirroredTurnOpen = tailPollCoord.remoteFileOpen.value,
+                    sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                )
+                if (!idle) { idleTicks = 0; continue }
+                if (++idleTicks < QUEUE_RELEASE_IDLE_TICKS) continue
+                idleTicks = 0
+                android.util.Log.i(
+                    "SshAi-Chat",
+                    "idle with ${_outbox.value.size} queued message(s) — releasing the queue",
+                )
+                drainOutbox(sess)
+            }
+        }
         // The 5h/weekly windows are ACCOUNT-WIDE: other sessions, the CLI, other
         // devices move them even when THIS chat is idle. Refreshing only on
         // turn-end left the bar frozen at a 2-hour-old number. So poll every 30s
@@ -4444,7 +4553,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 modelsCoord.probeAvailableModels(s, force = true)
             }
         }
-        startNewChat(_currentAgent.value, resumeIdParam = null)
+        // "+ new session" from inside a chat: a genuinely new conversation, so
+        // the previous brand-new session is neither shown again nor left behind.
+        startNewChat(_currentAgent.value, resumeIdParam = null, adoptExisting = false)
     }
 
     fun retry() {
@@ -4667,6 +4778,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 ServiceLocator.historyCache.appendDraft(serverId, agent, b)
             }
         }
+        // AFTER the drafts are on disk (order matters — the close discards the
+        // session's in-memory history): a chat the user abandoned before the CLI
+        // ever gave it an id is unreachable from now on. Nothing resumes it, and
+        // the next "+ new chat" deliberately no longer adopts it, so leaving it
+        // in the manager would keep a `claude --print` process, an SSH channel
+        // and a pool reference alive for a screen that no longer exists — one per
+        // abandoned new chat, until the server's session ceiling says no. A turn
+        // still in flight is exempt (see closeIfBrandNew); the foreground service
+        // is there to let it finish.
+        if (sid != null) {
+            SilentlyTry.fired("SshAi-Chat", "close brand-new session on exit") {
+                sessionsManager.closeIfBrandNew(serverId, agent, sid)
+            }
+        }
         super.onCleared()
     }
 
@@ -4757,6 +4882,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             runningWithBusyDrainer: Boolean,
             mirroredTurnOpen: Boolean,
         ): Boolean = working || runningWithBusyDrainer || mirroredTurnOpen
+
+        /**
+         * How many consecutive idle polls (500 ms each) must pass before the
+         * last-resort release fires. Three is long enough that the gap between
+         * "turn ended" and "the next turn started" can't be mistaken for idle,
+         * short enough that a missed edge costs the user ~1.5 s rather than
+         * their whole queue.
+         */
+        internal const val QUEUE_RELEASE_IDLE_TICKS = 3
+
+        /**
+         * The EXACT INVERSE of [shouldQueueSend], plus "there is something to
+         * send and the session can take it". Pure so the release rule is pinned
+         * by a test instead of living only inside a polling loop: a queued
+         * message must be released whenever the session is idle, no matter which
+         * edge (local turn end, mirrored turn end, Stop, reconnect) got us
+         * there — see the watcher for the failure this net closes.
+         */
+        internal fun shouldReleaseQueue(
+            hasQueue: Boolean,
+            working: Boolean,
+            drainerBusy: Boolean,
+            mirroredTurnOpen: Boolean,
+            sessionReady: Boolean,
+        ): Boolean = hasQueue && sessionReady &&
+            !shouldQueueSend(
+                working = working,
+                runningWithBusyDrainer = drainerBusy,
+                mirroredTurnOpen = mirroredTurnOpen,
+            )
 
         /** How Stop reaches the running turn. */
         enum class StopRoute { STREAM, STREAM_FORCE, ONESHOT, EXTERNAL_KILL }

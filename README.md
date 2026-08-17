@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.4-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.5-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.4
+conch ▌ v0.3.5
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -48,6 +48,46 @@ conch ▌ v0.3.4
   signed build, your choice.
 
 ---
+
+## What's new in 0.3.5
+
+**The floating window tells you what is happening.** Picture-in-Picture was
+showing a reply from an old turn with no sign of whether anything was running —
+and it opened on every swipe home, whether or not there was work to watch. It now
+opens only while a turn is actually in flight, follows the live tail of *that*
+turn, and carries the real status: the working verb, the elapsed timer, the token
+count, how many agents are running and how many messages are queued. An idle
+chat's last reply is labelled as such instead of impersonating live output.
+
+**Nothing in that window can cancel your turn.** The Stop action in the PiP
+header sat under the same tap that expands the window and fired with no
+confirmation, so a reflex mis-tap destroyed a running turn. It is gone; Stop
+lives in the prompt bar, where pressing it is a decision.
+
+**"+ new chat" opens a new chat.** It used to hand back the previous
+never-used chat — and if that one had wedged while connecting, every "fresh" chat
+inherited the same hang. Abandoned brand-new chats are now closed instead of
+left holding a CLI process and an SSH channel.
+
+**The model in the top bar is the chat's model.** During a fan-out it followed
+whichever subagent last spoke, flipping between models while the conversation
+itself had not moved. Subagent turns no longer touch it, and no longer land in
+the transcript.
+
+**Agents report themselves.** Each row in the agents panel now shows its status,
+its model, how long it has run, how many tools it has called and what it cost,
+with the result, the failure or the tool it is running right now underneath — and
+the collapsed header adds up the whole fan-out's tokens.
+
+**Queued messages always go out.** A queue released only on certain turn-end
+signals, and Stop consumed the one it needed, so follow-ups typed during a turn
+could sit there unsent. Release is now based on the session being idle, however
+the turn ended.
+
+**Fixes.** One Conch entry in recents instead of one per return from the floating
+window. The reply-landed vibration no longer depends on the chat being on screen
+— it works with the app backgrounded — and the end of an answer is now three long
+pulses you can feel without looking.
 
 ## What's new in 0.3.4
 

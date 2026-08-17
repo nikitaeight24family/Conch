@@ -192,6 +192,28 @@ class AgentSessionManager(
     }
 
     /**
+     * A session with a turn ACTUALLY IN FLIGHT — not merely one that exists.
+     *
+     * ⚠ `Running` means "the session is up and idle"; `Working` means "a turn is
+     * generating". [findMostRecentlyActive] deliberately accepts both, which is
+     * right for "whose chat should the floating window show" and WRONG for
+     * "should there be a floating window at all". Picture-in-Picture was gated on
+     * `activeCount > 0` — the number of session OBJECTS — so it opened on every
+     * swipe home for the rest of the app's life once any chat had ever been
+     * opened, showing a window about nothing.
+     *
+     * `drainerBusy` is included because our own turn tracking can desync off
+     * `Working` (a chat reopened mid-turn) while the prompt drainer is provably
+     * still inside a turn.
+     */
+    fun findWorkingSession(): AgentSession? = sessions.values.firstOrNull {
+        it.isAlive() && (it.state.value == SessionState.Working || it.drainerBusy)
+    }
+
+    /** True when any session has a turn in flight — see [findWorkingSession]. */
+    fun anyTurnInFlight(): Boolean = findWorkingSession() != null
+
+    /**
      * Find an alive session that's already attached to the given CLI-side
      * `resumeId`. Lets ChatViewModel reuse an existing AgentSession when
      * the user pops the chat off the back stack and re-opens it — without
@@ -279,6 +301,53 @@ class AgentSessionManager(
             k.startsWith(prefix) && v.agentSessionId == null &&
                 v.isAlive() && SessionStateMachine.isAdoptable(v.state.value)
         }?.value
+    }
+
+    /**
+     * Close ONE session — [chatId] — if and only if it never got a CLI-side id
+     * and isn't mid-turn. Reports whether it died.
+     *
+     * ⚠ THIS IS THE OTHER HALF OF NOT ADOPTING AN ORPHAN.
+     *
+     * "+ new chat" used to hand the user back the PREVIOUS brand-new chat via
+     * [findOrphanBrandNew] — same session object, same history, same stuck
+     * state. Adoption is now refused for a user-initiated new chat — but the
+     * refused orphan would be unreachable forever (that lookup WAS the only way
+     * back to it) while still holding a live `claude --print` process, an SSH
+     * channel and an `SshConnectionPool.acquire` reference nothing will ever
+     * release. Abandon one per new chat and the server-side session ceiling is
+     * only a matter of time.
+     *
+     * ⚠ CALLER MUST OWN [chatId]. This deliberately does NOT sweep by
+     * (serverId, agent): a second brand-new chat sitting further down the back
+     * stack looks identical from here, and killing it would leave that screen
+     * holding a corpse. Each ChatViewModel closes ITS OWN slot — when it moves
+     * on to another one, and again in `onCleared`.
+     *
+     * A session mid-TURN is left alone. A brand-new chat that is actually
+     * answering gets its CLI id within a second of `system.init`, so anything
+     * still `Working` without one is a first turn in flight, and the user
+     * leaving the screen is not a reason to cancel their reply — the foreground
+     * service exists to keep exactly that running. It stops being brand-new on
+     * its own.
+     *
+     * Typed-but-unsent text is NOT lost by this: `onCleared` persists it to the
+     * (server, agent) draft slot first, and the next new chat offers it back
+     * through the composer — the durable half of invariant #38, and the only
+     * half that survives process death anyway.
+     */
+    fun closeIfBrandNew(serverId: String, agent: Agent, chatId: String): Boolean {
+        val k = key(serverId, agent, chatId)
+        val s = sessions[k] ?: return false
+        if (s.agentSessionId != null) return false
+        if (s.state.value == SessionState.Working) return false
+        sessions.remove(k)?.close()
+        android.util.Log.d(
+            "SshAi-AgentMgr",
+            "closed unreachable brand-new session on $serverId/${agent.name}",
+        )
+        updateCount()
+        return true
     }
 
     /**

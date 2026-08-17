@@ -101,10 +101,52 @@ sealed interface AgentMessage {
         override val id: String,
         val agentId: String?,
         val parentToolUseId: String?,
+        /**
+         * The CLI's `task_id` for this agent. A SECOND join key, needed because
+         * `task_updated` (the record that carries the terminal status) ships
+         * `task_id` ONLY — no `tool_use_id` — so without remembering the
+         * task_id→tool_use_id pairing from `task_started` there is no way to
+         * land a completion on the right row.
+         */
+        val taskId: String? = null,
         val subagentType: String? = null,
         val task: String? = null,
-        /** Cumulative tokens this observation reports, 0 when unknown. */
+        /**
+         * Tokens THIS observation adds — one assistant record's own
+         * `message.usage`. Summed across observations by the roster.
+         *
+         * ⚠ Not to be confused with [totalTokens], which is already a total.
+         * Summing those would multiply the agent's cost by the number of
+         * progress events it emitted.
+         */
         val tokens: Long = 0,
+        /** Absolute cumulative total the CLI reports for the whole agent
+         *  (`usage.total_tokens` on task_progress / task_notification).
+         *  Last-wins, never summed. */
+        val totalTokens: Long? = null,
+        /** `usage.tool_uses` — how many tools the agent has called. Absolute. */
+        val toolUses: Int? = null,
+        /** `usage.duration_ms` — wall-clock the CLI measured for the agent.
+         *  Preferred over [elapsedSeconds] when present (it keeps ticking for
+         *  an agent that hasn't emitted a turn in a while). */
+        val durationMs: Long? = null,
+        /** `last_tool_name` — what the agent is doing RIGHT NOW. */
+        val lastTool: String? = null,
+        /** The model this agent actually runs on (`resolvedModel` on an
+         *  agent_progress record, `message.model` on its assistant turns).
+         *  Shown on the agent's own row — and deliberately kept OUT of the
+         *  chat's model picker, which reports the CHAT's model. */
+        val model: String? = null,
+        /** CLI task status: running · completed · failed · killed · queued ·
+         *  paused · cancelled. Null when the record doesn't carry one. */
+        val status: String? = null,
+        /** The agent's own one-line result (`summary` on task_notification). */
+        val summary: String? = null,
+        /** Failure text from a `task_updated` patch. */
+        val error: String? = null,
+        /** True once the CLI moved the agent to the background
+         *  (`is_backgrounded`) — it keeps running while the main turn ends. */
+        val backgrounded: Boolean? = null,
         val elapsedSeconds: Long? = null,
         val done: Boolean = false,
         /**

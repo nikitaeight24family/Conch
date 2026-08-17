@@ -79,6 +79,19 @@ object ClaudeMessageParser {
      *  JSONL cache, so zero storage cost); drives the topbar's session mirror. */
     private const val OBSERVED_MODEL_ID_PREFIX = "claude-model-"
 
+    /**
+     * Task statuses that mean "this agent will not do any more work".
+     *
+     * The CLI's full vocabulary is running · completed · failed · killed ·
+     * queued · paused · cancelled (counted in the 2.1.220 binary). Only the
+     * four below end a run: `queued` and `paused` are still pending, and
+     * `running` obviously is. A closed set on purpose — an unknown future
+     * status leaves the agent shown as live, which is the safe direction to be
+     * wrong in (a stuck spinner is visible; a silently "finished" agent that is
+     * still burning tokens is not).
+     */
+    private val TASK_TERMINAL_STATUSES = setOf("completed", "failed", "killed", "cancelled")
+
     /** Stable id for the non-rendering System row that mirrors the session's
      *  current reasoning effort (only `ultracode` is recorded by Claude — see
      *  parseAttachment). Stable → one upserting row; `observedReasoning` in the
@@ -234,6 +247,38 @@ object ClaudeMessageParser {
             subagentActivity(trimmed)?.let { return listOf(it) }
         }
 
+        // ⚠ THE LIVE STREAM DOES NOT USE `isSidechain` AT ALL.
+        //
+        // `isSidechain` is a SESSION-FILE field. On the wire (`--print
+        // --output-format stream-json`, which is how we drive the CLI) a
+        // subagent's turns arrive as ordinary top-level events tagged
+        // `parent_tool_use_id`, measured against 2.1.220:
+        //
+        //   {"type":"assistant","message":{"model":"claude-sonnet-5",…,"usage":{…}},
+        //    "parent_tool_use_id":"toolu_01Qq…","subagent_type":"general-purpose",
+        //    "task_description":"ping test"}
+        //
+        // Without this branch they fell through to the normal assistant path, which
+        // cost two visible bugs: • `message.model` was mirrored into the topbar's
+        // model row, so the picker flipped to whatever the SUBAGENT ran on and back
+        // again — "Sonnet, Opus, Sonnet" during a fan-out while the chat itself
+        // never moved; • the subagent's prose was appended to the transcript as a
+        // plain assistant turn, which is exactly what the CLI refuses to do — twenty
+        // agents bury the answer the user is reading. Their usage/model/task now
+        // feed the agent roster instead, and the text stays searchable on the record
+        // (see [AgentMessage.SubagentActivity]).
+        //
+        // Prefilter matches only a NON-NULL id (`:"`): every main-agent event
+        // carries `"parent_tool_use_id":null`, so the hot path is untouched.
+        // The decision is made on the PARSED top-level field, so a chat message
+        // that merely quotes this JSON pays one parse and renders normally —
+        // a line must never be able to vanish here.
+        if (trimmed.contains("\"parent_tool_use_id\":\"") ||
+            trimmed.contains("\"parent_tool_use_id\": \"")
+        ) {
+            subagentStreamTurn(trimmed)?.let { return listOf(it) }
+        }
+
         // Fast path: token-stream parser (JsonReader) for the hot
         // `assistant` / `user` events with text-only content. This is
         // where Claude streams 50-100 deltas/sec during a live reply.
@@ -293,58 +338,131 @@ object ClaudeMessageParser {
         // `"isSidechain":false` (every ordinary record carries it) and a chat
         // message that merely quotes these words both fail this test, which is
         // exactly the point.
-        val isProgress = firstString(obj, "type") == "agent_progress"
+        //
+        // ⚠ `agent_progress` is NESTED. Measured on 2.1.220, the record the CLI
+        // actually writes/emits is
+        // {"type":"progress","parentToolUseID":…,"toolUseID":"agent_…",
+        // "data":{"type":"agent_progress","agentId":…,"agentType":…,
+        // "description":…,"prompt":…,"resolvedModel":…,
+        // "modelsUsed":[…],"message":{…}}} — the discriminator lives at
+        // `data.type`, NOT at the top level. The old check read the top level
+        // only, so it answered "not a subagent" for every one of these, the
+        // record fell through to the generic parser, and its tokens/model/agent
+        // id were dropped on the floor. The roster then had nothing but the
+        // spawn call to draw from, which is why twenty agents listed with no
+        // tokens, no runtime and no idea whether they had finished.
+        val data = SilentlyTry.logged("SshAi-ClaudeParse", "subagent data") {
+            obj["data"]?.jsonObject
+        }
+        val isProgress = firstString(obj, "type") == "agent_progress" ||
+            (data != null && firstString(data, "type") == "agent_progress")
         val isSidechain = SilentlyTry.loggedOrElse("SshAi-ClaudeParse", "read isSidechain", false) {
             obj["isSidechain"]?.jsonPrimitive?.content == "true"
         } ?: false
         if (!isProgress && !isSidechain) return null
-
-        // Token usage lives on the assistant record's `message.usage`. Sum the
-        // billed halves; cache reads are counted too because that is what the
-        // CLI's per-agent "↓ N tokens" reflects.
-        var tokens = 0L
-        SilentlyTry.fired("SshAi-ClaudeParse", "subagent usage") {
-            val usage = obj["message"]?.jsonObject?.get("usage")?.jsonObject
-            if (usage != null) {
-                for (k in listOf(
-                    "input_tokens", "output_tokens",
-                    "cache_read_input_tokens", "cache_creation_input_tokens",
-                )) {
-                    tokens += usage[k]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                }
+        // Fields sit on `data` for a progress record and at the top level for a
+        // session-file sidechain row; read whichever exists, preferring `data`.
+        val fields: List<JsonObject> = listOfNotNull(data, obj)
+        fun field(vararg keys: String): String? =
+            fields.firstNotNullOfOrNull { o -> firstString(o, *keys) }
+        val inner = fields.firstNotNullOfOrNull { o ->
+            SilentlyTry.logged("SshAi-ClaudeParse", "subagent inner message") {
+                o["message"]?.jsonObject
             }
         }
 
         val subtype = firstString(obj, "subtype")
         return AgentMessage.SubagentActivity(
             id = uuid(),
-            agentId = firstString(obj, "agentId", "agent_id"),
-            parentToolUseId = firstString(obj, "parentToolUseID", "parent_tool_use_id"),
-            subagentType = firstString(obj, "subagent_type"),
-            task = firstString(obj, "task_description", "description"),
-            tokens = tokens,
-            elapsedSeconds = SilentlyTry.logged("SshAi-ClaudeParse", "subagent elapsed") {
-                obj["elapsed_time_seconds"]?.jsonPrimitive?.content?.toLongOrNull()
+            agentId = field("agentId", "agent_id"),
+            parentToolUseId = field("parentToolUseID", "parent_tool_use_id"),
+            subagentType = field("subagent_type", "agentType", "agent_type"),
+            task = field("task_description", "description"),
+            tokens = usageTokens(inner),
+            // `resolvedModel` is the agent's REAL model after the CLI resolved
+            // an alias ("sonnet" → claude-sonnet-5); `modelsUsed` is its
+            // history when an agent switched mid-run. Either belongs on the
+            // agent's own row and nowhere near the chat's model picker.
+            model = field("resolvedModel", "resolved_model")
+                ?: inner?.let { firstString(it, "model") }?.takeIf { !it.startsWith("<") },
+            elapsedSeconds = fields.firstNotNullOfOrNull { o ->
+                SilentlyTry.logged("SshAi-ClaudeParse", "subagent elapsed") {
+                    o["elapsed_time_seconds"]?.jsonPrimitive?.content?.toLongOrNull()
+                }
             },
             done = subtype == "subagent_complete",
             // Keep the subagent's own words so a Task fan-out stays searchable
             // (these records used to parse as AssistantText/ToolUse and get
             // indexed; folding them into metadata alone would drop the whole
             // research trail out of search).
-            text = SilentlyTry.logged("SshAi-ClaudeParse", "subagent text") {
-                val content = obj["message"]?.jsonObject?.get("content")
-                when (content) {
-                    is kotlinx.serialization.json.JsonArray -> content.mapNotNull { blk ->
-                        val o = blk as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-                        o["text"]?.jsonPrimitive?.contentOrNull
-                            ?: o["content"]?.jsonPrimitive?.contentOrNull
-                    }.joinToString("\n").takeIf { it.isNotBlank() }
-                    is kotlinx.serialization.json.JsonPrimitive -> content.contentOrNull?.takeIf { it.isNotBlank() }
-                    else -> null
-                }
-            },
+            text = contentText(inner),
         )
     }
+
+    /**
+     * One subagent turn as it arrives on the LIVE stream: an ordinary
+     * `assistant` / `user` event whose top-level `parent_tool_use_id` names the
+     * `Agent`/`Task` tool_use that spawned it.
+     *
+     * Returns null for anything that isn't definitively subagent traffic, so
+     * `parse` falls through to normal handling. See the call site for why this
+     * exists and what rendering it as a chat row cost.
+     */
+    private fun subagentStreamTurn(line: String): AgentMessage.SubagentActivity? {
+        val obj = SilentlyTry.logged("SshAi-ClaudeParse", "parse subagent stream turn") {
+            json.parseToJsonElement(line).jsonObject
+        } ?: return null
+        // Decision on the PARSED top-level field only.
+        val parent = firstString(obj, "parent_tool_use_id", "parentToolUseID") ?: return null
+        val type = firstString(obj, "type")
+        if (type != "assistant" && type != "user") return null
+        val inner = SilentlyTry.logged("SshAi-ClaudeParse", "subagent stream message") {
+            obj["message"]?.jsonObject
+        }
+        return AgentMessage.SubagentActivity(
+            id = uuid(),
+            agentId = firstString(obj, "agentId", "agent_id"),
+            parentToolUseId = parent,
+            subagentType = firstString(obj, "subagent_type"),
+            task = firstString(obj, "task_description", "description"),
+            tokens = usageTokens(inner),
+            model = inner?.let { firstString(it, "model") }?.takeIf { !it.startsWith("<") },
+            text = contentText(inner),
+        )
+    }
+
+    /**
+     * Tokens billed by ONE assistant record — both input halves, output, and
+     * both cache halves, because that is what the CLI's own per-agent
+     * "↓ N tokens" counts. Incremental: the roster sums these.
+     */
+    private fun usageTokens(message: JsonObject?): Long {
+        var tokens = 0L
+        SilentlyTry.fired("SshAi-ClaudeParse", "subagent usage") {
+            val usage = message?.get("usage")?.jsonObject ?: return@fired
+            for (k in listOf(
+                "input_tokens", "output_tokens",
+                "cache_read_input_tokens", "cache_creation_input_tokens",
+            )) {
+                tokens += usage[k]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+            }
+        }
+        return tokens
+    }
+
+    /** Flatten a message's `content` (string, or array of blocks) to plain text. */
+    private fun contentText(message: JsonObject?): String? =
+        SilentlyTry.logged("SshAi-ClaudeParse", "subagent text") {
+            when (val content = message?.get("content")) {
+                is kotlinx.serialization.json.JsonArray -> content.mapNotNull { blk ->
+                    val o = blk as? JsonObject ?: return@mapNotNull null
+                    o["text"]?.jsonPrimitive?.contentOrNull
+                        ?: o["content"]?.jsonPrimitive?.contentOrNull
+                }.joinToString("\n").takeIf { it.isNotBlank() }
+                is kotlinx.serialization.json.JsonPrimitive -> content.contentOrNull?.takeIf { it.isNotBlank() }
+                else -> null
+            }
+        }
 
     private fun quickType(line: String): String? = ParserHelpers.quickType(line)
 
@@ -838,7 +956,7 @@ object ClaudeMessageParser {
                 val what = firstString(obj, "summary", "description")
                     ?: patch?.let { firstString(it, "description", "error") }
                 val lastTool = firstString(obj, "last_tool_name")
-                listOf(note(
+                val row = note(
                     "task · $status${what?.let { " · ${it.take(90)}" } ?: ""}" +
                         (lastTool?.let { " · $it" } ?: ""),
                     detail = genericDetail(obj),
@@ -848,7 +966,86 @@ object ClaudeMessageParser {
                         else -> AgentMessage.EventNote.Tone.DIM
                     },
                     id = "sysevt-task-$taskKey",
-                ))
+                )
+                // ── The SAME event, also as roster telemetry ──
+                //
+                // This family is where the CLI keeps everything the user was
+                // missing about a fan-out. Verified against 2.1.220 on a live
+                // `--print --output-format stream-json` run:
+                //
+                //   task_started      task_id · tool_use_id · description ·
+                //                     subagent_type · task_type · prompt
+                //   task_progress     … · usage{total_tokens, tool_uses,
+                //                     duration_ms} · last_tool_name · summary
+                //   task_notification … · status · summary · usage{…} · output_file
+                //   task_updated      task_id · patch{status, end_time, error,
+                //                     is_backgrounded, …}   ← task_id ONLY
+                //
+                // The one-line note above is a chat row; it cannot carry any of
+                // that into the agent panel, which is why the panel could only ever
+                // show a name. Emit the structured twin alongside it so the roster
+                // gets the numbers and the note keeps driving the pinned
+                // background-task line.
+                //
+                // ⚠ AGENTS ONLY. `task_type` is one of local_agent /
+                // remote_agent / local_bash; a backgrounded Bash command is a
+                // task but NOT an agent and must not appear in the roster. A
+                // `task_updated` carries no type at all, so it is emitted
+                // unconditionally and the roster drops it unless that task_id
+                // was already introduced as an agent.
+                val taskType = firstString(obj, "task_type")
+                val isAgentTask = taskType == "local_agent" || taskType == "remote_agent" ||
+                    firstString(obj, "subagent_type") != null ||
+                    firstString(obj, "workflow_name") != null
+                val taskId = firstString(obj, "task_id")
+                if (taskId == null || (!isAgentTask && subtype != "task_updated" &&
+                        subtype != "task_notification")
+                ) {
+                    listOf(row)
+                } else {
+                    val usage = SilentlyTry.logged("SshAi-ClaudeParse", "task usage") {
+                        obj["usage"]?.jsonObject
+                    }
+                    fun num(o: JsonObject?, key: String): Long? = o?.let {
+                        SilentlyTry.logged("SshAi-ClaudeParse", "task usage num") {
+                            it[key]?.jsonPrimitive?.content?.toLongOrNull()
+                        }
+                    }
+                    listOf(
+                        row,
+                        AgentMessage.SubagentActivity(
+                            id = uuid(),
+                            agentId = null,
+                            parentToolUseId = firstString(obj, "tool_use_id"),
+                            taskId = taskId,
+                            subagentType = firstString(obj, "subagent_type"),
+                            task = firstString(obj, "description")
+                                ?: patch?.let { firstString(it, "description") },
+                            totalTokens = num(usage, "total_tokens"),
+                            toolUses = num(usage, "tool_uses")?.toInt(),
+                            durationMs = num(usage, "duration_ms"),
+                            lastTool = lastTool,
+                            // A status is only real when the event carried one:
+                            // `task_started` implies running, everything else
+                            // must not invent one or a progress tick would
+                            // resurrect a finished agent.
+                            status = firstString(obj, "status")
+                                ?: patch?.let { firstString(it, "status") }
+                                ?: if (subtype == "task_started") "running" else null,
+                            summary = firstString(obj, "summary"),
+                            error = patch?.let { firstString(it, "error") },
+                            backgrounded = patch?.let {
+                                SilentlyTry.logged("SshAi-ClaudeParse", "task backgrounded") {
+                                    it["is_backgrounded"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
+                                }
+                            },
+                            done = TASK_TERMINAL_STATUSES.contains(
+                                firstString(obj, "status")
+                                    ?: patch?.let { firstString(it, "status") },
+                            ),
+                        ),
+                    )
+                }
             }
             "task_summary" -> {
                 val detail = firstString(obj, "detail")
