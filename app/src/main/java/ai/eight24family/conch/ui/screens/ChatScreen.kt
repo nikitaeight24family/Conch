@@ -771,7 +771,8 @@ private fun PinnedWorkingStatus(
     // the screen the moment the main turn goes idle and the user would again
     // have no idea what ran (user, 2026-07-23).
     val roster by vm.subagents.collectAsState()
-    ai.eight24family.conch.ui.components.SubagentRosterRow(roster)
+    val agentBgTasks by vm.agentBackgroundTasks.collectAsState()
+    ai.eight24family.conch.ui.components.SubagentRosterRow(roster, agentBgTasks)
     // Background workflows (ultracode) — the CLI footer's «name · N/M agents
     // done · elapsed», polled from the workflow journal on the server.
     val workflows by vm.liveWorkflows.collectAsState()

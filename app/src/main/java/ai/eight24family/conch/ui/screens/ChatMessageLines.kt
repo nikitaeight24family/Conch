@@ -253,6 +253,9 @@ internal fun TerminalLine(
         // here would put a fan-out of eight agents' turns into the middle of the
         // conversation — exactly what the CLI filters out of its own transcript.
         is AgentMessage.SubagentActivity -> Unit
+        // The CLI's background-task set. Feeds the agent panel's count; the
+        // display list filters it out before we ever get here.
+        is AgentMessage.BackgroundTasks -> Unit
         // Turn-completion signal. The reader drops it before history, so this
         // branch should be unreachable — it exists so the compiler keeps
         // guarding the rest of this `when`.

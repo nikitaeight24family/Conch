@@ -83,8 +83,19 @@ private fun glyph(a: SubagentRun): String = when {
  * Tap to expand.
  */
 @Composable
-fun SubagentRosterRow(roster: List<SubagentRun>, modifier: Modifier = Modifier) {
-    if (roster.isEmpty()) return
+fun SubagentRosterRow(
+    roster: List<SubagentRun>,
+    /**
+     * Background commands the agents are running. Reported HERE because that is
+     * whose work it is: these events used to be rendered as chat rows, and a
+     * fan-out's shell commands buried the conversation under `task · completed ·
+     * Background command "…"` lines with nothing to act on (2026-08-18). The
+     * session's OWN background command still gets its chat row.
+     */
+    backgroundTasks: Int = 0,
+    modifier: Modifier = Modifier,
+) {
+    if (roster.isEmpty() && backgroundTasks == 0) return
     var expanded by remember { mutableStateOf(false) }
     val running = roster.count { !it.done }
     val totalTokens = roster.sumOf { it.tokens }
@@ -106,6 +117,9 @@ fun SubagentRosterRow(roster: List<SubagentRun>, modifier: Modifier = Modifier) 
                 // the number the user asks for first and should not have to
                 // expand twenty rows to add up by hand.
                 if (totalTokens > 0) append(" · ${compactTokens(totalTokens)}")
+                // The agents' background commands, as a count. One number here
+                // replaces the run of task rows that used to fill the chat.
+                if (backgroundTasks > 0) append(" · $backgroundTasks bg")
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.tertiary,

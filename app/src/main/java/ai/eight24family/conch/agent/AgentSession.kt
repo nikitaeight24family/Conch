@@ -365,6 +365,31 @@ class AgentSession(
     /** See [AgentSessionSshLifecycle.isAlive]. */
     fun isAlive(): Boolean = sshLifecycle.isAlive()
 
+    /**
+     * Can this session still take a prompt AT ALL?
+     *
+     * ⚠ THE ONE QUESTION EVERY DRAIN MUST ASK BEFORE IT CLAIMS A MESSAGE.
+     *
+     * [send] hands the text to [promptQueue], whose drainer runs on [scope]. If
+     * that scope is cancelled the enqueue still succeeds, `scope.launch` returns
+     * an already-cancelled Job, the drainer body never runs, and NOTHING throws —
+     * the prompt is added to a deque nobody will ever read. The chat bubble is
+     * emitted from inside the drainer too, so the message does not even appear.
+     *
+     * And the scope IS cancelled on a routine failure: `start()`'s catch calls
+     * `close()` (a missing agent binary, a rejected host key, a transport that
+     * dies during the handshake), while `AgentSessionManager.openOrGet` returns
+     * the object regardless and the ViewModel caches it. So a chat can hold a
+     * session that looks present, reports `Failed`, and silently eats everything
+     * handed to it — which is how a queue of the user's follow-ups could be
+     * claimed, have its crash-insurance drafts deleted, and vanish with no row,
+     * no bubble and no error (2026-08-18 audit).
+     *
+     * Cheap and honest: it asks the scope itself, not a state enum.
+     */
+    fun canAcceptSend(): Boolean =
+        scope.coroutineContext[kotlinx.coroutines.Job]?.isActive == true
+
     /** True while a CLI process for this chat is actually running, so the
      *  conversation is still warm in its memory. Ask THIS — not [isAlive] —
      *  before telling the user anything about what the next turn will cost:
@@ -604,6 +629,25 @@ class AgentSession(
         // pending control so the current turn ends cleanly; either way no Error,
         // the agent just continues with this message (user, 2026-06-26).
         cancelPendingQuestions()
+
+        // ⛔ A DEAD SCOPE MUST NOT EAT THE PROMPT.
+        //
+        // Belt for [canAcceptSend]'s brace: every caller is supposed to ask
+        // first, but if one ever forgets, the failure mode is invisible —
+        // `enqueue` succeeds, `scope.launch` hands back an already-cancelled Job,
+        // the drainer (which is also what emits the chat bubble) never runs, and
+        // the text is gone without one log line. Route it to the SAME undelivered
+        // store a turn aborted by a dead transport uses, so the ViewModel's exit
+        // path persists it as a draft and the user gets their words back instead
+        // of silence.
+        if (!canAcceptSend()) {
+            android.util.Log.e(
+                tag,
+                "send REFUSED: session scope is cancelled — parking ${text.length}B as undelivered",
+            )
+            undeliveredPrompts.add(text)
+            return
+        }
 
         // Remember this text so the JSONL tail's replay of the same prompt
         // (claude writes every user turn into the session log) doesn't show

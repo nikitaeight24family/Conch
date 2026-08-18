@@ -308,7 +308,12 @@ class MainActivity : ComponentActivity() {
         // watching work you can't watch on screen — so it now opens only when
         // there IS work.
         val turnInFlight = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read turn-in-flight for PiP", false) {
-            ServiceLocator.agentSessions.anyTurnInFlight()
+            // The WIDER test: a turn generating, a session still bootstrapping, or
+            // a prompt drainer inside a turn. PiP keeps this process resumed, so
+            // an in-flight handshake / touch / upload needs it as much as a
+            // streaming reply does — gating on `Working` alone dropped all of them
+            // plus the gap between send and the state flipping.
+            ServiceLocator.agentSessions.anyWorkWorthFloating()
         }
         // A MIRRORED turn (driven from the console / another device) never flips
         // our own SessionState.Working, but it is exactly as much "work in

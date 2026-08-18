@@ -375,7 +375,8 @@ class SshAiService : Service() {
 
     private fun buildNotification(activeCount: Int, heldCount: Int, heldNames: List<String> = emptyList()): Notification {
         // Tap the body → open the app at whatever screen it was last on
-        // (singleTop on MainActivity in the manifest).
+        // (singleTask on MainActivity in the manifest, so this reuses the one
+        // instance wherever it lives — pinned PiP task included).
         val tap = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT

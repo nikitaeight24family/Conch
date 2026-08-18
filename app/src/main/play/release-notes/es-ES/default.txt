@@ -1,7 +1,5 @@
 Novedades
-• Ventana flotante rehecha: estado en vivo (temporizador, tokens, agentes, cola) en vez de una respuesta vieja. Solo se abre si algo está en curso, y quitamos el botón de parada que se pulsaba sin querer.
-• "+ nuevo chat" siempre abre un chat nuevo.
-• La barra superior muestra el modelo del chat, no del subagente.
-• Panel de agentes: estado, modelo, tokens, herramientas y tiempo.
-• La cola sale al terminar el turno, también tras Detener.
-• Una entrada en recientes. Vibración triple.
+• Corregida una vibración que podía sonar sin parar hasta forzar el cierre de la app, y otra que se disparaba al enviar mientras la respuesta seguía llegando.
+• Las tareas en segundo plano de los agentes ya no inundan el chat: se cuentan con los agentes. En la conversación quedan solo las suyas.
+• Un mensaje en cola ya no puede perderse si la sesión detrás había muerto.
+• "+ nuevo chat" abre un chat nuevo también al cambiar de agente.

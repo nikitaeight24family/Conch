@@ -134,6 +134,7 @@ internal fun buildInChatHits(messages: List<AgentMessage>, query: String): List<
             // Panel data, never a chat row — it carries no searchable body, so
             // this label is unreachable in practice.
             is AgentMessage.SubagentActivity -> "agent"
+            is AgentMessage.BackgroundTasks -> "task"
             is AgentMessage.Error -> "err"
             is AgentMessage.Raw -> "•"
             is AgentMessage.PermissionRequest -> "ask · ${m.toolName}"
@@ -210,7 +211,13 @@ internal fun chatSearchableBody(m: AgentMessage): String? = when (m) {
     is AgentMessage.ToolResult -> m.output
     is AgentMessage.System -> m.raw
     // Subagent bookkeeping is not conversation text — keep it out of search.
-    is AgentMessage.SubagentActivity -> null
+    // The agents' own words. They are not a transcript row (the CLI keeps them
+    // out too, and twenty agents would bury the answer) but they ARE the research
+    // trail — and since a subagent turn stopped parsing as AssistantText, this is
+    // the only thing keeping it findable in the chat the user ran it from.
+    is AgentMessage.SubagentActivity -> m.text?.takeIf { it.isNotBlank() }
+    // A snapshot of running background tasks — state, not text. Nothing to find.
+    is AgentMessage.BackgroundTasks -> null
     is AgentMessage.Error -> m.text
     is AgentMessage.Raw -> m.text
     is AgentMessage.PermissionRequest -> "${m.toolName} ${m.description}"

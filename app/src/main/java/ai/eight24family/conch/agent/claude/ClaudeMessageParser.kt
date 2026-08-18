@@ -92,6 +92,11 @@ object ClaudeMessageParser {
      */
     private val TASK_TERMINAL_STATUSES = setOf("completed", "failed", "killed", "cancelled")
 
+    /** Stable id for the non-rendering row that mirrors the CLI's background-task
+     *  SET. Stable because the event has REPLACE semantics — one upserting row,
+     *  latest snapshot wins. */
+    private const val BACKGROUND_TASKS_ID = "claude-background-tasks"
+
     /** Stable id for the non-rendering System row that mirrors the session's
      *  current reasoning effort (only `ultracode` is recorded by Claude — see
      *  parseAttachment). Stable → one upserting row; `observedReasoning` in the
@@ -373,7 +378,14 @@ object ClaudeMessageParser {
 
         val subtype = firstString(obj, "subtype")
         return AgentMessage.SubagentActivity(
-            id = uuid(),
+            // ⚠ STABLE, NOT RANDOM. The tail-poll mirrors the same JSONL record
+            // that already came down the live stream whenever the stream goes
+            // quiet (which a long fan-out does by design — the agents run
+            // out-of-band), and `appendDeduped`'s only defence for these rows is
+            // the id. With `uuid()` here the same record landed twice and
+            // `foldSubagents`' `tokens +=` billed the agent twice. Content-hashed
+            // so both paths agree.
+            id = "subagent-" + stableId(line, "sub"),
             agentId = field("agentId", "agent_id"),
             parentToolUseId = field("parentToolUseID", "parent_tool_use_id"),
             subagentType = field("subagent_type", "agentType", "agent_type"),
@@ -420,7 +432,11 @@ object ClaudeMessageParser {
             obj["message"]?.jsonObject
         }
         return AgentMessage.SubagentActivity(
-            id = uuid(),
+            // Stable — the message id when the record has one (the file mirror
+            // and the stream then agree on it), else a content hash. A random id
+            // here double-counted an agent's tokens whenever both paths saw the
+            // same turn; see the sibling in `subagentActivity`.
+            id = "subagent-" + (inner?.let { firstString(it, "id") } ?: stableId(line, "sub")),
             agentId = firstString(obj, "agentId", "agent_id"),
             parentToolUseId = parent,
             subagentType = firstString(obj, "subagent_type"),
@@ -703,7 +719,25 @@ object ClaudeMessageParser {
      */
     /** The marker that ends a turn. Non-rendering; the stream reader consumes it
      *  and drops it. Every terminal exit of this parser must emit exactly one. */
-    private fun turnEnd(reason: String) = AgentMessage.TurnEnd(uuid(), reason)
+    /**
+     * The non-rendering "this line ended the turn" marker.
+     *
+     * ⚠ ITS ID MUST BE STABLE. It was `uuid()`, so every re-parse of the same
+     * `result` record — a tail-poll tick re-reading a frozen file, a reconnect
+     * re-paint, a rescue reload — appended ANOTHER end-of-turn row that
+     * `appendDeduped` could not collapse. Invisible as clutter (the row renders
+     * nothing), but anything keyed off "a new TurnEnd arrived" then fired again
+     * and again: the completion haptic buzzed at full amplitude every two seconds
+     * until the user force-stopped the app (2026-08-18).
+     *
+     * Keyed by the REASON, not the raw line: a session file holds many `result`
+     * records, and the reason is what the marker actually means. One row per
+     * reason per chat is the correct cardinality for a marker whose only job is
+     * to say "a turn ended here" — and the turn-completion consumers all read the
+     * latest state, never a count.
+     */
+    private fun turnEnd(reason: String) =
+        AgentMessage.TurnEnd("turn-end-" + stableId(reason, "te"), reason)
 
     private fun inferTopLevelType(obj: JsonObject): String? = when {
         obj.containsKey("event") || obj.containsKey("message") -> null
@@ -909,6 +943,29 @@ object ClaudeMessageParser {
         return when (subtype) {
             // just noise in the chat. Hide.
             "turn_duration" -> emptyList()
+
+            // ── The live background-task SET, never a chat row ──
+            //
+            // The CLI's own schema spells out the contract: "REPLACE semantics:
+            // swap your set for this payload".
+            //
+            // Parsed into ONE upserting row (stable id: only the newest snapshot
+            // means anything) that never renders, so the agent panel can report
+            // how many background commands the fan-out is running.
+            "background_tasks_changed" -> {
+                val entries = SilentlyTry.logged("SshAi-ClaudeParse", "read background task set") {
+                    obj["tasks"]?.jsonArray?.mapNotNull { el ->
+                        val o = el as? JsonObject ?: return@mapNotNull null
+                        val id = firstString(o, "task_id") ?: return@mapNotNull null
+                        AgentMessage.BackgroundTasks.Entry(
+                            taskId = id,
+                            taskType = firstString(o, "task_type"),
+                            description = firstString(o, "description"),
+                        )
+                    }
+                }.orEmpty()
+                listOf(AgentMessage.BackgroundTasks(id = BACKGROUND_TASKS_ID, tasks = entries))
+            }
             "api_retry" -> {
                 // CLI retries 529 / 500 / 504 / dropped connections up to 10×
                 // with exponential backoff. WITHOUT a visible signal the user
@@ -987,21 +1044,39 @@ object ClaudeMessageParser {
                 // gets the numbers and the note keeps driving the pinned
                 // background-task line.
                 //
-                // ⚠ AGENTS ONLY. `task_type` is one of local_agent /
-                // remote_agent / local_bash; a backgrounded Bash command is a
-                // task but NOT an agent and must not appear in the roster. A
-                // `task_updated` carries no type at all, so it is emitted
-                // unconditionally and the roster drops it unless that task_id
-                // was already introduced as an agent.
+                // ⚠ THE TWIN IS EMITTED FOR EVERY TASK, THE NOTE IS NOT.
+                //
+                // A task is not automatically the SESSION's task. With a fan-out
+                // running, most `task_*` traffic is the AGENTS' own background
+                // commands — the CLI keeps ONE task registry for the whole session
+                // and reports all of it on the main stream — and dumping that in
+                // the transcript is what buried the conversation.
+                //
+                // The owner is NOT on the wire: the registry entry holds
+                // `agentId` (verified in 2.1.220: `{...kw(u,"local_bash",n,i),
+                // type:"local_bash", …, agentId:s}`) but `task_started` emits
+                // only task_id · tool_use_id · description · subagent_type ·
+                // task_type · prompt · skip_transcript. So ownership is decided
+                // at DISPLAY time, where the whole message list is available:
+                // OUR OWN background command has its `tool_use` block in the
+                // main transcript, an agent's does not (those fold into
+                // SubagentActivity). See `foldTaskOwnership`.
+                //
+                // Hence: the twin always (it carries the tool_use_id that
+                // decision needs, plus the roster numbers), the note only when
+                // the CLI hasn't already told us to keep it out of the
+                // transcript. `skip_transcript` is the CLI's own instruction —
+                // it marks its INTERNAL forks (reactive compaction, memory
+                // extraction, prompt suggestion, "dream"), none of which the
+                // user asked for or can act on.
                 val taskType = firstString(obj, "task_type")
-                val isAgentTask = taskType == "local_agent" || taskType == "remote_agent" ||
-                    firstString(obj, "subagent_type") != null ||
-                    firstString(obj, "workflow_name") != null
+                val skipTranscript = SilentlyTry.logged("SshAi-ClaudeParse", "task skip_transcript") {
+                    obj["skip_transcript"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
+                } == true
+                val rows = if (skipTranscript) emptyList() else listOf(row)
                 val taskId = firstString(obj, "task_id")
-                if (taskId == null || (!isAgentTask && subtype != "task_updated" &&
-                        subtype != "task_notification")
-                ) {
-                    listOf(row)
+                if (taskId == null) {
+                    rows
                 } else {
                     val usage = SilentlyTry.logged("SshAi-ClaudeParse", "task usage") {
                         obj["usage"]?.jsonObject
@@ -1011,13 +1086,26 @@ object ClaudeMessageParser {
                             it[key]?.jsonPrimitive?.content?.toLongOrNull()
                         }
                     }
-                    listOf(
-                        row,
+                    rows + listOf(
                         AgentMessage.SubagentActivity(
-                            id = uuid(),
+                            // ⚠ ONE ROW PER (task, subtype), NOT PER EVENT. With
+                            // `uuid()` this appended forever: a 20-agent fan-out
+                            // ticking `task_progress` grew the history by a row
+                            // per tick per task, and every append re-ran the
+                            // whole O(n) display/roster/board pipeline eagerly on
+                            // the Main thread — plus it inflated the home "N new"
+                            // badge, which counts raw history size.
+                            //
+                            // Per-subtype rather than per-task because the twins
+                            // are not interchangeable: `task_started` is the only
+                            // one carrying `tool_use_id`, which is what decides
+                            // whose task it is, so a `task_updated` must not
+                            // replace it. Four rows per task, bounded.
+                            id = "subagent-task-$taskId-$subtype",
                             agentId = null,
                             parentToolUseId = firstString(obj, "tool_use_id"),
                             taskId = taskId,
+                            taskType = taskType,
                             subagentType = firstString(obj, "subagent_type"),
                             task = firstString(obj, "description")
                                 ?: patch?.let { firstString(it, "description") },

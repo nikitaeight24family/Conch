@@ -1,7 +1,5 @@
 Nouveautés
-• Fenêtre flottante refaite : statut en direct (minuteur, jetons, agents, file) au lieu d'une vieille réponse. Elle ne s'ouvre que si quelque chose tourne, et le bouton d'arrêt trop facile à toucher a disparu.
-• « + nouveau chat » ouvre toujours un nouveau chat.
-• L'en-tête affiche le modèle du chat, pas celui d'un sous-agent.
-• Panneau agents : statut, modèle, jetons, outils, durée.
-• La file part à la fin du tour, Stop inclus.
-• Une entrée dans les récents. Triple vibration.
+• Corrigé : une vibration qui pouvait durer sans fin jusqu'à ce qu'on force l'arrêt de l'app, et une autre qui se déclenchait à l'envoi alors que la réponse arrivait encore.
+• Les tâches d'arrière-plan des agents n'inondent plus le chat : elles sont comptées avec les agents. La conversation ne garde que les siennes.
+• Un message en file ne peut plus être perdu si la session derrière était morte.
+• « + nouveau chat » ouvre un nouveau chat même au changement d'agent.

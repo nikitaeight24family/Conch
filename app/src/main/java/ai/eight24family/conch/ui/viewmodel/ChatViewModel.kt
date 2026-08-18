@@ -560,7 +560,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // warnings are matched ONLY on their own non-conversation types
         // (EventNote/Error), and the one annotation that DOES arrive as a bubble
         // (Claude's image coordinate hint) is matched by its EXACT shape, which no
-        // real message has.
+        // real message has. Which background-task notes are THIS SESSION's, and
+        // which belong to the agents. Computed once over the raw list — see
+        // `foldTaskOwnership` for why the owner has to be inferred rather than read
+        // off the wire.
+        val ownership = ai.eight24family.conch.agent.foldTaskOwnership(raw)
         val deNoised = raw.filterNot { m ->
             when (m) {
                 is AgentMessage.AssistantText -> {
@@ -579,7 +583,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // warning. Matched on the note/error types, never on conversation.
                 is AgentMessage.EventNote ->
                     m.label.contains("bubblewrap", ignoreCase = true) ||
-                        m.label.contains("permissions.allow entries", ignoreCase = true)
+                        m.label.contains("permissions.allow entries", ignoreCase = true) ||
+                        // ── AGENTS' TASKS BELONG TO THE AGENTS ── A fan-out's
+                        // background commands come down the SAME stream as the
+                        // session's own (one task registry per session) and used
+                        // to be rendered identically, so the conversation
+                        // drowned in `task · completed · Background command "…"`
+                        // rows the user had no reason to read. Keep the note
+                        // only for a task this session itself started; the rest
+                        // are accounted for in the agent panel.
+                        (m.id.startsWith("sysevt-task-") && m.id !in ownership.ownTaskNoteIds)
                 is AgentMessage.Error ->
                     m.text.contains("bubblewrap", ignoreCase = true) ||
                         m.text.contains("permissions.allow entries", ignoreCase = true)
@@ -589,6 +602,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // applied between items, so a fan-out injected a run of blank gaps
                 // into the conversation.
                 is AgentMessage.SubagentActivity -> true
+                // The CLI's background-task SET (REPLACE semantics, fires on
+                // every change). Drives the agent panel's count; never a row.
+                is AgentMessage.BackgroundTasks -> true
                 else -> false
             }
         }
@@ -613,6 +629,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 if (id == null) emptyList() else byId[id].orEmpty(),
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Background commands the AGENTS are running right now.
+     *
+     * This is where the task rows that used to flood the transcript went. They
+     * are the agents' work, so they are reported with the agents — one number in
+     * the roster header, not one chat row per event per task.
+     */
+    val agentBackgroundTasks: StateFlow<Int> =
+        combine(_localSessionId, _messagesBySession) { id, byId ->
+            ai.eight24family.conch.agent.foldTaskOwnership(
+                if (id == null) emptyList() else byId[id].orEmpty(),
+            ).agentTaskCount
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     /** A live background WORKFLOW row (the ultracode `Workflow` tool). The
      *  CLI shows «name · N/M agents done · elapsed»; those live counts live in
@@ -681,9 +711,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val liveBgTasks: StateFlow<List<String>> =
         combine(_localSessionId, _messagesBySession) { id, byId ->
             val msgs = if (id == null) emptyList() else byId[id].orEmpty()
+            // OUR OWN tasks only. This line exists to explain why a turn looks
+            // dead — "the CLI is asleep waiting on the task it started". An
+            // AGENT's background command explains nothing about the main turn,
+            // and with a fan-out running it would pin a dozen of them.
+            val own = ai.eight24family.conch.agent.foldTaskOwnership(msgs).ownTaskNoteIds
             val lastByTask = LinkedHashMap<String, String>()
             for (m in msgs) {
-                if (m is AgentMessage.EventNote && m.id.startsWith("sysevt-task-")) {
+                if (m is AgentMessage.EventNote && m.id.startsWith("sysevt-task-") &&
+                    m.id in own
+                ) {
                     lastByTask[m.id] = m.label
                 }
             }
@@ -1379,10 +1416,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 if (_outbox.value.isEmpty()) return@collect
                 val sid = _localSessionId.value ?: return@collect
                 val s = activeSessions[sid] ?: return@collect
-                // Only drain into an idle session — a running turn already has
-                // drainOutbox wired to its completion, and draining twice would
-                // send the same message on both paths.
-                if (_stateBySession.value[sid] !is SessionState.Working) {
+                // Only drain into an idle session that is actually UP — a running
+                // turn already has drainOutbox wired to its completion (draining
+                // twice would send the same message on both paths), and a session
+                // that is `Failed` / bootstrapping is not a place a message can
+                // go. This guard used to read only "not Working", so `Failed`
+                // passed it and the queue was drained into a corpse. Same rule as
+                // `shouldReleaseQueue`; drainOutbox refuses a dead scope too.
+                if (shouldReleaseQueue(
+                        hasQueue = true,
+                        working = _stateBySession.value[sid] is SessionState.Working,
+                        drainerBusy = s.drainerBusy,
+                        mirroredTurnOpen = tailPollCoord.remoteFileOpen.value,
+                        sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                    )
+                ) {
                     android.util.Log.i(
                         "SshAi-Turn",
                         "network back — draining ${_outbox.value.size} queued message(s)",
@@ -1425,6 +1473,34 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * same batch twice — the first to run claims and empties the queue, the
      * second sees it empty. */
     private fun drainOutbox(s: AgentSession) {
+        // ⛔ NEVER CLAIM A MESSAGE A DEAD SESSION CANNOT SEND.
+        //
+        // This method DESTROYS the only copies of the user's text: it empties
+        // `_outbox` (which `observeOutboxForPersistence` then mirrors as an empty
+        // list into prefs) and deletes each row's crash-insurance draft, on the
+        // strength of `s.send()` being about to deliver it. If the session's
+        // scope is cancelled, `send` swallows the prompt in silence — no bubble,
+        // no row, no error, and nothing left on disk to recover from. Three
+        // copies gone in one breath, unrecoverably (2026-08-18 audit).
+        //
+        // A session in that state is routine, not exotic: `start()`'s catch
+        // closes the session (cancelling its scope) on a missing agent binary or
+        // a handshake failure, `openOrGet` hands the object back anyway, and the
+        // ViewModel caches it. `Failed` then passes the edge-drains' only guard
+        // ("not Working"), and the very next network-validated event drains into
+        // the corpse.
+        //
+        // So the queue KEEPS the rows. They stay visible with their ✕, exactly
+        // as the queue promises, and the reconnect ladder or the idle release
+        // will hand them to a session that can actually take them.
+        if (!s.canAcceptSend()) {
+            android.util.Log.w(
+                "SshAi-Turn",
+                "drain refused: session can't accept a send (dead scope) — " +
+                    "${_outbox.value.size} queued message(s) stay in the queue",
+            )
+            return
+        }
         var claimed: List<QueuedMessage> = emptyList()
         _outbox.update { lst ->
             claimed = lst
@@ -1708,7 +1784,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * [ChatViewModelHaptics].
      */
     private val hapticsCoord by lazy {
-        ChatViewModelHaptics(viewModelScope, ServiceLocator.haptics).also {
+        ChatViewModelHaptics(viewModelScope, ServiceLocator.haptics::perform).also {
             it.install(
                 messages = messages,
                 state = state,
@@ -2213,7 +2289,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          * brand-new session is precisely the bug: it re-opens the chat the user
          * just left instead of a fresh one, and if that one was wedged
          * mid-bootstrap the new chat inherits the hang. See
-         * [ai.eight24family.conch.agent.AgentSessionManager.reapBrandNewOrphans].
+         * [ai.eight24family.conch.agent.AgentSessionManager.closeIfBrandNew].
          */
         adoptExisting: Boolean = true,
     ) {
@@ -2413,7 +2489,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // `_history` holds the pending UserText the user typed.
             // ⚠ Reuse path 2 is REFUSED for a user-initiated new chat, and the
             // orphan it would have adopted is reaped instead — see
-            // `reapBrandNewOrphans` for why adopting it handed the user back the
+            // `closeIfBrandNew` for why adopting it handed the user back the
             // previous chat (and, when that one was wedged, an unkillable hang).
             val existingAlive = when {
                 resumeIdParam != null -> sessionsManager.findByResume(serverId, agent, resumeIdParam)
@@ -4117,8 +4193,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // until the turn is genuinely over (2026-08-17).
                     val sid = _localSessionId.value
                     val sess = sid?.let { activeSessions[it] }
-                    if (sess != null && _outbox.value.isNotEmpty() &&
-                        _stateBySession.value[sid] !is SessionState.Working
+                    // Same rule as every other release: idle AND up. "Not
+                    // Working" alone let a `Failed` session claim the queue.
+                    if (sess != null && shouldReleaseQueue(
+                            hasQueue = _outbox.value.isNotEmpty(),
+                            working = _stateBySession.value[sid] is SessionState.Working,
+                            drainerBusy = sess.drainerBusy,
+                            // This IS the mirrored turn-end edge — the flag has
+                            // just gone false, so it must not gate itself.
+                            mirroredTurnOpen = false,
+                            sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                        )
                     ) {
                         drainOutbox(sess)
                     }
@@ -4505,7 +4590,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // into the Codex topbar because availableModels / defaultModel weren't
             // being cleared on agent switch.
             modelsCoord.resetOnAgentSwitch()
-            startNewChat(newAgent)
+            // Switching agent IS starting a new conversation, so it gets both
+            // halves of the new-chat rule: never adopt the previous brand-new
+            // orphan, and close the slot being abandoned. Without this the
+            // CLAUDE→CODEX→CLAUDE round trip handed back the wedged Claude chat
+            // it had left behind — and left its `claude --print`, SSH channel and
+            // pool reference running in between, i.e. it MANUFACTURED the orphan
+            // it then adopted.
+            startNewChat(newAgent, adoptExisting = false)
             refreshSessions()
         }
     }
@@ -4532,7 +4624,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (!session.reasoning.isNullOrBlank()) {
             modelsCoord.setSessionInitialReasoning(session.reasoning)
         }
-        startNewChat(_currentAgent.value, resumeIdParam = session.id, resumeFilePath = session.path)
+        // Another conversation, so the brand-new slot we are leaving is closed
+        // rather than abandoned (tapping a session from inside an unused new chat
+        // used to leak it). Adoption is unaffected: with a resume id the lookup is
+        // `findByResume`, which is exactly what should happen here.
+        startNewChat(
+            _currentAgent.value,
+            resumeIdParam = session.id,
+            resumeFilePath = session.path,
+            adoptExisting = false,
+        )
     }
 
     /** Start a fresh CLI session, no --resume. */

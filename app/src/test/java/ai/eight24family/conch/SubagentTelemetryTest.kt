@@ -158,13 +158,20 @@ class SubagentTelemetryTest {
     }
 
     @Test
-    fun `a background bash task is not an agent`() {
+    fun `a background bash task is tagged as one and never becomes an agent`() {
+        // The twin IS emitted for a local_bash task — the display layer needs its
+        // tool_use_id to work out whose task it is (see TaskOwnershipTest) — but
+        // it carries the type, and the ROSTER is where that type is enforced.
+        // Getting this wrong grows a phantom agent row per shell command a
+        // fan-out runs.
         val out = parse(bashTaskStarted)
-        assertTrue(
-            "local_bash belongs to the task board, not the agent roster: $out",
-            out.none { it is AgentMessage.SubagentActivity },
-        )
+        val twin = out.filterIsInstance<AgentMessage.SubagentActivity>().single()
+        assertEquals("local_bash", twin.taskType)
         assertTrue(out.any { it is AgentMessage.EventNote })
+        assertTrue(
+            "local_bash must not reach the roster",
+            ai.eight24family.conch.agent.foldSubagents(out).isEmpty(),
+        )
     }
 
     @Test

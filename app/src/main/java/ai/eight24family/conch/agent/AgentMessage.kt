@@ -109,6 +109,15 @@ sealed interface AgentMessage {
          * land a completion on the right row.
          */
         val taskId: String? = null,
+        /**
+         * The CLI's `task_type`: `local_agent` · `remote_agent` · `local_bash`.
+         *
+         * ⚠ A `local_bash` task is a BACKGROUND COMMAND, not an agent — and the
+         * roster must skip it or a fan-out's shell commands each grow a phantom
+         * agent row. It is still carried here (not dropped at parse time)
+         * because the display layer needs it to decide whose task it is.
+         */
+        val taskType: String? = null,
         val subagentType: String? = null,
         val task: String? = null,
         /**
@@ -158,6 +167,32 @@ sealed interface AgentMessage {
          */
         val text: String? = null,
     ) : AgentMessage
+
+    /**
+     * The CLI's authoritative snapshot of every background task running RIGHT
+     * NOW (`system.background_tasks_changed`).
+     *
+     * ⚠ REPLACE semantics — the CLI's own schema says so verbatim: "swap your
+     * set for this payload". So this row carries a STABLE id and upserts; only
+     * the latest snapshot means anything, and a task that has dropped out of the
+     * list is finished. That is also why it must never be a chat row: it fires
+     * on every change, and rendering each one buried the conversation under a
+     * run of identical "background tasks changed" lines while twenty agents ran.
+     *
+     * NEVER rendered. It exists so the agent panel can say how many background
+     * commands the fan-out is running.
+     */
+    data class BackgroundTasks(
+        override val id: String,
+        val tasks: List<Entry>,
+    ) : AgentMessage {
+        data class Entry(
+            val taskId: String,
+            /** `local_agent` · `remote_agent` · `local_bash`. */
+            val taskType: String?,
+            val description: String?,
+        )
+    }
 
     /** Agent invoked a tool. Input is opaque JSON serialized to string. */
     data class ToolUse(

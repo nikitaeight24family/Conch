@@ -210,8 +210,29 @@ class AgentSessionManager(
         it.isAlive() && (it.state.value == SessionState.Working || it.drainerBusy)
     }
 
-    /** True when any session has a turn in flight — see [findWorkingSession]. */
-    fun anyTurnInFlight(): Boolean = findWorkingSession() != null
+    /**
+     * Work worth keeping the Activity alive for, which is a WIDER question than
+     * [findWorkingSession].
+     *
+     * Picture-in-Picture is not decorative: it keeps this process resumed, which
+     * is what lets an in-flight handshake, a security-key touch, an upload or a
+     * download over the SSH channel survive the user swiping home. Gating PiP on
+     * "a turn is generating" alone dropped every one of those — and the gap
+     * between pressing send and the state actually flipping to `Working`.
+     *
+     * `Bootstrapping` is included for exactly that reason and costs nothing in
+     * the "window about nothing" direction it replaced: it is a transient state
+     * measured in seconds, not the permanent "a session object exists" that used
+     * to open PiP on every swipe home for the life of the process.
+     */
+    fun anyWorkWorthFloating(): Boolean = sessions.values.any {
+        it.isAlive() && (
+            it.state.value == SessionState.Working ||
+                it.state.value is SessionState.Bootstrapping ||
+                it.drainerBusy
+            )
+    }
+
 
     /**
      * Find an alive session that's already attached to the given CLI-side
@@ -340,7 +361,16 @@ class AgentSessionManager(
         val k = key(serverId, agent, chatId)
         val s = sessions[k] ?: return false
         if (s.agentSessionId != null) return false
-        if (s.state.value == SessionState.Working) return false
+        // ⚠ `Working` ALONE IS NOT ENOUGH. Our own turn tracking can desync off
+        // Working while a turn is provably still in flight — `reconcileStuckTurn`
+        // forces Working→Running when the reader wedges, and a brand-new chat
+        // whose `system.init` was missed never gets an id either. Both at once is
+        // exactly this method's input: it would then cancel the drainer, close the
+        // channel and kill the user's first turn, with the prompt recoverable from
+        // nowhere (it is already past `pendingRedelivery` and `consumeUndelivered`).
+        // `drainerBusy` stays true for the whole of a turn we launched, which is
+        // the same test `findWorkingSession` uses for "is anything running".
+        if (s.state.value == SessionState.Working || s.drainerBusy) return false
         sessions.remove(k)?.close()
         android.util.Log.d(
             "SshAi-AgentMgr",

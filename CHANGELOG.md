@@ -11,6 +11,36 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.6] — 2026-08-18
+
+### Fixed
+- The completion vibration could repeat at full amplitude every couple of seconds
+  until the app was force-stopped: it was keyed off the arrival of an
+  end-of-turn row, whose id was random, so every re-parse of the same record
+  looked like a new turn ending. Ids are content-stable now, and the buzz is
+  capped at once per turn by state.
+- The same vibration fired the instant you pressed send while the reply was still
+  coming — "working" is an OR of two signals that hand off to each other, and its
+  falling edge is a handoff gap, not an ending. It now waits for the state to
+  settle, and fires at once on the CLI's own end-of-turn record.
+- The agents' background tasks no longer fill the transcript. The CLI reports its
+  one session-wide task registry on the main stream, so a fan-out's shell commands
+  arrived looking exactly like the session's own; the chat now keeps only its own
+  task rows and the agents' are counted with the agents. The
+  `background_tasks_changed` snapshot — which fires on every change — is no longer
+  a chat row at all.
+- A queued message could be destroyed by being released into a session that had
+  already died: all three copies were dropped while the send was silently
+  swallowed. A drain now refuses a session that cannot accept it.
+- "+ new chat" opens a new chat when switching agent too, and no longer leaves the
+  abandoned brand-new session running with its CLI process and SSH channel.
+- A background shell command can no longer create an agent row in the panel, and
+  an agent's tokens can no longer be counted twice when the same turn arrives on
+  both the live stream and the file mirror.
+- Picture-in-Picture opens for a connecting session or an in-flight transfer as
+  well, not only a generating turn.
+- Subagent text is searchable from inside the chat again.
+
 ## [0.3.5] — 2026-08-18
 
 ### Added
@@ -1040,6 +1070,7 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.6
 [0.3.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.5
 [0.3.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.4
 [0.3.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.3

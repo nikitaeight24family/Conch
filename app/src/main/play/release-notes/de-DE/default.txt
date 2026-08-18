@@ -1,7 +1,5 @@
 Neu
-• Schwebendes Fenster neu gebaut: Live-Status (Timer, Tokens, Agenten, Warteschlange) statt einer alten Antwort. Es öffnet nur, wenn etwas läuft; der leicht falsch getroffene Stopp-Knopf ist weg.
-• „+ neuer Chat" öffnet immer einen neuen Chat.
-• Kopfzeile zeigt das Modell des Chats, nicht das eines Subagenten.
-• Agenten-Panel: Status, Modell, Tokens, Tools, Laufzeit.
-• Wartende Nachrichten gehen am Turn-Ende raus, auch nach Stopp.
-• Ein Eintrag in „Zuletzt". Dreifaches Vibrieren.
+• Behoben: ein Vibrieren, das ohne Ende weiterlief, bis man die App abwürgte, und eines, das beim Senden auslöste, während die Antwort noch lief.
+• Die Hintergrund-Tasks der Agenten überfluten den Chat nicht mehr — sie werden bei den Agenten gezählt. Im Verlauf bleiben nur seine eigenen.
+• Eine wartende Nachricht kann nicht mehr verloren gehen, wenn die Sitzung dahinter gestorben war.
+• „+ neuer Chat" öffnet auch beim Agentenwechsel einen neuen Chat.

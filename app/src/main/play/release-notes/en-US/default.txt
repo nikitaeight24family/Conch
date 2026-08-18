@@ -1,7 +1,5 @@
 What's new
-• Floating window rebuilt: live status (timer, tokens, agents, queue) instead of an old reply. It opens only while something is running, and the stop button that was easy to mis-tap is gone.
-• "+ new chat" always opens a new chat.
-• The top bar shows the chat's model, not a subagent's.
-• Agents panel: status, model, tokens, tools and runtime per agent.
-• Queued messages always send when a turn ends, Stop included.
-• One entry in recents. Triple buzz on a reply.
+• Fixed a vibration that could buzz on and on until you force-stopped the app, and one that fired the moment you pressed send while the answer was still coming.
+• The agents' own background tasks no longer flood the chat — they are counted with the agents. Task rows in the conversation are now only its own.
+• A queued message can no longer be lost when the session behind it had died.
+• "+ new chat" opens a new chat from the agent switcher too.

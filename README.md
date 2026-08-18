@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.5-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.6-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.5
+conch ▌ v0.3.6
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -48,6 +48,35 @@ conch ▌ v0.3.5
   signed build, your choice.
 
 ---
+
+## What's new in 0.3.6
+
+**A vibration that would not stop.** The "answer finished" buzz could repeat at
+full amplitude every couple of seconds until the app was force-stopped, and it
+also fired the moment you pressed send while the reply was still coming. Both
+came from the same mistake — treating "a row arrived" and "the working flag
+dipped" as an answer landing — and both are gone: the buzz is capped at once per
+turn, it waits for the state to settle, and the row it keys off can no longer be
+mistaken for a new one.
+
+**The agents' tasks belong to the agents.** With a fan-out running, the CLI
+reports every background command from its one session-wide task registry on the
+main stream, so the conversation filled with `task · completed · Background
+command "…"` rows plus a "background tasks changed" line on every change. The
+transcript now keeps only its OWN task rows; the agents' are counted with the
+agents.
+
+**A queued message cannot be lost.** Releasing the queue into a session that had
+already died destroyed all three copies of the text — the queue, its saved
+mirror, and the crash-insurance draft — while the send itself was silently
+swallowed. A drain now refuses a session that cannot take it, and the rows stay
+in the queue with their ✕.
+
+**Fixes.** "+ new chat" opens a new chat from the agent switcher too (and no
+longer leaves the abandoned one running). Agent rows can no longer be created by a
+shell command, nor double-count their tokens. The floating window opens for a
+connecting session and an in-flight upload as well, not only a generating turn.
+Subagent text is searchable from the chat again.
 
 ## What's new in 0.3.5
 
