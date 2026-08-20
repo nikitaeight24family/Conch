@@ -1,4 +1,3 @@
 What's new
-• Stop is absolute. It halts the turn instantly — running on the server, started by this phone earlier, or with the link just dropped — and a Stop pressed offline lands once the server is reachable. Queued messages still go out after it.
-• Fixed a vibration that could buzz until you force-quit the app, and one that fired the instant you pressed send.
-• Sign-in fixed: submit always answers, the code is read from the clipboard, and a finished sign-in is recognised.
+• The limit indicator counts only the limits your chat is actually subject to. Another model's weekly cap no longer reads as 100% while your own window is still almost empty.
+• When a different limit is the one near the wall, the bar names it — "Weekly 92%" instead of a bare 92%.

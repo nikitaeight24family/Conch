@@ -11,6 +11,20 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.8] — 2026-08-20
+
+### Fixed
+- The collapsed limit indicator could read 100% off a limit that cannot block
+  the chat you are in: a per-model weekly cap belonging to a model the session
+  is not running. Per-model caps are now weighed only against the model actually
+  in force, the bar rests on the soonest-rolling aggregate window (the 5-hour
+  one), and it leaves that window only for a limit at 0.90+ utilisation — which
+  it then names ("Weekly 100%"), since an unnamed 100% reads as the whole plan
+  being gone. Model identity is matched on family, so an id, an alias and a
+  display label are the same model.
+
+---
+
 ## [0.3.7] — 2026-08-20
 
 ### Added
@@ -1109,6 +1123,7 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.8
 [0.3.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.7
 [0.3.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.6
 [0.3.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.5

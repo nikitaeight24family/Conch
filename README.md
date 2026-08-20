@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.7-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.8-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.7
+conch ▌ v0.3.8
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,19 @@ conch ▌ v0.3.7
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.3.8
+
+**The limit bar answers for the chat you are in.** 0.3.7 taught it to show the
+window that actually constrains the account rather than always the 5-hour one —
+and then it over-corrected: a chat on one model could read a flat **100%**
+because a *different* model's weekly cap was spent, a wall that cannot stop a
+single turn of the model you are on. Per-model caps now count only for their own
+model, the bar rests on your 5-hour window, and it steps off that window only
+when another limit is genuinely at the wall — where it also says **which** one,
+because a bare "100%" that happens to mean "weekly" reads as "all of it is gone".
 
 ---
 

@@ -1,4 +1,3 @@
 Novedades
-• Detener es absoluto: el turno se corta al instante, ya se ejecute en el servidor, lo iniciara antes este teléfono o se acabara de caer la conexión. Un Detener pulsado sin conexión se aplica en cuanto el servidor vuelve. Los mensajes en cola siguen saliendo después.
-• Corregida una vibración que podía sonar hasta forzar el cierre, y otra al pulsar enviar.
-• Inicio de sesión arreglado: enviar siempre responde y el código se toma del portapapeles.
+• El indicador de límite solo cuenta los límites a los que tu chat está realmente sujeto. El tope semanal de otro modelo ya no se lee como 100% mientras tu propia ventana sigue casi vacía.
+• Cuando el límite al borde es otro, la barra lo nombra: «Weekly 92%» en lugar de un 92% a secas.

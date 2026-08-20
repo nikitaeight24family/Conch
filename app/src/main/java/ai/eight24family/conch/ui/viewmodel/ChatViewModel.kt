@@ -3844,11 +3844,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
     }
 
+    /** The two CLI-refusal signals as one flow, so [usageBar] can also take the
+     *  model in force and still fit `combine`'s five-arg form. */
+    private val cliLimitState = combine(_cliLimitReset, _cliLimitHit) { reset, hit -> reset to hit }
+
+    /**
+     * The model this chat is ACTUALLY subject to — the live `message.model` of
+     * the last assistant turn, else the user's explicit pick. Feeds the usage
+     * bar so a per-model cap is only ever shown to the model it binds: on
+     * 2026-08-20 an Opus 5 chat read a flat 100% because Fable's weekly cap was
+     * spent, a wall that could not stop a single Opus turn.
+     */
+    private val inForceModel = combine(
+        modelsCoord.observedModel, modelsCoord.selectedModel,
+    ) { observed, picked ->
+        observed?.takeIf { it.isNotBlank() } ?: picked?.takeIf { it.isNotBlank() }
+    }
+
     val usageBar: StateFlow<UsageBarState> = combine(
-        _usage, costStats, _cliLimitReset, _cliLimitHit, usageTicker,
-    ) { report, cost, cliReset, cliHit, _ ->
+        _usage, costStats, cliLimitState, inForceModel, usageTicker,
+    ) { report, cost, cliLimit, inForce, _ ->
+        val (cliReset, cliHit) = cliLimit
         val now = System.currentTimeMillis()
-        val primary = report?.primary
+        // The window this session is subject to — NOT simply the most-used one
+        // on the account (see UsageReport.barPick).
+        val pick = report?.barPick(inForce)
+        val primary = pick?.window
         // Authoritative CLI reset: when the account is rate-limited and the
         // server-side probe can't read the reset (inference-only token 403s the
         // usage endpoint), honour the reset the CLI printed ("resets 8:30pm").
@@ -3859,7 +3880,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // limit the CLI hit 10 minutes ago. Live/curl reports (fetchedAt null)
         // are fresh by construction and keep clearing it.
         val probeSaysClear = primary != null && primary.percent < 100 &&
-            report?.fetchedAtEpochMs == null
+            report.fetchedAtEpochMs == null
         if (cliReset != null && cliReset > now && !probeSaysClear) {
             // Rate-limited: show the reset as a LOCAL clock time ("resets 10:30 AM")
             // in the user's own zone — not the CLI's foreign-zone "8:30pm".
@@ -3883,9 +3904,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val reset =
                     if (primary.percent >= 100) primary.resetAtEpochMs?.let { ai.eight24family.conch.agent.usageResetClock(it) }.orEmpty()
                     else primary.resetTextLive(now)
+                // An escalated window is NAMED: a bare "100%" that actually
+                // means "weekly" (or another model's cap) reads as "everything
+                // is gone" — which is the misread being fixed here.
+                val name = if (pick.escalated) primary.shortName + " " else ""
                 UsageBarState(
                     fill = primary.fraction,
-                    label = "${primary.percent}%" + if (reset.isNotEmpty()) " · $reset" else "",
+                    label = name + "${primary.percent}%" + if (reset.isNotEmpty()) " · $reset" else "",
                     filled = true,
                     severity = primary.usedFraction,
                 )

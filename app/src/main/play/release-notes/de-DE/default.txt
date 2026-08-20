@@ -1,4 +1,3 @@
-Neu
-• Stopp ist absolut: der Turn bricht sofort ab — egal ob er auf dem Server läuft, früher von diesem Handy gestartet wurde oder die Verbindung gerade abriss. Ein Stopp ohne Verbindung greift, sobald der Server wieder erreichbar ist. Wartende Nachrichten gehen danach weiterhin raus.
-• Behoben: ein Vibrieren, das bis zum Abwürgen der App weiterlief, und eines beim Senden.
-• Anmeldung repariert: Senden antwortet immer, der Code wird zuverlässig aus der Zwischenablage übernommen.
+Was ist neu
+• Die Limit-Anzeige zählt nur noch Limits, denen dieser Chat wirklich unterliegt. Das Wochenlimit eines anderen Modells liest sich nicht mehr als 100%, während das eigene Fenster fast leer ist.
+• Ist ein anderes Limit dasjenige an der Wand, nennt der Balken es — „Weekly 92%“ statt eines nackten 92%.

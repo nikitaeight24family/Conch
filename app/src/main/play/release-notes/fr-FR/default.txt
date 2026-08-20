@@ -1,4 +1,3 @@
 Nouveautés
-• Stop est absolu : le tour s'arrête aussitôt, qu'il tourne sur le serveur, ait été lancé plus tôt par ce téléphone ou que la connexion vienne de tomber. Un Stop appuyé sans connexion s'applique dès que le serveur revient. Les messages en file partent toujours ensuite.
-• Corrigé : une vibration qui durait jusqu'à l'arrêt forcé de l'app, et une autre à l'envoi.
-• Connexion réparée : le bouton répond toujours, le code est repris du presse-papiers.
+• L'indicateur de limite ne compte plus que les limites auxquelles votre conversation est réellement soumise. Le plafond hebdomadaire d'un autre modèle ne se lit plus comme 100% alors que votre propre fenêtre est presque vide.
+• Quand c'est une autre limite qui touche au mur, la barre la nomme : « Weekly 92% » au lieu d'un simple 92%.

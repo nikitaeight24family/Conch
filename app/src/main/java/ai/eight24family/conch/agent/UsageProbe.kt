@@ -44,6 +44,21 @@ data class UsageWindow(
         val at = resetAtEpochMs ?: return resetText
         return usageCountdownText((at - nowMs) / 1000)
     }
+
+    /** The model family a per-model window is scoped to, read back off the label
+     *  every producer builds it with — `"Fable · weekly"` / `"Opus · 5-hour"` /
+     *  the bare `"Fable"` of `model_scoped` all yield the family. Null for an
+     *  aggregate, which is scoped to no single model. */
+    val modelFamily: String? get() =
+        if (perModel) label.substringBefore(" · ").trim().takeIf { it.isNotEmpty() } else null
+
+    /** Compact name for the collapsed bar, used only when the drawn window is
+     *  NOT the working one and therefore has to say which wall it describes:
+     *  "Weekly · all models" → "Weekly", "Fable · weekly" → "Fable weekly". */
+    val shortName: String get() = label
+        .removeSuffix(" · all models")
+        .removeSuffix(" limit")
+        .replace(" · ", " ")
 }
 
 /** The reset moment as an absolute clock time IN THE DEVICE'S OWN TIMEZONE
@@ -146,11 +161,96 @@ data class UsageReport(
      * aggregate window over a per-model one (it describes the whole account),
      * then to the one that resets soonest.
      */
-    val primary: UsageWindow? get() = windows.maxWithOrNull(
-        compareBy<UsageWindow> { it.usedFraction }
-            .thenBy { if (it.perModel) 0 else 1 }
-            .thenByDescending { it.resetAtEpochMs ?: Long.MAX_VALUE },
-    )
+    val primary: UsageWindow? get() = windows.maxWithOrNull(BINDING_ORDER)
+
+    /** The windows that can constrain a session running [inForceModel] — every
+     *  aggregate, plus only the per-model caps of that model's own family. */
+    fun windowsInForce(inForceModel: String?): List<UsageWindow> =
+        windows.filter { it.appliesTo(inForceModel) }
+
+    /**
+     * What the COLLAPSED bar shows for a session running [inForceModel] — and
+     * whether that is the working window or an escalation.
+     *
+     * [primary] alone is the wrong answer here, and the user caught it on
+     * 2026-08-20: an **Opus 5** chat showed a flat `100%` bar because the
+     * account's **Fable weekly** cap was spent. Fable's cap cannot block an Opus
+     * turn, so the bar was reporting a wall that was not in front of him — the
+     * mirror image of the 2026-08-19 bug that [primary] was introduced to fix.
+     *
+     * Both failures die under one rule: show the window this session is
+     * ACTUALLY subject to.
+     *  - anchor = the aggregate window that rolls over soonest (the 5-hour on
+     *    both Claude and Codex). That is the number the user watches, so it is
+     *    where the bar rests.
+     *  - escalate to the most-used eligible window once it is genuinely near the
+     *    wall ([USAGE_ESCALATE_FRACTION] — the bar's own red tier): that is the
+     *    08-19 case, and [UsageBarPick.escalated] tells the UI to NAME it,
+     *    because a bare "100%" that actually means "weekly" reads as "all of it
+     *    is gone".
+     *  - per-model caps of other families never enter either choice.
+     *
+     * Unknown model (null/blank) keeps every window eligible: with nothing to
+     * attribute against, a hidden block is worse than a named surprise.
+     */
+    fun barPick(inForceModel: String? = null): UsageBarPick? {
+        val eligible = windowsInForce(inForceModel)
+            .ifEmpty { return primary?.let { UsageBarPick(it, escalated = true) } }
+        val worst = eligible.maxWithOrNull(BINDING_ORDER) ?: return null
+        // Nearest reset = the shortest cadence, without having to recognise any
+        // label ("5-hour · all models" on Claude, "5-hour limit" on Codex). Ties
+        // and missing resets keep list order, where the 5-hour window is first.
+        val anchor = eligible.filterNot { it.perModel }
+            .minByOrNull { it.resetAtEpochMs ?: Long.MAX_VALUE }
+            ?: return UsageBarPick(worst, escalated = true)
+        return if (worst !== anchor && worst.usedFraction >= USAGE_ESCALATE_FRACTION &&
+            worst.usedFraction > anchor.usedFraction
+        ) {
+            UsageBarPick(worst, escalated = true)
+        } else {
+            UsageBarPick(anchor, escalated = false)
+        }
+    }
+}
+
+/** [UsageReport.barPick] result: the window to draw, plus whether it has to be
+ *  NAMED because it is not the working window the bar normally rests on. */
+data class UsageBarPick(val window: UsageWindow, val escalated: Boolean)
+
+/** Ranking used to find the window that binds: most genuinely CONSUMED first —
+ *  never `fraction`/`percent`, which Codex inverts to "remaining". Ties go to
+ *  the aggregate over a per-model window (it describes the whole account), then
+ *  to the one that resets soonest. */
+private val BINDING_ORDER = compareBy<UsageWindow> { it.usedFraction }
+    .thenBy { if (it.perModel) 0 else 1 }
+    .thenByDescending { it.resetAtEpochMs ?: Long.MAX_VALUE }
+
+/** Where a window stops being background detail and takes the collapsed bar
+ *  over from the 5-hour anchor. The same 0.90 the bar already turns red at, so
+ *  the number and the colour escalate together. */
+const val USAGE_ESCALATE_FRACTION = 0.90f
+
+/** Family words in a model id / alias / display label: `claude-opus-5`,
+ *  `Opus 5 1M` and `opus` all reduce to `{opus}`. Vendor prefix and version
+ *  noise drop out, so any two spellings of one model compare equal. */
+internal fun modelFamilyTokens(s: String): Set<String> =
+    Regex("[a-z]{3,}").findAll(s.lowercase())
+        .map { it.value }
+        .filterNot { it in NON_FAMILY_WORDS }
+        .toSet()
+
+private val NON_FAMILY_WORDS = setOf("claude", "latest", "weekly", "hour", "all", "models")
+
+/** Does this window's cap apply to a session running [inForceModel]?
+ *  Aggregates always do. A per-model cap applies to its own family only —
+ *  Fable's weekly says nothing about an Opus turn. */
+fun UsageWindow.appliesTo(inForceModel: String?): Boolean {
+    if (!perModel) return true
+    val running = inForceModel?.takeIf { it.isNotBlank() } ?: return true
+    val family = modelFamilyTokens(modelFamily ?: return true)
+    if (family.isEmpty()) return true
+    val runningTokens = modelFamilyTokens(running)
+    return family.any { it in runningTokens }
 }
 
 /** One row of Claude's `/context` breakdown (System prompt / System tools /
