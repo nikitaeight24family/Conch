@@ -73,7 +73,11 @@ fun ServerActivityLogScreen(
                         Text(
                             serverName.ifBlank { serverId.take(12) },
                             style = MaterialTheme.typography.labelSmall,
-                            color = outline,
+                            color = ai.eight24family.conch.ui.theme.serverNameColor(
+                                serverId = serverId,
+                                serverName = serverName,
+                                fallback = outline,
+                            ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )

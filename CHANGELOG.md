@@ -11,6 +11,45 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.7] — 2026-08-20
+
+### Added
+- Per-server accent colour: a random hex assigned on add, editable in the
+  server's settings, and used to draw that server's name everywhere in the app.
+  Servers saved before this release derive a stable colour from their id, so
+  nothing is grey while you wait to edit it. Randomness is confined to the hue,
+  and the drawn colour adapts to the active theme so a name always clears a
+  readable contrast against the background it is on.
+- Server filter for the sessions list: long-press an agent chip (or the title)
+  to tick which hosts appear. Each row shows how many of the listed sessions it
+  owns, and a filter that empties the list says so and offers a way back.
+
+### Fixed
+- A turn running on the server could be reported as finished — spinner out,
+  completion vibration fired — while it was still going. The app judged
+  liveness by the session file's timestamp, and a long tool writes nothing
+  while it runs; it now asks the server whether the agent process is alive.
+- A session being driven from a terminal or another device never showed as
+  working in the sessions list when the app happened to hold an idle session
+  object for it.
+- The collapsed limit indicator always showed the 5-hour window, so it could
+  read 15% while a different, exhausted window was refusing turns. It now shows
+  the window that actually constrains the account, and a limit the CLI reports
+  in the chat is believed at once.
+- The "the cache may have expired" note under the prompt bar now appears only
+  when re-sending would actually be expensive.
+- The sessions list kept a spinner going for up to 90 seconds after a turn had
+  visibly finished.
+
+### Changed
+- Freshness while the app is on screen: sessions that are moving are checked
+  every two seconds, the full list refresh runs every ten seconds instead of
+  thirty, returning to the app refreshes immediately, and servers are now
+  visited in parallel so one unreachable host cannot starve the others. Metered
+  links, data saver and a backgrounded app switch all of it off.
+
+---
+
 ## [0.3.6] — 2026-08-18
 
 ### Fixed
@@ -1070,6 +1109,7 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.7
 [0.3.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.6
 [0.3.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.5
 [0.3.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.4

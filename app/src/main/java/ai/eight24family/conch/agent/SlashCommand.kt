@@ -30,6 +30,21 @@ enum class SlashCommandKind {
      * channel with /compact, 2026-08-03).
      */
     AGENT_BUILTIN,
+    /** `/cost` — the CLI's own session-cost text over the control channel. Ours
+     *  is the only honest source: the money is spent on the user's server, and a
+     *  local read would say $0.00. */
+    SESSION_COST,
+    /** `/plan` — read the plan-mode plan the worker is holding. */
+    SHOW_PLAN,
+    /** `/version` — the version of the CLI actually running the turns, which is
+     *  not the app's version and can differ from what the user assumes. */
+    CLI_VERSION,
+    /** `/background` — detach in-flight FOREGROUND work (the CLI's Ctrl+B), so a
+     *  long build stops holding the turn open. Not `/bg`, which spawns a new
+     *  detached agent. */
+    BACKGROUND_RUNNING,
+    /** `/stoptask <id>` — kill ONE running task by id, from the phone. */
+    STOP_TASK,
     /**
      * `/bg <task>` — hand a task to a DETACHED agent on the server
      * (`claude --bg`). It is not tied to this chat's process or to the phone's
@@ -68,6 +83,13 @@ object SlashCommands {
         SlashCommand("review", "code review · /review [base-branch] (Codex)", SlashCommandKind.REVIEW, acceptsArgs = true),
         SlashCommand("bg",     "run a task in the background · keeps going if you close the app",
             SlashCommandKind.RUN_BACKGROUND, acceptsArgs = true),
+        SlashCommand("cost",   "what this session has cost on the server",     SlashCommandKind.SESSION_COST),
+        SlashCommand("plan",   "show the plan the agent is working from",      SlashCommandKind.SHOW_PLAN),
+        SlashCommand("version", "CLI version running your turns",             SlashCommandKind.CLI_VERSION),
+        SlashCommand("background", "detach what is running now · frees the turn",
+            SlashCommandKind.BACKGROUND_RUNNING),
+        SlashCommand("stoptask", "stop one background task · /stoptask <id>",
+            SlashCommandKind.STOP_TASK, acceptsArgs = true),
     )
 
     /**

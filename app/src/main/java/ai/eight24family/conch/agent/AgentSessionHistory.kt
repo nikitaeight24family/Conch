@@ -153,6 +153,15 @@ internal class AgentSessionHistory(
             // and a subsequent ToolUse / PermissionRequest / Error),
             // then apply this message synchronously.
             flushStreamingBuffer()
+            // SAME VERDICT ONCE. The CLI's error `result` carries the final text
+            // — which it may have ALREADY said as an assistant message. Keyed
+            // errors (overload banner etc.) are upserts with behavior of their
+            // own and stay untouched.
+            if (msg is AgentMessage.Error && msg.kind == null) {
+                val lastText = (_history.value.lastOrNull() as? AgentMessage.AssistantText)
+                    ?.text?.trim()
+                if (lastText != null && lastText == msg.text.trim()) return
+            }
             applyToHistory(msg)
         }
     }

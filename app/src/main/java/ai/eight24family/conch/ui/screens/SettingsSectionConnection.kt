@@ -287,7 +287,11 @@ internal fun DeviceKeyRow(entry: DeviceKeyEntry, now: Long, onRemove: (String) -
                 Text(
                     entry.serverName,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = ai.eight24family.conch.ui.theme.serverNameColor(
+                        serverId = entry.serverId,
+                        serverName = entry.serverName,
+                        fallback = MaterialTheme.colorScheme.onSurface,
+                    ),
                     fontWeight = FontWeight.Bold,
                 )
                 Text(

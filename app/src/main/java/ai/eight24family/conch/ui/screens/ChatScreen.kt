@@ -183,8 +183,15 @@ fun ChatScreen(
     val rewindPrefill by vm.rewindPrefill.collectAsState()
     androidx.compose.runtime.LaunchedEffect(rewindPrefill) {
         rewindPrefill?.let {
-            input = it
-            vm.saveInputDraft(it)
+            // NEVER CLOBBER. The rewound prompt is OFFERED, not imposed: the
+            // sheet's own copy ("its text goes back into the composer") assumes an
+            // empty composer, and assigning unconditionally destroyed whatever the
+            // user had already typed - from memory AND from disk, because
+            // saveInputDraft writes the same key the draft-restore reads, so
+            // leaving and re-entering the chat brought back the rewound text
+            // instead of theirs. Same merge the returned-text path below uses.
+            input = if (input.isBlank()) it else it + "\n" + input
+            vm.saveInputDraft(input)
             vm.consumeRewindPrefill()
         }
     }
@@ -777,7 +784,16 @@ private fun PinnedWorkingStatus(
     // done · elapsed», polled from the workflow journal on the server.
     val workflows by vm.liveWorkflows.collectAsState()
     ai.eight24family.conch.ui.components.WorkflowRosterRow(workflows)
-    if (!isWorking) return
+    // The turn stopped but background work of this session is still running —
+    // the CLI re-invokes it with a task-notification when the work lands, so
+    // "done" is really "paused". SAY it, instead of the chat just falling
+    // silent while the user wonders why the answer buzz felt different.
+    val ownBg by vm.ownBackgroundTasks.collectAsState()
+    if (!isWorking) {
+        val pendingBg = ownBg + agentBgTasks
+        if (pendingBg > 0) WaitingForBackgroundRow(pendingBg)
+        return
+    }
     val liveTokens by vm.liveThinkingTokens.collectAsState()
     val remoteTokens by vm.remoteTokens.collectAsState()
     val remoteTurnStart by vm.remoteTurnStartMs.collectAsState()
@@ -797,7 +813,13 @@ private fun PinnedWorkingStatus(
         // scoped AgentSession turn start (survives VM recreation — a re-entered
         // mid-turn chat used to restart the clock from the adoption moment) →
         // the per-composition fallback.
-        startMs = remoteTurnStart ?: vm.sessionTurnStartMs().takeIf { it > 0L } ?: localStartMs,
+        // APP-DRIVEN turn first: when WE started the turn, our own Working
+        // timestamp IS the start — the file mirror re-anchors on later `user`
+        // records (tool results are user-typed!), which reset the visible
+        // clock mid-turn and, on a session whose writer died mid-turn hours
+        // ago, showed «600m» the moment a new message was typed (2026-08-18).
+        // The mirror stays authoritative for turns we did NOT drive.
+        startMs = vm.sessionTurnStartMs().takeIf { it > 0L } ?: remoteTurnStart ?: localStartMs,
         thinkingTokens = tokens,
         effort = activeEffort,
         thinking = remoteThinking,

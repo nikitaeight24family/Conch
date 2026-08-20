@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import ai.eight24family.conch.ui.components.ConnectionDot
 import ai.eight24family.conch.ui.components.HostInfoSheet
 import ai.eight24family.conch.ui.components.TopBarSpinner
@@ -294,7 +295,11 @@ fun AgentPickerScreen(
                     Text(
                         server?.name ?: "…",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = ai.eight24family.conch.ui.theme.serverNameColor(
+                            serverId = server?.id,
+                            serverName = server?.name,
+                            fallback = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -514,6 +519,7 @@ internal fun ServerAgentPanel(
                 // "[ log in ]" that looks like it's asking them to start over
                 // (user, 2026-07-05).
                 val loginNow = vm.loginRequest.collectAsState().value
+                val usageBriefs = vm.usageBrief.collectAsState().value
                 Agent.entries.forEach { agent ->
                     val s = statuses?.get(agent)
                     val rowChecking = !firstProbeDone || (s?.liveAuthPending == true)
@@ -525,8 +531,10 @@ internal fun ServerAgentPanel(
                         liveOutput = installOutput[agent],
                         op = installOp[agent],
                         checking = rowChecking,
-                        loggingIn = loginNow?.agent == agent && loginNow.submitted,
+                        loggingIn = loginNow?.agent == agent && loginNow.submitted &&
+                            loginNow.serverId == vm.serverId,
                         windowsServer = serverOs == "WINDOWS",
+                        usageLine = usageBriefs[agent],
                         onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
                         onInstall = { vm.installAgent(agent) },
                         onLogin = { vm.startLogin(agent) },
@@ -551,15 +559,23 @@ internal fun ServerAgentPanel(
             onRegisterNewKey = { vm.cancelSkRefresh(); onOpenKeychainForRegister(serverId) },
         )
     }
+    // ⚠ OWN SERVER ONLY. The flow behind this dialog is process-global
+    // (AgentPickerViewModel.activeLogin) while THIS composable exists once per
+    // server on the Agents overview — ungated, every panel stacked its own
+    // copy of the dialog and the topmost one belonged to a VM that never
+    // started any login: its submit hit a null stdin and the button silently
+    // did nothing. Retry and "use API key" would be aimed at the wrong server
+    // too.
     val loginReq = vm.loginRequest.collectAsState().value
-    if (loginReq != null) {
+    if (loginReq != null && loginReq.serverId == vm.serverId) {
         LoginDialog(
             request = loginReq,
             onCancel = { vm.cancelLogin() },
-            onSubmitCode = {
-                if (loginReq.callbackMode) vm.submitCodexCallback(it)
-                else vm.submitOAuthCode(it)
+            onSubmitCode = { code, manual ->
+                if (loginReq.callbackMode) vm.submitCodexCallback(code)
+                else vm.submitOAuthCode(code, manual)
             },
+            onRetry = { vm.startOAuthLogin(loginReq.agent) },
             onUseApiKey = { vm.switchToApiKey(loginReq.agent) },
         )
     }
@@ -588,6 +604,10 @@ internal fun ServerAgentPanel(
             agent = methodSheetAgent,
             slots = allSlots[methodSheetAgent].orEmpty(),
             activeSlotId = activeSlots[methodSheetAgent],
+            activePlan = ai.eight24family.conch.agent.UsageProbe
+                .cached(vm.serverId, methodSheetAgent)?.plan,
+            busySlotId = vm.accountOpBusy.collectAsState().value,
+            opError = vm.accountOpError.collectAsState().value,
             onActivateSlot = { vm.activateSlot(methodSheetAgent, it) },
             onRenameSlot = { vm.openRename(methodSheetAgent, it) },
             onRemoveSlot = { vm.removeSlot(methodSheetAgent, it) },
@@ -646,8 +666,18 @@ private fun LoginOnlyBackdrop(
                 fontWeight = FontWeight.Bold,
             )
             serverName?.let {
+                // Only the NAME takes the accent; the `❯ ` prompt stays dim.
+                val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                    serverName = it,
+                    fallback = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Text(
-                    "❯ $it",
+                    androidx.compose.ui.text.buildAnnotatedString {
+                        append("❯ ")
+                        withStyle(
+                            androidx.compose.ui.text.SpanStyle(color = accent),
+                        ) { append(it) }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -677,6 +707,17 @@ private fun AuthManagerSheet(
     agent: Agent,
     slots: List<ai.eight24family.conch.agent.CredentialVault.Slot>,
     activeSlotId: String?,
+    /** Live plan for the ACTIVE account (UsageProbe cache) — fills the plan
+     *  line for credentials that carry no plan of their own (Claude
+     *  setup-token). Null when never probed. */
+    activePlan: String? = null,
+    /** Slot an operation (remove / switch) is running on: that row shows a
+     *  spinner instead of its action icons, and taps are ignored meanwhile —
+     *  seconds of SSH must never look like a dead button. */
+    busySlotId: String? = null,
+    /** Why the last operation did nothing (no transport, server didn't
+     *  confirm). Rendered in the sheet, in error colour. */
+    opError: String? = null,
     onActivateSlot: (String) -> Unit,
     onRenameSlot: (ai.eight24family.conch.agent.CredentialVault.Slot) -> Unit,
     onRemoveSlot: (String) -> Unit,
@@ -718,10 +759,11 @@ private fun AuthManagerSheet(
             } else {
                 for (s in slots) {
                     val isActive = s.id == activeSlotId
+                    val rowBusy = s.id == busySlotId
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onActivateSlot(s.id) }
+                            .clickable(enabled = busySlotId == null) { onActivateSlot(s.id) }
                             .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -730,27 +772,52 @@ private fun AuthManagerSheet(
                         Column(Modifier.weight(1f)) {
                             Text(s.label, color = fg)
                             Text(
-                                if (s.masked != null) "${methodBadgeLabel(s.method)} · ${s.masked}"
-                                else methodBadgeLabel(s.method),
+                                slotMethodLine(agent, s),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = dim,
                             )
+                            s.email?.let {
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = dim)
+                            }
+                            slotFactsLine(agent, s, if (isActive) activePlan else null)?.let {
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = dim)
+                            }
                         }
-                        Text(
-                            "✎",
-                            color = dim,
-                            modifier = Modifier
-                                .clickable { onRenameSlot(s) }
-                                .padding(horizontal = 10.dp, vertical = 2.dp),
-                        )
-                        Text(
-                            "✕",
-                            color = dim,
-                            modifier = Modifier
-                                .clickable { onRemoveSlot(s.id) }
-                                .padding(horizontal = 10.dp, vertical = 2.dp),
-                        )
+                        if (rowBusy) {
+                            // The tap is being worked on — SSH round-trips take
+                            // seconds, and a silent ✕ reads as a dead button.
+                            CircularProgressIndicator(
+                                color = primary,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .size(16.dp),
+                            )
+                        } else {
+                            Text(
+                                "✎",
+                                color = dim,
+                                modifier = Modifier
+                                    .clickable(enabled = busySlotId == null) { onRenameSlot(s) }
+                                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                            )
+                            Text(
+                                "✕",
+                                color = dim,
+                                modifier = Modifier
+                                    .clickable(enabled = busySlotId == null) { onRemoveSlot(s.id) }
+                                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                            )
+                        }
                     }
+                }
+                opError?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = danger,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -865,6 +932,10 @@ private fun AgentRow(
      *  can't run there (no sh), so the row says WHY instead of a misleading
      *  "not installed" (honest detection; support itself is out of scope). */
     windowsServer: Boolean = false,
+    /** Compact live limits ("5h 28% · Weekly 3%"), known from the connection
+     *  alone — shown on the ready line so the user sees their budget BEFORE
+     *  entering a chat. Null = unknown (not fetched / agent has no quota API). */
+    usageLine: String? = null,
     onClick: () -> Unit,
     onInstall: () -> Unit = {},
     onLogin: () -> Unit = {},
@@ -999,7 +1070,8 @@ private fun AgentRow(
             // Run-state (subscription) not yet determined — honest "still
             // checking" instead of a premature "ready".
             runStatePending -> "  checking subscription…"
-            else -> "  ready · ${status.installedVersion ?: ""}"
+            else -> "  ready · ${status.installedVersion ?: ""}" +
+                (usageLine?.let { " · $it" } ?: "")
         }
         Text(
             sub,
@@ -1055,6 +1127,68 @@ private fun methodBadgeLabel(key: String): String = when (key) {
     "bedrock" -> "Bedrock"
     "chatgpt" -> "OAuth"
     else -> key.replaceFirstChar { it.uppercase() }
+}
+
+// ── Account passport display (AuthManagerSheet row details) ──────────────────
+// Facts extracted server-side from the slot's own credential copy (see
+// CredentialVault.listSlots enrichment). Everything here is as-of-capture.
+
+private fun fmtDay(epochSec: Long): String? =
+    if (epochSec <= 0) null
+    else java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.US)
+        .format(java.util.Date(epochSec * 1000))
+
+private fun isoToEpochSec(iso: String?): Long? = iso?.let {
+    runCatching { java.time.Instant.parse(it).epochSecond }.getOrNull()
+        ?: runCatching { java.time.OffsetDateTime.parse(it).toInstant().epochSecond }.getOrNull()
+}
+
+/** Second row: what KIND of credential this slot holds. */
+private fun slotMethodLine(agent: Agent, s: ai.eight24family.conch.agent.CredentialVault.Slot): String {
+    val badge = methodBadgeLabel(s.method)
+    val kindDetail = when {
+        s.masked != null -> s.masked
+        // Claude OAuth comes in two shapes worth telling apart: the 1-year
+        // setup-token vs a refreshing full-oauth session file.
+        agent == Agent.CLAUDE && s.kind == "token" -> "long-lived token"
+        agent == Agent.CLAUDE && s.kind == "file" -> "session file"
+        else -> null
+    }
+    return if (kindDetail != null) "$badge · $kindDetail" else badge
+}
+
+/** Bottom row: added date · plan · the one expiry fact that matters. */
+private fun slotFactsLine(
+    agent: Agent,
+    s: ai.eight24family.conch.agent.CredentialVault.Slot,
+    livePlan: String?,
+): String? {
+    val now = System.currentTimeMillis() / 1000
+    val parts = mutableListOf<String>()
+    fmtDay(s.createdAt)?.let { parts.add("added $it") }
+    val plan = s.plan ?: livePlan
+    plan?.let { parts.add(it.replaceFirstChar { c -> c.uppercase() } + " plan") }
+    when {
+        // Claude setup-token: documented 1-year lifetime, nothing inside the
+        // token to read — computed from the capture date, hence the ~.
+        agent == Agent.CLAUDE && s.kind == "token" && s.createdAt > 0 -> {
+            val exp = s.createdAt + 365L * 24 * 3600
+            fmtDay(exp)?.let {
+                parts.add(if (exp < now) "token expired $it" else "token expires ~$it")
+            }
+        }
+        // Codex: the id_token says how far the subscription is paid.
+        s.planUntil != null -> isoToEpochSec(s.planUntil)?.let { untilSec ->
+            fmtDay(untilSec)?.let {
+                parts.add(if (untilSec < now) "sub lapsed $it" else "sub until $it")
+            }
+        }
+        // Codex without a sub claim: at least say how fresh the session copy is.
+        s.lastRefresh != null -> isoToEpochSec(s.lastRefresh)?.let { refSec ->
+            fmtDay(refSec)?.let { parts.add("session from $it") }
+        }
+    }
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
 }
 
 @Composable
@@ -1185,11 +1319,21 @@ private fun DiagnosisCard(
  * credentials file lands on the server.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+/** How many times the login dialog re-reads the clipboard after a return from
+ *  the browser. Android only allows the read once the window has focus, which
+ *  arrives some time AFTER onResume — a single read is a coin flip. */
+private const val CLIP_GRAB_TRIES = 8
+
 @Composable
 private fun LoginDialog(
     request: ai.eight24family.conch.ui.viewmodel.AgentPickerViewModel.LoginRequest,
     onCancel: () -> Unit,
-    onSubmitCode: (String) -> Unit,
+    /** (code, manual) — `manual` false for the clipboard auto-grab. A human
+     *  press must always produce an answer; see submitOAuthCode. */
+    onSubmitCode: (String, Boolean) -> Unit,
+    /** Start the sign-in over — offered when the flow stalled on something the
+     *  user has now fixed (typically: the server was not connected yet). */
+    onRetry: () -> Unit,
     onUseApiKey: () -> Unit,
 ) {
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -1227,27 +1371,51 @@ private fun LoginDialog(
     var lastAutoClip by remember { mutableStateOf("") }
     LaunchedEffect(resumeTick) {
         if (resumeTick == 0) return@LaunchedEffect
-        if (!request.awaitingPaste || request.submitted || request.fatalError != null) return@LaunchedEffect
-        // Clipboard access needs window focus (Android 10+) — give it a beat.
-        kotlinx.coroutines.delay(450)
-        val clip = clipboard.getText()?.text?.trim().orEmpty()
-        if (clip.isEmpty() || clip == lastAutoClip) return@LaunchedEffect
-        val valid = if (request.callbackMode) {
-            // Callback URL the browser landed on (Codex/Gemini localhost pattern).
-            clip.startsWith("http") && clip.contains("code=")
-        } else {
-            // Claude OOB code: `<code>#<state>`, both base64url. The submit
-            // handler re-sanitizes (whitespace / glued URL tail).
-            Regex("[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{16,}").containsMatchIn(clip)
+        if (request.submitted || request.fatalError != null) return@LaunchedEffect
+        // ⚠ ONE READ IS NOT ENOUGH, AND THAT IS WHY THIS NEVER WORKED.
+        //
+        // Android 10+ hands the clipboard over only to a window that HAS FOCUS.
+        // Coming back from the browser, focus lands some time after ON_RESUME —
+        // longer on an OEM with its own transition, longer again when the app was
+        // floating in PiP.
+        //
+        // So: poll for a few seconds and stop at the first read that yields a
+        // code. Cheap (a string read per tick), bounded, and it costs nothing when
+        // the clipboard is already readable on the first tick.
+        //
+        // The `awaitingPaste` gate is also gone from here: the dialog being up,
+        // unsubmitted and without a fatal error IS the state where a code is
+        // welcome. Requiring the CLI to have printed its prompt first meant a
+        // fast copy-paste round trip lost the grab entirely.
+        val codeRx = Regex("[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{16,}")
+        var found: String? = null
+        repeat(CLIP_GRAB_TRIES) { attempt ->
+            kotlinx.coroutines.delay(if (attempt == 0) 350L else 400L)
+            if (request.submitted || request.fatalError != null) return@LaunchedEffect
+            val clip = clipboard.getText()?.text?.trim().orEmpty()
+            if (clip.isEmpty() || clip == lastAutoClip) return@repeat
+            // ⚠ TAKE THE CODE, NOT THE CLIPBOARD. the browser's Copy button
+            // also happily includes surrounding text on some pages.
+            val hit = if (request.callbackMode) {
+                clip.takeIf { it.startsWith("http") && it.contains("code=") }
+            } else {
+                codeRx.find(clip)?.value
+            }
+            if (hit != null) { lastAutoClip = clip; found = hit; return@repeat }
         }
-        if (!valid) return@LaunchedEffect
-        lastAutoClip = clip
+        val code = found ?: run {
+            android.util.Log.d(
+                "SshAi-AgentPicker",
+                "clipboard auto-grab found nothing in ${CLIP_GRAB_TRIES} tries — manual paste still works",
+            )
+            return@LaunchedEffect
+        }
         android.util.Log.d(
             "SshAi-AgentPicker",
-            "LoginDialog clipboard auto-grab — len=${clip.length} callbackMode=${request.callbackMode}",
+            "LoginDialog clipboard auto-grab — took ${code.length}B of a clip, callbackMode=${request.callbackMode}",
         )
         pasted = ""
-        onSubmitCode(clip)
+        onSubmitCode(code, false)
     }
     androidx.compose.ui.window.Dialog(onDismissRequest = onCancel) {
         Surface(
@@ -1390,17 +1558,35 @@ private fun LoginDialog(
                         )
                     }
                     if (request.url == null && request.code == null) {
+                        // ⚠ SAY WHAT THE FLOW SAYS. This used to be an
+                        // unconditional spinner + "Starting OAuth flow…", which is
+                        // a promise the app cannot keep once the flow has given up:
+                        // the login wrote "no connection to this server" into
+                        // rawTail and the screen spun over it (2026-08-18). The
+                        // model's own words win, and a stalled flow gets a way
+                        // forward instead of an animation.
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp).padding(end = 8.dp),
-                                strokeWidth = 2.dp,
-                                color = cyan,
-                            )
+                            if (!request.stalled) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp).padding(end = 8.dp),
+                                    strokeWidth = 2.dp,
+                                    color = cyan,
+                                )
+                            }
                             Text(
-                                "Starting OAuth flow…",
-                                color = muted,
+                                request.rawTail.takeIf { it.isNotBlank() && it != "starting…" }
+                                    ?: "Starting OAuth flow…",
+                                color = if (request.stalled) fg else muted,
                                 style = MaterialTheme.typography.bodyMedium,
                             )
+                        }
+                        if (request.stalled) {
+                            OutlinedButton(
+                                onClick = { onRetry() },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("[ retry ]", style = MaterialTheme.typography.labelLarge)
+                            }
                         }
                     }
                 }
@@ -1457,7 +1643,7 @@ private fun LoginDialog(
                                 "SshAi-AgentPicker",
                                 "LoginDialog submit tapped — codeLen=${pasted.trim().length} callbackMode=${request.callbackMode}",
                             )
-                            onSubmitCode(pasted)
+                            onSubmitCode(pasted, true)
                             pasted = ""
                         },
                         enabled = pasted.isNotBlank(),

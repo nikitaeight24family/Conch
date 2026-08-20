@@ -187,7 +187,10 @@ fun TerminalScreen(
                     Text(
                         serverName.ifBlank { "terminal" },
                         style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = ai.eight24family.conch.ui.theme.serverNameColor(
+                            serverName = serverName,
+                            fallback = MaterialTheme.colorScheme.primary,
+                        ),
                     )
                 },
                 navigationIcon = {

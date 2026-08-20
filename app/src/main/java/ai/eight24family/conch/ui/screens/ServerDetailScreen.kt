@@ -26,7 +26,10 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -51,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -155,7 +159,23 @@ fun ServerDetailScreen(
     if (confirmDelete && s != null) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete \"${s.name}\"?") },
+            title = {
+                // Only the name inside the quotes takes the server's accent.
+                val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                    serverId = s.id,
+                    serverName = s.name,
+                    fallback = androidx.compose.material3.LocalContentColor.current,
+                )
+                Text(
+                    androidx.compose.ui.text.buildAnnotatedString {
+                        append("Delete \"")
+                        withStyle(
+                            androidx.compose.ui.text.SpanStyle(color = accent),
+                        ) { append(s.name) }
+                        append("\"?")
+                    },
+                )
+            },
             text = { Text("Removes the server, its stored credentials, and all chat sessions tied to it. The remote machine isn't touched.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -204,7 +224,11 @@ fun ServerDetailScreen(
                     Text(
                         s?.name ?: "server",
                         style = MaterialTheme.typography.titleLarge,
-                        color = cyan,
+                        color = ai.eight24family.conch.ui.theme.serverNameColor(
+                            serverId = s?.id,
+                            serverName = s?.name,
+                            fallback = cyan,
+                        ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -297,6 +321,16 @@ fun ServerDetailScreen(
                 title = "Activity log",
                 subtitle = "recent operations on this server",
                 onClick = { onOpenActivityLog(s.id, s.name) },
+            )
+
+            SectionDivider()
+
+            // ── // appearance ──
+            SectionLabel("// appearance")
+            ServerColorRow(
+                server = s,
+                onPick = { vm.setColorHex(it) },
+                onRandomize = { vm.setColorHex(null) },
             )
 
             SectionDivider()
@@ -494,6 +528,77 @@ private fun humanBps(bytesPerSec: Long): String {
     val mb = kb / 1024.0
     if (mb < 1024) return "%.1f MiB/s".format(mb)
     return "%.1f GiB/s".format(mb / 1024.0)
+}
+
+/**
+ * The server's accent colour — the swatch, its hex (editable), and a die to roll
+ * a new random one. This colour is what the server's NAME is drawn in everywhere
+ * in the app, so the row previews exactly that: the name itself, in the colour.
+ *
+ * The hex field commits only on a COMPLETE, parseable value, so typing "#1" mid-
+ * edit never writes a colour and never rejects the keystroke — the field keeps
+ * what the user typed and the swatch simply waits.
+ */
+@Composable
+private fun ServerColorRow(
+    server: ai.eight24family.conch.domain.Server,
+    onPick: (String) -> Unit,
+    onRandomize: () -> Unit,
+) {
+    val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+        serverId = server.id, serverName = server.name,
+        fallback = MaterialTheme.colorScheme.onSurface,
+    )
+    // Follow the stored value when it changes underneath us (the die, or an edit
+    // on another screen), but never fight the user mid-typing.
+    val stored = server.colorHex ?: ai.eight24family.conch.ui.theme.ServerAccent.toHex(accent)
+    var text by androidx.compose.runtime.remember(stored) {
+        androidx.compose.runtime.mutableStateOf(stored)
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(accent, androidx.compose.foundation.shape.CircleShape)
+                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape),
+        )
+        OutlinedTextField(
+            value = text,
+            onValueChange = { raw ->
+                text = raw
+                ai.eight24family.conch.ui.theme.ServerAccent.parse(raw)?.let {
+                    onPick(ai.eight24family.conch.ui.theme.ServerAccent.toHex(it))
+                }
+            },
+            label = { Text("accent") },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedButton(
+            onClick = onRandomize,
+            shape = RectangleShape,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+        ) { Text("⁙", fontWeight = FontWeight.Bold) }
+    }
+    Text(
+        server.name,
+        color = accent,
+        style = MaterialTheme.typography.bodyLarge,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+    Text(
+        "// the server's name is shown in this colour throughout the app",
+        color = MaterialTheme.colorScheme.outline,
+        style = MaterialTheme.typography.labelSmall,
+    )
 }
 
 @Composable

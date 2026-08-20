@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -140,8 +142,33 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * Seeded from peek() so a chat opened on an already-held server is green at
      * frame zero instead of flashing offline. */
     val connected: StateFlow<Boolean> =
-        ServiceLocator.sshConnectionPool.userHeldIds
-            .map { serverId in it }
+        // WARNING: THIS IS LIVENESS, NOT INTENT.
+        //
+        // It used to be `userHeldIds.map { serverId in it }` alone, on the
+        // strength of that set being pruned when a transport died. The pruner
+        // (`SshConnectionPool.pruneDeadUserHeld`) has NO CALLERS - deliberately,
+        // because a dropped connection must stay in the held set for the
+        // reconnect ladder to keep working on it. So the dot latched green from
+        // the first connect until an explicit disconnect: sleep through a network
+        // drop or a server reboot and it still said connected while every send
+        // failed. Worse, the Servers tab computes the same thing from `peek()`
+        // and was honest, so two screens showed opposite states for one server.
+        //
+        // The transport itself is the only honest source, and `peek` is a
+        // lock-free read of it. It is not a flow, so this samples: instantly on
+        // any change of user intent (connect / disconnect), and otherwise on a
+        // slow tick while the chat is open. One ConcurrentHashMap lookup per
+        // tick, no I/O.
+        kotlinx.coroutines.flow.combine(
+            ServiceLocator.sshConnectionPool.userHeldIds,
+            kotlinx.coroutines.flow.flow {
+                while (true) {
+                    emit(Unit)
+                    kotlinx.coroutines.delay(CONNECTED_DOT_POLL_MS)
+                }
+            },
+        ) { _, _ -> ServiceLocator.sshConnectionPool.peek(serverId) != null }
+            .distinctUntilChanged()
             .stateIn(
                 viewModelScope,
                 SharingStarted.Eagerly,
@@ -418,6 +445,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             limitExpiryTick,
         ) { agent, statuses, _ ->
             val st = statuses[agent]
+            // NOT LOGGED IN is the hardest block there is — harder than a rate
+            // limit — yet it used to pass this sieve untouched (only claudeState
+            // verdicts blocked), so a server with ZERO accounts still offered a
+            // live send button, and the turn it launched span for hours. Checked
+            // FIRST: a claudeState verdict describes the login that no longer
+            // exists.
+            if (st != null && !st.loggedIn) {
+                return@combine "${agent.displayName} isn't logged in on this server — log in on the agents screen, then come back."
+            }
             // A transient limit whose reset moment has passed is NOT a block —
             // the cache expires it at parse time, and this guard covers the
             // in-memory copy between the reset moment and the next cache read.
@@ -644,6 +680,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ).agentTaskCount
         }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
+    /** Background commands the SESSION ITSELF is still running. Non-zero at
+     *  turn end means the stop is a PAUSE — the CLI re-invokes the session
+     *  with a task-notification when the command lands. Drives the "waiting
+     *  for background" chat row and the two-pulse (not three) haptic. */
+    val ownBackgroundTasks: StateFlow<Int> =
+        combine(_localSessionId, _messagesBySession) { id, byId ->
+            ai.eight24family.conch.agent.foldTaskOwnership(
+                if (id == null) emptyList() else byId[id].orEmpty(),
+            ).ownRunningTasks
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
     /** A live background WORKFLOW row (the ultracode `Workflow` tool). The
      *  CLI shows «name · N/M agents done · elapsed»; those live counts live in
      *  the workflow's own journal on the server, NOT in the session rollout, so
@@ -851,18 +898,47 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * both cheap to know: no live CLI for this chat, and its last activity is
      * older than the hour.
      */
+    // ⚠ A LIVE CLI PROCESS DOES NOT KEEP THE CACHE WARM. The cache lives at the
+    // PROVIDER and expires by ITS clock alone — measured 2026-08-18: a session
+    // idle 28 minutes (live persistent proc the whole time) re-created 491k
+    // tokens on the next turn (create=491717, read=18976 in its own usage
+    // record). So liveness must not silence this warning, and one hour is not
+    // the only threshold: Anthropic's TTL is 5 minutes at minimum (1h at best),
+    // so past 5m the cache MAY be cold, past 1h it IS.
+    private fun cacheIdleMs(rid: String?): Long? {
+        if (rid == null) return null
+        val last = ServiceLocator.sessionActivity.lastActivity(serverId, rid)
+        if (last <= 0L) return null
+        return System.currentTimeMillis() - last
+    }
+
     val coldCacheRebuild: StateFlow<Boolean> =
-        combine(_localSessionId, _resumeId, _stateBySession) { sid, rid, states ->
-            // The PROCESS, not the transport. `isAlive()` answers "is there an
-            // SSH link", and since the pool rebuilds links under us that can be
-            // true with the CLI long gone — which is precisely the case whose
-            // next turn re-reads and re-bills the whole session. Asking the
-            // wrong one would silence this warning exactly when it is owed.
-            val warm = sid != null && activeSessions[sid]?.hasLiveCliProcess() == true
-            if (warm || rid == null) return@combine false
-            val last = ServiceLocator.sessionActivity.lastActivity(serverId, rid)
-            last > 0L && System.currentTimeMillis() - last > 60 * 60_000L
+        combine(_localSessionId, _resumeId, _stateBySession) { _, rid, _ ->
+            (cacheIdleMs(rid) ?: 0L) > 60 * 60_000L
         }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** The uncertain zone: idle past the provider's MINIMUM cache TTL (5m) but
+     *  under the maximum (1h). The 491k re-send above happened exactly here —
+     *  the "over an hour" warning stayed silent through it.
+     *
+     * Gated on the conversation being EXPENSIVE to re-send (context ≥
+     * [COLD_MAYBE_MIN_CONTEXT_PERCENT]% of the window). Nobody — not the app,
+     * not the CLI — can know in advance whether the provider evicted inside
+     * the 5m–1h window, so this hint is honest uncertainty; on a small
+     * conversation the worst case costs pennies and the hint is pure noise.
+     * The certain >1h warning and the post-hoc "cold cache" spend note stay
+     * unconditional.
+     *
+     *  `by lazy` dodges an init-order trap: [costStats] is declared further
+     *  down the class, and an Eagerly-shared combine can run its first
+     *  emission synchronously during construction on Main.immediate. */
+    val coldCacheMaybe: StateFlow<Boolean> by lazy {
+        combine(_localSessionId, _resumeId, _stateBySession, costStats) { _, rid, _, _ ->
+            val idle = cacheIdleMs(rid) ?: 0L
+            idle > 5 * 60_000L && idle <= 60 * 60_000L &&
+                contextPercent() >= COLD_MAYBE_MIN_CONTEXT_PERCENT
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }
 
     /** Epoch-ms start of the in-flight turn (the file's `user`-event timestamp),
      * or null when idle. The working-status timer syncs to this so a MIRRORED
@@ -1514,6 +1590,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
             }
         }
+        // The queue legitimately starts a turn right after a Stop; retire the
+        // order first so the pending kill cannot land on it.
+        clearStopOrder()
         val combinedText = claimed.joinToString("\n\n") { it.text }
         val combinedImages = claimed.flatMap { it.imagePaths }
         viewModelScope.launch {
@@ -1533,6 +1612,71 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  re-send the text to the CLI without re-rendering it. Main-thread only
      *  (retry + the watcher both run on viewModelScope's Main dispatcher). */
     private val pendingRedelivery = MutableStateFlow<List<String>>(emptyList())
+
+    /** A Stop whose kill is not confirmed yet. Drives the "stopping…" honesty in
+     *  the UI and gates [armStopOrderWatcher]; never gates the queue. */
+    private val _stopOrdered = MutableStateFlow(false)
+    val stopOrdered: StateFlow<Boolean> = _stopOrdered.asStateFlow()
+
+    /** Retire the stop order for this chat, in memory and on disk. */
+    private fun clearStopOrder() {
+        if (!_stopOrdered.value) return
+        _stopOrdered.value = false
+        _resumeId.value?.let { rid ->
+            viewModelScope.launch(Dispatchers.IO) {
+                SilentlyTry.fired("SshAi-Chat", "clear stop order") {
+                    ServiceLocator.preferences.setStopOrder(rid, false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Land a stop order that could not be delivered when it was given.
+     *
+     * A Stop pressed with no transport (or one whose server-side process survived
+     * the first attempt) is still owed. This watches for a moment when the server
+     * is reachable and no turn of OURS is running, re-runs the kill, and retires
+     * the order once the machine says nothing carries that id. Also picks up an
+     * order persisted by a previous run of the app, which is what makes a Stop
+     * pressed offline survive being killed.
+     *
+     * ⚠ It must never fire while a turn of ours is in flight: after a Stop the
+     * queue starts the NEXT turn on the same resume id, and killing that would
+     * turn one Stop into a permanent block.
+     */
+    private fun armStopOrderWatcher() {
+        viewModelScope.launch {
+            val rid = _resumeId.filterNotNull().first()
+            val persisted = SilentlyTry.loggedOrElse(
+                "SshAi-Chat", "read stop orders", emptySet<String>(),
+            ) { ServiceLocator.preferences.stopOrders.first() }.orEmpty()
+            if (rid in persisted) _stopOrdered.value = true
+            while (true) {
+                kotlinx.coroutines.delay(STOP_RETRY_POLL_MS)
+                if (!_stopOrdered.value) continue
+                val sid = _localSessionId.value ?: continue
+                val sess = activeSessions[sid]
+                // Never race the turn the queue just started.
+                if (_stateBySession.value[sid] is SessionState.Working) continue
+                if (sess?.drainerBusy == true) continue
+                val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: continue
+                val killer = ai.eight24family.conch.agent.RemoteTurnKiller
+                if (!killer.isKillableResumeId(rid)) { clearStopOrder(); continue }
+                val out = withContext(Dispatchers.IO) { execPooledText(client, killer.killScript(rid)) }
+                when (killer.parseOutcome(out)) {
+                    is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Killed -> {
+                        android.util.Log.i("SshAi-Chat", "deferred stop landed on ${rid.take(8)}")
+                        tailPollCoord.setRemoteFileOpen(false)
+                        clearStopOrder()
+                    }
+                    is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.NoneFound -> clearStopOrder()
+                    // Survived / Unreachable: keep the order and try again.
+                    else -> Unit
+                }
+            }
+        }
+    }
 
 
     /** The transport has been down CONTINUOUSLY for [UNREACHABLE_QUIET_MS] —
@@ -1592,7 +1736,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     /** One-shot event: open a downloaded file via the system chooser
      *  (`ACTION_VIEW`). */
-    data class OpenExternallyRequest(val uri: android.net.Uri, val mime: String)
+    /** [extension] and the rest ride along so that a failed hand-off can UNDO
+     *  the remembered choice and re-offer the chooser instead of dead-ending —
+     *  see the handler in `ChatScreenFileOpen.kt`. */
+    data class OpenExternallyRequest(
+        val uri: android.net.Uri,
+        val mime: String,
+        val extension: String = "",
+        val filename: String = "",
+        val sizeBytes: Long = 0L,
+        val remotePath: String = "",
+    )
     val openExternally: SharedFlow<OpenExternallyRequest> get() = downloadsCoord.openExternally
 
     /** One-shot event: hand the file to the system share sheet (`ACTION_SEND`). */
@@ -1610,6 +1764,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val remotePath: String,
     )
     val openFilePrompt: SharedFlow<OpenFilePromptRequest> get() = downloadsCoord.openFilePrompt
+
+    /** Nothing on the phone could open the file with the choice the user asked us
+     *  to remember: forget it and put the chooser back in front of them. */
+    fun openFileFallbackToPrompt(req: OpenExternallyRequest) =
+        downloadsCoord.openFileFallbackToPrompt(req)
 
     /**
      * Entry point invoked by the disk-icon click after a download has completed.
@@ -1784,7 +1943,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * [ChatViewModelHaptics].
      */
     private val hapticsCoord by lazy {
-        ChatViewModelHaptics(viewModelScope, ServiceLocator.haptics::perform).also {
+        ChatViewModelHaptics(
+            viewModelScope,
+            ServiceLocator.haptics::perform,
+            pendingBackground = { (ownBackgroundTasks.value + agentBackgroundTasks.value) > 0 },
+        ).also {
             it.install(
                 messages = messages,
                 state = state,
@@ -1845,6 +2008,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // here gives it the bubble, the queue row and the ✕ every other
             // message has.
             sendAsTurn = { line -> send(line, allowSlash = false) },
+            emitLocal = { text ->
+                _localSessionId.value?.let { sid ->
+                    _messagesBySession.update { m ->
+                        m + (sid to ((m[sid] ?: emptyList()) + AgentMessage.AssistantText(
+                            id = "localout-" + ai.eight24family.conch.agent.spec.stableId(text, "lo"),
+                            text = text,
+                        )))
+                    }
+                }
+            },
             postSendUpdate = { newId ->
                 if (newId != null && _resumeId.value != newId) {
                     _resumeId.value = newId
@@ -1872,6 +2045,46 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val sessionInitialReasoning: StateFlow<String?> get() = modelsCoord.sessionInitialReasoning
 
     init {
+        // A Stop is owed until the machine confirms it - including one given
+        // before this process existed.
+        armStopOrderWatcher()
+        // The CLI PUSHES its command list when it changes (a skill discovered as
+        // the agent moves into a subdirectory, a plugin loaded). Its schema says
+        // to REPLACE the cached list; the app used to render the push as a count
+        // and drop the payload, so a dynamically-discovered command never reached
+        // the autocomplete the user types into.
+        viewModelScope.launch {
+            messages.collect { list ->
+                val push = list.lastOrNull { it is AgentMessage.CommandsChanged }
+                    as? AgentMessage.CommandsChanged ?: return@collect
+                slashCoord.setAgentCommands(
+                    push.commands.map { e ->
+                        ai.eight24family.conch.agent.SlashCommand(
+                            name = e.name,
+                            description = e.description,
+                            kind = ai.eight24family.conch.agent.SlashCommandKind.AGENT_BUILTIN,
+                            acceptsArgs = !e.argumentHint.isNullOrBlank(),
+                        )
+                    },
+                )
+            }
+        }
+        // A rate-limit push means the numbers CHANGED; re-read the authoritative
+        // usage rather than synthesising a report from a partial event.
+        viewModelScope.launch {
+            var seen: String? = null
+            messages.collect { list ->
+                val hit = list.lastOrNull {
+                    (it is AgentMessage.Error && it.kind == "rate_limited") ||
+                        (it is AgentMessage.EventNote && it.id == "claude-rate-limit")
+                } ?: return@collect
+                val stamp = hit.id + "|" + (hit as? AgentMessage.EventNote)?.label.orEmpty() +
+                    (hit as? AgentMessage.Error)?.text.orEmpty()
+                if (stamp == seen) return@collect
+                seen = stamp
+                refreshUsage()
+            }
+        }
         // Cold-start hydrate: spec model cache (Claude alias map, Codex slug map etc.)
         modelsCoord.hydrateFromCache()
         // Arm turn haptics for the whole life of this chat. Touching the lazy
@@ -2441,11 +2654,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 "read-only open: cache hydrated ${cachedParsed.size} msgs, skipping AgentSession bootstrap (connect deferred to first send)"
             )
             // Instant seamless connect on OPEN, not just on first send: if this
-            // server has a device key, bring the transport up SILENTLY right now
-            // — no tap — so a logged-in server's chat is live immediately.
-            // silent=true never forces a FIDO touch on open; with no device key
-            // it stays an honest "offline · tap to connect". Skip the cache-only
-            // sentinel — there's no real server.
+            // server has a device key, bring the transport up SILENTLY right now —
+            // no tap — so a logged-in server's chat is live immediately.
+            // silent=true never forces a FIDO touch on open; with no device key it
+            // stays an honest "offline · tap to connect". Skip the cache-only
+            // sentinel — there's no real server. NEVER CLAIM A RECONNECT NOBODY IS
+            // RUNNING. Reaching the read-only branch means this open produced no
+            // session and the ladder has nothing left to re-arm on, so a lingering
+            // "reconnecting" is a lie that also argues against the one control that
+            // works (the connect chip).
+            reconnectCoord.standDown("chat opened read-only, no live transport")
             if (serverId != ai.eight24family.conch.ui.navigation.Routes.CACHE_ONLY_SERVER_ID) {
                 beginSearchOpenedConnect(silent = true)
                 // The silent connect only upgrades this chat when it succeeds
@@ -3235,19 +3453,25 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val t = text.trim()
             if (t.isEmpty() && attachmentsCoord.snapshot().isEmpty()) return
             if (t.isNotEmpty()) {
-                // Show the message IMMEDIATELY (optimistic). The old path buffered
-                // it INVISIBLY into _pending until the session came up ~8 s later
-                // (after the FIDO/device-key connect), so the user's message
-                // appeared to VANISH the moment they hit send — read as "it
-                // deleted my message". We render it now, carry it into the
-                // rebuilt session (seedMessages in beginSearchOpenedConnect), and
-                // deliver it ECHO-FREE once connected (pendingRedelivery →
-                // s.redeliver, no second bubble; JSONL echo stays deduped).
-                _messagesBySession.update { m ->
-                    m + (sid to ((m[sid] ?: emptyList()) +
-                        AgentMessage.UserText(UUID.randomUUID().toString(), t)))
-                }
-                pendingRedelivery.update { it + t }
+                // THE VISIBLE QUEUE, like every other undeliverable send.
+                //
+                // This used to render an optimistic BUBBLE and stash the text in
+                // `pendingRedelivery`. The bubble solved the original bug (an
+                // invisible `_pending` buffer made the message look deleted) but
+                // created a worse one: `pendingRedelivery` is drained only on a
+                // `Running` transition and is rendered by NOTHING, so if the
+                // connect failed or the user cancelled the security-key touch, the
+                // message sat in the transcript looking sent, forever, with no ✕,
+                // no row and no retry. And its crash-insurance draft was written
+                // only for a brand-new chat, while the common read-only open is a
+                // RESUMED one.
+                //
+                // A queue row is visible AND cancellable AND persisted per chat,
+                // and the ordinary drain delivers it the moment the session
+                // reaches Running. `parkInOutbox` is the one funnel for "this
+                // could not be handed to the CLI" — this path had been bypassing
+                // it.
+                parkInOutbox(t, t)
                 if (_resumeId.value == null) {
                     SilentlyTry.fired("SshAi-Chat", "append draft on offline first-send") {
                         ServiceLocator.historyCache.appendDraft(serverId, _currentAgent.value, t)
@@ -3263,6 +3487,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // send, it is describing the past, so it goes on its own instead of
         // waiting to be dismissed.
         _chatNotice.value = null
+        // Sending is the opposite of stopping: it retires the stop order so the
+        // retry watcher can never kill the turn this send is about to start.
+        clearStopOrder()
         val staged = attachmentsCoord.snapshot()
         val trimmed = text.trim()
         // Slash commands hijack the send path — never go to the model.
@@ -3596,6 +3823,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  overrides it (account switched / limit cleared) — see [usageBar]. */
     private val _cliLimitReset = MutableStateFlow<Long?>(null)
 
+    /** The CLI said a limit is hit but printed no parseable reset moment. Drives
+     *  a blocked bar with no clock, instead of a percentage that contradicts the
+     *  refusal the user is reading two lines above it. */
+    private val _cliLimitHit = MutableStateFlow(false)
+
     /**
      * The thin bar above the chat input (replaces the old static divider).
      * Shows the NEAREST plan window (accent fill + "14% · 3h"); else the API
@@ -3612,7 +3844,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
     }
 
-    val usageBar: StateFlow<UsageBarState> = combine(_usage, costStats, _cliLimitReset, usageTicker) { report, cost, cliReset, _ ->
+    val usageBar: StateFlow<UsageBarState> = combine(
+        _usage, costStats, _cliLimitReset, _cliLimitHit, usageTicker,
+    ) { report, cost, cliReset, cliHit, _ ->
         val now = System.currentTimeMillis()
         val primary = report?.primary
         // Authoritative CLI reset: when the account is rate-limited and the
@@ -3636,6 +3870,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 filled = true,
                 severity = 1f,
             )
+        }
+        // Blocked, reset unknown: say so plainly. A stale percentage next to the
+        // CLI's own refusal is the failure mode, not a missing clock.
+        if (cliHit && !probeSaysClear) {
+            return@combine UsageBarState(fill = 1f, label = "limit", filled = true, severity = 1f)
         }
         when {
             primary != null -> {
@@ -3667,6 +3906,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     private var usageJob: Job? = null
 
+    /** Lives as long as the VM: clears the bar the instant the agent's cached
+     *  login state flips to logged-out (account removed from ANY screen). */
+    private var usageAuthWatch: Job? = null
+
     /** Re-read the plan windows from the provider (server-side). Cheap; called
      *  on chat open and when a turn finishes. Shows the cached value instantly
      *  so the bar is never empty on (re)open, and a failed refresh keeps the
@@ -3680,11 +3923,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  briefly as the connection comes online, instead of leaving a stale bar. */
     fun refreshUsage() {
         val agent = _currentAgent.value
-        // Instant: last good value (warm from the sessions-list prefetch) so the
-        // bar is already there on open, not popping in seconds later.
-        UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) _usage.value = it }
+        // The bar must NEVER outlive the login it describes. The NOAUTH probes
+        // below only run when SSH is up — but the app already KNOWS the login
+        // state locally (AgentStatusCache: the picker's "not logged in" and the
+        // account-removal path both write it), and the bar kept quoting a
+        // deleted account on a disconnected server anyway. So: consult that
+        // knowledge FIRST, and keep watching it while the chat lives.
+        if (usageAuthWatch == null) {
+            usageAuthWatch = viewModelScope.launch(Dispatchers.IO) {
+                ServiceLocator.agentStatusCache.observeStatuses(serverId).collect { m ->
+                    if (m[_currentAgent.value]?.loggedIn == false) _usage.value = null
+                }
+            }
+        }
         usageJob?.cancel()
         usageJob = viewModelScope.launch(Dispatchers.IO) {
+            val known = ServiceLocator.agentStatusCache.load(serverId).statuses[agent]
+            if (known != null && !known.loggedIn) {
+                UsageProbe.forget(serverId, agent)
+                _usage.value = null
+                return@launch
+            }
+            // Instant: last good value (warm from the sessions-list prefetch) so
+            // the bar is already there on open, not popping in seconds later.
+            // AFTER the login check — a dead account's numbers must not even
+            // flash.
+            UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) _usage.value = it }
             // FAST: cheap source paints within a few hundred ms (Codex rollout
             // snapshot with projected resets / Claude's cached value)...
             UsageProbe.fetch(serverId, agent, fast = true)?.let { _usage.value = it }
@@ -3708,12 +3972,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // NO live process (idle chat — get_usage nulls on!procAlive):
                 // the CLI's own persisted usage state in ~/.claude.json is the
                 // same truth, mtime-gated so an unchanged file costs ~60 B.
-                // This tier is what keeps an idle chat's bar honest.
+                // This tier is what keeps an idle chat's bar honest. PAINT with
+                // the CLI's persisted reading, but DO NOT stop here: it is
+                // trusted up to an hour old, and returning early let a
+                // 50-minute-old 95% overwrite and then pin down a fresher 98%.
+                // The live curl below refines to the truly-current numbers.
                 UsageProbe.fetchClaudeCliCache(serverId)?.let { rep ->
                     val merged = UsageProbe.withPerModelCarryOver(serverId, agent, rep)
                     _usage.value = merged
                     UsageProbe.remember(serverId, agent, merged)
-                    return@launch
                 }
             }
             // ...then LIVE refines. Retry on null (= no warm connection yet) up
@@ -3723,6 +3990,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 UsageProbe.fetch(serverId, agent, fast = false)?.let { _usage.value = it; return@launch }
                 kotlinx.coroutines.delay(1500)
             }
+            // Every source came back empty. Two different truths hide in that:
+            // a hiccup (cache still holds the last good report → keep showing
+            // it, warm-state rule) — or the server said NO CREDENTIALS, in
+            // which case the probes above purged the cache, and keeping the
+            // old bar would quote a deleted account's limits forever.
+            if (UsageProbe.cached(serverId, agent) == null) _usage.value = null
         }
     }
 
@@ -4091,23 +4364,55 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // turn's TERMINAL event, so it lives at the tail. Scanning the
                 // tail (not all history) means an OLD limit that the user has
                 // since moved past doesn't keep re-arming the bar.
-                val reset = msgs.asReversed().asSequence().take(3).mapNotNull { m ->
-                    val t = when (m) {
+                // Scan the TAIL, and scan every row the CLI itself authors — the
+                // refusal does not always arrive as Result/Error. On 2026-08-19
+                // the chat carried "You've hit your session limit · resets
+                // 2:40pm" as its own dim rows while this watcher, looking only at
+                // Result/Error, saw nothing and the bar stayed at 15%. Assistant
+                // and user text stay EXCLUDED: a reply discussing limits (this
+                // very session did) must never arm the banner.
+                val tail = msgs.asReversed().asSequence().take(8).map { m ->
+                    when (m) {
                         is AgentMessage.Result -> m.text
                         is AgentMessage.Error -> m.text
+                        is AgentMessage.EventNote ->
+                            if (m.tone == AgentMessage.EventNote.Tone.WARN ||
+                                m.id == "claude-rate-limit"
+                            ) listOfNotNull(m.label, m.detail).joinToString(" ") else null
                         else -> null
                     }
-                    ai.eight24family.conch.agent.RateLimitReset.parse(t, now, zone)
-                }.firstOrNull { it > now }
+                }.toList()
+                val reset = tail.asSequence()
+                    .mapNotNull { ai.eight24family.conch.agent.RateLimitReset.parse(it, now, zone) }
+                    .firstOrNull { it > now }
+                val hit = tail.any { ai.eight24family.conch.agent.RateLimitReset.mentionsLimitHit(it) }
                 val last = msgs.lastOrNull()
                 when {
-                    reset != null -> _cliLimitReset.value = reset
+                    reset != null -> {
+                        val armed = _cliLimitReset.value != reset
+                        _cliLimitReset.value = reset
+                        // The CLI just told us we're blocked — go re-read the
+                        // account's real numbers NOW instead of waiting out the
+                        // poll interval.
+                        if (armed) refreshUsage()
+                    }
+                    // Limit hit with no parseable reset (a weekly window, an
+                    // unusual phrasing): still say BLOCKED. Showing a cheerful
+                    // percentage while the CLI refuses turns is the exact lie
+                    // this watcher exists to prevent.
+                    hit -> {
+                        if (!_cliLimitHit.value) { _cliLimitHit.value = true; refreshUsage() }
+                    }
                     // Forward progress past the limit — the user sent again or the
                     // agent replied — so we're no longer sitting on that failure.
                     // Drop it (a re-hit re-arms it) so a fresh turn / switched
-                    // account isn't painted as still-limited.
-                    last is AgentMessage.UserText || last is AgentMessage.AssistantText ->
+                    // account isn't painted as still-limited. Only when the tail
+                    // carries no limit row at all, so one late reply can't hide a
+                    // block that is still in force.
+                    last is AgentMessage.UserText || last is AgentMessage.AssistantText -> {
                         _cliLimitReset.value = null
+                        _cliLimitHit.value = false
+                    }
                 }
             }
         }
@@ -4270,7 +4575,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // one's looking, and it costs a poll). One ~0.3s server-side exec per tick.
         viewModelScope.launch {
             while (true) {
-                kotlinx.coroutines.delay(30_000)
+                kotlinx.coroutines.delay(USAGE_POLL_FOREGROUND_MS)
                 if (backgroundedSince == null) refreshUsage()
             }
         }
@@ -4314,9 +4619,55 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         _loopBySession.update { it + (sid to null) }
     }
 
+    /**
+     * STOP IS A LAW.
+     *
+     * (2026-08-18). So this method does not classify the situation and pick one
+     * remedy - it applies ALL of them, at once, every time
+     *
+     *  1. The UI says stopped IMMEDIATELY. The state flips out of Working here,
+     *     not when some remote confirmation arrives - four seconds of spinner
+     *     after a Stop is indistinguishable from Stop not working.
+     *  2. The local turn is force-cancelled: interrupt, then the process comes
+     *     down on `procAlive` alone (no "are we still Working" gate, because our
+     *     own tracking is exactly what desyncs on a wedged reader).
+     *  3. The server-side kill by resume id runs UNCONDITIONALLY, not only on the
+     *     ownerless route. If some process on that machine carries this session's
+     *     id, it dies - whoever started it. Safe to pair with (2) now: the stream
+     *     sets `userCancelled` before we get here and redelivery is dropped below,
+     *     which is what made the double-kill redeliver the prompt in the past.
+     *  4. If there is NO transport, the order is PERSISTED and retried by
+     *     [armStopOrderWatcher] the moment this server is reachable again -
+     *     including after an app restart. A stop pressed on the train lands.
+     *
+     * ⚠ WHAT STOP DOES NOT DO: stop the QUEUE. A message waiting in a bubble is
+     * something the user asked to send, and after the running turn dies it goes out
+     * and starts the next one - (2026-08-18). The order is cleared by the very next
+     * send/drain so the retry in (4) can never kill the turn the queue just
+     * started.
+     */
     fun stopCurrent() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid]
+        // 1. INSTANT, before anything that can block or fail. The working row and
+        //    the spinner both read these two.
+        _stopOrdered.value = true
+        if (_stateBySession.value[sid] is SessionState.Working) {
+            _stateBySession.update { it + (sid to SessionState.Running) }
+        }
+        tailPollCoord.setRemoteFileOpen(false)
+        // Nothing may be re-delivered after a stop. `pendingRedelivery` is drained
+        // on the next Running transition and is invisible, so a prompt left in it
+        // reappeared as a turn the user had explicitly halted.
+        pendingRedelivery.value = emptyList()
+        // 4. Persist the order so a dead transport only DELAYS the kill.
+        _resumeId.value?.let { rid ->
+            viewModelScope.launch(Dispatchers.IO) {
+                SilentlyTry.fired("SshAi-Chat", "persist stop order") {
+                    ServiceLocator.preferences.setStopOrder(rid, true)
+                }
+            }
+        }
         // The route is a pure decision (pinned by StopRouteTest). The bug this
         // fixes: an owned live process routed to the EXTERNAL pgrep kill, which
         // races our own supervision — it never sets `userCancelled`, so the
@@ -4328,19 +4679,23 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             isWorking = s?.state?.value is SessionState.Working,
         )) {
             // Owned + our tracking still on the turn → interrupt + escalate.
-            StopRoute.STREAM -> s?.cancelCurrent()
+            // FORCE even here: the non-force escalation is gated on the state
+            // still reading Working, and that gate is exactly what fails when a
+            // reader wedges - Stop then did nothing at all.
+            StopRoute.STREAM -> s?.cancelCurrent(force = true)
             // Owned but tracking desynced off Working (reopened mid-turn) →
             // force: the stream tears ITS OWN process down on procAlive alone,
             // cleanly, so Stop can't no-op into the external kill.
             StopRoute.STREAM_FORCE -> s?.cancelCurrent(force = true)
             // A one-shot turn WE run (no persistent process) → in-channel
             // INT→TERM→KILL ladder.
-            StopRoute.ONESHOT -> s?.cancelCurrent()
-            StopRoute.EXTERNAL_KILL -> {
-                stopMirroredRemoteTurn()
-                s?.cancelCurrent()
-            }
+            StopRoute.ONESHOT -> s?.cancelCurrent(force = true)
+            StopRoute.EXTERNAL_KILL -> s?.cancelCurrent(force = true)
         }
+        // 3. ALWAYS, whatever the route said. `stopRoute` decides how to reach a
+        //    turn WE own; it cannot know whether something else on that machine is
+        //    also writing this session, and "mine is dead" is not "it stopped".
+        stopMirroredRemoteTurn()
         // Kill the working verb NOW. The verb shows on state==Working OR the mirror
         // poll's remoteFileOpen; the branches above handle the app-driven state,
         // but the poll flag would keep the gerund up until the next tick
@@ -4900,6 +5255,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         /** Public constant — referenced by ChatPromptBar / ChatScreenPromptHost. */
         const val MAX_ATTACHMENTS: Int = 10
 
+        /**
+         * How often the plan-limit bar re-reads the account while the chat is ON
+         * SCREEN. The 5h/weekly windows are account-wide — the CLI, other
+         * devices and other sessions move them while this chat sits idle — and
+         * at 30 s the user was reading numbers up to half a minute stale next to
+         * a CLI that had already refused a turn. One ~0.3 s server-side exec per
+         * tick, only while foreground, so 8 s is affordable; backgrounded costs
+         * nothing.
+         */
+        private const val USAGE_POLL_FOREGROUND_MS = 8_000L
+
+        /** [coldCacheMaybe] fires only when re-sending is actually expensive:
+         *  context at or above this share of the window. Below it the worst
+         *  case (a full re-send) costs pennies and the hint is noise. */
+        private const val COLD_MAYBE_MIN_CONTEXT_PERCENT = 30
+
         /** Workflow journal poll cadence + how long done==total must stay quiet
          *  (journal mtime frozen) before the row retires. */
         private const val WF_POLL_MS = 5_000L
@@ -4991,6 +5362,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          * short enough that a missed edge costs the user ~1.5 s rather than
          * their whole queue.
          */
+        /** How often the chat's connection dot re-reads the real transport.
+         *  Slow on purpose: a dot that is one tick late is fine, a dot that
+         *  lies for an hour is not. */
+        internal const val CONNECTED_DOT_POLL_MS = 2_000L
+
+        /** How often an undelivered Stop looks for a way to land. */
+        internal const val STOP_RETRY_POLL_MS = 3_000L
+
         internal const val QUEUE_RELEASE_IDLE_TICKS = 3
 
         /**

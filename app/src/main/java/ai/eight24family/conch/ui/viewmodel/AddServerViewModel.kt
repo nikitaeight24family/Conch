@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -469,6 +470,15 @@ class AddServerViewModel(private val savedStateHandle: SavedStateHandle) : ViewM
             // default a brand-new server to Claude (the user switches freely).
             agent = existing?.agent ?: agent ?: Agent.CLAUDE,
             sshKeyIds = if (authMethod == AuthMethod.KEY) sshKeyIds else emptyList(),
+            // Accent colour: keep whatever an existing server has (this form has
+            // no colour field — that lives in server settings), and mint a random
+            // one for a brand-new server, biased away from the hues already in
+            // use so two servers never read as the same colour.
+            colorHex = existing?.colorHex ?: ai.eight24family.conch.ui.theme.ServerAccent.randomHex(
+                SilentlyTry.loggedOrElse("SshAi-AddServer", "read taken colours", emptyList()) {
+                    repo.observeServers().first().map { it.colorHex }
+                },
+            ),
         )
     }
 }

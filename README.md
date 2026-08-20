@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.6-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.7-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.6
+conch ▌ v0.3.7
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,43 @@ conch ▌ v0.3.6
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.3.7
+
+**Every server gets its own colour.** Each host is assigned a random accent when
+you add it, and its name is drawn in that colour everywhere in the app — the
+sessions list, the chat header, search results, the terminal. On a list that
+mixes machines you can now tell them apart without reading a word. The colour is
+yours to change in the server's settings (swatch, hex field, and a die for a new
+random one), and it adapts to the light theme instead of washing out: the hue
+stays, the lightness is re-picked so the name always clears a readable contrast.
+
+**Filter the list by server.** Long-press any agent chip — or the title — and
+tick the hosts you want to see. The count next to each server tells you what
+hiding it costs, and if a filter ever leaves the list empty it says so and offers
+one tap back, instead of looking like your sessions disappeared.
+
+**Work happening on the server shows up at once.** A long tool — an rsync, a
+build, a 47-minute hash — writes nothing to the session file while it runs, and
+the app used to read that silence as "the turn is over": the spinner went out and
+the phone buzzed "done" while the agent was still working. It now asks the server
+whether the CLI process is actually alive, so the truth comes from the machine
+instead of a timestamp. A session you are driving from your laptop lights up in
+the list too, which it never did before.
+
+**The limit indicator stops lying.** It always showed the 5-hour window, so it
+could read a comfortable 15% while the CLI in the same chat was refusing turns
+because a *different* window was exhausted. It now shows the window that actually
+constrains you, and when the CLI reports a limit the app believes it immediately
+instead of waiting for its next poll.
+
+**Faster everywhere you are looking.** Sessions you have open or that are moving
+are checked every couple of seconds, the full list refresh dropped from thirty
+seconds to ten, and returning to the app refreshes immediately instead of waiting
+out a tick. All of it is gated on the app being on screen and on an unmetered
+link, so a phone in your pocket still costs nothing.
 
 ---
 

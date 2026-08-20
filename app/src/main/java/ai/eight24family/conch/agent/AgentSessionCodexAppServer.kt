@@ -97,8 +97,11 @@ internal class AgentSessionCodexAppServer(
         val kind: Kind,
         /** requestUserInput: ordered (qid, hasOptions). */
         val questionIds: List<Pair<String, Boolean>> = emptyList(),
+        /** permissions/requestApproval: the profile the agent ASKED for, echoed
+         *  back verbatim on a grant. We never widen beyond what was requested. */
+        val requestedProfile: kotlinx.serialization.json.JsonObject? = null,
     ) {
-        enum class Kind { EXEC_APPROVAL, FILE_APPROVAL, USER_INPUT }
+        enum class Kind { EXEC_APPROVAL, FILE_APPROVAL, USER_INPUT, PERMISSIONS_PROFILE }
     }
 
     private val pendingServerReqs =
@@ -578,6 +581,47 @@ internal class AgentSessionCodexAppServer(
                     )
                 )
             }
+            // THE AGENT ASKING FOR A WIDER SANDBOX. Verified contract
+            // (generate-ts, 0.144.4): params carry `permissions{network,
+            // fileSystem}` plus a `reason`, and the RESPONSE is a granted profile
+            // with a scope of "turn" or "session" - not an accept/decline.
+            //
+            // This used to fall into the blanket -32601 below, which the CLI reads
+            // as "this client cannot do that": the agent quietly lost a capability
+            // it had asked for and the user never learned it had been asked. Extra
+            // network or filesystem reach is the user's call, so it is a card; the
+            // card's three answers map exactly onto the protocol's own vocabulary
+            // (deny = empty profile, once = scope "turn", session = scope
+            // "session").
+            "item/permissions/requestApproval" -> {
+                pendingServerReqs[key] = PendingServerReq(
+                    req.id, PendingServerReq.Kind.PERMISSIONS_PROFILE,
+                    requestedProfile = req.params["permissions"] as? kotlinx.serialization.json.JsonObject,
+                )
+                val reason = req.params.str("reason")
+                val profile = req.params["permissions"] as? kotlinx.serialization.json.JsonObject
+                val wants = buildList {
+                    if (profile?.get("network") != null &&
+                        profile["network"] != kotlinx.serialization.json.JsonNull
+                    ) add("network access")
+                    if (profile?.get("fileSystem") != null &&
+                        profile["fileSystem"] != kotlinx.serialization.json.JsonNull
+                    ) add("more of the filesystem")
+                }.ifEmpty { listOf("wider sandbox permissions") }
+                history.emitMsg(
+                    AgentMessage.PermissionRequest(
+                        id = "perm-codexperm-$key",
+                        requestId = key,
+                        toolName = "sandbox",
+                        description = reason ?: "the agent is asking for ${wants.joinToString(" and ")}",
+                        input = profile?.toString().orEmpty(),
+                        raw = req.params.toString(),
+                        // "session" is a real scope in this protocol, not an
+                        // approximation of one.
+                        canAllowSession = true,
+                    )
+                )
+            }
             // MCP elicitation needs a form/url surface we don't have —
             // decline per protocol instead of hanging the turn.
             "mcpServer/elicitation/request" ->
@@ -595,6 +639,10 @@ internal class AgentSessionCodexAppServer(
         val req = pendingServerReqs.remove(key) ?: return
         when (req.kind) {
             PendingServerReq.Kind.USER_INPUT -> history.resolveQuestion(key, emptyMap())
+            // Retiring an unanswered sandbox request = the narrowest possible
+            // answer, never silence: an unanswered server request hangs the turn.
+            PendingServerReq.Kind.PERMISSIONS_PROFILE ->
+                writeLine(CodexAppServerWire.encodePermissionsGrant(req.idElement, null, "turn"))
             else -> history.resolvePermission(key, AgentMessage.PermissionRequest.Resolution.DENIED)
         }
     }
@@ -605,6 +653,15 @@ internal class AgentSessionCodexAppServer(
     suspend fun respondPermission(requestId: String, decision: PermissionDecision): Boolean =
         withContext(Dispatchers.IO) {
             val req = pendingServerReqs.remove(requestId) ?: return@withContext false
+            // A sandbox-widening request is answered with a GRANTED PROFILE, not
+            // with accept/decline - deny means an empty profile. Same three
+            // buttons, different protocol underneath.
+            if (req.kind == PendingServerReq.Kind.PERMISSIONS_PROFILE) {
+                val granted = if (decision == PermissionDecision.DENY) null else req.requestedProfile
+                val scope = if (decision == PermissionDecision.ALLOW_SESSION) "session" else "turn"
+                writeLine(CodexAppServerWire.encodePermissionsGrant(req.idElement, granted, scope))
+                return@withContext true
+            }
             val wire = when (decision) {
                 PermissionDecision.DENY -> "decline"
                 PermissionDecision.ALLOW_ONCE -> "accept"

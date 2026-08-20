@@ -235,6 +235,9 @@ internal fun TerminalTopBar(
     title: String,
     agent: Agent,
     serverName: String,
+    /** Id of [serverName]'s server when it has resolved — the reliable key for
+     *  the per-server accent colour; the name is the fallback key. */
+    serverId: String? = null,
     /** Live transport state for [serverName]'s server — drives the ●/○ dot next
      *  to the name so the user can see online/offline at a glance. */
     connected: Boolean,
@@ -768,7 +771,11 @@ internal fun TerminalTopBar(
                         serverName,
                         style = MaterialTheme.typography.bodyMedium,
                         fontSize = MaterialTheme.typography.bodyMedium.fontSize * 0.85f,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = ai.eight24family.conch.ui.theme.serverNameColor(
+                            serverId = serverId,
+                            serverName = serverName,
+                            fallback = MaterialTheme.colorScheme.primary,
+                        ),
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

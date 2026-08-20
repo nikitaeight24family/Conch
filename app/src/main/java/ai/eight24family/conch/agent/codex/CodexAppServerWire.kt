@@ -230,6 +230,42 @@ internal object CodexAppServerWire {
         }
     }.toString()
 
+    /**
+     * Answer `item/permissions/requestApproval` — the agent asking to WIDEN its
+     * sandbox mid-turn (network access, extra filesystem paths).
+     *
+     * Generated contract (codex app-server generate-ts, 0.144.4):
+     *   params   {threadId, turnId, itemId, environmentId|null, startedAtMs,
+     *             cwd, reason|null,
+     *             permissions:{network|null, fileSystem|null}}
+     *   response {permissions:{network?, fileSystem?}, scope:"turn"|"session",
+     *             strictAutoReview?}
+     *
+     * ⚠ IT IS NOT AN ACCEPT/DECLINE. The response is a GRANTED PROFILE, so a
+     * refusal is an EMPTY profile rather than an error - and this used to be
+     * answered with a blanket JSON-RPC -32601, which the CLI reads as "this
+     * client cannot do that": the agent silently lost a capability it had asked
+     * for and the user was never told it had been asked. Granting extra network
+     * or filesystem reach is exactly the kind of decision that has to be the
+     * user's, so it is a card now, and the empty grant is what "no" means.
+     *
+     * [granted] null ⇒ deny (empty profile). Otherwise echo back the profile the
+     * agent requested, at [scope].
+     */
+    fun encodePermissionsGrant(
+        requestId: JsonElement,
+        granted: JsonObject?,
+        scope: String,
+    ): String = buildJsonObject {
+        put("id", requestId)
+        putJsonObject("result") {
+            putJsonObject("permissions") {
+                granted?.forEach { (k, v) -> if (v != JsonNull) put(k, v) }
+            }
+            put("scope", scope)
+        }
+    }.toString()
+
     /** Generic refusal for server requests we don't implement
      *  (item/permissions/requestApproval, item/tool/call, attestation…) —
      *  a JSON-RPC error response; codex fails that callback and the turn

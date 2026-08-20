@@ -194,6 +194,28 @@ sealed interface AgentMessage {
         )
     }
 
+    /**
+     * The CLI's full slash-command list after a mid-session change — a skill
+     * discovered as the agent moves into a subdirectory, a plugin loaded.
+     *
+     * ⚠ REPLACE semantics, stated in the schema: "Clients should REPLACE their
+     * cached command list with this payload." The app used to render it as a
+     * COUNT ("commands · 47 available") and throw the payload away, so a
+     * dynamically-discovered skill never reached the autocomplete the user types
+     * into. Non-rendering; a stable id so the newest push wins.
+     */
+    data class CommandsChanged(
+        override val id: String,
+        val commands: List<Entry>,
+    ) : AgentMessage {
+        data class Entry(
+            val name: String,
+            val description: String,
+            /** e.g. "&lt;file&gt;" — shown after the name in autocomplete. */
+            val argumentHint: String? = null,
+        )
+    }
+
     /** Agent invoked a tool. Input is opaque JSON serialized to string. */
     data class ToolUse(
         override val id: String,

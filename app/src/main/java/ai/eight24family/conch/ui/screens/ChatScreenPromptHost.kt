@@ -90,6 +90,7 @@ internal fun ChatPromptHost(
     // No live CLI and the last turn is older than the cache's hour: the next
     // message pays to re-send the whole conversation.
     val coldRebuild by vm.coldCacheRebuild.collectAsState()
+    val coldMaybe by vm.coldCacheMaybe.collectAsState()
     val runningElsewhere by vm.runningElsewhere.collectAsState()
 
     // Slash-command autocomplete state. Filters built-in + user-defined
@@ -172,6 +173,7 @@ internal fun ChatPromptHost(
                 // agent. Sending from here would launch a second CLI on it.
                 runningElsewhere = runningElsewhere,
                 coldRebuild = coldRebuild,
+                coldMaybe = coldMaybe,
                 state = state,
                 anyUploading = anyUploading,
                 reconnecting = reconnecting,

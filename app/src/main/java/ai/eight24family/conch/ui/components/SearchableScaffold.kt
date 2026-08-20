@@ -471,7 +471,7 @@ private fun SearchableTopBar(
  *  glance which agent + server a match came from. The FTS index itself
  *  doesn't store this (lines are agent-agnostic JSONL); we resolve it
  *  by scanning the in-memory sessions cache once per scope-change. */
-private data class HitSource(val serverName: String, val agent: Agent)
+private data class HitSource(val serverName: String, val agent: Agent, val serverId: String? = null)
 
 
 @Composable
@@ -518,7 +518,7 @@ private fun SearchHitsBody(
                     // claim the same id, keep the earlier match (the
                     // user's view of "first" is deterministic by the
                     // server list order).
-                    map.putIfAbsent(s.id, HitSource(server.name, a))
+                    map.putIfAbsent(s.id, HitSource(server.name, a, server.id))
                 }
             }
         }
@@ -737,7 +737,11 @@ private fun HitRow(
                     Text("  ", style = MaterialTheme.typography.labelSmall)
                     Text(
                         source!!.serverName,
-                        color = MaterialTheme.colorScheme.outline,
+                        color = ai.eight24family.conch.ui.theme.serverNameColor(
+                            serverId = source!!.serverId,
+                            serverName = source!!.serverName,
+                            fallback = MaterialTheme.colorScheme.outline,
+                        ),
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

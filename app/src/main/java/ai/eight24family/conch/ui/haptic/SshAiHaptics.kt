@@ -43,7 +43,7 @@ import ai.eight24family.conch.util.SilentlyTry
  * in a pocket, so it has to be felt without looking. [Confirm]'s
  * double tick was too close to an ordinary UI ack to notice.
  */
-enum class SshAiHaptic { Tick, Tap, Heavy, Confirm, Reject, GestureEnd, TurnEnd }
+enum class SshAiHaptic { Tick, Tap, Heavy, Confirm, Reject, GestureEnd, TurnEnd, TurnPausedBg }
 
 /**
  * Platform-neutral haptic player. Hidden behind a
@@ -138,6 +138,8 @@ class SshAiHaptics(
         // short click, and the point of TurnEnd is length. Falls through to
         // the triple-pulse waveform.
         SshAiHaptic.TurnEnd -> null
+        // Same family as TurnEnd, one pulse fewer — falls through.
+        SshAiHaptic.TurnPausedBg -> null
     }
 
     /** Pre-Q one-shot durations (ms) + amplitude (0..255). */
@@ -151,6 +153,7 @@ class SshAiHaptics(
         // Pre-O devices can't do waveforms at all, so the "triple" collapses
         // to one long buzz. Still unmistakable next to an 18 ms Tap.
         SshAiHaptic.TurnEnd -> 500L to 255
+        SshAiHaptic.TurnPausedBg -> 350L to 255
     }
 
     /**
@@ -193,6 +196,19 @@ class SshAiHaptics(
                         intArrayOf(0, 255, 0, 255, 0, 255),
                         -1,
                     )
+                } else {
+                    VibrationEffect.createWaveform(timings, -1)
+                }
+            }
+            // TurnPausedBg: TWO long pulses — same family as TurnEnd's three,
+            // one fewer on purpose: "paused, waiting on background work", not
+            // "done". The turn resumes by itself when the task-notification
+            // lands, so announcing the full "…and done" was a lie the user
+            // felt.
+            SshAiHaptic.TurnPausedBg -> {
+                val timings = longArrayOf(0, 220, 130, 280)
+                if (hasAmplitudeControl) {
+                    VibrationEffect.createWaveform(timings, intArrayOf(0, 255, 0, 255), -1)
                 } else {
                     VibrationEffect.createWaveform(timings, -1)
                 }

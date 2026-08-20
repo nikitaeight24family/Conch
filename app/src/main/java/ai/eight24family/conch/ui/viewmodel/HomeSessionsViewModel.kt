@@ -131,6 +131,43 @@ class HomeSessionsViewModel : ViewModel() {
         }
     }
 
+    /** Servers the user un-ticked in the server filter (long-press an agent
+     *  chip). In-memory for the same reason as [agentFilter] — a tick must
+     *  re-filter the list this frame — hydrated from prefs on init and persisted
+     *  on every change. HIDDEN ids, so a newly added server shows by default. */
+    private val _hiddenServerIds = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenServerIds: StateFlow<Set<String>> = _hiddenServerIds.asStateFlow()
+
+    @Volatile private var hiddenUserSet = false
+
+    fun toggleServerVisible(serverId: String, visible: Boolean) {
+        hiddenUserSet = true
+        val next = if (visible) _hiddenServerIds.value - serverId else _hiddenServerIds.value + serverId
+        _hiddenServerIds.value = next
+        viewModelScope.launch {
+            SilentlyTry.fired("SshAi-Home", "persist hidden servers") {
+                ServiceLocator.preferences.setHiddenServerIds(next)
+            }
+        }
+    }
+
+    /** Show every server again — the escape hatch from a filter the user forgot
+     *  they set (an all-hidden list looks like data loss otherwise). */
+    fun showAllServers() {
+        hiddenUserSet = true
+        _hiddenServerIds.value = emptySet()
+        viewModelScope.launch {
+            SilentlyTry.fired("SshAi-Home", "clear hidden servers") {
+                ServiceLocator.preferences.setHiddenServerIds(emptySet())
+            }
+        }
+    }
+
+    /** sessionId → when THIS process last had a turn of its own running there.
+     *  Feeds the echo window that keeps a just-finished turn from re-lighting
+     *  its own row; see the working-signal comment in [reload]. */
+    private val ourTurnWorkingAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** False until the first cache read completes — lets the UI distinguish
      *  "genuinely no sessions" from "haven't loaded yet" (no empty flash). */
     private val _loadedOnce = MutableStateFlow(false)
@@ -169,6 +206,12 @@ class HomeSessionsViewModel : ViewModel() {
                 ServiceLocator.preferences.homeAgentFilter.first()
             }
             if (!filterUserSet) _agentFilter.value = persisted
+        }
+        viewModelScope.launch {
+            val persisted = SilentlyTry.nullOnError {
+                ServiceLocator.preferences.hiddenServerIds.first()
+            }
+            if (!hiddenUserSet && persisted != null) _hiddenServerIds.value = persisted
         }
         viewModelScope.launch {
             while (true) {
@@ -251,6 +294,12 @@ class HomeSessionsViewModel : ViewModel() {
      *  covers the 30 s relist cadence + slow moments without flapping. */
     private val SERVER_WORKING_WINDOW_MS = 90_000L
 
+    /** How long after OUR OWN turn stops we ignore server-side activity signals
+     *  for that session — long enough to swallow the final answer landing in the
+     *  file and the mirror, short enough that work started on the server right
+     *  after ours shows up immediately. */
+    private val OUR_TURN_ECHO_MS = 20_000L
+
     /** sessionId → (cached size, seen bytes, count) memo so the 2.5 s reload
      *  only rescans a file tail when either side actually moved. */
     private val unreadCache =
@@ -325,6 +374,8 @@ class HomeSessionsViewModel : ViewModel() {
     }
 
     private suspend fun reload() {
+        // Deferred deletes first; a cheap no-op unless something is tombstoned.
+        reconcileTombstones()
         val list = servers.value.ifEmpty { repo.observeServers().first() }
         val out = ArrayList<HomeSessionRow>()
         val usable = HashMap<String, Set<Agent>>()
@@ -371,7 +422,20 @@ class HomeSessionsViewModel : ViewModel() {
                     // live by definition.
                     val cacheWorking =
                         System.currentTimeMillis() - ServiceLocator.historyCache.lastLiveActivityMs(sess.id) < SERVER_WORKING_WINDOW_MS
-                    val working = liveWorking || serverWorking || cacheWorking
+                    // OUR OWN just-finished turn ECHOES: the final answer lands in
+                    // the file and in the mirror right after our state goes idle,
+                    // and both look like activity. Suppress the server signals for
+                    // a SHORT window after our turn ends — that kills the ~90 s
+                    // ghost spinner (2026-08-19 01:23) without going deaf to real
+                    // work. ⚠ It must be a WINDOW, not "our session is idle".
+                    // Keying on idleness alone meant a session the user was
+                    // driving from the laptop CLI never lit up at all — the app
+                    // holds an adopted, idle AgentSession for it, so every
+                    // server-side signal was thrown away.
+                    if (liveWorking) ourTurnWorkingAtMs[sess.id] = System.currentTimeMillis()
+                    val echoing = !liveWorking &&
+                        System.currentTimeMillis() - (ourTurnWorkingAtMs[sess.id] ?: 0L) < OUR_TURN_ECHO_MS
+                    val working = liveWorking || (!echoing && (serverWorking || cacheWorking))
                     // Unread: live message count while this process has the
                     // session (precise); otherwise the DURABLE byte watermark
                     // vs the mirrored body — new JSONL lines since last view.
@@ -534,12 +598,35 @@ class HomeSessionsViewModel : ViewModel() {
                 val pruned = snap.sessions.filterNot { it.id == session.id && it.path == session.path }
                 cache.save(serverId, agent, pruned)
             }
-            SilentlyTry.fired("SshAi-Home", "forget cached session body") {
-                ServiceLocator.historyCache.forget(session.id)
-            }
-            val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            // WARNING: THE LOCAL BODY IS THE ONLY COPY LEFT IF THE SERVER `rm`
+            // DOES NOT LAND. It used to be deleted right here, BEFORE the transport
+            // was even checked, so deleting while offline hid the row behind a
+            // persisted tombstone, destroyed the cached conversation AND its owner
+            // sidecar, and never reached the server. The session lived on the
+            // machine and was gone from the app forever: not in Home, not in
+            // search, no trash, no undo, and the only screen that re-fires the `rm`
+            // is the per-agent list for that exact (server, agent) pair. Clearing
+            // app data was the only reset.
+            //
+            // So the server delete comes FIRST, and the local body is dropped only
+            // once it has actually happened. A tombstoned session whose `rm` is
+            // still owed stays hidden but INTACT, and [reconcileTombstones]
+            // finishes the job the next time that server is reachable.
+            var pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             if (pooled == null) {
-                android.util.Log.w("SshAi-Home", "deleteSession ${session.id.take(8)}: no pool — local-only removal")
+                // The same courtesy the per-agent screen extends: try to come up
+                // silently before giving up on the remote half.
+                SilentlyTry.fired("SshAi-Home", "silent connect for delete") {
+                    ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
+                }
+                pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            }
+            if (pooled == null) {
+                android.util.Log.w(
+                    "SshAi-Home",
+                    "deleteSession ${session.id.take(8)}: offline, hidden but body KEPT; " +
+                        "server rm deferred to reconcile",
+                )
                 return@launch
             }
             val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
@@ -547,14 +634,79 @@ class HomeSessionsViewModel : ViewModel() {
             val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
                 "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner),
             )
-            SilentlyTry.fired("SshAi-Home", "delete session on server") {
+            val removed = SilentlyTry.logged("SshAi-Home", "delete session on server") {
                 val sess = pooled.startSession()
                 try {
                     val proc = sess.exec(cmd)
                     proc.inputStream.readBytes()
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                    true
                 } finally {
                     SilentlyTry.fired("SshAi-Home", "close delete session") { sess.close() }
+                }
+            } == true
+            if (removed) {
+                SilentlyTry.fired("SshAi-Home", "forget cached session body") {
+                    ServiceLocator.historyCache.forget(session.id)
+                }
+            }
+        }
+    }
+
+    /**
+     * Finish deletes whose server `rm` never landed.
+     *
+     * A delete made offline is only half done: the row is hidden by a persisted
+     * tombstone while the conversation is still on the machine. Without this the
+     * other half only ever ran from the per-agent sessions list, a screen the user
+     * reaches by drilling Agents -> server -> agent, so a session deleted on the
+     * train stayed on the server indefinitely while looking deleted in the app.
+     *
+     * Runs on reload, and only when something is actually tombstoned AND that
+     * server is reachable, so it costs nothing in the common case.
+     */
+    private fun reconcileTombstones() {
+        if (tombstones.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            for (tag in tombstones) {
+                val serverId = tag.substringBefore(':')
+                val sessionId = tag.substringAfter(':')
+                if (serverId.isBlank() || sessionId.isBlank()) continue
+                val pooled = ServiceLocator.sshConnectionPool.peek(serverId) ?: continue
+                // Still in a cache for this server means a listing saw it, which
+                // means the server still has it. Nothing cached, nothing owed.
+                val owed = Agent.entries.mapNotNull { agent ->
+                    val snap = SilentlyTry.logged("SshAi-Home", "load cache for reconcile") {
+                        cache.load(serverId, agent)
+                    }
+                    snap?.sessions?.firstOrNull { it.id == sessionId }?.let { agent to it }
+                }
+                for ((agent, sess) in owed) {
+                    val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
+                        .deleteSessionCommand(sess.id, sess.path)
+                    val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+                        "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner),
+                    )
+                    android.util.Log.i(
+                        "SshAi-Home",
+                        "reconcile: finishing deferred delete of ${sess.id.take(8)} on $serverId",
+                    )
+                    val ok = SilentlyTry.logged("SshAi-Home", "reconcile delete") {
+                        val ch = pooled.startSession()
+                        try {
+                            val proc = ch.exec(cmd)
+                            proc.inputStream.readBytes()
+                            proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                            true
+                        } finally {
+                            SilentlyTry.fired("SshAi-Home", "close reconcile session") { ch.close() }
+                        }
+                    } == true
+                    if (ok) {
+                        SilentlyTry.fired("SshAi-Home", "forget body after reconcile") {
+                            ServiceLocator.historyCache.forget(sess.id)
+                        }
+                    }
                 }
             }
         }

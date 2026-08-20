@@ -25,6 +25,14 @@ data class Server(
      * ids are silently filtered when resolving secrets).
      */
     val sshKeyIds: List<String> = emptyList(),
+    /**
+     * This server's accent colour as `#RRGGBB` — its name is drawn in it
+     * everywhere in the app. Random at creation, editable in server settings.
+     * Null ⇒ derive a stable colour from [id] (see
+     * [ai.eight24family.conch.ui.theme.ServerAccent.derive]), so servers saved
+     * before this field existed are already colour-coded without a data write.
+     */
+    val colorHex: String? = null,
 )
 
 data class ServerSecrets(

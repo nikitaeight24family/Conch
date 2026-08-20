@@ -29,6 +29,8 @@ data class ServerEntity(
     /** Comma-separated ssh_key.id values. Null for password servers,
      *  or for KEY servers whose only key was deleted from the keychain. */
     @ColumnInfo(defaultValue = "NULL") val sshKeyIdsCsv: String? = null,
+    /** Accent colour `#RRGGBB`; null ⇒ derived from [id]. See Server.colorHex. */
+    @ColumnInfo(defaultValue = "NULL") val colorHex: String? = null,
 ) {
     fun toDomain() = Server(
         id = id,
@@ -43,6 +45,7 @@ data class ServerEntity(
             ?.split(",")
             ?.mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() } }
             ?: emptyList(),
+        colorHex = colorHex,
     )
 
     companion object {
@@ -57,6 +60,7 @@ data class ServerEntity(
             agent = s.agent.name,
             sshKeyIdsCsv = s.sshKeyIds.takeIf { it.isNotEmpty() }
                 ?.joinToString(","),
+            colorHex = s.colorHex,
         )
     }
 }

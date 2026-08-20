@@ -126,6 +126,14 @@ class ServerRepository(
         dao.upsert(current.copy(agent = agent.name))
     }
 
+    /** Set (or clear, with null) the server's accent colour — a single-field
+     *  write so the colour picker never has to round-trip the whole edit form
+     *  and can't clobber a concurrent credential change. */
+    suspend fun updateColorHex(id: String, colorHex: String?) {
+        val current = dao.getById(id) ?: return
+        dao.upsert(current.copy(colorHex = colorHex))
+    }
+
     suspend fun delete(id: String) {
         chatSessionRepository?.deleteAllForServer(id)
         dao.deleteById(id)

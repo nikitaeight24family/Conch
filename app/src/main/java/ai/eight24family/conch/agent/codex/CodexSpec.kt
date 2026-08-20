@@ -187,8 +187,8 @@ done | sort -t'	' -k2 -rn | head -500
 
     override val statusProbeLines: String = """
 echo "codex_inst=${'$'}(command -v codex >/dev/null 2>&1 && echo y || echo n)"
-echo "codex_ver=${'$'}(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-echo "codex_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @openai/codex version 2>/dev/null | tr -d '\r\n ' || echo '')"
+echo "codex_ver=${'$'}(conch_ver codex codex)"
+echo "codex_latest=${'$'}(conch_latest codex @openai/codex)"
 CM=""
 # codex's OWN verdict. `codex login status` prints "Logged in using ChatGPT"
 # (OAuth) / "Logged in using an API key" / "Not logged in", and EXITS 0 when

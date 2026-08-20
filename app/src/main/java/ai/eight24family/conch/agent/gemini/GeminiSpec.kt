@@ -191,8 +191,8 @@ done | sort -t'	' -k2 -rn | awk -F'\t' '!seen[${'$'}1]++' | head -200
 
     override val statusProbeLines: String = """
 echo "gemini_inst=${'$'}(command -v gemini >/dev/null 2>&1 && echo y || echo n)"
-echo "gemini_ver=${'$'}(gemini --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-echo "gemini_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @google/gemini-cli version 2>/dev/null | tr -d '\r\n ' || echo '')"
+echo "gemini_ver=${'$'}(conch_ver gemini gemini)"
+echo "gemini_latest=${'$'}(conch_latest gemini @google/gemini-cli)"
 CM=""
 # OAuth = creds file that actually carries a refresh_token. A bare
 # `-f` test lied: an empty/partial oauth_creds.json (e.g. the login

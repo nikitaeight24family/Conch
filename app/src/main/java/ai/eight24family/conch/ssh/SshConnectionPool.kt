@@ -55,8 +55,6 @@ import java.util.concurrent.TimeUnit
 class SshConnectionPool {
 
     /** Per-server live entry, alive iff `client.isConnected`. The
-     *  `refCount` field is mutated only while the per-server lock is
-     *  held (see [perServerLock]).
      *
      *  [openedAtMs] is the transport's birthday, and it is what stops
      *  [evictPoisoned] from killing a transport that CANNOT be the poisoned
@@ -64,7 +62,6 @@ class SshConnectionPool {
      *  livelock note on [evictPoisoned]. */
     private data class Entry(
         val client: SSHClient,
-        var refCount: Int,
         val openedAtMs: Long = System.currentTimeMillis(),
     )
 
@@ -74,6 +71,33 @@ class SshConnectionPool {
      *  global lock around them would serialise with the slow
      *  connect+auth path inside [acquire] and cause ANRs. */
     private val pool = ConcurrentHashMap<String, Entry>()
+
+    /**
+     * Outstanding [acquire] calls per server: references nobody has released
+     * yet.
+     *
+     * WARNING: it lives OUTSIDE [Entry] on purpose. It used to be a field ON
+     * the entry, and the entry is REPLACED on a dead-client rebuild and
+     * REMOVED by [evictPoisoned] - both of which threw the count away while
+     * every holder was still holding. The rebuilt entry started at 1 with
+     * three chats on it, so the FIRST release took it to zero and
+     * disconnected a transport the other two were using; the chat that lost
+     * it then failed "disconnected" under a connection dot that was still
+     * lit. A holder owns its reference for as long as it holds it, whatever
+     * happens to the socket underneath, so the count has to outlive the
+     * socket.
+     *
+     * Mutated only under the per-server lock, like everything else here.
+     */
+    private val outstanding = ConcurrentHashMap<String, Int>()
+
+    /** Bump the outstanding-acquire count for [serverId] and return it.
+     *  Caller holds the per-server lock. */
+    private fun bumpOutstanding(serverId: String): Int {
+        val n = (outstanding[serverId] ?: 0) + 1
+        outstanding[serverId] = n
+        return n
+    }
 
     /**
      * Per-server lock object used to serialise concurrent [acquire]
@@ -111,10 +135,10 @@ class SshConnectionPool {
         synchronized(lock) {
             val existing = pool[server.id]
             if (existing != null && existing.client.isConnected) {
-                existing.refCount += 1
+                val hits = bumpOutstanding(server.id)
                 android.util.Log.d(
                     TAG,
-                    "acquire(${server.id}) HIT — refcount=${existing.refCount} (no touch)"
+                    "acquire(${server.id}) HIT — refcount=$hits (no touch)"
                 )
                 return existing.client
             }
@@ -131,7 +155,11 @@ class SshConnectionPool {
             // (LoginGraceTime timeout → a preauth line fail2ban counts).
             // openAndAuthenticate owns that cleanup now (see its catch), so a
             // throw out of it never leaves a socket behind.
-            pool[server.id] = Entry(fresh, 1)
+            // NOT reset to 1: holders of the transport we just replaced still
+            // owe a release each.
+            pool[server.id] = Entry(fresh)
+            val opened = bumpOutstanding(server.id)
+            android.util.Log.d(TAG, "acquire(${server.id}) opened refcount=$opened")
             return fresh
         }
     }
@@ -143,10 +171,14 @@ class SshConnectionPool {
     fun release(serverId: String) {
         val lock = perServerLock[serverId] ?: return
         synchronized(lock) {
+            // Decrement FIRST, and whether or not a transport is pooled right
+            // now: an evicted entry must not make a holder's release vanish,
+            // or the count drifts up and the transport is never closed.
+            val left = ((outstanding[serverId] ?: 0) - 1).coerceAtLeast(0)
+            if (left == 0) outstanding.remove(serverId) else outstanding[serverId] = left
+            android.util.Log.d(TAG, "release($serverId) — refcount=$left")
             val entry = pool[serverId] ?: return
-            entry.refCount -= 1
-            android.util.Log.d(TAG, "release($serverId) — refcount=${entry.refCount}")
-            if (entry.refCount <= 0) {
+            if (left <= 0) {
                 android.util.Log.d(TAG, "  refcount hit zero — disconnecting client")
                 pool.remove(serverId)
                 // Off-thread: the chat's retry path releases from Main, where a
@@ -306,6 +338,17 @@ class SshConnectionPool {
         secrets: ServerSecrets,
         skSigner: ai.eight24family.conch.ssh.securitykey.SkSigner? = null,
     ): SSHClient {
+        // THE HUMAN ACTION THAT CLEARS THE SILENT-DIAL BACKOFF.
+        //
+        // The rule below [resetSilentBackoff] says it plainly: "a HUMAN action
+        // resets it". Nothing did - the only caller was the network-change
+        // handler. So after a bad-network stretch the streak stood at up to
+        // fifteen minutes, and every seamless path (`retry()`'s reconnect, the
+        // Connect button's silent attempt) refused with nothing but a logcat
+        // line, leaving the user to pay a security-key tap that seamless
+        // reconnect exists to spare them. Reaching this function means a person
+        // asked for this connection; the streak is stale by definition.
+        resetSilentBackoff()
         if (userHeld.contains(server.id)) {
             // Already user-held. Don't bump refcount again — just
             // return whichever live client the pool currently has.
@@ -322,6 +365,11 @@ class SshConnectionPool {
             userHeld.remove(server.id)
         }
         val client = acquire(server, secrets, skSigner)
+        // A connect that WORKED is the strongest possible evidence the server is
+        // reachable, so record it like a successful silent dial - otherwise the
+        // per-server streak survived a manual reconnect and kept vetoing the
+        // seamless path afterwards.
+        noteSilentDialResult(server.id, ok = true)
         // Mark held only AFTER a successful acquire — if auth blew up
         // we don't want a phantom userHeld entry that release can't
         // balance.
@@ -405,6 +453,26 @@ class SshConnectionPool {
      * UI (e.g. rebuild the notification text with the corrected
      * count). Idempotent — calling on a fully-alive pool is a no-op.
      */
+    /**
+     * DEAD CODE ON PURPOSE - do not "wire it up" without reading this.
+     *
+     * It has no callers, and that is the DESIGN: `userHeld` is user INTENT
+     * ("I connected this server"), and dropping a server out of it the moment
+     * its socket dies is what used to make a network blip look like the user
+     * had disconnected - the reconnect ladder then had nothing to work on and
+     * `SshAiService` stopped keeping the process alive. Intent outlives the
+     * socket, deliberately (see the note in SshAiService).
+     *
+     * It stayed here as an escape hatch, and its existence was quietly load
+     * bearing in the wrong way: the chat's connection dot read `userHeldIds`
+     * and its KDoc justified that by claiming this pruner kept the set honest.
+     * Nothing called it, so the dot latched green forever. The dot now reads the
+     * transport (`peek`) instead - see `ChatViewModel.connected`.
+     *
+     * Kept, unused, because the ONE thing it is right for is an explicit
+     * "forget everything" path; delete it rather than call it from a watchdog.
+     */
+    @Suppress("unused")
     fun pruneDeadUserHeld(): List<String> {
         val dead = userHeld.filter { peek(it) == null }
         if (dead.isEmpty()) return emptyList()

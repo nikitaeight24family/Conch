@@ -110,9 +110,46 @@ internal fun AttachMediaStrip(
     val ctx = LocalContext.current
     // Re-read on every open: the user may have changed the grant in Settings.
     var camera by remember { mutableStateOf(cameraGranted(ctx)) }
+    // A PERMANENTLY DENIED GRANT MUST NOT LEAVE A DEAD TILE.
+    //
+    // Two "Don't allow" taps and Android stops showing the dialog at all, so
+    // every further tap called requestPermissions, got rejected instantly with no
+    // UI, and the cell stayed a dark square with a camera glyph and no
+    // explanation - forever, restart included. The escape exists but lives
+    // entirely outside the app (Settings -> Apps -> Conch -> Permissions) and
+    // nothing hinted at it.
+    //
+    // `shouldShowRequestPermissionRationale` is how the platform says "asking
+    // again is pointless": false AFTER a denial means the system will not prompt,
+    // so the tap has to go where the decision actually lives.
+    var askedOnce by remember { mutableStateOf(false) }
     val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
-    ) { camera = cameraGranted(ctx) }
+    ) {
+        camera = cameraGranted(ctx)
+        askedOnce = true
+    }
+    val activity = ctx as? android.app.Activity
+    val requestCamera: () -> Unit = {
+        val canAsk = activity == null || !askedOnce ||
+            androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(
+                activity, Manifest.permission.CAMERA,
+            )
+        if (canAsk) {
+            permLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+        } else {
+            ai.eight24family.conch.util.SilentlyTry.fired(
+                "SshAi-Attach", "open app permission settings",
+            ) {
+                ctx.startActivity(
+                    android.content.Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.fromParts("package", ctx.packageName, null),
+                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
+    }
 
     Column(modifier = modifier.fillMaxWidth()) {
         // ⚠ NO WIDTH IS ASSUMED. This ships to every screen Play serves, so the
@@ -154,7 +191,7 @@ internal fun AttachMediaStrip(
                 CameraCell(
                     enabled = enabled,
                     live = camera,
-                    onRequestCamera = { permLauncher.launch(arrayOf(Manifest.permission.CAMERA)) },
+                    onRequestCamera = { requestCamera() },
                     onFallback = onCameraFallback,
                 )
             }

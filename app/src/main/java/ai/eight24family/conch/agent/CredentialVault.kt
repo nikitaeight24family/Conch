@@ -33,6 +33,26 @@ class CredentialVault(
         /** Masked key preview for API-key slots (`sk-proj…ab12`); null for
          *  OAuth slots. Computed server-side — never the full value. */
         val masked: String? = null,
+        /** ── Account passport, extracted SERVER-SIDE from the slot's own
+         *  credential at first listing (see the enrich block in [listSlots]).
+         *  Facts only — email, plan, dates — never token values. All fields
+         *  are as-of-capture: a slot is a frozen copy of the credential. ── */
+        /** OAuth shape: "file" (a credentials JSON) or "token" (an env-line
+         *  long-lived token, Claude `setup-token`). Null for API keys. */
+        val kind: String? = null,
+        /** Account email, when the credential carries an OIDC id_token
+         *  (Codex, Gemini) that names it. */
+        val email: String? = null,
+        /** Subscription plan: Codex `chatgpt_plan_type` ("team", "plus"…),
+         *  Claude full-oauth `subscriptionType` ("max", "pro"…). */
+        val plan: String? = null,
+        /** Codex: `chatgpt_subscription_active_until`, ISO-8601. */
+        val planUntil: String? = null,
+        /** Codex: `last_refresh` of the session file, ISO-8601. */
+        val lastRefresh: String? = null,
+        /** Claude full-oauth: `expiresAt` of the ACCESS token, epoch ms.
+         *  Refreshable — NOT an account expiry; kept for diagnostics. */
+        val expiresMs: Long? = null,
     )
 
     /** Live cred FILE for OAuth/file-based methods (HOME-relative, quoted at use). */
@@ -68,11 +88,54 @@ class CredentialVault(
      *  the caller can keep showing the last-known accounts instead of blanking
      *  them; an empty list means the listing ran and there genuinely are none. */
     suspend fun listSlots(): List<Slot>? {
+        // Self-healing passport: slots created before the detail fields existed
+        // (or by an older app) get their meta enriched IN PLACE on first list —
+        // facts are pulled out of the slot's own credential copy, server-side,
+        // so no migration step and no re-login is ever needed. `enriched=1`
+        // makes it once-per-slot. Extraction is POSIX (the 2026-08-17 sweep:
+        // portable() may land on dash/ash): grep/sed JSON field pulls + a
+        // base64 JWT payload decode; every field is optional, a parse miss
+        // just leaves the line out.
+        val enrich =
+            "jstr() { printf %s \"\$2\" | grep -oE \"\\\"\$1\\\"[[:space:]]*:[[:space:]]*\\\"[^\\\"]*\\\"\" | head -1 | sed -E 's/^[^:]*:[[:space:]]*\"//; s/\"\$//'; }; " +
+            "jnum() { printf %s \"\$2\" | grep -oE \"\\\"\$1\\\"[[:space:]]*:[[:space:]]*[0-9]+\" | head -1 | grep -oE '[0-9]+\$'; }; " +
+            "enrich_slot() { " +
+                "m=\"\$1/meta\"; grep -q '^enriched=' \"\$m\" 2>/dev/null && return 0; " +
+                "KIND=''; EMAIL=''; PLAN=''; PUNTIL=''; LREF=''; EXPMS=''; " +
+                "if [ -f \"\$1/cred\" ] && grep -q '^method=api\$' \"\$m\" 2>/dev/null; then KIND=''; " +
+                "elif [ -f \"\$1/cred\" ]; then " +
+                    "KIND=file; C=\$(tr -d '\\n' < \"\$1/cred\"); " +
+                    // OIDC id_token (Codex, Gemini): payload names the account.
+                    "JWT=\$(jstr id_token \"\$C\"); " +
+                    "if [ -n \"\$JWT\" ]; then " +
+                        "JP=\$(printf %s \"\$JWT\" | cut -d. -f2 | tr '_-' '/+'); " +
+                        "case \$((\${#JP} % 4)) in 2) JP=\"\$JP==\";; 3) JP=\"\$JP=\";; esac; " +
+                        "PAY=\$(printf %s \"\$JP\" | base64 -d 2>/dev/null | tr -d '\\n'); " +
+                        "EMAIL=\$(jstr email \"\$PAY\"); " +
+                        "PLAN=\$(jstr chatgpt_plan_type \"\$PAY\"); " +
+                        "PUNTIL=\$(jstr chatgpt_subscription_active_until \"\$PAY\"); " +
+                    "fi; " +
+                    "LREF=\$(jstr last_refresh \"\$C\"); " +
+                    // Claude full-oauth credentials file.
+                    "[ -n \"\$PLAN\" ] || PLAN=\$(jstr subscriptionType \"\$C\"); " +
+                    "EXPMS=\$(jnum expiresAt \"\$C\"); " +
+                "elif [ -f \"\$1/credenv\" ]; then KIND=token; fi; " +
+                "{ [ -n \"\$KIND\" ] && printf 'kind=%s\\n' \"\$KIND\"; " +
+                "[ -n \"\$EMAIL\" ] && printf 'email=%s\\n' \"\$EMAIL\"; " +
+                "[ -n \"\$PLAN\" ] && printf 'plan=%s\\n' \"\$PLAN\"; " +
+                "[ -n \"\$PUNTIL\" ] && printf 'planUntil=%s\\n' \"\$PUNTIL\"; " +
+                "[ -n \"\$LREF\" ] && printf 'lastRefresh=%s\\n' \"\$LREF\"; " +
+                "[ -n \"\$EXPMS\" ] && printf 'expiresMs=%s\\n' \"\$EXPMS\"; " +
+                "printf 'enriched=1\\n'; } >> \"\$m\"; " +
+            "}; "
         val out = SilentlyTry.logged(TAG, "list slots") {
             exec(
                 "bash -lc " + sh(
-                    "for d in $slotsDir/*/; do " +
-                        "[ -f \"\${d}meta\" ] && printf 'SLOT %s\\t%s\\n' \"\$(basename \"\$d\")\" \"\$(tr '\\n' '\\t' < \"\${d}meta\")\"; " +
+                    enrich +
+                        "for d in $slotsDir/*/; do " +
+                        "[ -f \"\${d}meta\" ] || continue; " +
+                        "enrich_slot \"\${d%/}\"; " +
+                        "printf 'SLOT %s\\t%s\\n' \"\$(basename \"\$d\")\" \"\$(tr '\\n' '\\t' < \"\${d}meta\")\"; " +
                         "done 2>/dev/null"
                 )
             )
@@ -93,6 +156,12 @@ class CredentialVault(
                 label = kv["label"]?.trim()?.takeIf { it.isNotEmpty() } ?: id,
                 createdAt = kv["created"]?.trim()?.toLongOrNull() ?: 0L,
                 masked = kv["masked"]?.trim()?.takeIf { it.isNotEmpty() },
+                kind = kv["kind"]?.trim()?.takeIf { it.isNotEmpty() },
+                email = kv["email"]?.trim()?.takeIf { it.isNotEmpty() },
+                plan = kv["plan"]?.trim()?.takeIf { it.isNotEmpty() },
+                planUntil = kv["planUntil"]?.trim()?.takeIf { it.isNotEmpty() },
+                lastRefresh = kv["lastRefresh"]?.trim()?.takeIf { it.isNotEmpty() },
+                expiresMs = kv["expiresMs"]?.trim()?.toLongOrNull(),
             )
         }.toList()
     }
@@ -180,10 +249,35 @@ class CredentialVault(
             // line — leaving the env line kept the server logged in after the
             // last account was removed (probe then honestly said "ready" while
             // the sheet said "No accounts").
+            //
+            // For Claude, credentials alone are NOT the whole login. Two more
+            // things keep the account alive on the server: - IDENTITY RESIDUE:
+            // ~/.claude.json carries oauthAccount (email, org — the CLI's banner
+            // greets from it) and the account's cachedUsageUtilization. python3
+            // first, jq fallback, both absent → residue stays (log- only concern,
+            // never a broken JSON). - RUNNING PROCESSES: headless stream-json
+            // turns launched before the logout hold the token in their env and
+            // keep burning the account (measured: a 4h20m zombie turn survived
+            // the logout). A logged-out account has no business computing — kill
+            // them. The pattern matches only headless `--output-format
+            // stream-json` launches, never a human's interactive `claude` TUI.
+            val claudeResidue = if (agent == Agent.CLAUDE)
+                "python3 -c 'import json,os;p=os.path.expanduser(\"~/.claude.json\");d=json.load(open(p));[d.pop(k,None) for k in (\"oauthAccount\",\"cachedUsageUtilization\")];json.dump(d,open(p,\"w\"),indent=2)' 2>/dev/null " +
+                    "|| { command -v jq >/dev/null 2>&1 && jq 'del(.oauthAccount,.cachedUsageUtilization)' \"\$HOME/.claude.json\" > \"\$HOME/.claude.json.cln\" 2>/dev/null && mv \"\$HOME/.claude.json.cln\" \"\$HOME/.claude.json\"; }; " +
+                    // ⚠ [c]laude, not claude: pkill -f matches FULL command
+                    // lines, and this very script's own `bash -lc '…'` line
+                    // contains the pattern — a plain match killed the shell
+                    // running the removal before its `echo OK` («Couldn't
+                    // remove — the server didn't confirm», 2026-08-18). The
+                    // bracket keeps the regex matching real processes while no
+                    // longer matching its own text.
+                    "pkill -f -- '[c]laude --output-format stream-json' 2>/dev/null; "
+            else ""
             "M=\$(sed -nE 's/^method=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
                 "if [ \"\$M\" = api ]; then sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; " +
                 "else rm -f \"$liveCred\"; " +
                 (oauthEnvVar?.let { "sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; " } ?: "") +
+                claudeResidue +
                 "fi; "
         } else ""
         val out = SilentlyTry.logged(TAG, "remove slot") {
@@ -192,18 +286,19 @@ class CredentialVault(
         return out?.contains("OK") == true
     }
 
-    /** Rename a slot — rewrite its label, preserving everything else. */
+    /** Rename a slot — swap ONLY the label line, preserving every other meta
+     *  line (method/created/masked and the enriched account passport). The old
+     *  full-rewrite lost whatever it didn't know to carry over. */
     suspend fun rename(slotId: String, method: String, createdAt: Long, label: String): Boolean {
         val safeId = slotId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val dir = "$slotsDir/$safeId"
         val out = SilentlyTry.logged(TAG, "rename slot") {
             exec(
                 "bash -lc " + sh(
-                    "[ -d \"$dir\" ] || { echo NOSLOT; exit 0; }; " +
-                        // keep the masked line (if any) as-is; only swap label.
-                        "MASKED=\$(sed -nE 's/^masked=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
-                        "{ printf 'method=%s\\nlabel=%s\\ncreated=%s\\n' ${sh(method)} ${sh(label)} ${sh(createdAt.toString())}; " +
-                        "[ -n \"\$MASKED\" ] && printf 'masked=%s\\n' \"\$MASKED\"; } > \"$dir/meta\" && echo OK"
+                    "[ -f \"$dir/meta\" ] || { echo NOSLOT; exit 0; }; " +
+                        "grep -v '^label=' \"$dir/meta\" > \"$dir/meta.tmp\" 2>/dev/null; " +
+                        "printf 'label=%s\\n' ${sh(label)} >> \"$dir/meta.tmp\" && " +
+                        "mv \"$dir/meta.tmp\" \"$dir/meta\" && echo OK"
                 )
             )
         }

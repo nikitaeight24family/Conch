@@ -256,6 +256,8 @@ internal fun TerminalLine(
         // The CLI's background-task set. Feeds the agent panel's count; the
         // display list filters it out before we ever get here.
         is AgentMessage.BackgroundTasks -> Unit
+        // Feeds the slash autocomplete; never a transcript row.
+        is AgentMessage.CommandsChanged -> Unit
         // Turn-completion signal. The reader drops it before history, so this
         // branch should be unreachable — it exists so the compiler keeps
         // guarding the rest of this `when`.

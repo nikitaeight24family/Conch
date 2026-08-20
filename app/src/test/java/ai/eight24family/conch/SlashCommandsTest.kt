@@ -152,7 +152,23 @@ class SlashCommandsTest {
         val names = SlashCommands.BUILT_IN.map { it.name }.toSet()
         // "bg" joined deliberately (2026-08-03): `claude --bg` hands a task to a
         // detached agent that outlives the app — see BackgroundTaskTest.
-        val expected = setOf("clear", "new", "diff", "init", "memory", "agents", "model", "review", "bg")
+        //
+        // The five below joined deliberately (2026-08-18): each one is a CLI
+        // capability the app was not asking for, reachable nowhere else, and each
+        // asks the CLI over the control channel instead of guessing locally —
+        //   cost       get_session_cost, because a local read says $0.00 while the
+        //              money is being spent on the user's server;
+        //   plan       get_plan, so PLAN mode is readable and not just a mode;
+        //   version    get_binary_version — the CLI running the turns is not the
+        //              app, and the two can differ;
+        //   background background_tasks (the CLI's Ctrl+B): detach what is running
+        //              so a long build stops holding the turn open. NOT /bg, which
+        //              spawns a new detached agent;
+        //   stoptask   stop_task, so a runaway task dies from the phone.
+        val expected = setOf(
+            "clear", "new", "diff", "init", "memory", "agents", "model", "review", "bg",
+            "cost", "plan", "version", "background", "stoptask",
+        )
         assertEquals(expected, names)
     }
 

@@ -36,6 +36,27 @@ object RateLimitReset {
         RegexOption.IGNORE_CASE,
     )
 
+    /**
+     * The CLI's own "you are blocked NOW" phrasings. Deliberately narrow: it
+     * requires an explicit limit-reached construction, so a reply that merely
+     * mentions limits (or our own "close to the limit" warning note) can't trip
+     * it. This is the fastest limit signal that exists — the CLI prints it in
+     * the chat the instant a turn is refused, while any usage endpoint still
+     * needs a poll and lags seconds behind (2026-08-19: the chat showed
+     * "You've hit your session limit · resets 2:40pm" while the bar sat at 15%).
+     */
+    private val LIMIT_HIT = Regex(
+        """(?:hit\s+your\s+(?:session|usage|weekly|\d+[- ]hour)\s+limit""" +
+            """|(?:session|usage|weekly|\d+[- ]hour)\s+limit\s+reached""" +
+            """|limit\s+reached\s*(?:·|—|-|\.)""" +
+            """|limit\s+will\s+reset\s+at)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** True when [text] says a limit is CURRENTLY hit (not merely near). */
+    fun mentionsLimitHit(text: String?): Boolean =
+        !text.isNullOrBlank() && LIMIT_HIT.containsMatchIn(text)
+
     /** Human "resets …" clause verbatim from [text], for a message the user
      *  reads (e.g. the humanized fallback error) — null if none present. */
     fun resetPhrase(text: String?): String? {

@@ -1,5 +1,4 @@
 What's new
-• Fixed a vibration that could buzz on and on until you force-stopped the app, and one that fired the moment you pressed send while the answer was still coming.
-• The agents' own background tasks no longer flood the chat — they are counted with the agents. Task rows in the conversation are now only its own.
-• A queued message can no longer be lost when the session behind it had died.
-• "+ new chat" opens a new chat from the agent switcher too.
+• Stop is absolute. It halts the turn instantly — running on the server, started by this phone earlier, or with the link just dropped — and a Stop pressed offline lands once the server is reachable. Queued messages still go out after it.
+• Fixed a vibration that could buzz until you force-quit the app, and one that fired the instant you pressed send.
+• Sign-in fixed: submit always answers, the code is read from the clipboard, and a finished sign-in is recognised.

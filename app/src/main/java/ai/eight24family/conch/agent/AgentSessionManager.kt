@@ -66,7 +66,31 @@ class AgentSessionManager(
         sessions[key] = session
         updateCount()
         SshAiService.start(appContext)
-        session.start()
+        // WARNING: A SESSION THAT FAILED TO START MUST NOT STAY IN THE MAP.
+        //
+        // `start()`'s own catch calls `close()`, so on a failure (agent binary
+        // not on PATH, rejected host key, a transport that dies during the
+        // handshake) what is left here is a corpse: its scope is cancelled, it
+        // can never carry a turn, and nothing will ever remove it. It still
+        // counted towards `activeCount`, which is what the foreground service
+        // watches - so the service could never self-stop, and its notification
+        // froze at whatever it had last posted (with `active > 0` and no held
+        // ids, `refreshNotifications` returns early). One failed open and the
+        // app kept a permanent notification about nothing.
+        //
+        // The object is still RETURNED: the caller has to read its `Failed`
+        // state to tell the user why. It simply is not the manager's any more,
+        // and `AgentSession.canAcceptSend` makes it refuse work honestly.
+        val started = session.start()
+        if (started.isFailure) {
+            sessions.remove(key, session)
+            updateCount()
+            android.util.Log.w(
+                "SshAi-AgentMgr",
+                "start() failed on $serverId/${agent.name} - dropped from the manager: " +
+                    "${started.exceptionOrNull()?.message}",
+            )
+        }
         return session
     }
 
@@ -90,6 +114,17 @@ class AgentSessionManager(
         // watches both activeCount AND pool.userHeldCount and stops only
         // when BOTH are zero — closing an AgentSession shouldn't drop a
         // user-intent SSH ref.
+    }
+
+    /** Close every live session of ONE agent on ONE server. Account changed
+     *  hands (logout / switch / uninstall): a persistent CLI process launched
+     *  under the OLD credentials keeps them in its env and keeps answering —
+     *  and burning — as the old account. The next send relaunches under the
+     *  credentials now live. */
+    fun closeAllFor(serverId: String, agent: Agent) {
+        val prefix = "$serverId:${agent.name}:"
+        sessions.keys.filter { it.startsWith(prefix) }.forEach { sessions.remove(it)?.close() }
+        updateCount()
     }
 
     fun closeAllForServer(serverId: String) {

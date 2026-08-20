@@ -138,6 +138,17 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
     }
 }
 
+/**
+ * v8 — per-server accent colour (`#RRGGBB`). Purely additive and nullable: an
+ * existing row keeps NULL and the UI derives a stable colour from its id, so no
+ * backfill pass is needed and no server ever renders colourless.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE servers ADD COLUMN colorHex TEXT DEFAULT NULL")
+    }
+}
+
 val ALL_MIGRATIONS = arrayOf(
     MIGRATION_1_2,
     MIGRATION_2_3,
@@ -145,4 +156,5 @@ val ALL_MIGRATIONS = arrayOf(
     MIGRATION_4_5,
     MIGRATION_5_6,
     MIGRATION_6_7,
+    MIGRATION_7_8,
 )

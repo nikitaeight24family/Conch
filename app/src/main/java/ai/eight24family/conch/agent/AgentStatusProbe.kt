@@ -248,12 +248,19 @@ class AgentStatusProbe(private val ssh: SshClient) {
     /** `bash -lc` wrapper running ONLY specs that define a live-auth check.
      *  Null when none do (nothing to run). */
     private fun liveAuthScript(): String? {
-        val live = AgentSpecRegistry.all.joinToString("\n") { it.liveAuthProbeLines }.trim()
-        if (live.isBlank()) return null
+        val liveSpecs = AgentSpecRegistry.all.filter { it.liveAuthProbeLines.isNotBlank() }
+        if (liveSpecs.isEmpty()) return null
         // TIMEOUT_FN: the spec lines guard their CLI invocations with
         // `conch_timeout` (macOS ships no `timeout` binary at all).
+        // Parallel per spec, same shape as [script]: these actually SPAWN the
+        // CLIs, the slowest single one should be the whole wait.
         val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd() + "\n" + RemoteEnv.TIMEOUT_FN
-        return RemoteEnv.portable("bash -lc " + shellEscape(pathPrep + "\n" + live))
+        val body = pathPrep + "\nCPD=\$(mktemp -d 2>/dev/null || echo /tmp/conch-live.\$\$)\nmkdir -p \"\$CPD\"\n" +
+            liveSpecs.mapIndexed { i, spec ->
+                "( {\n" + spec.liveAuthProbeLines + "\n} > \"\$CPD/$i.out\" ) &"
+            }.joinToString("\n") +
+            "\nwait\ncat \"\$CPD\"/*.out 2>/dev/null\nrm -rf \"\$CPD\""
+        return RemoteEnv.portable("bash -lc " + shellEscape(body))
     }
 
     private fun script(): String {
@@ -268,8 +275,48 @@ class AgentStatusProbe(private val ssh: SshClient) {
         // invisible to a plain `bash -lc`. Adding them by hand here
         // means the probe sees what's actually installed without
         // requiring any rc-file patching server-side.
-        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd() + "\n" + RemoteEnv.TIMEOUT_FN
-        val body = pathPrep + "\n" + AgentSpecRegistry.all.joinToString("\n") { it.statusProbeLines }
+        // Cache helpers for the two expensive lookups every spec makes. On a
+        // busy 1-vCPU box a single node CLI start costs seconds (measured
+        // 2026-08-18: `gemini --version` 3.2-7.4s under REACH load) and an
+        // `npm view` is a registry round-trip — both answers barely ever
+        // change. A CLI's version changes only when its binary does → keyed by
+        // the binary's mtime (-L: npm swaps symlinks on update). The registry's
+        // latest moves a few times a week → 6h TTL. Cache lives server-side in
+        // ~/.cache/conch; a miss falls through to the real command, so a wiped
+        // cache costs one slow probe, never a wrong answer.
+        val cacheHelpers =
+            "conch_ver() { " +
+                "b=\$(command -v \"\$2\" 2>/dev/null) || { echo ''; return; }; " +
+                "m=\$(stat -Lc %Y \"\$b\" 2>/dev/null || stat -L -f %m \"\$b\" 2>/dev/null || echo 0); " +
+                "cf=\"\$HOME/.cache/conch/ver-\$1\"; " +
+                "if [ -f \"\$cf\" ]; then read cm cv < \"\$cf\" 2>/dev/null; " +
+                "if [ \"\$cm\" = \"\$m\" ] && [ -n \"\$cv\" ]; then echo \"\$cv\"; return; fi; fi; " +
+                "v=\$(\"\$2\" --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1); " +
+                "mkdir -p \"\$HOME/.cache/conch\" 2>/dev/null; " +
+                "[ -n \"\$v\" ] && printf '%s %s\\n' \"\$m\" \"\$v\" > \"\$cf\" 2>/dev/null; " +
+                "echo \"\$v\"; }\n" +
+            "conch_latest() { " +
+                "cf=\"\$HOME/.cache/conch/latest-\$1\"; now=\$(date +%s); " +
+                "if [ -f \"\$cf\" ]; then read ts lv < \"\$cf\" 2>/dev/null; " +
+                "if [ -n \"\$lv\" ] && [ \$(( now - \${ts:-0} )) -lt 21600 ] 2>/dev/null; then echo \"\$lv\"; return; fi; fi; " +
+                "lv=\$(command -v npm >/dev/null 2>&1 && npm view \"\$2\" version 2>/dev/null | tr -d '\\r\\n '); " +
+                "mkdir -p \"\$HOME/.cache/conch\" 2>/dev/null; " +
+                "[ -n \"\$lv\" ] && printf '%s %s\\n' \"\$now\" \"\$lv\" > \"\$cf\" 2>/dev/null; " +
+                "echo \"\$lv\"; }\n"
+        val pathPrep = RemoteEnv.PATH_PREAMBLE.trimEnd() + "\n" + RemoteEnv.TIMEOUT_FN + "\n" + cacheHelpers
+        // The specs run IN PARALLEL, each in its own subshell with its own
+        // output file. Serial, the probe paid the SUM of every slow piece —
+        // measured on the dev server 2026-08-18: `gemini --version` alone 3.2s,
+        // plus three `npm view` round-trips and the Claude run-state curls, so
+        // the picker spun for 4-20s. Parallel, the wall time is the slowest
+        // single spec. Per-block files keep the k=v lines unmangled (the parser
+        // reads an unordered map); subshells also isolate the specs' helper
+        // functions from each other.
+        val body = pathPrep + "\nCPD=\$(mktemp -d 2>/dev/null || echo /tmp/conch-probe.\$\$)\nmkdir -p \"\$CPD\"\n" +
+            AgentSpecRegistry.all.mapIndexed { i, spec ->
+                "( {\n" + spec.statusProbeLines + "\n} > \"\$CPD/$i.out\" ) &"
+            }.joinToString("\n") +
+            "\nwait\ncat \"\$CPD\"/*.out 2>/dev/null\nrm -rf \"\$CPD\""
         return RemoteEnv.portable("bash -lc " + shellEscape(body))
     }
 

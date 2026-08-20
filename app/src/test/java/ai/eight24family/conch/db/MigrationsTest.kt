@@ -3,6 +3,10 @@ package ai.eight24family.conch.db
 import ai.eight24family.conch.data.db.MIGRATION_1_2
 import ai.eight24family.conch.data.db.MIGRATION_2_3
 import ai.eight24family.conch.data.db.MIGRATION_3_4
+import ai.eight24family.conch.data.db.MIGRATION_4_5
+import ai.eight24family.conch.data.db.MIGRATION_5_6
+import ai.eight24family.conch.data.db.MIGRATION_6_7
+import ai.eight24family.conch.data.db.MIGRATION_7_8
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -188,5 +192,36 @@ class MigrationsTest {
         assertEquals("SHA256:legacy", row["knownHostKey"])
         assertEquals("CLAUDE", row["agent"])
         assertEquals(null, row["sshKeyId"])
+    }
+
+    @Test
+    fun `migration 7 to 8 adds nullable colorHex without touching existing rows`() {
+        val c = openV1()
+        c.exec(
+            """
+            INSERT INTO servers (id,name,host,port,username,authMethod,knownHostKey)
+            VALUES ('legacy','from-v1','old.example.com',22,'me','PASSWORD','SHA256:legacy')
+            """.trimIndent()
+        )
+        val db = JdbcSupportDb(c)
+        MIGRATION_1_2.migrate(db)
+        MIGRATION_2_3.migrate(db)
+        MIGRATION_3_4.migrate(db)
+        MIGRATION_4_5.migrate(db)
+        MIGRATION_5_6.migrate(db)
+        MIGRATION_6_7.migrate(db)
+        MIGRATION_7_8.migrate(db)
+
+        // NULL, not a colour: the UI derives a stable one from the id, which is
+        // what lets this migration stay a pure DDL step with no backfill.
+        val row = c.queryFirst("SELECT name, knownHostKey, colorHex FROM servers WHERE id='legacy'")
+        assertNotNull("legacy row missing after chained migration to v8", row)
+        assertEquals("from-v1", row!!["name"])
+        assertEquals("SHA256:legacy", row["knownHostKey"])
+        assertEquals(null, row["colorHex"])
+
+        // And the column is writable with the hex the app stores.
+        c.exec("UPDATE servers SET colorHex='#4FD1C5' WHERE id='legacy'")
+        assertEquals("#4FD1C5", c.queryFirst("SELECT colorHex FROM servers WHERE id='legacy'")!!["colorHex"])
     }
 }

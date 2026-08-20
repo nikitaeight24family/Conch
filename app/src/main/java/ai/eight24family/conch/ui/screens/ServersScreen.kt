@@ -207,7 +207,9 @@ private fun ServerRow(
             Text("❯ ", color = cyan, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
             Text(
                 server.name,
-                color = fg,
+                color = ai.eight24family.conch.ui.theme.serverNameColor(
+                    serverId = server.id, serverName = server.name, fallback = fg,
+                ),
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f, fill = true)

@@ -135,6 +135,14 @@ fun TextViewerScreen(
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var confirmDiscard by remember { mutableStateOf(false) }
+    // The toolbar arrow asks before discarding edits; the system back gesture did
+    // not - and that is the one most people use. This draft is `remember`-scoped
+    // and never persisted (unlike the chat composer, which is), so a swipe back
+    // silently destroyed an edit to a real file on the server: no prompt, no
+    // signal, nothing to recover from. Routed through the SAME confirm dialog.
+    androidx.activity.compose.BackHandler(enabled = editing && dirty) {
+        confirmDiscard = true
+    }
 
     // ── View-mode highlighting (off-main, bounded + fail-safe) ─────
     val colors = defaultHighlightColors()

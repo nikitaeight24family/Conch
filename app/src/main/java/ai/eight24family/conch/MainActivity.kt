@@ -162,10 +162,17 @@ class MainActivity : ComponentActivity() {
             val customTabHandler = androidx.compose.runtime.remember {
                 ai.eight24family.conch.ui.CustomTabUriHandler(this@MainActivity)
             }
+            // Per-server accent colours, resolved once here and read by every
+            // composable that draws a server name (~17 sites). Collected at the
+            // root so a colour change in server settings repaints the whole app
+            // at once, and so leaf screens that only receive a display name can
+            // still find their colour without a new nav argument.
+            val serverAccents = ai.eight24family.conch.ui.theme.rememberServerAccents()
             androidx.compose.runtime.CompositionLocalProvider(
                 androidx.compose.ui.platform.LocalDensity provides scaled,
                 ai.eight24family.conch.ui.haptic.LocalSshAiHaptics provides haptics,
                 androidx.compose.ui.platform.LocalUriHandler provides customTabHandler,
+                ai.eight24family.conch.ui.theme.LocalServerAccents provides serverAccents,
             ) {
                 Root(isInPip = isInPipState.value)
             }

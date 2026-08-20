@@ -270,6 +270,65 @@ internal object ClaudeControlWire {
 
     /** Rename the session's title (shows in `claude --resume`). Title must be
      *  non-empty; the CLI persists it to the transcript. */
+    /**
+     * Kill ONE running task by id. Schema: `{subtype:"stop_task",task_id}`,
+     * described as "Stops a running task."
+     *
+     * This is the protocol answer to a runaway build: the app already knows every
+     * task_id (they arrive on `task_started`), so a task can be stopped from the
+     * phone instead of the user reaching for a laptop to Ctrl-C it.
+     */
+    fun encodeStopTask(requestId: String, taskId: String): String =
+        clientRequest(requestId, "stop_task", buildJsonObject { put("task_id", taskId) })
+
+    /**
+     * Background in-flight FOREGROUND work — Ctrl+B semantics.
+     * `{subtype:"background_tasks",tool_use_id?}`: "Backgrounds in-flight
+     * foreground tasks (Bash commands and subagents). With tool_use_id, targets
+     * only the task whose originating tool_use block has this id. When omitted,
+     * backgrounds all foreground tasks."
+     *
+     * ⚠ Not the same thing as `/bg`, which spawns a NEW detached agent. This
+     * detaches what is ALREADY running so the turn can end.
+     */
+    fun encodeBackgroundTasks(requestId: String, toolUseId: String? = null): String =
+        clientRequest(
+            requestId, "background_tasks",
+            toolUseId?.let { id -> buildJsonObject { put("tool_use_id", id) } },
+        )
+
+    /**
+     * The formatted session cost — "the same text /usage prints in
+     * non-interactive mode … so the thin-client /usage dialog shows the remote
+     * container cost instead of the local $0.00", which is exactly our situation:
+     * the money is spent on the user's server, not on the phone.
+     * Response: `{text}` (ANSI-stripped).
+     */
+    fun encodeGetSessionCost(requestId: String): String =
+        clientRequest(requestId, "get_session_cost")
+
+    /**
+     * The workspace diff, resolved BY THE WORKER: "the worker resolves one base
+     * ref for both stats and hunks (working tree vs HEAD, falling back to
+     * branch-vs-default-merge-base when the tree is clean) and applies the
+     * standard caps (5s git timeout, 50 files, 1MB/file)".
+     *
+     * Better than our own `git diff HEAD` in two ways that matter: it picks the
+     * right base when the tree is clean (ours returned nothing and said "no
+     * changes"), and the caps are the CLI's, so a huge repo cannot hang the turn.
+     */
+    fun encodeGetWorkspaceDiff(requestId: String): String =
+        clientRequest(requestId, "get_workspace_diff")
+
+    /** The plan-mode plan. `{exists, content?}` — and the caller does not need to
+     *  know the plan file's path, the worker resolves its own slug. */
+    fun encodeGetPlan(requestId: String): String = clientRequest(requestId, "get_plan")
+
+    /** The CLI's own version, `{version, buildTime?}`. Ours is the phone's idea of
+     *  the app; this is the thing actually running the turns. */
+    fun encodeGetBinaryVersion(requestId: String): String =
+        clientRequest(requestId, "get_binary_version")
+
     fun encodeRenameSession(requestId: String, title: String): String =
         clientRequest(requestId, "rename_session", buildJsonObject {
             put("title", title)

@@ -135,6 +135,7 @@ internal fun buildInChatHits(messages: List<AgentMessage>, query: String): List<
             // this label is unreachable in practice.
             is AgentMessage.SubagentActivity -> "agent"
             is AgentMessage.BackgroundTasks -> "task"
+            is AgentMessage.CommandsChanged -> "sys"
             is AgentMessage.Error -> "err"
             is AgentMessage.Raw -> "•"
             is AgentMessage.PermissionRequest -> "ask · ${m.toolName}"
@@ -218,6 +219,8 @@ internal fun chatSearchableBody(m: AgentMessage): String? = when (m) {
     is AgentMessage.SubagentActivity -> m.text?.takeIf { it.isNotBlank() }
     // A snapshot of running background tasks — state, not text. Nothing to find.
     is AgentMessage.BackgroundTasks -> null
+    // The command catalogue is a picker, not conversation.
+    is AgentMessage.CommandsChanged -> null
     is AgentMessage.Error -> m.text
     is AgentMessage.Raw -> m.text
     is AgentMessage.PermissionRequest -> "${m.toolName} ${m.description}"

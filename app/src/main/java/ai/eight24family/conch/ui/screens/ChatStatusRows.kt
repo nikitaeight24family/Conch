@@ -231,6 +231,39 @@ internal fun WorkingStatusRow(
     }
 }
 
+/**
+ * "Paused, waiting on background work" — shown where the working row lives,
+ * when the turn has ended but the session's background command(s) are still
+ * running. The CLI resumes the session with a task-notification when they
+ * land, so the chat is NOT done and must not just fall silent (paired with
+ * the two-pulse [ai.eight24family.conch.ui.haptic.SshAiHaptic.TurnPausedBg]).
+ */
+@Composable
+internal fun WaitingForBackgroundRow(count: Int) {
+    androidx.compose.foundation.layout.Row(
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .height(20.dp),
+    ) {
+        Text(
+            "◔",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.tertiary,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (count == 1) "waiting for a background task — resumes on its own"
+            else "waiting for $count background tasks — resumes on its own",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            maxLines = 1,
+        )
+    }
+}
+
 /** Glyph cycle — same family Claude's TUI rotates through. */
 private val WORK_GLYPHS = listOf("✶", "✻", "✽", "✢", "·", "✢", "✽", "✻")
 
@@ -415,6 +448,10 @@ internal fun promptBarStatusHint(
      *  cache's hour, so the next message pays to re-send the whole
      *  conversation instead of reading it back. */
     coldRebuild: Boolean = false,
+    /** Idle past the provider cache's MINIMUM TTL (5m) but under its maximum
+     *  (1h) — the cache MAY be cold; a 491k re-send was measured at 28 minutes
+     *  idle. Softer wording than [coldRebuild], which is certain. */
+    coldMaybe: Boolean = false,
 ): String? = when {
     // SEAMLESS: while the chat is silently auto-reconnecting (device key), show
     // NOTHING — no "queued", no "failed", no "disconnected". The reconnect must
@@ -426,6 +463,8 @@ internal fun promptBarStatusHint(
         "// this session is running on the server — sending starts a SECOND agent on it"
     coldRebuild ->
         "// idle over an hour — the next message re-sends the whole conversation (cache expired)"
+    coldMaybe ->
+        "// idle over 5m — the provider cache may have expired (TTL 5m–1h); sending may re-pay the conversation"
     anyUploading -> "// uploading attachment(s)…"
     state is SessionState.Failed ->
         "// agent: failed — ${state.reason.take(60)} · pull-down to retry"

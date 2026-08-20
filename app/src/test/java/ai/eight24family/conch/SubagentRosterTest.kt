@@ -55,6 +55,37 @@ class SubagentRosterTest {
     }
 
     @Test
+    fun `a finished agent from a previous turn leaves the roster`() {
+        val roster = foldSubagents(
+            listOf(
+                task("t1", "general-purpose", "old fan-out"),
+                AgentMessage.ToolResult(id = "r1", toolUseId = "t1", output = "ok", isError = false),
+                // Next turn starts — the finished agent above is history now.
+                AgentMessage.UserText(id = "u2", text = "next question"),
+                task("t2", "Explore", "current fan-out"),
+            ),
+        )
+        assertEquals(listOf("Explore"), roster.map { it.type })
+    }
+
+    @Test
+    fun `a still-running agent survives the next turn, a finished one from this turn stays`() {
+        val roster = foldSubagents(
+            listOf(
+                task("t1", "general-purpose", "backgrounded, still working"),
+                AgentMessage.UserText(id = "u2", text = "next question"),
+                task("t2", "Explore", "current"),
+                AgentMessage.ToolResult(id = "r2", toolUseId = "t2", output = "ok", isError = false),
+            ),
+        )
+        // t1 never finished → stays despite its age; t2 finished but belongs to
+        // the CURRENT turn → stays (its summary is this turn's live report).
+        assertEquals(listOf("general-purpose", "Explore"), roster.map { it.type })
+        assertFalse(roster[0].done)
+        assertTrue(roster[1].done)
+    }
+
+    @Test
     fun `several agents keep launch order and count independently`() {
         val roster = foldSubagents(
             listOf(

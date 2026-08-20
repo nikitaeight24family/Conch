@@ -989,7 +989,14 @@ internal class AgentSessionPersistentStream(
         // tears our own process down if it ignores it.
         if (target != null) interrupt(target) else if (force) interrupt(null)
         scope.launch {
-            kotlinx.coroutines.delay(4_000)
+            // 800 ms, not 4 s. The interrupt is the GOOD path - it aborts the turn
+            // and leaves the CLI process warm, so the next send does not re-read
+            // the session - and when it lands it lands in a few hundred
+            // milliseconds. Four seconds of a spinner after the user pressed Stop
+            // is indistinguishable from Stop not working, which is the complaint.
+            // Wait only long enough for a healthy interrupt to be honoured, then
+            // take the process down.
+            kotlinx.coroutines.delay(STOP_GRACE_MS)
             val escalate = when {
                 // FORCE the kill on procAlive alone. Stop was routed here BECAUSE
                 // we own a live process and the file says it's mid-turn; the normal
@@ -1160,6 +1167,79 @@ internal class AgentSessionPersistentStream(
             { id -> ClaudeControlWire.encodeGetUsage(id) },
             timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
         )?.takeIf { it.ok }?.payload
+
+    /**
+     * The worker's own workspace diff as unified text, or null when the channel
+     * cannot answer. Concatenates the returned hunks; shape is tolerant on
+     * purpose (the response carries stats plus per-file hunks and the exact key
+     * names are the one thing worth being lenient about).
+     */
+    suspend fun workspaceDiff(): String? {
+        val payload = sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetWorkspaceDiff(id) },
+            timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload ?: return null
+        fun str(o: kotlinx.serialization.json.JsonObject, k: String) =
+            (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        // A single text field, if the worker sends one.
+        str(payload, "diff")?.takeIf { it.isNotBlank() }?.let { return it }
+        str(payload, "patch")?.takeIf { it.isNotBlank() }?.let { return it }
+        val files = (payload["files"] as? kotlinx.serialization.json.JsonArray) ?: return null
+        val out = StringBuilder()
+        for (f in files) {
+            val o = f as? kotlinx.serialization.json.JsonObject ?: continue
+            val path = str(o, "path") ?: str(o, "file")
+            val hunks = str(o, "hunks") ?: str(o, "patch") ?: str(o, "diff")
+            if (hunks.isNullOrBlank()) continue
+            if (path != null) out.append("--- ").append(path).append('\n')
+            out.append(hunks.trimEnd()).append('\n')
+        }
+        return out.toString().takeIf { it.isNotBlank() }
+    }
+
+    /** Stop ONE task by id over the control channel. True when the CLI
+     *  acknowledged it. */
+    suspend fun stopTask(taskId: String): Boolean =
+        sendControlRequest({ id -> ClaudeControlWire.encodeStopTask(id, taskId) })?.ok == true
+
+    /** Detach in-flight foreground work (Ctrl+B). [toolUseId] null = all of it. */
+    suspend fun backgroundTasks(toolUseId: String? = null): Boolean =
+        sendControlRequest({ id ->
+            ClaudeControlWire.encodeBackgroundTasks(id, toolUseId)
+        })?.ok == true
+
+    /** The CLI's own formatted session-cost text, or null when the channel is
+     *  down / the responder refused. */
+    suspend fun sessionCost(): String? =
+        sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetSessionCost(id) },
+            timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload
+            ?.get("text")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            ?.takeIf { it.isNotBlank() }
+
+    /** The plan-mode plan: null when there is none (or the channel is down). */
+    suspend fun plan(): String? {
+        val payload = sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetPlan(id) },
+            timeoutMs = HEAVY_RESPONSE_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload ?: return null
+        val exists = (payload["exists"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content?.toBooleanStrictOrNull() == true
+        if (!exists) return null
+        return (payload["content"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content?.takeIf { it.isNotBlank() }
+    }
+
+    /** The version of the CLI actually running the turns, `version (buildTime)`. */
+    suspend fun binaryVersion(): String? {
+        val payload = sendControlRequest(
+            { id -> ClaudeControlWire.encodeGetBinaryVersion(id) },
+        )?.takeIf { it.ok }?.payload ?: return null
+        fun str(k: String) = (payload[k] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        val v = str("version")?.takeIf { it.isNotBlank() } ?: return null
+        return str("buildTime")?.takeIf { it.isNotBlank() }?.let { "$v ($it)" } ?: v
+    }
 
     /** Server-side fuzzy file search for @-mentions. null = channel down /
      *  refused (callers show nothing rather than a stale list). */
@@ -1363,6 +1443,10 @@ internal class AgentSessionPersistentStream(
             working: Boolean,
             alive: Boolean,
         ): Boolean = sameTurn && !victimDone && working && alive
+
+        /** How long a protocol interrupt gets to end the turn before Stop takes
+         *  the process down. Short on purpose - see the call site. */
+        internal const val STOP_GRACE_MS = 800L
 
         /** Poll cadence while awaiting a turn's completion (inactivity check). */
         private const val INACTIVITY_CHECK_MS = 60L * 1000

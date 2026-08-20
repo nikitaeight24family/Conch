@@ -114,6 +114,7 @@ class AppPreferences(private val context: Context) {
         stringPreferencesKey("agent_default_model_key_${agent.uppercase()}_v1")
     private val userHeldServerIdsKey = stringPreferencesKey("user_held_server_ids")
     private val highRefreshRateKey = booleanPreferencesKey("high_refresh_rate_enabled")
+    private val stopOrdersKey = stringPreferencesKey("stop_orders")
     private val hapticsEnabledKey = booleanPreferencesKey("haptics_enabled")
     private val appScaleKey = floatPreferencesKey("app_scale")
     private val customBgHexKey = stringPreferencesKey("custom_bg_hex")
@@ -313,6 +314,29 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { p ->
             if (agentName.isNullOrBlank()) p.remove(homeAgentFilterKey)
             else p[homeAgentFilterKey] = agentName
+        }
+    }
+
+    /**
+     * Servers the user un-ticked in the home list's server filter (long-press an
+     * agent chip). Stores the HIDDEN ids, not the visible ones, deliberately: a
+     * newly added server must show up on its own, and an empty/absent value has
+     * to mean "everything visible" — with a visible-list the same absence would
+     * mean "nothing visible" and a fresh install would look broken.
+     */
+    private val hiddenServerIdsKey = stringPreferencesKey("home_hidden_server_ids")
+    val hiddenServerIds: Flow<Set<String>> = context.dataStore.data.map { p ->
+        p[hiddenServerIdsKey]
+            ?.split(",")
+            ?.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    suspend fun setHiddenServerIds(ids: Set<String>) {
+        context.dataStore.edit { p ->
+            if (ids.isEmpty()) p.remove(hiddenServerIdsKey)
+            else p[hiddenServerIdsKey] = ids.joinToString(",")
         }
     }
 
@@ -665,7 +689,12 @@ class AppPreferences(private val context: Context) {
     fun openFilePreferenceForExtension(extension: String): Flow<String?> {
         val key = stringPreferencesKey("open_file_pref_${extension.lowercase()}")
         return context.dataStore.data.map { p ->
-            p[key]?.takeIf { it == "internal" || it == "external" }
+            // "share" belongs here too: the chooser offers it, the consumer
+            // has a branch for it, and leaving it out of this whitelist made the
+            // "remember for .ext files" checkbox a silent no-op for exactly one
+            // of the three choices - while honouring it for the one that could
+            // brick the button.
+            p[key]?.takeIf { it == "internal" || it == "external" || it == "share" }
         }
     }
 
@@ -974,17 +1003,50 @@ class AppPreferences(private val context: Context) {
      *  (the server just confirmed those sessions are gone). Keeps the set
      *  bounded and self-healing — tombstones for sessions the server STILL
      *  reports (delete pending/failed) are retained so they stay hidden. */
-    suspend fun pruneDeletedSessions(serverId: String, presentIds: Set<String>) {
-        val prefix = "$serverId:"
+    /**
+     * Drop exactly the tombstones in [tags] (each `"<serverId>:<sessionId>"`).
+     *
+     * WARNING: this replaced a `pruneDeletedSessions(serverId, presentIds)` that
+     * removed EVERY tombstone for a server whose id was missing from the set it
+     * was handed. The set was one AGENT's listing, while the tombstone key has no
+     * agent in it - so opening the Codex list on a server dropped the tombstone of
+     * a session deleted in CLAUDE, and the deleted chat came back on the next
+     * Claude listing. Deciding what is confirmed-gone needs to know whose session
+     * it was, which is the CALLER's knowledge; this only applies the decision.
+     */
+    suspend fun clearDeletedSessionTombstones(tags: Set<String>) {
+        if (tags.isEmpty()) return
         context.dataStore.edit { p ->
             val cur = p[deletedSessionsKey]?.split(',')?.filter { it.isNotBlank() }?.toMutableSet()
                 ?: return@edit
-            val before = cur.size
-            cur.removeAll { tag ->
-                tag.startsWith(prefix) && tag.removePrefix(prefix) !in presentIds
-            }
-            if (cur.size == before) return@edit
+            if (!cur.removeAll(tags)) return@edit
             if (cur.isEmpty()) p.remove(deletedSessionsKey) else p[deletedSessionsKey] = cur.joinToString(",")
+        }
+    }
+
+    /**
+     * Sessions the user pressed STOP on and whose kill is not confirmed yet.
+     *
+     * STOP IS A LAW, NOT A REQUEST. So the ORDER is persisted, and the kill is
+     * retried by whoever next reaches that server until the machine confirms
+     * nothing is running.
+     *
+     * Keyed by the CLI resume id, which is the only identity a server-side
+     * process carries in its argv. Cleared when the kill is confirmed, or when the
+     * user sends into that chat again (sending is the opposite of stopping).
+     */
+    val stopOrders: Flow<Set<String>> = context.dataStore.data.map { p ->
+        p[stopOrdersKey]?.split(',')?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+    }
+
+    suspend fun setStopOrder(sessionId: String, ordered: Boolean) {
+        if (sessionId.isBlank()) return
+        context.dataStore.edit { p ->
+            val cur = p[stopOrdersKey]?.split(',')?.filter { it.isNotBlank() }?.toMutableSet()
+                ?: mutableSetOf()
+            val changed = if (ordered) cur.add(sessionId) else cur.remove(sessionId)
+            if (!changed) return@edit
+            if (cur.isEmpty()) p.remove(stopOrdersKey) else p[stopOrdersKey] = cur.joinToString(",")
         }
     }
 

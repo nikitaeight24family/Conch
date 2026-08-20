@@ -97,6 +97,13 @@ object ClaudeMessageParser {
      *  latest snapshot wins. */
     private const val BACKGROUND_TASKS_ID = "claude-background-tasks"
 
+    /** Stable id for the CLI's command-list push — REPLACE semantics, so one
+     *  upserting row and the newest payload wins. */
+    private const val COMMANDS_CHANGED_ID = "claude-commands-changed"
+
+    /** Stable id for the rate-limit banner. */
+    private const val RATE_LIMIT_ID = "claude-rate-limit"
+
     /** Stable id for the non-rendering System row that mirrors the session's
      *  current reasoning effort (only `ultracode` is recorded by Claude — see
      *  parseAttachment). Stable → one upserting row; `observedReasoning` in the
@@ -749,6 +756,82 @@ object ClaudeMessageParser {
     private fun parseObject(obj: JsonObject, raw: String): List<AgentMessage> {
         return when (obj.string("type") ?: inferTopLevelType(obj)) {
             "system" -> parseSystem(obj, raw)
+            // ⚠ THE ONE FRAME THAT ANSWERS "IS THIS THING HUNG?".
+            //
+            // Verified shape (2.1.220): `{type:"tool_progress",tool_use_id,
+            // tool_name:"Bash"|"PowerShell"|"REPL",parent_tool_use_id,
+            // elapsed_time_seconds,task_id?,heartbeat?,subagent_retry?}`, yielded
+            // from the stream generator for bash/powershell progress and tool
+            // heartbeats. On a phone this is the difference between "the twenty
+            // minute Bash is working" and "the twenty minute Bash is dead", and
+            // the app was dropping it on the floor and timing tools itself.
+            //
+            // Non-rendering, stable per tool call: the working row reads the
+            // latest for the tool it is showing.
+            // The provider's own push when limit state CHANGES - the app only
+            // ever polled for this. Verified shape (2.1.220): `rate_limit_info:
+            // {status:"allowed"|"allowed_warning"|"rejected", resetsAt?,
+            // rateLimitType?:"five_hour"|"seven_day"|…, utilization?, overage*}`.
+            //
+            // `rejected` is the single most actionable state in the app - the turn
+            // the user just paid for will not run - and it was arriving on the wire
+            // with nobody listening. Surfaced as an upserting banner; the VM also
+            // uses it to re-read the authoritative usage instead of synthesising
+            // numbers from a partial event.
+            "rate_limit_event" -> {
+                val info = SilentlyTry.logged("SshAi-ClaudeParse", "read rate limit info") {
+                    obj["rate_limit_info"]?.jsonObject
+                }
+                val status = info?.let { firstString(it, "status") }.orEmpty()
+                val window = info?.let { firstString(it, "rateLimitType", "rate_limit_type") }
+                    ?.replace('_', ' ')
+                val pct = info?.let {
+                    SilentlyTry.logged("SshAi-ClaudeParse", "read utilization") {
+                        it["utilization"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                    }
+                }
+                val tail = listOfNotNull(
+                    window,
+                    pct?.let { "${it.toInt()}%" },
+                ).joinToString(" · ")
+                when (status) {
+                    "rejected" -> listOf(
+                        AgentMessage.Error(
+                            id = RATE_LIMIT_ID,
+                            text = "Limit reached" + tail.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
+                            kind = "rate_limited",
+                            details = "The agent cannot run a turn until the window resets.",
+                        ),
+                    )
+                    "allowed_warning" -> listOf(note(
+                        "close to the limit" + tail.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
+                        tone = AgentMessage.EventNote.Tone.WARN,
+                        id = RATE_LIMIT_ID,
+                    ))
+                    // "allowed" is the normal case; the usage bar owns the number.
+                    else -> emptyList()
+                }
+            }
+            "tool_progress" -> {
+                val tool = firstString(obj, "tool_name")
+                val id = firstString(obj, "tool_use_id")
+                val secs = SilentlyTry.logged("SshAi-ClaudeParse", "tool_progress elapsed") {
+                    obj["elapsed_time_seconds"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toLong()
+                }
+                // A subagent's tool is the subagent's business (the roster shows
+                // its own last tool); only the main turn's belongs on the row.
+                val ptu = firstString(obj, "parent_tool_use_id")
+                if (tool.isNullOrBlank() || id.isNullOrBlank() || ptu != null) emptyList()
+                else listOf(
+                    AgentMessage.System(
+                        id = "toolprogress-$id",
+                        subtype = "tool_progress",
+                        title = tool,
+                        toolCount = (secs ?: 0L).toInt(),
+                        raw = "",
+                    ),
+                )
+            }
             "assistant" -> parseAssistant(obj, raw)
             "user" -> parseUser(obj, raw)
             "result" -> {
@@ -811,6 +894,7 @@ object ClaudeMessageParser {
                     val inTok = usage?.get("input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                     val outTok = usage?.get("output_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                     val cacheRead = usage?.get("cache_read_input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val cacheCreate = usage?.get("cache_creation_input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                     val cost = obj["total_cost_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
                     val durMs = obj["duration_ms"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
                     // Locale.US: the default (ru) locale renders "12,0k"
@@ -831,10 +915,25 @@ object ClaudeMessageParser {
                             ?.let { "$" + "%.4f".format(java.util.Locale.US, it).trimEnd('0').trimEnd('.') },
                         durMs?.takeIf { it >= 1000 }?.let { "${it / 1000}s" },
                     )
+                    // MEASURED cache verdict, not a guess: the provider's own
+                    // usage says whether this turn paid to re-write the
+                    // conversation. A cold cache re-billed 491k on a session
+                    // idle only 28 minutes (2026-08-18) and nothing on screen
+                    // said so — the user found out from the limits. Threshold:
+                    // a big write with a tiny read is a re-send; ordinary turns
+                    // write a few k of NEW context on top of a big read.
+                    val coldResend = (cacheCreate ?: 0) > 50_000 &&
+                        (cacheRead ?: 0) < (cacheCreate ?: 0) / 10
                     buildList {
                         add(AgentMessage.Result(uuid(), subtype, text))
                         if (statParts.isNotEmpty()) {
                             add(note("tokens · ${statParts.joinToString(" · ")}"))
+                        }
+                        if (coldResend) {
+                            add(note(
+                                "cold cache — this turn re-sent ~${k(cacheCreate ?: 0)} tokens of history",
+                                tone = AgentMessage.EventNote.Tone.WARN,
+                            ))
                         }
                         add(turnEnd("result"))
                     }
@@ -952,6 +1051,62 @@ object ClaudeMessageParser {
             // Parsed into ONE upserting row (stable id: only the newest snapshot
             // means anything) that never renders, so the agent panel can report
             // how many background commands the fan-out is running.
+            // REPLACE the cached command list, do not count it. Entry shape
+            // verified (2.1.220): {name, description, argumentHint, aliases?}.
+            // "Short snake_case reason set by the host CLI, e.g. 'host_exit'" —
+            // emitted on a graceful worker teardown. Without it the worker just
+            // stops answering and the app waits out a heartbeat timeout with
+            // nothing to tell the user. ⚠ Its own schema notes absence is NOT a
+            // dead-host signal, so this only ever EXPLAINS a shutdown, never
+            // concludes one.
+            "worker_shutting_down" -> listOf(note(
+                "the CLI is shutting down · " + (firstString(obj, "reason") ?: "no reason given"),
+                tone = AgentMessage.EventNote.Tone.WARN,
+                id = "sysevt-worker-shutdown",
+            ))
+            // `{summary, preceding_tool_use_ids[]}` — the CLI's own one-line
+            // digest of a run of tool calls. On a phone this is the difference
+            // between reading twelve rows and reading one, and it was being
+            // dropped.
+            "tool_use_summary" -> {
+                val sum = firstString(obj, "summary")?.trim()
+                if (sum.isNullOrEmpty()) emptyList()
+                else listOf(note(
+                    sum.take(160),
+                    detail = sum.takeIf { it.length > 160 },
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                    id = "sysevt-toolsum-" + stableId(sum, "ts"),
+                ))
+            }
+            // The agent opened a PR / pushed a change. `provider` is a naming hint
+            // derived from the URL shape ("github", "gitlab", …), so the URL is
+            // the part worth showing - it is the thing the user goes and looks at.
+            "code_change_published" -> {
+                val url = firstString(obj, "url", "prUrl", "pr_url", "link")
+                val provider = firstString(obj, "provider")
+                if (url == null && provider == null) emptyList()
+                else listOf(note(
+                    listOfNotNull("published", provider, url).joinToString(" · "),
+                    detail = url,
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                    id = "sysevt-code-published-" + stableId(url ?: provider.orEmpty(), "cp"),
+                ))
+            }
+            "commands_changed" -> {
+                val entries = SilentlyTry.logged("SshAi-ClaudeParse", "read command list") {
+                    obj["commands"]?.jsonArray?.mapNotNull { el ->
+                        val o = el as? JsonObject ?: return@mapNotNull null
+                        val name = firstString(o, "name") ?: return@mapNotNull null
+                        AgentMessage.CommandsChanged.Entry(
+                            name = name.removePrefix("/"),
+                            description = firstString(o, "description").orEmpty(),
+                            argumentHint = firstString(o, "argumentHint", "argument_hint"),
+                        )
+                    }
+                }.orEmpty()
+                if (entries.isEmpty()) emptyList()
+                else listOf(AgentMessage.CommandsChanged(COMMANDS_CHANGED_ID, entries))
+            }
             "background_tasks_changed" -> {
                 val entries = SilentlyTry.logged("SshAi-ClaudeParse", "read background task set") {
                     obj["tasks"]?.jsonArray?.mapNotNull { el ->
@@ -1315,11 +1470,61 @@ object ClaudeMessageParser {
                 "bridge · ${firstString(obj, "state") ?: "?"}" +
                     (firstString(obj, "detail")?.let { " · ${it.take(80)}" } ?: ""),
             ))
-            "local_command" -> listOf(note(
-                (firstString(obj, "content") ?: "local command").take(140),
-            ))
-            "session_state_changed" -> listOf(note(
-                "session · ${firstString(obj, "state") ?: "?"}",
+            // ⚠ THE KEY IS `local_command_output`, NOT `local_command`. Verified
+            // schema (2.1.220): `{type:"system",subtype:"local_command_output",
+            // content,uuid,session_id}` described as "Output from a local slash
+            // command (e.g. /voice, /usage). Displayed as assistant-style text in
+            // the transcript." We matched a subtype that does not exist, so this
+            // branch never ran and the output of `/usage` and friends fell through
+            // to the generic renderer as a dim one-line event note - truncated to
+            // 140 chars, in the wrong voice, for what is the entire answer to the
+            // command the user just ran.
+            //
+            // Rendered as the CLI describes it: assistant text. Its own uuid keeps
+            // the row stable across a re-parse.
+            "local_command_output" -> {
+                val body = firstString(obj, "content")?.trim()
+                if (body.isNullOrEmpty()) emptyList()
+                else listOf(
+                    AgentMessage.AssistantText(
+                        id = "localcmd-" + (firstString(obj, "uuid") ?: stableId(body, "lc")),
+                        text = body,
+                    ),
+                )
+            }
+            // The CLI's own authoritative turn boundary — its schema calls `idle`
+            // "the authoritative turn-over signal", fired after the held-back
+            // result flushes. Mapping it to a TurnEnd marker is what makes the
+            // app's idea of "the turn is over" the CLI's idea rather than an
+            // inference from silence.
+            //
+            // ⚠ IT ONLY ARRIVES IF WE ASK FOR IT. The emit site is gated on the
+            // `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` env var, which ClaudeSpec now
+            // sets on the launch line. Without that this branch is dead code, so
+            // do not remove the env var thinking it is decoration.
+            "session_state_changed" -> when (firstString(obj, "state")) {
+                "idle" -> listOf(turnEnd("session_state:idle"))
+                // "your agent is blocked on YOU" — a free push for the one state
+                // the user has to act on. Stable id so repeats upsert.
+                "requires_action" -> listOf(note(
+                    "waiting for you",
+                    tone = AgentMessage.EventNote.Tone.WARN,
+                    id = "sysevt-requires-action",
+                ))
+                // "running" adds nothing: the turn start is already tracked by the
+                // send itself, and a note per transition is noise.
+                else -> emptyList()
+            }
+            // A `/clear` (or a plan-mode exit) starts a NEW conversation under a
+            // new id server-side. The app used to show nothing at all, so the
+            // transcript silently went on displaying a conversation the CLI had
+            // already abandoned. Named honestly for now; adopting the new id in
+            // place is a bigger change than a parser branch.
+            "conversation_reset" -> listOf(note(
+                "conversation cleared on the server — this chat is a new one now",
+                detail = firstString(obj, "newConversationId", "new_conversation_id"),
+                tone = AgentMessage.EventNote.Tone.WARN,
+                id = "sysevt-conversation-reset",
             ))
 
             // UNKNOWN subtype — render generically, NEVER swallow. A future

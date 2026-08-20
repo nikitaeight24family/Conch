@@ -50,13 +50,31 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "record durable owners (full listing)") {
             historyCache.recordOwners(serverId, agent, raw)
         }
-        // The server just told us exactly which sessions exist. Prune any
-        // delete-tombstone whose session is no longer listed → the delete is
-        // confirmed and the set stays bounded. Tombstones for sessions the
-        // server STILL reports (rm pending/failed) are kept so they stay hidden.
-        viewModelScope.launch {
+        // The server just told us exactly which sessions exist FOR THIS AGENT.
+        // A tombstone whose session is no longer listed is a confirmed delete and
+        // can go; one the server still reports (rm pending/failed) is kept so the
+        // row stays hidden.
+        //
+        // WARNING: SCOPE IT TO THIS AGENT. The tombstone key is
+        // "<serverId>:<sessionId>" with no agent in it, and this listing covers
+        // one agent — so the old server-wide prune dropped tombstones belonging to
+        // the OTHER agents on the same host, and their deleted chats came back.
+        // The durable owner sidecar knows whose session an id is; an id we cannot
+        // attribute is left alone (it stays hidden, and the delete is retried by
+        // the reconcile paths).
+        viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                ServiceLocator.preferences.pruneDeletedSessions(serverId, raw.mapTo(HashSet()) { it.id })
+                val present = raw.mapTo(HashSet()) { it.id }
+                val prefix = "$serverId:"
+                val confirmed = _deletedIds.value.mapNotNull { id ->
+                    if (id in present) return@mapNotNull null
+                    val owner = SilentlyTry.logged("SshAi-Sessions", "owner for tombstone prune") {
+                        historyCache.owner(id)
+                    }
+                    if (owner?.agent != agent) return@mapNotNull null
+                    prefix + id
+                }.toSet()
+                ServiceLocator.preferences.clearDeletedSessionTombstones(confirmed)
             }
         }
     }

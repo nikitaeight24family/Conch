@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -45,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,8 +107,35 @@ fun HomeSessionsScreen(
         barShown -> filterName?.let { n -> usableAgents.firstOrNull { it.name == n } }
         else -> null
     }
-    val visibleRows = remember(rows, selectedAgent) {
-        if (selectedAgent == null) rows else rows.filter { it.session.agent == selectedAgent }
+    // Servers the user un-ticked in the server filter (long-press a chip / the
+    // title). Applied on top of the agent filter, and NEVER applied to a server
+    // whose rows are the only thing on screen by accident — see the empty state
+    // below, which offers "show all" so a forgotten filter can't look like
+    // vanished sessions.
+    val hiddenServers by vm.hiddenServerIds.collectAsState()
+    val visibleRows = remember(rows, selectedAgent, hiddenServers) {
+        rows.filter {
+            (selectedAgent == null || it.session.agent == selectedAgent) &&
+                it.serverId !in hiddenServers
+        }
+    }
+    // Per-server session counts for the filter sheet — counted AFTER the agent
+    // filter but BEFORE the server filter, so an un-ticked server still shows
+    // what un-hiding it would bring back.
+    val countsByServer = remember(rows, selectedAgent) {
+        rows.filter { selectedAgent == null || it.session.agent == selectedAgent }
+            .groupingBy { it.serverId }.eachCount()
+    }
+    var serverFilterOpen by remember { mutableStateOf(false) }
+    if (serverFilterOpen) {
+        ServerFilterSheet(
+            servers = servers,
+            counts = countsByServer,
+            hidden = hiddenServers,
+            onToggle = { id, visible -> vm.toggleServerVisible(id, visible) },
+            onShowAll = { vm.showAllServers() },
+            onDismiss = { serverFilterOpen = false },
+        )
     }
     // Servers where the focused agent is usable — the "new session" targets.
     // One → open directly; many → pick from a dropdown.
@@ -157,11 +186,25 @@ fun HomeSessionsScreen(
 
     SearchableScaffold(
         title = {
+            val haptics = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
             Column {
                 Text(
                     "Conch ▌ sessions",
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.primary,
+                    // Second door to the server filter. The chips are the primary
+                    // one, but they only exist with ≥2 usable agents — on a
+                    // single-agent setup the filter would otherwise be
+                    // unreachable. The title is always here.
+                    modifier = if (servers.size >= 2) {
+                        Modifier.handCursor().combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                haptics.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy)
+                                serverFilterOpen = true
+                            },
+                        )
+                    } else Modifier,
                 )
                 // Live auto-connect progress, visible from launch on the screen
                 // the user lands on — so connecting is obviously the app's own
@@ -197,16 +240,46 @@ fun HomeSessionsScreen(
                                         // filter's content is laid out (see below).
                                         scrollTopTrigger++
                                     },
+                                    onLongPress = { serverFilterOpen = true },
                                 )
                             }
                             if (visibleRows.isEmpty()) {
-                                // A usable agent with no sessions yet — invite one.
-                                Text(
-                                    "// no ${selectedAgent?.displayName ?: ""} sessions yet — tap ＋ to start one",
-                                    color = MaterialTheme.colorScheme.outline,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.padding(20.dp),
-                                )
+                                // Two very different empty states. A server filter
+                                // hiding everything must SAY so and offer the way
+                                // back — otherwise a filter set days ago reads as
+                                // lost sessions, and "tap ＋" is useless advice.
+                                val hiddenCount = rows.count {
+                                    (selectedAgent == null || it.session.agent == selectedAgent) &&
+                                        it.serverId in hiddenServers
+                                }
+                                if (hiddenCount > 0) {
+                                    Column(Modifier.padding(20.dp)) {
+                                        Text(
+                                            "// $hiddenCount session${if (hiddenCount == 1) "" else "s"} " +
+                                                "hidden by the server filter",
+                                            color = MaterialTheme.colorScheme.outline,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                        )
+                                        Text(
+                                            "show all servers",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .padding(top = 8.dp)
+                                                .handCursor()
+                                                .clickable { vm.showAllServers() },
+                                        )
+                                    }
+                                } else {
+                                    // A usable agent with no sessions yet — invite one.
+                                    Text(
+                                        "// no ${selectedAgent?.displayName ?: ""} sessions yet — tap ＋ to start one",
+                                        color = MaterialTheme.colorScheme.outline,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.padding(20.dp),
+                                    )
+                                }
                             } else {
                                 LazyColumn(
                                     state = listState,
@@ -301,13 +374,32 @@ fun HomeSessionsScreen(
                             // >1 target → pick which (server and/or agent).
                             DropdownMenu(expanded = serverMenuOpen, onDismissRequest = { serverMenuOpen = false }) {
                                 for ((s, a) in newChatPairs) {
-                                    val label = when {
-                                        multiAgent && multiServer -> "${a.displayName} · ${s.name}"
-                                        multiAgent -> a.displayName
-                                        else -> "${s.username}@${s.name}"
-                                    }
                                     DropdownMenuItem(
-                                        text = { Text(label) },
+                                        // Only the server NAME carries its accent; the rest of
+                                        // the label keeps the menu's own content colour.
+                                        text = {
+                                            val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                                                serverId = s.id,
+                                                serverName = s.name,
+                                                fallback = androidx.compose.material3.LocalContentColor.current,
+                                            )
+                                            val accentSpan = androidx.compose.ui.text.SpanStyle(color = accent)
+                                            Text(
+                                                androidx.compose.ui.text.buildAnnotatedString {
+                                                    when {
+                                                        multiAgent && multiServer -> {
+                                                            append("${a.displayName} · ")
+                                                            withStyle(accentSpan) { append(s.name) }
+                                                        }
+                                                        multiAgent -> append(a.displayName)
+                                                        else -> {
+                                                            append("${s.username}@")
+                                                            withStyle(accentSpan) { append(s.name) }
+                                                        }
+                                                    }
+                                                },
+                                            )
+                                        },
                                         // Agent/company logo next to each target so
                                         // the pick is scannable at a glance, not
                                         // just text.
@@ -333,6 +425,97 @@ fun HomeSessionsScreen(
     }
 }
 
+/**
+ * WHICH SERVERS the home list shows — reached by long-pressing any agent chip.
+ * Ticks are per server; the count next to each is how many of the currently
+ * listed sessions it owns, so the user can see what un-ticking will cost them
+ * before they do it.
+ *
+ * Each name is drawn in that server's own accent colour, which makes this sheet
+ * double as the legend for the colours in the list itself.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ServerFilterSheet(
+    servers: List<ai.eight24family.conch.domain.Server>,
+    counts: Map<String, Int>,
+    hidden: Set<String>,
+    onToggle: (String, Boolean) -> Unit,
+    onShowAll: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
+            Text(
+                "▌ servers",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "// untick to hide a server's sessions from this list",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(top = 2.dp, bottom = 10.dp),
+            )
+            for (s in servers) {
+                val visible = s.id !in hidden
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .handCursor()
+                        .clickable { onToggle(s.id, !visible) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    androidx.compose.material3.Checkbox(
+                        checked = visible,
+                        onCheckedChange = { onToggle(s.id, it) },
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            s.name,
+                            color = ai.eight24family.conch.ui.theme.serverNameColor(
+                                serverId = s.id, serverName = s.name,
+                                fallback = MaterialTheme.colorScheme.onSurface,
+                            ),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "${s.username}@${s.host}",
+                            color = MaterialTheme.colorScheme.outline,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        (counts[s.id] ?: 0).toString(),
+                        color = MaterialTheme.colorScheme.outline,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            if (hidden.isNotEmpty()) {
+                Text(
+                    "show all",
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .handCursor()
+                        .clickable { onShowAll() },
+                )
+            }
+        }
+    }
+}
+
 /** Horizontally-scrollable agent filter: "All" + one chip per USABLE agent
  *  (installed + logged-in). Lets the user surface Codex/Gemini history that the
  *  recency sort otherwise buries under a burst of recent Claude activity, and
@@ -344,6 +527,11 @@ private fun AgentFilterChips(
     total: Int,
     selected: Agent?,
     onSelect: (Agent?) -> Unit,
+    /** Long-press ANY chip → the server filter. The chips are the one control
+     *  the user already reaches for when the list shows too much, so the
+     *  by-server cut lives on the same control rather than in a menu they'd
+     *  have to discover. Long-press is safe here: it only opens a sheet. */
+    onLongPress: () -> Unit = {},
 ) {
     val state = rememberLazyListState()
     // Bring the active chip on-screen — tapping "Codex" when it sits off the
@@ -361,10 +549,13 @@ private fun AgentFilterChips(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         item {
-            AgentChip("All", total, null, selected == null) { onSelect(null) }
+            AgentChip("All", total, null, selected == null, onLongClick = onLongPress) { onSelect(null) }
         }
         items(agents) { a ->
-            AgentChip(a.displayName, counts[a] ?: 0, AgentSpecRegistry[a].iconRes, selected == a) { onSelect(a) }
+            AgentChip(
+                a.displayName, counts[a] ?: 0, AgentSpecRegistry[a].iconRes, selected == a,
+                onLongClick = onLongPress,
+            ) { onSelect(a) }
         }
     }
 }
@@ -375,6 +566,7 @@ private fun AgentChip(
     count: Int,
     iconRes: Int?,
     selected: Boolean,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val primary = MaterialTheme.colorScheme.primary
@@ -382,12 +574,23 @@ private fun AgentChip(
     val bg = if (selected) primary.copy(alpha = 0.18f) else Color.Transparent
     val borderC = if (selected) primary else dim.copy(alpha = 0.5f)
     val fg = if (selected) primary else MaterialTheme.colorScheme.onSurface
+    val haptics = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
     Row(
         modifier = Modifier
             .background(bg, RoundedCornerShape(50))
             .border(1.dp, borderC, RoundedCornerShape(50))
             .handCursor()
-            .clickable { onClick() }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick?.let { action ->
+                    {
+                        // A pulse so the gesture confirms itself — a long-press
+                        // with no feedback reads as a missed tap.
+                        haptics.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy)
+                        action()
+                    }
+                },
+            )
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -451,9 +654,20 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
         )
         Column(modifier = Modifier.weight(1f)) {
             // Server — small, grey, insignificant, ABOVE the name. Breadcrumb
-            // over the accent.
+            // over the accent. The NAME carries the server's accent colour
+            val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                serverId = row.serverId, serverName = row.serverName, fallback = dim,
+            )
             Text(
-                "${row.username}@${row.serverName}",
+                androidx.compose.ui.text.buildAnnotatedString {
+                    append("${row.username}@")
+                    withStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            color = accent,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                    ) { append(row.serverName) }
+                },
                 color = dim,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,

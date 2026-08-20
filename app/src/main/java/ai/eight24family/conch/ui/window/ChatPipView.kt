@@ -116,7 +116,13 @@ fun ChatPipView(vm: ChatViewModel, modifier: Modifier = Modifier) {
                 Text(
                     server?.name ?: vm.cachedServerName ?: "Conch",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    // Name key carries the accent while `server` is still loading —
+                    // the cached name is available before the row is.
+                    color = ai.eight24family.conch.ui.theme.serverNameColor(
+                        serverId = server?.id,
+                        serverName = server?.name ?: vm.cachedServerName,
+                        fallback = MaterialTheme.colorScheme.primary,
+                    ),
                     fontWeight = FontWeight.Bold,
                     fontSize = 10.sp,
                     maxLines = 1,

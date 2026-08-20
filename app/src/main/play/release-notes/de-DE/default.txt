@@ -1,5 +1,4 @@
 Neu
-• Behoben: ein Vibrieren, das ohne Ende weiterlief, bis man die App abwürgte, und eines, das beim Senden auslöste, während die Antwort noch lief.
-• Die Hintergrund-Tasks der Agenten überfluten den Chat nicht mehr — sie werden bei den Agenten gezählt. Im Verlauf bleiben nur seine eigenen.
-• Eine wartende Nachricht kann nicht mehr verloren gehen, wenn die Sitzung dahinter gestorben war.
-• „+ neuer Chat" öffnet auch beim Agentenwechsel einen neuen Chat.
+• Stopp ist absolut: der Turn bricht sofort ab — egal ob er auf dem Server läuft, früher von diesem Handy gestartet wurde oder die Verbindung gerade abriss. Ein Stopp ohne Verbindung greift, sobald der Server wieder erreichbar ist. Wartende Nachrichten gehen danach weiterhin raus.
+• Behoben: ein Vibrieren, das bis zum Abwürgen der App weiterlief, und eines beim Senden.
+• Anmeldung repariert: Senden antwortet immer, der Code wird zuverlässig aus der Zwischenablage übernommen.

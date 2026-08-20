@@ -150,6 +150,33 @@ internal class ChatViewModelReconnect(
         reconnectJob = null
     }
 
+    /**
+     * The ladder has stood down and is NOT coming back on its own — say so.
+     *
+     * `retry()` can land in the read-only branch (the pool is still down), which
+     * returns before writing any state for the new session slot. The slot then
+     * reads `Idle`, and the ladder only re-arms on a NEW `Failed` emission, so no
+     * further attempt is ever scheduled. Meanwhile `_reconnecting` is cleared only
+     * by [onTransportRecovered], which needs a Running session or a live pool -
+     * neither of which will happen. Result: the chat said "reconnecting" forever,
+     * added "server unreachable" after five minutes, and the log showed zero
+     * attempts. The user's only real escape was the "offline - tap to connect"
+     * chip, which the text was arguing against.
+     *
+     * Distinct from [onTransportRecovered] on purpose: nothing recovered here. The
+     * attempt counter is deliberately left alone (see that method's note).
+     */
+    fun standDown(why: String) {
+        if (!_reconnecting.value && reconnectJob == null) return
+        android.util.Log.i(
+            "SshAi-Reconnect",
+            "standing down: $why - no further attempt is scheduled, the connect chip owns it now",
+        )
+        _reconnecting.value = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+    }
+
     fun shouldAutoRetry(reason: String): Boolean {
         val r = reason.lowercase()
         // Things we shouldn't auto-retry on (config errors, missing CLI):

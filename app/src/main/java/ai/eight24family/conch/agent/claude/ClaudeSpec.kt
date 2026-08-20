@@ -132,9 +132,26 @@ object ClaudeSpec : AgentCliSpec {
         // the read-only mirrored card and the CLI proceeds on its own).
         val permissionToolArg =
             if (input.approvalMode == AgentApprovalMode.YOLO) "" else " --permission-prompt-tool stdio"
-        return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}stdbuf -oL claude" +
+        // ⚠ BOTH OF THESE ARE OUTPUT-ONLY, SO THEY ARE CACHE-NEUTRAL. Read the
+        // `--permission-prompt-tool` note above before adding anything else here:
+        // a flag that changes the TOOL SET changes the prompt prefix and re-bills
+        // the whole conversation. An env var that only changes what is written to
+        // stdout, and a flag that only adds events to the stream, do not.
+        //
+        // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: the CLI's `session_state_changed`
+        // emit site is gated on it (verified in the 2.1.220 binary). That event is
+        // the CLI's OWN authoritative "the turn is over" / "requires_action"
+        // signal, and without the var it never exists, so the app was inferring
+        // turn boundaries it could simply have been told.
+        //
+        // --include-hook-events: the parser has handled hook_started /
+        // hook_progress / hook_response since June, and those branches could never
+        // fire because nothing passed the flag that emits them. A user with a
+        // Stop-hook or a formatter now sees it run instead of an unexplained pause.
+        val extraStreamEnv = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1 "
+        return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}${extraStreamEnv}stdbuf -oL claude" +
             " --output-format stream-json --input-format stream-json" +
-            " --include-partial-messages --verbose" +
+            " --include-partial-messages --verbose --include-hook-events" +
             permissionToolArg +
             "$approvalArg$resume$modelArg$effortArg 2>&1"
     }
@@ -462,12 +479,12 @@ done | sort -t'	' -k2 -rn | head -500
 
     override val statusProbeLines: String = """
 echo "claude_inst=${'$'}(command -v claude >/dev/null 2>&1 && echo y || echo n)"
-echo "claude_ver=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+echo "claude_ver=${'$'}(conch_ver claude claude)"
 # Anthropic's primary distribution is the native installer, but they ALSO
 # publish to npm as @anthropic-ai/claude-code (officially deprecated but
 # still updated in lockstep with the installer per their docs). npm view
 # is the cleanest server-side check; gated on npm being present.
-echo "claude_latest=${'$'}(command -v npm >/dev/null 2>&1 && npm view @anthropic-ai/claude-code version 2>/dev/null | tr -d '\r\n ' || echo '')"
+echo "claude_latest=${'$'}(conch_latest claude @anthropic-ai/claude-code)"
 CM=""
 # OAuth = a credentials file that actually CARRIES a usable token — NOT merely
 # the presence of the key names. A dead / logged-out session leaves the file with
@@ -484,6 +501,14 @@ claude_oauth_live() {
     grep -qE '"(access_?[Tt]oken|refresh_?[Tt]oken)"[[:space:]]*:[[:space:]]*"[^"]+"' "${'$'}f" 2>/dev/null && return 0
   done
   [ -n "${'$'}CLAUDE_CODE_OAUTH_TOKEN" ] && return 0
+  # AND IN THE FILES IT IS PERSISTED TO. A `setup-token` login stores
+  # `export CLAUDE_CODE_OAUTH_TOKEN=...` in the shell rc files, and this probe used
+  # to test ONLY the live env var - while the very next line tests ANTHROPIC_API_KEY
+  # both ways. `bash -l` reads ~/.profile only when ~/.bash_profile and
+  # ~/.bash_login are absent, so on a normal server the token was invisible here:
+  # the user completed the whole sign-in, the token was written, and the row still
+  # read "not logged in - tap to start OAuth" (measured on 824, 2026-08-18).
+  grep -qsE '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' ~/.bashrc ~/.profile ~/.bash_profile ~/.env 2>/dev/null && return 0
   return 1
 }
 if claude_oauth_live; then CM="${'$'}CM oauth"; fi
@@ -533,7 +558,7 @@ case " ${'$'}CM " in
       if [ -z "${'$'}RTOK" ]; then echo "claude_run_state=TOKEN_EXPIRED"; else echo "claude_run_state=UNKNOWN"; fi
       exit 0
     fi
-    VER=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    VER=${'$'}(conch_ver claude claude)
     UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
     prof=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/profile" 2>/dev/null)
     PC=${'$'}(printf '%s' "${'$'}prof" | sed -n 's/^HTTP://p' | tail -1)
@@ -555,11 +580,19 @@ case " ${'$'}CM " in
     mx=n; h '"has_claude_max"[[:space:]]*:[[:space:]]*true' && mx=y
     pr=n; h '"has_claude_pro"[[:space:]]*:[[:space:]]*true' && pr=y
     sa=n; h '"subscription_status"[[:space:]]*:[[:space:]]*"(active|trialing)"' && sa=y
+    # ORG plans carry no personal has_claude_* flags at all: a Team seat probes
+    # has_claude_max:false + has_claude_pro:false while organization_type says
+    # claude_team and the ORG's subscription_status is active — and the CLI runs
+    # turns fine (verified live 2026-08-18: claude -p exit 0 on exactly this
+    # profile, while the picker said "[ no subscription ]"). Whether the SEAT
+    # includes Code isn't in this profile; a refused turn surfaces that itself.
+    ot=${'$'}(printf '%s' "${'$'}PJ" | sed -n -E 's/.*"organization_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
     pd=n; { h '"payment_auth_hosted_invoice_url"[[:space:]]*:[[:space:]]*"http' || h '"pending_invoice"[[:space:]]*:[[:space:]]*("|\{|true)'; } && pd=y
     TE=${'$'}(printf '%s' "${'$'}PJ" | sed -n -E 's/.*"claude_code_trial_ends_at"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
     NW=${'$'}(date +%s); TS=; [ -n "${'$'}TE" ] && TS=${'$'}(date -d "${'$'}TE" +%s 2>/dev/null)
     ST=OK; DA=
     if [ "${'$'}mx" = y -o "${'$'}pr" = y ] && [ "${'$'}sa" = y ]; then ST=OK
+    elif [ "${'$'}sa" = y ] && { [ "${'$'}ot" = claude_team ] || [ "${'$'}ot" = claude_enterprise ]; }; then ST=OK
     elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -gt "${'$'}NW" ]; then ST=TRIAL_ACTIVE; DA="${'$'}(( (${'$'}TS-${'$'}NW)/86400 )) days"
     elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -le "${'$'}NW" ] && [ "${'$'}mx" = n ] && [ "${'$'}pr" = n ]; then ST=TRIAL_ENDED
     elif [ "${'$'}pr" = y ] && [ -z "${'$'}TE" ]; then ST=TRIAL_START
@@ -594,6 +627,8 @@ case " ${'$'}CM " in
     # tier stays unknown and the sheet just omits it).
     PLAN=
     if [ "${'$'}mx" = y ]; then PLAN=Max; elif [ "${'$'}pr" = y ]; then PLAN=Pro; fi
+    [ -z "${'$'}PLAN" ] && [ "${'$'}ot" = claude_team ] && PLAN=Team
+    [ -z "${'$'}PLAN" ] && [ "${'$'}ot" = claude_enterprise ] && PLAN=Enterprise
     [ -z "${'$'}PLAN" ] && { [ "${'$'}ST" = TRIAL_ACTIVE ] || [ "${'$'}ST" = TRIAL_START ]; } && PLAN="Pro trial"
     [ -z "${'$'}PLAN" ] && [ "${'$'}ST" = NO_SUBSCRIPTION ] && PLAN=Free
     [ -n "${'$'}PLAN" ] && echo "claude_plan=${'$'}PLAN"

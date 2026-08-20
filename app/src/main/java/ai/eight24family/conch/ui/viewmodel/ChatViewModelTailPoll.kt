@@ -375,12 +375,16 @@ internal class ChatViewModelTailPoll(
         // A turn that is genuinely running touches its file; one that has not
         // been touched in a minute is not running, whatever the last record
         // looks like.
-        if (heartbeatInFlight(preSig.inFlight, preFrozenMs)) {
-            _remoteFileOpen.value = true
-        }
-        _remoteTurnStartMs.value = preSig.turnStartMs
-        _remoteThinking.value = preSig.thinking
-        _remoteTokens.value = preSig.tokens
+        // ⚠ The seed stats are only real if the turn IS in flight per the same
+        // heartbeat rule. Seeding them unconditionally resurrected dead turns:
+        // a session whose writer was killed mid-turn 10 hours ago seeded
+        // turnStartMs from its stale user record, and the next app-driven send
+        // showed «600m» of elapsed on a brand-new turn (2026-08-18).
+        val seedLive = heartbeatInFlight(preSig.inFlight, preFrozenMs, pre.writerAlive)
+        if (seedLive) _remoteFileOpen.value = true
+        _remoteTurnStartMs.value = if (seedLive) preSig.turnStartMs else null
+        _remoteThinking.value = seedLive && preSig.thinking
+        _remoteTokens.value = if (seedLive) preSig.tokens else 0L
 
         // ── Poll loop ──
         var lastSeenWorking = false
@@ -631,7 +635,7 @@ internal class ChatViewModelTailPoll(
             )
             // Same heartbeat rule as the seed: no writes for a minute means the
             // turn is over, however unfinished the last record looks.
-            val inFlight = heartbeatInFlight(probe.inFlight, stat.frozenForMs)
+            val inFlight = heartbeatInFlight(probe.inFlight, stat.frozenForMs, stat.writerAlive)
             val turnStart = probe.turnStartMs
             val thinking = probe.thinking
             ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
@@ -709,7 +713,19 @@ internal class ChatViewModelTailPoll(
             // Turn-start for the working timer: a fresh user-event timestamp when
             // we have one, else KEEP the prior value through a `tool` phase (so the
             // clock doesn't reset each Bash); cleared when work ends OR waiting.
-            _remoteTurnStartMs.value = if (working) (turnStart ?: _remoteTurnStartMs.value) else null
+            // Within one continuously-working stretch the anchor may only move
+            // BACKWARD (a late-parsed earlier record), never forward: the file
+            // gains `user`-typed records for every tool result, and re-anchoring to
+            // those reset the visible clock on each Bash. A NEW turn passes through
+            // working=false, which clears the anchor first.
+            _remoteTurnStartMs.value = if (working) {
+                val prev = _remoteTurnStartMs.value
+                when {
+                    prev == null -> turnStart
+                    turnStart == null -> prev
+                    else -> minOf(prev, turnStart)
+                }
+            } else null
             // Effort suffix shows only while actually thinking, not mid-tool/waiting.
             _remoteThinking.value = working && thinking
             // Tokens: monotonic per turn. Keyed on the PROTECTED turn-start (which
@@ -751,6 +767,21 @@ internal class ChatViewModelTailPoll(
         }
         } finally {
             _remoteWaitingForInput.value = false
+            // ⚠ AND THE TURN FLAG. The comment above this loop names the problem
+            // ("states in which nothing left in the app could ever clear this
+            // flag") and then covered only the banner. `_remoteFileOpen` is the
+            // mirrored-turn "a turn is in flight" signal, and EVERY send gate
+            // reads it: with the poller gone on Failed/Closed it stayed true
+            // forever, so every later send was parked in the queue and no
+            // release could fire either — `shouldReleaseQueue` is the exact
+            // inverse, and the mirrored-edge drain needs a true→false transition
+            // that nothing was left to produce. A dead end whose only accidental
+            // escape was pressing Stop on a chat that wasn't running.
+            //
+            // No poller means we do not KNOW whether a turn is in flight, and
+            // false is the honest answer: the flag claims knowledge we no longer
+            // have. A rebuilt poller re-establishes it within one tick.
+            _remoteFileOpen.value = false
         }
     }
 
@@ -929,6 +960,17 @@ internal class ChatViewModelTailPoll(
          *  live turn — unlike [inFlight], it never flips on the 12-min stale
          *  fallback, so a long silent research turn is never torn down. Default false. */
         val turnComplete: Boolean = false,
+        /**
+         * A CLI process is alive ON THE SERVER working in THIS session's project.
+         * The honest answer to "is the turn still running" when the file has gone
+         * quiet: a long tool (rsync, a build, a 47-minute hash) writes NOTHING to
+         * the JSONL while it runs, so mtime-freshness alone declared the turn over
+         * after 60 s — the app buzzed its three-pulse "done" and dropped the
+         * spinner while the server was mid-tool. null = could not be determined (no
+         * /proc, no pgrep) → callers fall back to the mtime heartbeat, never to a
+         * guess.
+         */
+        val writerAlive: Boolean? = null,
     )
 
     suspend fun statSizeAndAgentAlive(
@@ -954,8 +996,39 @@ internal class ChatViewModelTailPoll(
         // missing file look like a ~1.8 GB one: the `size == null` guard never
         // fired, every tick saw "grew", the poll never backed off, and the chat
         // sat there alive-but-empty. Sentinel + a shape check on the pair.
+        // Third line: IS THE WRITER STILL ALIVE. `pgrep -f` the agent's own
+        // binary, then match each candidate's CWD against the project this
+        // session belongs to — Claude stores rollouts under
+        // ~/.claude/projects/<cwd with / → ->/<uuid>.jsonl, so the mangled cwd of
+        // a live process is a substring test against the session path. That makes
+        // the verdict SPECIFIC to this session: another chat's `claude` running
+        // elsewhere must not keep this spinner alive. Prints
+        // SSHAI_WRITER=1/0/? — `?` when the box has no pgrep or no /proc, which
+        // reads as "unknown" and leaves the old mtime rule in charge.
+        val binPattern = when (agent) {
+            Agent.CLAUDE -> "claude"
+            Agent.CODEX -> "codex"
+            Agent.GEMINI -> "gemini"
+        }
+        // Only Claude's layout lets us tie a live process to THIS session: its
+        // rollouts live at ~/.claude/projects/<cwd with / → ->/<uuid>.jsonl, so a
+        // candidate's mangled CWD must match the path's project component
+        // EXACTLY. Two failure modes that exactness prevents:
+        //   · a substring test would let a process in `/home` ("-home") vouch for
+        //     every project under it, keeping foreign spinners alive;
+        //   · Codex/Gemini paths encode no cwd, so a "no match" there would be a
+        //     FALSE "the turn is over" — they report `?` and keep the mtime rule.
+        val liveness = "if command -v pgrep >/dev/null 2>&1 && [ -d /proc ] && " +
+            "case $q in */projects/*) true;; *) false;; esac; then " +
+            "W=0; for pid in \$(pgrep -f $binPattern 2>/dev/null); do " +
+            "C=\$(readlink /proc/\$pid/cwd 2>/dev/null); [ -n \"\$C\" ] || continue; " +
+            "M=\$(printf '%s' \"\$C\" | tr '/' '-'); " +
+            "case $q in */projects/\"\$M\"/*) W=1; break;; esac; " +
+            "done; echo SSHAI_WRITER=\$W; " +
+            "else echo 'SSHAI_WRITER=?'; fi"
         val inner = "if [ -r $q ]; then stat -c %s,%Y $q 2>/dev/null || " +
-            "stat -f %z,%m $q 2>/dev/null; else echo SSHAI_NOFILE; fi; date +%s; echo ---;"
+            "stat -f %z,%m $q 2>/dev/null; else echo SSHAI_NOFILE; fi; date +%s; " +
+            liveness + "; echo ---;"
         val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return PollProbe(size = null)
         val statPart = out.substringBefore("---")
         val statLines = statPart.lineSequence().filter { it.isNotBlank() }.toList()
@@ -970,6 +1043,9 @@ internal class ChatViewModelTailPoll(
         val mtimeSec = statFields?.getOrNull(1)?.trim()?.toLongOrNull()
         val mtimeMs = mtimeSec?.let { it * 1000 }
         val serverNowSec = statLines.getOrNull(1)?.trim()?.toLongOrNull()
+        val writerAlive = statLines.firstOrNull { it.startsWith("SSHAI_WRITER=") }
+            ?.removePrefix("SSHAI_WRITER=")?.trim()
+            ?.let { if (it == "1") true else if (it == "0") false else null }
         // Both ends are the server's own clock → skew-proof, and still correct on
         // open (real frozen time, not "since the app noticed").
         val frozenForMs = if (mtimeSec != null && serverNowSec != null)
@@ -1245,8 +1321,20 @@ internal class ChatViewModelTailPoll(
          * proof of recency, claiming a live turn is the fake-spinner lie the
          * 2026-08-17 home-list fix banned.
          */
-        internal fun heartbeatInFlight(inFlight: Boolean, frozenForMs: Long?): Boolean =
-            inFlight && (frozenForMs ?: Long.MAX_VALUE) < STALE_TURN_MS
+        internal fun heartbeatInFlight(
+            inFlight: Boolean,
+            frozenForMs: Long?,
+            /** [PollProbe.writerAlive] — proof from the server, when obtainable. */
+            writerAlive: Boolean? = null,
+        ): Boolean {
+            if (!inFlight) return false
+            // PROOF BEATS THE CLOCK, both ways. A live process in this session's
+            // project means the turn IS running however long the file has been
+            // quiet (a 47-minute hash writes nothing) — and NO process means it
+            // is over even if the file was touched a second ago.
+            if (writerAlive != null) return writerAlive
+            return (frozenForMs ?: Long.MAX_VALUE) < STALE_TURN_MS
+        }
 
         /**
          * WORKING is DEFINITIVE — our own in-flight turn OR the file's
@@ -1293,7 +1381,7 @@ internal class ChatViewModelTailPoll(
             return v
         }
 
-        const val POLL_INTERVAL_MS: Long = 5_000L
+        const val POLL_INTERVAL_MS: Long = 2_000L
         /** Background poll cadence — chat-might-come-back-soon. */
         const val POLL_INTERVAL_BACKGROUND_MS: Long = 30_000L
         /** Deep-background poll cadence — chat-isn't-coming-back-soon. */

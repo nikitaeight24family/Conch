@@ -1,5 +1,4 @@
 Nouveautés
-• Corrigé : une vibration qui pouvait durer sans fin jusqu'à ce qu'on force l'arrêt de l'app, et une autre qui se déclenchait à l'envoi alors que la réponse arrivait encore.
-• Les tâches d'arrière-plan des agents n'inondent plus le chat : elles sont comptées avec les agents. La conversation ne garde que les siennes.
-• Un message en file ne peut plus être perdu si la session derrière était morte.
-• « + nouveau chat » ouvre un nouveau chat même au changement d'agent.
+• Stop est absolu : le tour s'arrête aussitôt, qu'il tourne sur le serveur, ait été lancé plus tôt par ce téléphone ou que la connexion vienne de tomber. Un Stop appuyé sans connexion s'applique dès que le serveur revient. Les messages en file partent toujours ensuite.
+• Corrigé : une vibration qui durait jusqu'à l'arrêt forcé de l'app, et une autre à l'envoi.
+• Connexion réparée : le bouton répond toujours, le code est repris du presse-papiers.

@@ -128,7 +128,29 @@ data class UsageReport(
      *  hit 10 minutes ago). */
     val fetchedAtEpochMs: Long? = null,
 ) {
-    val primary: UsageWindow? get() = windows.firstOrNull()
+    /**
+     * The window that actually CONSTRAINS the account right now — the most-USED
+     * one, not the first in display order.
+     *
+     * This used to be `windows.firstOrNull()`, i.e. always the 5-hour window,
+     * and that made the collapsed bar lie in exactly the case where it matters:
+     * on 2026-08-19 the CLI refused turns ("You've hit your session limit ·
+     * resets 2:40pm") while the bar read a comfortable **15%** — the 5-hour
+     * number — because the window that was pegged at 100% was a different one
+     * (weekly, or the third-party-OAuth-app bucket that our own access path
+     * lives in). A limit indicator that shows a window you are NOT blocked on
+     * is worse than no indicator.
+     *
+     * Ranking key is [UsageWindow.usedFraction] — genuinely consumed — never
+     * `fraction`/`percent`, which Codex inverts to "remaining". Ties go to the
+     * aggregate window over a per-model one (it describes the whole account),
+     * then to the one that resets soonest.
+     */
+    val primary: UsageWindow? get() = windows.maxWithOrNull(
+        compareBy<UsageWindow> { it.usedFraction }
+            .thenBy { if (it.perModel) 0 else 1 }
+            .thenByDescending { it.resetAtEpochMs ?: Long.MAX_VALUE },
+    )
 }
 
 /** One row of Claude's `/context` breakdown (System prompt / System tools /
@@ -195,6 +217,21 @@ object UsageProbe {
 
     /** Last known report (cache hit) — instant, no SSH. Null if never fetched. */
     fun cached(serverId: String, agent: Agent): UsageReport? = cache[key(serverId, agent)]
+
+    /** Printed by the server-side commands when there is NO credential to ask
+     * It splits "the SSH blinked" (keep last good, warm-state rule) from
+     * "logged out" (there is no truth to show) — without it both looked like an
+     * empty output, and the bar kept showing a deleted account's limits. */
+    internal const val NOAUTH_MARKER = "CONCH_NOAUTH"
+
+    /** Drop everything remembered for (server, agent): the account behind the
+     *  numbers is gone (logged out / switched). Memory + disk + the CLI-cache
+     *  memo, so no path can resurrect a dead account's percentages. */
+    fun forget(serverId: String, agent: Agent) {
+        cache.remove(key(serverId, agent))
+        if (agent == Agent.CLAUDE) cliCacheMemo.remove(serverId)
+        persistToDisk()
+    }
 
     /** Adopt a report obtained elsewhere (the live control channel) into the
      *  same cache the fetch path warms, so chat re-opens stay instant.
@@ -345,6 +382,13 @@ object UsageProbe {
             Agent.GEMINI -> return null // no machine-readable quota
         }
         val out = execOnServer(serverId, cmd)?.takeIf { it.isNotBlank() } ?: return null
+        // The server answered and said "no credentials": this is a real logout,
+        // not a hiccup — purge the remembered report so the bar goes honest
+        // instead of showing the dead account forever.
+        if (out.contains(NOAUTH_MARKER)) {
+            forget(serverId, agent)
+            return null
+        }
         val windows = when (agent) {
             Agent.CLAUDE -> parseClaude(out)
             Agent.CODEX -> parseCodex(out)
@@ -402,7 +446,15 @@ object UsageProbe {
     /** The mtime-gated read: prints `CONCH_UMT:<mtime>,<size>` always, the
      *  (compressed) body only when the file changed AND fits the cap. */
     internal fun cliCacheCmd(knownMtime: String): String =
-        "f=\"\$HOME/.claude.json\"; " +
+        // Credential gate first: after OUR logout (vault remove) the CLI's
+        // persisted usage block survives in ~/.claude.json for up to its 1-h
+        // trust window — reading it would resurrect the deleted account's
+        // percentages. No token → say so and stop.
+        "C=\"\$HOME/.claude/.credentials.json\"; [ -f \"\$C\" ] || C=\"\$HOME/.config/claude/.credentials.json\"; " +
+            "TOK=\$(sed -n -E 's/.*\"access_?[Tt]oken\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\\1/p' \"\$C\" 2>/dev/null | head -1); " +
+            "[ -z \"\$TOK\" ] && TOK=\"\$CLAUDE_CODE_OAUTH_TOKEN\"; " +
+            "[ -z \"\$TOK\" ] && { echo CONCH_NOAUTH; exit 0; }; " +
+            "f=\"\$HOME/.claude.json\"; " +
             "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null); " +
             "s=\$(stat -c %s \"\$f\" 2>/dev/null || stat -f %z \"\$f\" 2>/dev/null || wc -c < \"\$f\" 2>/dev/null); " +
             "echo \"CONCH_UMT:\${m:-none},\${s:-0}\"; " +
@@ -420,6 +472,10 @@ object UsageProbe {
         val last = cliCacheMemo[serverId]
         val out = execOnServer(serverId, cliCacheCmd(last?.mtime ?: "none"))
             ?.takeIf { it.isNotBlank() } ?: return null
+        if (out.contains(NOAUTH_MARKER)) {
+            forget(serverId, Agent.CLAUDE)
+            return null
+        }
         // Digits-or-none ONLY: the mtime is echoed back into the NEXT read's
         // shell command, so the accepted alphabet is the injection guard.
         val marker = Regex("CONCH_UMT:([0-9]+|none),(\\d+)").find(out) ?: return null
@@ -814,7 +870,7 @@ object UsageProbe {
         # in CLAUDE_CODE_OAUTH_TOKEN (~/.profile). Read the env token as fallback,
         # else the usage bar could never refresh and showed a stale ghost %.
         [ -z "${'$'}TOK" ] && TOK="${'$'}CLAUDE_CODE_OAUTH_TOKEN"
-        [ -z "${'$'}TOK" ] && exit 0
+        [ -z "${'$'}TOK" ] && { echo CONCH_NOAUTH; exit 0; }
         VER=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
         # 1) FULL-scope OAuth (browser login): the rich usage endpoint — five_hour,
@@ -893,6 +949,7 @@ object UsageProbe {
     // snapshot still shows a real countdown, not "now".
     private val CODEX_FAST_CMD = """
         export PATH="${'$'}HOME/.local/bin:/usr/local/bin:${'$'}PATH"
+        [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         f=${'$'}(ls -t ${'$'}HOME/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}f" ] && f=${'$'}(ls -t ${'$'}(find ${'$'}HOME/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null) 2>/dev/null | head -1)
         [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null | tail -1
@@ -906,6 +963,7 @@ object UsageProbe {
     // (forward-projected) limit instead of nothing. Slower (~2-3s) — runs in the
     // background to refine the fast value. All server-side; token never crosses.
     private val CODEX_LIVE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
+        [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         if command -v codex >/dev/null 2>&1; then
           { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"sshai","title":"sshai","version":"1.0"}}}'
             sleep 0.4

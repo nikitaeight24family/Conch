@@ -292,7 +292,9 @@ internal class ChatViewModelDownloads(
                     ChatViewModel.OpenInViewerRequest(uri, filename, serverId, remotePath)
                 )
                 "external" -> _openExternally.emit(
-                    ChatViewModel.OpenExternallyRequest(uri, mime)
+                    ChatViewModel.OpenExternallyRequest(
+                        uri, mime, ext, filename, sizeBytes, remotePath,
+                    )
                 )
                 "share" -> _shareFile.emit(
                     ChatViewModel.ShareRequest(uri, mime, filename)
@@ -301,6 +303,30 @@ internal class ChatViewModelDownloads(
                     ChatViewModel.OpenFilePromptRequest(uri, filename, mime, ext, sizeBytes, remotePath)
                 )
             }
+        }
+    }
+
+    /**
+     * The remembered "open with" choice could not be honoured (no app handles the
+     * type any more). Drop it and re-offer the chooser — a remembered shortcut
+     * that stops working has to give the long way back, or the disk icon is dead
+     * for that extension with no screen able to revive it.
+     */
+    fun openFileFallbackToPrompt(req: ChatViewModel.OpenExternallyRequest) {
+        scope.launch {
+            if (req.extension.isNotBlank()) {
+                ServiceLocator.preferences.setOpenFilePreferenceForExtension(req.extension, null)
+            }
+            _openFilePrompt.emit(
+                ChatViewModel.OpenFilePromptRequest(
+                    uri = req.uri,
+                    filename = req.filename.ifBlank { req.uri.lastPathSegment.orEmpty() },
+                    mime = req.mime,
+                    extension = req.extension,
+                    sizeBytes = req.sizeBytes,
+                    remotePath = req.remotePath,
+                )
+            )
         }
     }
 

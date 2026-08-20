@@ -102,6 +102,34 @@ fun AgentEditScreen(
         if (saved) onBack()
     }
 
+    // WARNING: THIS FORM IS NOT PERSISTED ANYWHERE. `AgentEditViewModel.form` is
+    // in-memory VM state that dies with the back-stack entry, and the only write
+    // is an explicit save - so leaving discarded a name, a description and a
+    // system prompt the user may have spent minutes on, with no prompt and no
+    // draft. The chat composer and (partly) the text viewer already learned this
+    // lesson; this screen never did.
+    //
+    // "Dirty" is deliberately coarse - anything typed at all counts. A false
+    // prompt costs one tap; a false discard costs the whole prompt.
+    val dirty = form.name.isNotBlank() || form.description.isNotBlank() ||
+        form.body.isNotBlank()
+    var confirmDiscard by remember { mutableStateOf(false) }
+    val attemptBack: () -> Unit = { if (dirty && !saved) confirmDiscard = true else onBack() }
+    androidx.activity.compose.BackHandler(enabled = dirty && !saved) { confirmDiscard = true }
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard this subagent?") },
+            text = { Text("Nothing here has been saved yet.") },
+            confirmButton = {
+                TextButton(onClick = { confirmDiscard = false; onBack() }) { Text("Discard") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") }
+            },
+        )
+    }
+
     val canSave = form.name.isNotBlank() &&
         (form.scope == AgentScope.GLOBAL || !cwd.isNullOrBlank()) &&
         !saving
@@ -139,7 +167,7 @@ fun AgentEditScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = attemptBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "back")
                     }
                 },

@@ -1,5 +1,4 @@
 Novedades
-• Corregida una vibración que podía sonar sin parar hasta forzar el cierre de la app, y otra que se disparaba al enviar mientras la respuesta seguía llegando.
-• Las tareas en segundo plano de los agentes ya no inundan el chat: se cuentan con los agentes. En la conversación quedan solo las suyas.
-• Un mensaje en cola ya no puede perderse si la sesión detrás había muerto.
-• "+ nuevo chat" abre un chat nuevo también al cambiar de agente.
+• Detener es absoluto: el turno se corta al instante, ya se ejecute en el servidor, lo iniciara antes este teléfono o se acabara de caer la conexión. Un Detener pulsado sin conexión se aplica en cuanto el servidor vuelve. Los mensajes en cola siguen saliendo después.
+• Corregida una vibración que podía sonar hasta forzar el cierre, y otra al pulsar enviar.
+• Inicio de sesión arreglado: enviar siempre responde y el código se toma del portapapeles.

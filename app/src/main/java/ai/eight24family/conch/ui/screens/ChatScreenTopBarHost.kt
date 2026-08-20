@@ -267,6 +267,7 @@ internal fun ChatTopBarHost(
         // before vm.server resolves from Room (avoids the "one line, no server"
         // flash on open).
         serverName = server?.name ?: vm.cachedServerName ?: "",
+        serverId = server?.id,
         connected = connected,
         selectedModel = selectedModel,
         observedModel = observedModel,

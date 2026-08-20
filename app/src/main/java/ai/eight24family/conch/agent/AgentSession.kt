@@ -673,6 +673,29 @@ class AgentSession(
     }
 
     /**
+     * Control-channel capabilities the CLI already exposes and the app was not
+     * asking for. All null/false when this chat is not on a persistent Claude
+     * stream — the callers say so rather than pretending.
+     */
+    suspend fun workspaceDiffText(): String? =
+        if (usePersistent()) persistentStream.workspaceDiff() else null
+
+    suspend fun stopTask(taskId: String): Boolean =
+        if (usePersistent()) persistentStream.stopTask(taskId) else false
+
+    suspend fun backgroundRunningTasks(toolUseId: String? = null): Boolean =
+        if (usePersistent()) persistentStream.backgroundTasks(toolUseId) else false
+
+    suspend fun sessionCostText(): String? =
+        if (usePersistent()) persistentStream.sessionCost() else null
+
+    suspend fun planText(): String? =
+        if (usePersistent()) persistentStream.plan() else null
+
+    suspend fun cliVersion(): String? =
+        if (usePersistent()) persistentStream.binaryVersion() else null
+
+    /**
      * Run a code review (Codex `review/start`) on the current thread. No-op for
      * non-Codex agents (the `/review` palette entry is gated to Codex anyway).
      * [baseBranch] blank → review the uncommitted changes ("before I push").

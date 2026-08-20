@@ -257,7 +257,11 @@ fun SessionsScreen(
                 )
                 Text(
                     name,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = ai.eight24family.conch.ui.theme.serverNameColor(
+                        serverId = serverId,
+                        serverName = server?.name,
+                        fallback = MaterialTheme.colorScheme.onSurface,
+                    ),
                     style = MaterialTheme.typography.titleMedium,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     maxLines = 1,

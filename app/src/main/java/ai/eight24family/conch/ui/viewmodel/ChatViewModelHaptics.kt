@@ -52,6 +52,14 @@ internal class ChatViewModelHaptics(
      */
     private val perform: (SshAiHaptic) -> Unit,
     /**
+     * "The turn stopped, but the session's background work is still running" —
+     * the CLI re-invokes the session with a task-notification when it lands,
+     * so the stop is a PAUSE, not an answer. Consulted at announce time: true
+     * → two pulses ([SshAiHaptic.TurnPausedBg]) instead of the three-pulse
+     * "…and done".
+     */
+    private val pendingBackground: () -> Boolean = { false },
+    /**
      * The clock. Injectable because every rule in this class is a TIME rule —
      * "held for a settle window", "at most once per turn", "a turn ran long
      * enough" — and a rule that once vibrated until the app had to be killed is
@@ -239,7 +247,7 @@ internal class ChatViewModelHaptics(
         if (lastTurnEndMs?.let { now - it < turnEndDebounceMs } == true) return
         announcedThisTurn = true
         lastTurnEndMs = now
-        perform(SshAiHaptic.TurnEnd)
+        perform(if (pendingBackground()) SshAiHaptic.TurnPausedBg else SshAiHaptic.TurnEnd)
     }
 
     private fun onWorking(working: Boolean) {

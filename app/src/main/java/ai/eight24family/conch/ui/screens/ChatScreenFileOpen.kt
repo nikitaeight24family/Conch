@@ -46,7 +46,28 @@ internal fun ChatFileOpenHandlers(
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            SilentlyTry.fired("SshAi-FileOpen", "startActivity external view") { ctx.startActivity(intent) }
+            // WARNING: A REMEMBERED CHOICE MUST NOT BE ABLE TO KILL THE BUTTON.
+            //
+            // This used to be a bare swallow. Tick "remember for .ext files" +
+            // "Other app" for a type nothing on the phone handles (.jsonl, .log,
+            // .toml, an .apk with unknown-sources off) - or have the handler app
+            // uninstalled later - and every future tap of the disk icon threw
+            // ActivityNotFoundException into a log and did NOTHING: no sheet, no
+            // error, no way back, because the chooser is skipped once a choice is
+            // remembered and no screen can un-remember it. The only escape was
+            // Settings -> Delete all data, which also destroys every server and key.
+            //
+            // So a failure UN-REMEMBERS the choice and re-offers the chooser. The
+            // remembered path is a shortcut; a shortcut that stops working has to
+            // give the long way back.
+            val opened = runCatching { ctx.startActivity(intent) }.isSuccess
+            if (!opened) {
+                android.util.Log.w(
+                    "SshAi-FileOpen",
+                    "no app handles ${req.mime} - forgetting the remembered choice and asking again",
+                )
+                vm.openFileFallbackToPrompt(req)
+            }
         }
     }
     LaunchedEffect(Unit) {

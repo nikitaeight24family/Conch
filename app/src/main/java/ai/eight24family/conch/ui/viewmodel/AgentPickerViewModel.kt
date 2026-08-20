@@ -39,7 +39,7 @@ import kotlinx.coroutines.launch
  */
 class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
-    private val serverId: String = checkNotNull(savedStateHandle["serverId"])
+    val serverId: String = checkNotNull(savedStateHandle["serverId"])
     /** Reached via the Agents bottom-tab: show cached statuses without auto-
      *  connecting / asking for the key. Explicit refresh still connects. */
     private val browse: Boolean = savedStateHandle.get<Boolean>("browse") ?: false
@@ -82,6 +82,8 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     fun openMethodSheet(agent: Agent) {
         _methodSheetAgent.value = agent
+        // A stale complaint from the previous visit must not greet the user.
+        _accountOpError.value = null
         refreshSlots(agent)
     }
     fun closeMethodSheet() { _methodSheetAgent.value = null }
@@ -94,6 +96,37 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     private val _activeSlots = MutableStateFlow<Map<Agent, String>>(emptyMap())
     val activeSlots: StateFlow<Map<Agent, String>> = _activeSlots.asStateFlow()
+
+    /** Slot id an account operation (remove / switch) is currently running on.
+     * These are seconds of SSH round-trips, and the ✕ used to acknowledge the
+     * tap with NOTHING — and a failed op (no transport → vault() is null) was
+     * a silent no-op forever. The sheet shows a spinner on the busy row and
+     * refuses double-taps; failures land in [accountOpError]. */
+    private val _accountOpBusy = MutableStateFlow<String?>(null)
+    val accountOpBusy: StateFlow<String?> = _accountOpBusy.asStateFlow()
+
+    /** Why the last account operation did nothing — shown in the sheet until
+     *  the next operation starts. Null = no complaint. */
+    private val _accountOpError = MutableStateFlow<String?>(null)
+    val accountOpError: StateFlow<String?> = _accountOpError.asStateFlow()
+
+    /** Compact live-limits line per logged-in agent ("5h 28% · Weekly 3%"),
+     * warmed off every status probe — the connection alone is enough to know
+     * the limit, no chat entry required. Rides the same UsageProbe cache the
+     * chat bar uses, so both surfaces always quote the same numbers. */
+    private val _usageBrief = MutableStateFlow<Map<Agent, String>>(emptyMap())
+    val usageBrief: StateFlow<Map<Agent, String>> = _usageBrief.asStateFlow()
+    private val usageWarmAt = java.util.concurrent.ConcurrentHashMap<Agent, Long>()
+
+    private fun rebuildUsageBrief(agent: Agent) {
+        val rep = ai.eight24family.conch.agent.UsageProbe.cached(serverId, agent)
+        val parts = rep?.windows?.filter { !it.perModel }?.take(2)
+            ?.filter { it.percent >= 0 }?.map { w -> "${w.label} ${w.percent}%" }
+            .orEmpty()
+        _usageBrief.value =
+            if (parts.isEmpty()) _usageBrief.value - agent
+            else _usageBrief.value + (agent to parts.joinToString(" · "))
+    }
 
     /** A vault bound to the live pooled SSH client, or null if not connected. */
     private fun vault(agent: Agent): ai.eight24family.conch.agent.CredentialVault? {
@@ -175,6 +208,10 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     suspend fun onLoginSuccess(agent: Agent) {
         val wasAddFlow = pendingAddAccount == agent
         pendingAddAccount = null
+        // A different account just became live — whatever limits were remembered
+        // belong to the previous one. Drop them; the run-state probe below (and
+        // the next chat open) fetch THIS account's numbers.
+        ai.eight24family.conch.agent.UsageProbe.forget(serverId, agent)
         val v = vault(agent) ?: return
         val existing = v.listSlots()
         val method = _statuses.value?.get(agent)?.activeMethod ?: "oauth"
@@ -247,13 +284,29 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     /** Switch the active account — copy this slot's creds into the CLI's live path. */
     fun activateSlot(agent: Agent, slotId: String) {
+        if (_accountOpBusy.value != null) return
+        _accountOpBusy.value = slotId
+        _accountOpError.value = null
         viewModelScope.launch {
-            val v = vault(agent) ?: return@launch
+            try {
+            val v = vault(agent) ?: run {
+                _accountOpError.value = "No connection to this server — connect it, then switch."
+                return@launch
+            }
             if (v.activate(slotId)) {
                 ServiceLocator.authMethodStore.setActiveSlot(serverId, agent, slotId)
                 _activeSlots.value = _activeSlots.value + (agent to slotId)
+                // The limits on record belong to the account we just switched
+                // AWAY from — showing them under the new one is a lie.
+                ai.eight24family.conch.agent.UsageProbe.forget(serverId, agent)
+                // Live CLI processes still carry the OLD account in their env —
+                // close them; the next send relaunches under the new one.
+                ServiceLocator.agentSessions.closeAllFor(serverId, agent)
                 reverifyAgentQuiet(agent)   // switched account → quiet single-agent re-check
+            } else {
+                _accountOpError.value = "Couldn't switch — the server didn't confirm. Check the connection and try again."
             }
+            } finally { _accountOpBusy.value = null }
         }
     }
 
@@ -262,11 +315,29 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * active AND another remains, FAIL OVER to it (so the server stays usable and
      * we show THAT account's status); */
     fun removeSlot(agent: Agent, slotId: String) {
+        if (_accountOpBusy.value != null) return
+        _accountOpBusy.value = slotId
+        _accountOpError.value = null
         viewModelScope.launch {
-            val v = vault(agent) ?: return@launch
+            try {
+            val v = vault(agent) ?: run {
+                _accountOpError.value = "No connection to this server — connect it, then remove the account."
+                return@launch
+            }
             val wasActive = ServiceLocator.authMethodStore.activeSlot(serverId, agent) == slotId
-            v.remove(slotId, clearLiveIfActive = wasActive)
+            if (!v.remove(slotId, clearLiveIfActive = wasActive)) {
+                _accountOpError.value = "Couldn't remove — the server didn't confirm. Check the connection and try again."
+                return@launch
+            }
             if (wasActive) {
+                // The removed account owned the remembered limits — drop them so
+                // nothing (chat bar included) keeps quoting a deleted login.
+                ai.eight24family.conch.agent.UsageProbe.forget(serverId, agent)
+                // And its live CLI processes: they hold the removed credentials
+                // in their env and keep running (a 4h20m zombie turn survived a
+                // logout, 2026-08-18). vault.remove above also pkills headless
+                // turns server-side; this closes OUR app-side sessions cleanly.
+                ServiceLocator.agentSessions.closeAllFor(serverId, agent)
                 // remove() already wiped the live creds → make another saved
                 // account live, or go logged-out if none. NO probe afterwards —
                 // we already KNOW the outcome, so set the row directly (user:).
@@ -284,6 +355,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // (Removing a NON-active slot leaves the live login untouched — the
             // row's status is already correct, nothing to change.)
             refreshSlots(agent)
+            } finally { _accountOpBusy.value = null }
         }
     }
 
@@ -396,6 +468,16 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *    (and Codex's `codex login --no-browser` — same shape). */
     data class LoginRequest(
         val agent: Agent,
+        /** Which server this login belongs to. The flow behind the dialog is
+         *  process-global ([activeLogin]) while a picker panel exists PER
+         *  SERVER (the Agents overview embeds one VM per server) — so every
+         *  panel used to render its own copy of the dialog and the TOPMOST
+         *  one, owned by a VM that never started any login, swallowed the
+         *  taps: submit hit its null stdin handle and did nothing (measured
+         *  on the phone 2026-08-18, twice: prompt 21:24:10, submit 21:24:29,
+         *  `stdin=NULL`). Panels must render the dialog ONLY for their own
+         *  server. */
+        val serverId: String,
         val url: String?,
         val code: String?,
         val rawTail: String,
@@ -421,6 +503,18 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          *  free tier). The dialog then shows this message + an "[ use API key ]"
          *  affordance instead of a dead URL/paste field. */
         val fatalError: String? = null,
+        /**
+         * The flow is NOT progressing and will not on its own - it needs
+         * something from the user first (today: a connection to this server).
+         *
+         * ⚠ It exists because the dialog's placeholder for "no url and no code
+         * yet" is a SPINNER plus the words "Starting OAuth flow…", and that text
+         * is a lie in this state: the login had already given up and written the
+         * reason into [rawTail], while the screen kept promising progress
+         * (2026-08-18). Distinct from [fatalError], which is a dead end offering
+         * the API-key path; this one is retryable and says so.
+         */
+        val stalled: Boolean = false,
     )
     // Process-global (companion [activeLogin]) so MainActivity can see an
     // in-flight OAuth login WITHOUT a VM handle — it gates Picture-in-Picture
@@ -591,6 +685,14 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     ServiceLocator.sshConnectionPool.peek(serverId) != null
                 if (nowConnected && !wasConnected) {
                     if (_needsManualRefresh.value) _needsManualRefresh.value = false
+                    // A transport just came up SILENTLY (device key / another
+                    // screen's reconnect). If a security-key touch prompt is
+                    // still standing for this server, it lost the race and is
+                    // now asking for a tap NOBODY needs — the notification
+                    // «Authenticate to 824» while 824 was already connected
+                    // (2026-08-18). Retire it; the refresh below rides the
+                    // live transport.
+                    if (_skTouchRequest.value != null) refreshCoord.cancelSkRefresh()
                     refreshCoord.refresh(userTriggered = false, force = true)
                 }
                 wasConnected = nowConnected
@@ -621,6 +723,31 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         shellEscape = ::shellEscape,
         onLoginSuccess = ::onLoginSuccess,
     )
+
+    init {
+        // Limits ride the connection, not the chat: whenever a probe reports an
+        // agent logged in, warm its usage (over the pooled SSH) and publish the
+        // brief line for the row. Logged-out agents lose their line. 60s
+        // staleness gate so overlapping refreshes don't stack fetches.
+        viewModelScope.launch {
+            _statuses.collect { m ->
+                (m ?: return@collect).forEach { (agent, st) ->
+                    if (!st.installed || !st.loggedIn) {
+                        _usageBrief.value = _usageBrief.value - agent
+                        return@forEach
+                    }
+                    rebuildUsageBrief(agent)
+                    val now = System.currentTimeMillis()
+                    if (now - (usageWarmAt[agent] ?: 0L) < 60_000) return@forEach
+                    usageWarmAt[agent] = now
+                    launch(kotlinx.coroutines.Dispatchers.IO) {
+                        ai.eight24family.conch.agent.UsageProbe.fetch(serverId, agent, fast = false)
+                        rebuildUsageBrief(agent)
+                    }
+                }
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -744,6 +871,10 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      */
     fun removeAgent(agent: Agent) {
         _methodSheetAgent.value = null
+        // The CLI (and with it the login) is going away — its limits go too,
+        // and so do its live sessions (their processes die with the binary).
+        ai.eight24family.conch.agent.UsageProbe.forget(serverId, agent)
+        ServiceLocator.agentSessions.closeAllFor(serverId, agent)
         ensureConnectedThenRun(agent, "uninstall") { installCoord.uninstallAgent(agent) }
     }
 
@@ -808,7 +939,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     fun startOAuthLogin(agent: Agent) = oauthCoord.startOAuthLogin(agent)
     fun submitCodexCallback(raw: String) = oauthCoord.submitCodexCallback(raw)
-    fun submitOAuthCode(code: String) = oauthCoord.submitOAuthCode(code)
+    fun submitOAuthCode(code: String, manual: Boolean) = oauthCoord.submitOAuthCode(code, manual)
     fun cancelLogin() = oauthCoord.cancelLogin()
 
     private fun shellEscape(s: String): String =

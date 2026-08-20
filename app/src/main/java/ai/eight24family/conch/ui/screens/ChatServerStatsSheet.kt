@@ -68,7 +68,10 @@ internal fun ServerStatsSheet(
                 Text(
                     serverName.ifBlank { "—" },
                     style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = ai.eight24family.conch.ui.theme.serverNameColor(
+                        serverName = serverName,
+                        fallback = MaterialTheme.colorScheme.onSurface,
+                    ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(2f),

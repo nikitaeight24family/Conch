@@ -174,7 +174,11 @@ private fun ServerSection(
             Column(modifier = Modifier.weight(1f, fill = true)) {
                 Text(
                     entry.server.name,
-                    color = fg,
+                    color = ai.eight24family.conch.ui.theme.serverNameColor(
+                        serverId = entry.server.id,
+                        serverName = entry.server.name,
+                        fallback = fg,
+                    ),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,

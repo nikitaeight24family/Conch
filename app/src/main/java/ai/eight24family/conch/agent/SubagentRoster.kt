@@ -59,6 +59,12 @@ private const val TASK_NOTE_PREFIX = "sysevt-task-"
 data class TaskOwnership(
     val ownTaskNoteIds: Set<String>,
     val agentTaskCount: Int,
+    /** Background commands the SESSION ITSELF is running right now. When a turn
+     * ends with this non-zero, the CLI will re-invoke the session with a
+     * task-notification when the command finishes — "done" is really "paused,
+     * waiting for background" and every surface (haptic, chat row) must say
+     * so, not announce an answer. */
+    val ownRunningTasks: Int = 0,
 )
 
 /**
@@ -133,7 +139,11 @@ fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
         ?: seenTasks.filter { it !in finishedTasks && it !in agentTasks }
     val agentRunning = running.count { TASK_NOTE_PREFIX + it !in ownNotes }
 
-    return TaskOwnership(ownTaskNoteIds = ownNotes, agentTaskCount = agentRunning)
+    return TaskOwnership(
+        ownTaskNoteIds = ownNotes,
+        agentTaskCount = agentRunning,
+        ownRunningTasks = running.size - agentRunning,
+    )
 }
 
 /**
@@ -154,10 +164,20 @@ fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
  *    finished — that is what flips ● (running) to ○ (done).
  *
  * Order is preserved: agents appear in launch order, like the CLI's list.
+ *
+ * FINISHED AGENTS DO NOT OUTLIVE THEIR TURN. This folds the whole transcript,
+ * so every fan-out ever run used to stay on the roster forever — 100+ rows in
+ * long sessions. Rule: a DONE agent spawned before the latest user message is
+ * history, not a roster row — the transcript already holds its work. Still-
+ * running (incl. backgrounded) agents stay regardless of age, and the current
+ * turn's fan-out stays fully visible — summaries included — until the next
+ * user message starts a new turn.
  */
 fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     // key -> mutable accumulator, insertion-ordered.
     data class Acc(
+        /** Index of the message that OPENED this row — which turn it belongs to. */
+        val spawnIdx: Int = 0,
         var type: String? = null,
         var task: String? = null,
         /** Sum of per-record `message.usage`. Our own count. */
@@ -183,7 +203,7 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     // every completion would land nowhere and agents would stay ● forever.
     val taskKeys = HashMap<String, String>()
 
-    for (m in messages) {
+    for ((msgIdx, m) in messages.withIndex()) {
         when (m) {
             is AgentMessage.ToolUse -> {
                 // "Task" is the historical name; the shipped CLI spawns
@@ -204,7 +224,7 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
                     // the PARSED input → not an agent spawn, skip silently.
                     if (!nameIsAgentish && type == null) return@fired
                     parsedAgent = true
-                    val a = acc.getOrPut(m.id) { Acc() }
+                    val a = acc.getOrPut(m.id) { Acc(spawnIdx = msgIdx) }
                     a.type = type ?: a.type
                     a.task = task ?: a.task
                     // The spawn itself is the CLI's own "model" hint: an
@@ -213,7 +233,7 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
                     // before the agent's first turn reports.
                     a.model = o["model"]?.jsonPrimitive?.content ?: a.model
                 }
-                if (nameIsAgentish && !parsedAgent) acc.getOrPut(m.id) { Acc() }
+                if (nameIsAgentish && !parsedAgent) acc.getOrPut(m.id) { Acc(spawnIdx = msgIdx) }
             }
 
             is AgentMessage.SubagentActivity -> {
@@ -249,7 +269,7 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
                 val identifiesAsAgent = m.subagentType != null || m.agentId != null ||
                     m.taskType == "local_agent" || m.taskType == "remote_agent"
                 if (key !in acc && !identifiesAsAgent) continue
-                val a = acc.getOrPut(key) { Acc() }
+                val a = acc.getOrPut(key) { Acc(spawnIdx = msgIdx) }
                 // Per-record usage is incremental → sum. `total_tokens` is
                 // ALREADY a total → last-wins. Mixing the two up bills the
                 // agent once per progress tick.
@@ -284,7 +304,11 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
         }
     }
 
-    return acc.map { (key, a) ->
+    // The latest user message is the turn boundary: done agents from before it
+    // are history (their work is in the transcript), not roster rows.
+    val lastUserIdx = messages.indexOfLast { it is AgentMessage.UserText }
+    return acc.mapNotNull { (key, a) ->
+        if (a.done && lastUserIdx >= 0 && a.spawnIdx < lastUserIdx) return@mapNotNull null
         SubagentRun(
             key = key,
             type = a.type,

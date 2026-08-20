@@ -55,6 +55,10 @@ internal class ChatViewModelSlash(
     /** Send text as an ordinary turn through the VM's own send path — bubble,
      *  visible outbox, cancel — without re-entering slash dispatch. */
     private val sendAsTurn: (String) -> Unit = {},
+    /** Put LOCAL output (a plan, a cost table) into the transcript as
+     *  assistant-style text - which is how the CLI itself renders the output of a
+     *  local command, and the only place long content can be read on a phone. */
+    private val emitLocal: (String) -> Unit = {},
 ) {
     private val _customCommands = MutableStateFlow<List<SlashCommand>>(emptyList())
     val customCommands: StateFlow<List<SlashCommand>> = _customCommands.asStateFlow()
@@ -88,6 +92,35 @@ internal class ChatViewModelSlash(
         val agent = currentAgent()
         when (cmd.kind) {
             SlashCommandKind.NEW_SESSION -> newSession()
+            // Control-channel capabilities. Each one asks the CLI rather than
+            // guessing locally, and each says plainly when the channel cannot
+            // answer instead of showing a zero or an empty panel.
+            SlashCommandKind.SESSION_COST -> askOverControl("cost") { it.sessionCostText() }
+            SlashCommandKind.CLI_VERSION -> askOverControl("version") { it.cliVersion() }
+            SlashCommandKind.SHOW_PLAN -> askOverControl("plan", "No plan yet — the agent has not written one.") {
+                it.planText()
+            }
+            SlashCommandKind.BACKGROUND_RUNNING -> {
+                val s = sessionAccess() ?: return
+                scope.launch {
+                    val ok = s.backgroundRunningTasks()
+                    notice(
+                        if (ok) "Detached what was running — it keeps going and the turn is free."
+                        else "Nothing to detach, or the CLI refused.",
+                    )
+                }
+            }
+            SlashCommandKind.STOP_TASK -> {
+                val id = args.trim()
+                if (id.isBlank()) {
+                    notice("/stoptask needs a task id — the agent panel shows them.")
+                    return
+                }
+                val s = sessionAccess() ?: return
+                scope.launch {
+                    notice(if (s.stopTask(id)) "Task $id stopped." else "Could not stop $id.")
+                }
+            }
             SlashCommandKind.INJECT_DIFF -> injectGitDiff()
             SlashCommandKind.INIT_REPO -> sendInitPrompt()
             SlashCommandKind.OPEN_MEMORY -> {
@@ -163,7 +196,18 @@ internal class ChatViewModelSlash(
             val gitCmd = if (cwd != null && cwd.isNotBlank())
                 "cd ${shQuote(cwd)} && git diff --no-color HEAD"
             else "git diff --no-color HEAD"
-            val out = s.execOnLive("bash -lc " + shQuote(gitCmd)).orEmpty().trimEnd()
+            // ASK THE WORKER FIRST. It resolves the base ref itself (working tree
+            // vs HEAD, falling back to branch-vs-merge-base when the tree is
+            // clean - the case where our own `git diff HEAD` returned nothing and
+            // we told the user "no changes") and applies its own caps, so a huge
+            // repo cannot hang the turn. The shell stays as the fallback for a
+            // chat that is not on a persistent Claude stream.
+            val out = (
+                ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Slash", "worker diff") {
+                    s.workspaceDiffText()
+                }?.takeIf { it.isNotBlank() }
+                    ?: s.execOnLive("bash -lc " + shQuote(gitCmd)).orEmpty()
+                ).trimEnd()
             if (out.isBlank()) {
                 setModal(ChatModal.Unsupported("/diff", "git diff is empty (no changes vs HEAD)."))
                 return@launch
@@ -236,6 +280,35 @@ internal class ChatViewModelSlash(
      * session file, so it appears in the sessions list by itself — we don't
      * mirror its output here, we say where it went.
      */
+    /**
+     * Ask the CLI something over the control channel and put the answer in front
+     * of the user, as a row they can read rather than a toast that disappears.
+     *
+     * The channel legitimately cannot answer sometimes (this chat is not on a
+     * persistent Claude stream, the transport is down, the responder refused) —
+     * that is reported, never papered over with a blank panel or a zero.
+     */
+    private fun askOverControl(
+        label: String,
+        emptyText: String = "Nothing to show — the CLI had no answer.",
+        ask: suspend (ai.eight24family.conch.agent.AgentSession) -> String?,
+    ) {
+        val s = sessionAccess() ?: return
+        scope.launch {
+            val text = ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Slash", "control ask $label") {
+                ask(s)
+            }
+            if (text.isNullOrBlank()) { notice(emptyText); return@launch }
+            // Long content (a plan, a cost table) belongs in the transcript, not
+            // in a one-line notice that truncates it.
+            if (text.length > 160 || text.contains('\n')) {
+                emitLocal("$label\n\n" + text.trim())
+            } else {
+                notice("$label · ${text.trim()}")
+            }
+        }
+    }
+
     private fun runInBackground(args: String) {
         val task = args.trim()
         if (task.isBlank()) {

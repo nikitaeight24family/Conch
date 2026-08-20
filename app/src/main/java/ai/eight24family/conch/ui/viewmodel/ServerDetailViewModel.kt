@@ -294,6 +294,23 @@ class ServerDetailViewModel(
     }
 
     /** Drop the live transport + any held sessions/shell for this server. */
+    /** Set this server's accent colour (`#RRGGBB`), or roll a fresh random one
+     *  when [hex] is null. The colour is what identifies the server by eye
+     *  across the app, so it writes through a single-field repository update —
+     *  no form round-trip, nothing else in the row can be clobbered. */
+    fun setColorHex(hex: String?) {
+        viewModelScope.launch {
+            SilentlyTry.fired("SshAi-ServerDetail", "save accent colour") {
+                val next = hex ?: ai.eight24family.conch.ui.theme.ServerAccent.randomHex(
+                    repo.observeServers().first()
+                        .filter { it.id != serverId }
+                        .map { it.colorHex },
+                )
+                repo.updateColorHex(serverId, next)
+            }
+        }
+    }
+
     fun disconnect() {
         ServiceLocator.sshConnectionPool.userDisconnect(serverId)
         ServiceLocator.agentSessions.closeAllForServer(serverId)
@@ -356,6 +373,30 @@ class ServerDetailViewModel(
         // actually been minted+written. (Was bug: user tapped connect, FIDO
         // succeeded, enroll wrote the key, but the UI sat on its initial
         // null read forever — `refreshDeviceKey` only fired once in init.)
+        // ⚠ THE EDGE IS NOT ENOUGH, AND THAT IS WHY THE ROW LIED.
+        //
+        // `wasHeld` starts from the CURRENT value, so when the screen is opened on
+        // a server that is ALREADY held — which is what happens right after
+        // tapping connect and signing in — the false→true transition never
+        // arrives, this refresh never runs, and the row keeps showing its FIRST
+        // read: the one taken before the enroll had written the key. The user then
+        // sees "not created yet — connect & tap once" over a key that exists, and
+        // the same screen tells them to do what they just did.
+        //
+        // So: keep the edge (it is the fast path right after an enroll) AND poll
+        // while the answer can still change. The poll stops the moment a key is
+        // found, so a server that genuinely has none costs one cheap local read
+        // every few seconds while its screen is open, and nothing after.
+        viewModelScope.launch {
+            var tries = 0
+            while (tries < DEVICE_KEY_RECHECK_TRIES) {
+                delay(2_500)
+                if (deviceKey.value != null) return@launch
+                if (serverId !in pool.userHeldIds.value) { tries++; continue }
+                tries++
+                refreshDeviceKey()
+            }
+        }
         viewModelScope.launch {
             var wasHeld = serverId in pool.userHeldIds.value
             pool.userHeldIds.collect { ids ->
@@ -514,4 +555,11 @@ class ServerDetailViewModel(
     fun delete() {
         viewModelScope.launch { repo.delete(serverId) }
     }
+    private companion object {
+        /** How many times the device-key row re-reads its store while the screen
+         *  is open. Enough to outlast an enroll that is slower than usual (a bad
+         *  link, a sleepy box); it stops early the moment a key appears. */
+        private const val DEVICE_KEY_RECHECK_TRIES = 8
+    }
+
 }
