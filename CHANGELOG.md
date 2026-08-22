@@ -11,6 +11,35 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.3.9] — 2026-08-22
+
+### Added
+- Team and Enterprise subscriptions are recognised — an active organisation
+  account no longer reads as "no subscription".
+- Account cards show email, plan and expiry; live limits appear on the agent
+  list, known from the connection alone before a chat is opened.
+- Settings → Connection → fail2ban: a master auto-connect switch and a minimum
+  gap between automatic reconnects, so automatic dialing can be bounded or
+  turned off to suit a strict jail.
+- A [ retry ] control on a disconnected server with a live connect log.
+
+### Changed
+- Signing in runs the CLI's real full-scope login, so the server's own terminal
+  is logged in too and the plan/limits are readable everywhere.
+- Background probes and session discovery reuse one live SSH transport instead
+  of opening a fresh handshake per call — far fewer connections in the server's
+  auth log.
+
+### Fixed
+- A logged-out agent can no longer be sent to; logging out actually clears the
+  server-side session.
+- Dropped connections recover on their own; a sign-in error retries or explains
+  instead of hanging.
+- The usage bar shows the live account's limits or nothing, never a stale value
+  from a removed account.
+
+---
+
 ## [0.3.8] — 2026-08-20
 
 ### Fixed

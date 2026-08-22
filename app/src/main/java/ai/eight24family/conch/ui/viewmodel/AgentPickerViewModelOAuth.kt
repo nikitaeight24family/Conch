@@ -192,12 +192,16 @@ internal class AgentPickerViewModelOAuth(
             l.startsWith("error") || l.contains("failed")
     }
 
-    fun startOAuthLogin(agent: Agent) {
+    fun startOAuthLogin(agent: Agent) = startOAuthLogin(agent, internalRetry = false)
+
+    private fun startOAuthLogin(agent: Agent, internalRetry: Boolean) {
         loginJob?.cancel()
         // This attempt's identity. Everything below tears down only what IT owns.
         val myGen = ++loginGen
         // A verdict latched by a PREVIOUS login must not haunt this one's dialog.
         latchedVerdict = ""
+        // A human pressing the button starts a fresh retry budget.
+        if (!internalRetry) loginAutoRetries = 0
         loginJob = scope.launch(Dispatchers.IO) {
             val tag = "SshAi-AgentPicker"
             // ⚠ NEVER VANISH. This was a bare `return@launch` when the pool had no
@@ -244,6 +248,9 @@ internal class AgentPickerViewModelOAuth(
             // credential) — the finally then KEEPS the error dialog up and never
             // calls onLoginSuccess, so a phantom account is never saved.
             var loginFailed = false
+            // Set when this attempt died underneath the user and a fresh one is
+            // being launched — the finally must not clear the dialog it hands over.
+            var autoRetrying = false
             try {
                 val cmd = when (agent) {
                     // The REAL /login, driven through the TUI over our PTY — NOT
@@ -445,6 +452,29 @@ internal class AgentPickerViewModelOAuth(
                             }
                         }
                     }
+                    // STALL WATCHDOG. readLine blocks forever on a half-open
+                    // socket, so a transport that dies mid-login left the dialog
+                    // spinning with no verdict for minutes (2026-08-22). Silence
+                    // past the threshold (or a dead transport) force-closes the
+                    // proc — the read loop unblocks into the failure path below,
+                    // which auto-retries or says why. The clock EXCLUDES the
+                    // paste wait: a user hunting for their code is not a stall.
+                    val lastStdoutMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+                    val stallJob = launch {
+                        while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
+                            delay(5_000)
+                            val awaitingUser = loginRequestMut.value?.awaitingPaste == true &&
+                                loginRequestMut.value?.submitted != true
+                            if (awaitingUser) { lastStdoutMs.set(System.currentTimeMillis()) ; continue }
+                            val idle = System.currentTimeMillis() - lastStdoutMs.get()
+                            val transportDead = runCatching { !pooled.isConnected }.getOrDefault(true)
+                            if (transportDead || idle > LOGIN_STALL_MS) {
+                                android.util.Log.w(tag, "login($agent) watchdog: transportDead=$transportDead idle=${idle}ms — closing proc")
+                                SilentlyTry.fired("SshAi-AgentPicker", "close login proc on stall") { proc.close() }
+                                return@launch
+                            }
+                        }
+                    }
                     while (true) {
                         val rawLine = try { reader.readLine() } catch (e: Throwable) {
                             android.util.Log.w(tag, "login($agent) read threw: ${e.javaClass.simpleName}: ${e.message}"); null
@@ -465,6 +495,7 @@ internal class AgentPickerViewModelOAuth(
                             )
                             break
                         }
+                        lastStdoutMs.set(System.currentTimeMillis())
                         val line = termEscapeRe.replace(rawLine, "").trim()
                         if (line.isEmpty()) continue
                         // Spinner-frame / decoration-only lines stay OUT of the
@@ -610,15 +641,25 @@ internal class AgentPickerViewModelOAuth(
                             .lastOrNull { isVerdictLine(it) }
                             ?: latchedVerdict.takeIf { it.isNotBlank() }
                         if (verdict != null) latchedVerdict = verdict
+                        // An error-shaped verdict is a STOP the user must act on
+                        // — mark the request stalled so the dialog offers the
+                        // retry affordance next to the message instead of a
+                        // spinner over a corpse.
+                        val verdictIsError = verdict != null && verdict.lowercase().let {
+                            it.startsWith("✗") || it.startsWith("×") || it.contains("error") ||
+                                it.contains("failed") || it.contains("400")
+                        }
                         loginRequestMut.value = cur.copy(
                             url = nextUrl,
                             code = code ?: cur.code,
                             rawTail = verdict ?: cur.rawTail,
                             awaitingPaste = cur.awaitingPaste || pasteNow || callbackNow,
                             callbackMode = cur.callbackMode || callbackNow,
+                            stalled = cur.stalled || verdictIsError,
                         )
                     }
                     pollJob.cancel()
+                    stallJob.cancel()
                 }
                 if (recovering) {
                     // Silent auto-fix: reinstall the broken CLI, then
@@ -669,6 +710,22 @@ internal class AgentPickerViewModelOAuth(
                         awaitingPaste = false, submitted = true, fatalError = null,
                     )
                     onLoginSuccess(agent)
+                } else if (loginAutoRetries < LOGIN_MAX_AUTO_RETRIES) {
+                    // The attempt died underneath the user (transport EOF, wedged
+                    // CLI, watchdog kill). An error must not stop the human —
+                    // relaunch the whole flow ourselves and SAY so; the retry
+                    // budget stops a dead server from looping forever.
+                    loginAutoRetries++
+                    autoRetrying = true
+                    android.util.Log.w(tag, "login($agent) — attempt died, auto-retry $loginAutoRetries/$LOGIN_MAX_AUTO_RETRIES")
+                    loginRequestMut.value = (loginRequestMut.value
+                        ?: AgentPickerViewModel.LoginRequest(agent, serverId, null, null, "")).copy(
+                        url = null, code = null,
+                        awaitingPaste = false, submitted = false, stalled = false,
+                        rawTail = "Connection dropped — retrying sign-in ($loginAutoRetries/$LOGIN_MAX_AUTO_RETRIES)…",
+                    )
+                    startOAuthLogin(agent, internalRetry = true)
+                    return@launch
                 } else {
                     loginFailed = true
                     android.util.Log.w(tag, "login($agent) — proc ended with NO fresh credential; NOT a login, not saving an account")
@@ -676,7 +733,8 @@ internal class AgentPickerViewModelOAuth(
                         ?: AgentPickerViewModel.LoginRequest(agent, serverId, null, null, "")).copy(
                         awaitingPaste = false,
                         submitted = false,
-                        fatalError = "Sign-in didn't complete — nothing was saved. The login window closed before an account was signed in. Tap Cancel and try again.",
+                        fatalError = "Sign-in didn't complete after ${LOGIN_MAX_AUTO_RETRIES + 1} attempts — nothing was saved. " +
+                            "Check the server's connection, then tap retry.",
                     )
                 }
             } catch (t: Throwable) {
@@ -684,8 +742,10 @@ internal class AgentPickerViewModelOAuth(
             } finally {
                 // Only the attempt that OWNS the handle may close it: a newer
                 // attempt is already running on its own process, and closing its
-                // stdin from here is what made the code undeliverable.
-                if (!recovering && stdinGen == myGen) {
+                // stdin from here is what made the code undeliverable. An
+                // auto-retry hands the dialog to its successor the same way a
+                // recovery does.
+                if (!recovering && !autoRetrying && stdinGen == myGen) {
                     SilentlyTry.fired("SshAi-AgentPicker", "close login stdin (finally)") { loginProcStdin?.close() }
                     loginProcStdin = null
                     // But keep the dialog UP on a real failure so the user sees why
@@ -1161,6 +1221,20 @@ internal class AgentPickerViewModelOAuth(
          *  actually reaches the login regardless of which panel's button
          *  delivered it. */
         @Volatile private var loginJob: Job? = null
+
+        /** Auto-retries consumed by the CURRENT user-initiated login. A login
+         * that dies underneath the user (transport EOF, wedged CLI) restarts
+         * itself up to [LOGIN_MAX_AUTO_RETRIES] times before it is allowed to
+         * stop them with a message. Reset on every MANUAL start. */
+        @Volatile private var loginAutoRetries = 0
+        private const val LOGIN_MAX_AUTO_RETRIES = 2
+
+        /** Watchdog: with the login incomplete, this long with NO stdout means
+         * the CLI (or the transport under it) is wedged — readLine can block
+         * forever on a half-open socket, which is exactly the the user hit
+         * (2026-08-22, 15:14: transport broke mid-login, EOF surfaced only
+         * minutes later). */
+        private const val LOGIN_STALL_MS = 60_000L
 
         /** The last verdict-shaped line the CLI printed, kept so it cannot
          *  scroll out of the dialog while the flow is still running. */

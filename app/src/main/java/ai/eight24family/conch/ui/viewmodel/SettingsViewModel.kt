@@ -73,6 +73,20 @@ class SettingsViewModel : ViewModel() {
     val sshKeepaliveIntervalSec: StateFlow<Int> = prefs.sshKeepaliveIntervalSec
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 45)
 
+    val autoConnectEnabled: StateFlow<Boolean> = prefs.autoConnectEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    val silentReconnectFloorSec: StateFlow<Int> = prefs.silentReconnectFloorSec
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 40)
+
+    fun setAutoConnectEnabled(enabled: Boolean) {
+        viewModelScope.launch { prefs.setAutoConnectEnabled(enabled) }
+    }
+
+    fun setSilentReconnectFloorSec(seconds: Int) {
+        viewModelScope.launch { prefs.setSilentReconnectFloorSec(seconds) }
+    }
+
     val dataSaverEnabled: StateFlow<Boolean> = prefs.dataSaverEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 

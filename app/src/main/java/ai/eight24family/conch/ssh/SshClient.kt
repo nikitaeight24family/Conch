@@ -102,6 +102,45 @@ open class SshClient {
          */
         skSigner: ai.eight24family.conch.ssh.securitykey.SkSigner? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
+        // ⚡ REUSE A LIVE POOLED TRANSPORT — the fail2ban fix (2026-08-22).
+        // Every one-shot execute() otherwise does a FULL connect+auth+disconnect,
+        // so a burst of background probes/discovery/stats against a CONNECTED
+        // server showed up in the server's auth.log as N "Accepted publickey"
+        // plus preauth churn — and `mode=aggressive` bans on the preauth lines.
+        // If the pool already holds a live client for THIS server, multiplex a
+        // channel on it: zero handshake, and NEVER disconnect it (it isn't ours
+        // — closing it would drop every chat sharing the transport). SK-safe:
+        // a live pooled client means the touch already happened. Only when there
+        // is NO live transport do we fall through to a fresh one-shot dial.
+        ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)?.let { pooled ->
+            return@withContext runCatching {
+                val session = pooled.startSession()
+                try {
+                    val cmd = session.exec(ai.eight24family.conch.agent.RemoteEnv.portable(command))
+                    val out = ByteArrayOutputStream()
+                    val err = ByteArrayOutputStream()
+                    cmd.inputStream.copyTo(out)
+                    cmd.errorStream.copyTo(err)
+                    cmd.join(60, TimeUnit.SECONDS)
+                    val exit = cmd.exitStatus ?: -1
+                    buildString {
+                        append(String(out.toByteArray(), Charsets.UTF_8))
+                        if (err.size() > 0) {
+                            if (isNotEmpty()) append('\n')
+                            append("[stderr]\n")
+                            append(String(err.toByteArray(), Charsets.UTF_8))
+                        }
+                        if (exit != 0) {
+                            if (isNotEmpty()) append('\n')
+                            append("[exit $exit]")
+                        }
+                    }
+                } finally {
+                    // Close the CHANNEL only — the pooled client lives on.
+                    SilentlyTry.fired("SshAi-SshClient", "close pooled exec channel") { session.close() }
+                }
+            }
+        }
         // Read from Settings → Connection. runCatching for the same
         // test-seam reason as testConnection above. Socket timeout is
         // then overridden to 60s below because one-shot exec needs a

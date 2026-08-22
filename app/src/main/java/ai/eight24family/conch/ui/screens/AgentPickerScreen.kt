@@ -522,7 +522,13 @@ internal fun ServerAgentPanel(
                 val usageBriefs = vm.usageBrief.collectAsState().value
                 Agent.entries.forEach { agent ->
                     val s = statuses?.get(agent)
-                    val rowChecking = !firstProbeDone || (s?.liveAuthPending == true)
+                    // A browse panel with no live transport is not checking
+                    // anything and never will by itself — «checking…» there is
+                    // the same forever-lie as «…probing» (2026-08-22).
+                    val rowNeverChecked = vm.browse && s == null &&
+                        ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(vm.serverId) == null
+                    val rowChecking = !rowNeverChecked &&
+                        (!firstProbeDone || (s?.liveAuthPending == true))
                     AgentRow(
                         agent = agent,
                         status = if (rowChecking) null else s,
@@ -535,6 +541,7 @@ internal fun ServerAgentPanel(
                             loginNow.serverId == vm.serverId,
                         windowsServer = serverOs == "WINDOWS",
                         usageLine = usageBriefs[agent],
+                        neverChecked = rowNeverChecked,
                         onClick = { vm.rememberAgent(agent); onPickAgent(agent) },
                         onInstall = { vm.installAgent(agent) },
                         onLogin = { vm.startLogin(agent) },
@@ -936,6 +943,11 @@ private fun AgentRow(
      *  alone — shown on the ready line so the user sees their budget BEFORE
      *  entering a chat. Null = unknown (not fetched / agent has no quota API). */
     usageLine: String? = null,
+    /** Browse panel (Agents tab), no cache, no live transport: NOTHING is
+     *  probing and nothing will — the panel deliberately never connects on its
+     *  own. «…probing» here was a lie a freshly-added server showed forever
+     *  (2026-08-22). Say the truth and the way out instead. */
+    neverChecked: Boolean = false,
     onClick: () -> Unit,
     onInstall: () -> Unit = {},
     onLogin: () -> Unit = {},
@@ -1057,6 +1069,7 @@ private fun AgentRow(
             // is the wrong claim — the agent may well be installed, WE can't
             // drive it (every probe/launch is sh). Say the true reason.
             windowsServer -> "  Windows OpenSSH server — not supported yet"
+            status == null && neverChecked -> "  not checked yet — tap the server name to connect"
             status == null -> "  …probing"
             !status.installed -> "  not installed"
             status.updateAvailable ->

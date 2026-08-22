@@ -49,6 +49,8 @@ internal fun SettingsSectionConnection(vm: SettingsViewModel) {
     val sshConnectTimeoutSec by vm.sshConnectTimeoutSec.collectAsState()
     val sshKeepaliveIntervalSec by vm.sshKeepaliveIntervalSec.collectAsState()
     val dataSaverEnabled by vm.dataSaverEnabled.collectAsState()
+    val autoConnectEnabled by vm.autoConnectEnabled.collectAsState()
+    val silentReconnectFloorSec by vm.silentReconnectFloorSec.collectAsState()
     var guardOpen by remember { mutableStateOf(false) }
     // Seamless reconnect moved to the per-server detail page (it's a property of
     // the SERVER, not the app). See ServerDetailScreen's `// seamless reconnect`.
@@ -126,6 +128,56 @@ internal fun SettingsSectionConnection(vm: SettingsViewModel) {
         }
         if (guardOpen) {
             ConnectionGuardSheet(onDismiss = { guardOpen = false })
+        }
+
+        // ── fail2ban ──────────────────────────────────────────────────────
+        // Every automatic handshake is a line the server's fail2ban may count.
+        // These let a user with a strict jail bound, or forbid, auto-dialing.
+        Text(
+            "fail2ban",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        SettingsRow(
+            icon = Icons.Filled.Autorenew,
+            title = "Auto-connect",
+            subtitle = if (autoConnectEnabled)
+                "The app reconnects on its own (app open, network change, dropped link). Turn OFF if your jail bans the phone — then only Connect / retry / opening a chat dials."
+            else
+                "OFF — the app never dials on its own. Reconnect by tapping the server, [ retry ], or opening a chat.",
+        ) {
+            Switch(
+                checked = autoConnectEnabled,
+                onCheckedChange = { vm.setAutoConnectEnabled(it) },
+            )
+        }
+        // The backoff floor only matters while auto-connect can dial.
+        if (autoConnectEnabled) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsRow(
+                    icon = Icons.Filled.Timer,
+                    title = "Min gap between auto-reconnects",
+                    subtitle = "Slowest-safe floor for retrying a failing server; it doubles from here up to 15 min. Raise it to stay under your jail's maxretry/findtime.",
+                ) {
+                    Text(
+                        "${silentReconnectFloorSec}s",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Slider(
+                    value = silentReconnectFloorSec.toFloat(),
+                    onValueChange = { v ->
+                        val stepped = (v / 20f).toInt() * 20
+                        vm.setSilentReconnectFloorSec(stepped.coerceIn(20, 600))
+                    },
+                    valueRange = 20f..600f,
+                    steps = ((600 - 20) / 20) - 1,
+                )
+            }
         }
     }
 }

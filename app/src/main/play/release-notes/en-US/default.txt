@@ -1,3 +1,6 @@
 What's new
-• The limit indicator counts only the limits your chat is actually subject to. Another model's weekly cap no longer reads as 100% while your own window is still almost empty.
-• When a different limit is the one near the wall, the bar names it — "Weekly 92%" instead of a bare 92%.
+• Team and Enterprise subscriptions are recognized — no more false "no subscription".
+• Sign-in now grants full access: the server's own terminal is logged in too, and plan/limits show everywhere.
+• Account cards show email, plan and expiry. Limits appear right on the agent list.
+• Dropped connections reconnect themselves; sign-in retries instead of hanging.
+• The limit indicator counts only limits your chat is subject to, and names the one near the wall.

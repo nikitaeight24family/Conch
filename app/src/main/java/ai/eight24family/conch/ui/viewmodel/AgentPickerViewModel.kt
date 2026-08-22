@@ -42,7 +42,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val serverId: String = checkNotNull(savedStateHandle["serverId"])
     /** Reached via the Agents bottom-tab: show cached statuses without auto-
      *  connecting / asking for the key. Explicit refresh still connects. */
-    private val browse: Boolean = savedStateHandle.get<Boolean>("browse") ?: false
+    val browse: Boolean = savedStateHandle.get<Boolean>("browse") ?: false
     private val repo  = ServiceLocator.serverRepository
     private val probeApi = ServiceLocator.agentStatusProbe
     private val cache = ServiceLocator.agentStatusCache
@@ -725,6 +725,99 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     )
 
     init {
+        // ⛔ NO WALL-CLOCK RECONNECT LOOP. A 30s self-healing loop got the phone
+        // fail2ban'd: the pool multiplexes, so a LIVE transport needs no new auth
+        // — but a server whose stored auth is stale (an expired device key carries
+        // a server-side expiry-time) FAILS auth on every fresh dial, and a timer
+        // turns that into maxretry hits in aggressive mode, then recidive.
+        // Automatic code must therefore NEVER open a handshake on a timer. Exactly
+        // ONE silent attempt when the panel opens — the pool's own per-server
+        // backoff (noteSilentDialResult) stops a failing server from being
+        // re-dialed on every re-open — and after that, reconnection is the user's
+        // call via [retryConnectNow] (the [ retry ] button) or an explicit tap.
+        // The userHeldIds collector below still turns any resulting connection
+        // into a forced probe.
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            attemptSilentConnect()
+        }
+    }
+
+    /** One silent connect attempt. [force] is the RETRY BUTTON — a deliberate
+     *  human gesture that clears the app-side cooldown; the pool still applies
+     *  its own per-server backoff so even a mashed button can't out-run the
+     *  jail. Never called on a timer. */
+    private suspend fun attemptSilentConnect(force: Boolean = false) {
+        if (ServiceLocator.sshConnectionPool.peek(serverId) != null) return
+        val now = System.currentTimeMillis()
+        if (!force && now < (silentConnectBackoff[serverId] ?: 0L)) return
+        synchronized(silentConnectLock) {
+            if (!force && now - lastSilentConnectMs < 15_000L) return
+            lastSilentConnectMs = now
+        }
+        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-AgentPicker", "silent connect attempt") {
+            ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
+        }
+        if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
+            // Didn't come up — hands off this server for 10 minutes even on a
+            // panel re-open (the pool's own cooldown is the real jail guard;
+            // this just stops the app-side re-trigger).
+            silentConnectBackoff[serverId] = System.currentTimeMillis() + 10 * 60_000L
+        } else {
+            silentConnectBackoff.remove(serverId)
+        }
+    }
+
+    /** Live, human-readable trace of the last connect attempt, shown next to
+     * the [ retry ] button. The old retry routed through the silent sweep,
+     * which SKIPS a cooling-down server — so the tap did nothing and said
+     * nothing. Now the retry dials THIS server directly and narrates every
+     * step here. */
+    private val _connectLog = MutableStateFlow<String?>(null)
+    val connectLog: StateFlow<String?> = _connectLog.asStateFlow()
+
+    /** The visible retry: a deliberate human dial of THIS server, in the open.
+     *  Goes straight to the pool's connect entry points (NOT the silent sweep,
+     *  which would veto a cooling-down server), so it always does something and
+     *  says what. One dial per tap — the human spends their own fail2ban budget
+     *  at their own pace, which the jail's maxretry=3/600s tolerates. */
+    fun retryConnectNow() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            silentConnectBackoff.remove(serverId)
+            if (ServiceLocator.sshConnectionPool.peek(serverId) != null) {
+                _connectLog.value = "Already connected"
+                return@launch
+            }
+            _connectLog.value = "Connecting…"
+            val repo = ServiceLocator.serverRepository
+            val server = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { repo.getById(serverId) }
+            if (server == null) { _connectLog.value = "Server not found"; return@launch }
+            val secrets = repo.getSecrets(serverId)
+            try {
+                if (secrets.skKeys.isNotEmpty()) {
+                    if (!ai.eight24family.conch.ssh.EphemeralSshKey.exists(serverId)) {
+                        // No stored device key → this needs a physical tap, which
+                        // only the server's own connect dialog can drive. Say so
+                        // instead of silently failing an impossible silent dial.
+                        _connectLog.value = "Needs a security-key tap — open this server to connect"
+                        return@launch
+                    }
+                    _connectLog.value = "Authenticating with device key…"
+                    val c = ServiceLocator.sshConnectionPool.userConnectEphemeral(server)
+                    _connectLog.value = if (c != null) "Connected ✓"
+                        else "Device key rejected — reconnect the key by opening this server"
+                } else {
+                    _connectLog.value = "Authenticating…"
+                    ServiceLocator.sshConnectionPool.userConnect(server, secrets, null)
+                    _connectLog.value = "Connected ✓"
+                }
+            } catch (t: Throwable) {
+                _connectLog.value = "Failed: " +
+                    ai.eight24family.conch.util.ErrorMessages.humanize(t, context = "connect")
+            }
+        }
+    }
+
+    init {
         // Limits ride the connection, not the chat: whenever a probe reports an
         // agent logged in, warm its usage (over the pooled SSH) and publish the
         // brief line for the row. Logged-out agents lose their line. 60s
@@ -951,6 +1044,15 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     companion object {
+        /** Throttle for the aggressive silent connect above — one sweep per
+         *  window, however many panels initialize at once. */
+        private val silentConnectLock = Any()
+        @Volatile private var lastSilentConnectMs = 0L
+
+        /** serverId → retry-after epoch-ms: a server the silent sweep FAILED to
+         *  bring up is left alone for a cooldown — fail2ban counts our zeal. */
+        private val silentConnectBackoff = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
         /** Process-global in-flight OAuth login. Backs [loginRequest] for the
          *  active picker AND is read directly by MainActivity (PiP gating +
          *  the PiP login panel) without a ViewModel handle. Null = no login. */

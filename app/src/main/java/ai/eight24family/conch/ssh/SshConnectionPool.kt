@@ -540,12 +540,28 @@ class SshConnectionPool {
     private data class SilentFailStreak(val count: Int, val lastMs: Long)
     private val silentFails = ConcurrentHashMap<String, SilentFailStreak>()
 
-    /** True when [sid] may be silently dialed: no failure streak, or its
-     *  exponential cool-down (40 s · 2^(n-1), capped 15 min) has passed. */
+    /** User-tunable (Settings → Connection → fail2ban): the backoff FLOOR in ms
+     *  and the master AUTO-connect switch. Read via runBlocking on the IO-thread
+     *  callers (same pattern as the connect timeouts); cheap DataStore reads. A
+     *  stricter jail → raise the floor or turn auto-connect off entirely. */
+    private fun silentFloorMs(): Long = runBlocking {
+        ai.eight24family.conch.di.ServiceLocator.preferences.silentReconnectFloorSec.first()
+    }.coerceIn(20, 600) * 1000L
+
+    /** False → the app must not open ANY handshake on its own; only explicit
+     *  user actions (tap connect / retry / open chat) may dial. */
+    fun autoConnectAllowed(): Boolean = runBlocking {
+        ai.eight24family.conch.di.ServiceLocator.preferences.autoConnectEnabled.first()
+    }
+
+    /** True when [sid] may be silently dialed: auto-connect is on, and there is
+     *  no failure streak or its exponential cool-down (floor · 2^(n-1), capped
+     *  15 min) has passed. The floor is the user's fail2ban knob. */
     private fun silentCooldownPassed(sid: String): Boolean {
+        if (!autoConnectAllowed()) return false
         val f = silentFails[sid] ?: return true
-        val shift = (f.count - 1).coerceIn(0, 5)          // 40s → 80s → … → 21m20s pre-cap
-        val waitMs = (40_000L shl shift).coerceAtMost(15 * 60_000L)
+        val shift = (f.count - 1).coerceIn(0, 5)
+        val waitMs = (silentFloorMs() shl shift).coerceAtMost(15 * 60_000L)
         return System.currentTimeMillis() - f.lastMs >= waitMs
     }
 
@@ -627,6 +643,9 @@ class SshConnectionPool {
      * Best-effort; never throws. Must be called off the main thread.
      */
     suspend fun reconnectHeldOnNetworkChange() {
+        // Master fail2ban switch: auto-connect off → the app opens nothing on a
+        // network change either; the user reconnects by hand.
+        if (!autoConnectAllowed()) return
         val repo = ai.eight24family.conch.di.ServiceLocator.serverRepository
         // A NEW network invalidates every "this server keeps failing" verdict —
         // the failures may have been the old network's fault (or a fail2ban ban

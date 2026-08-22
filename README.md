@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.8-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.3.9-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.8
+conch ▌ v0.3.9
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,21 @@ conch ▌ v0.3.8
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.3.9
+
+**Sign-in, subscriptions and connections that tell the truth.** Team and
+Enterprise accounts are recognised instead of falsely reading "no subscription".
+Signing in now runs the CLI's real full-scope login, so the server's own
+terminal ends up logged in too, and the plan and limits are known everywhere —
+including right on the agent list, before you open a chat. Each account card
+shows its email, plan and expiry. A dropped connection reconnects on its own or
+offers a retry with a live connect log, and a new Settings → Connection →
+fail2ban section lets you bound or disable automatic dialing to fit a strict
+jail. Under the hood, background probes now share one SSH transport instead of
+opening a fresh handshake each — far quieter in the server's auth log.
 
 ---
 

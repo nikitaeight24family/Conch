@@ -123,6 +123,8 @@ class AppPreferences(private val context: Context) {
     private val dataSaverEnabledKey = booleanPreferencesKey("data_saver_enabled")
     private val sshConnectTimeoutKey = intPreferencesKey("ssh_connect_timeout_sec")
     private val sshKeepaliveIntervalKey = intPreferencesKey("ssh_keepalive_interval_sec")
+    private val autoConnectKey = booleanPreferencesKey("auto_connect_enabled")
+    private val silentReconnectFloorKey = intPreferencesKey("silent_reconnect_floor_sec")
     private val seamlessReconnectKey = booleanPreferencesKey("seamless_reconnect_enabled")
     // SEC-1 kill-switch: when false, the conch-bridge refuses `shell` commands
     // from the server-side agent (logs/ping/screenshot still work). Defends
@@ -827,6 +829,35 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setSshKeepaliveIntervalSec(seconds: Int) {
         context.dataStore.edit { it[sshKeepaliveIntervalKey] = seconds.coerceIn(15, 120) }
+    }
+
+    // ── fail2ban adaptation ─────────────────────────────────────
+    // Every NEW SSH handshake the app opens on its own is a line the server's
+    // fail2ban may count (in aggressive mode even a preauth close counts). A
+    // user with a strict jail needs to bound, or forbid, automatic dialing.
+
+    /** Master switch for AUTOMATIC connecting: silent connect on app/panel
+     *  open, the held-server reconnect watchdog, network-change reconnect.
+     *  OFF = the app never opens a handshake unless the user taps (connect /
+     *  [ retry ] / open a chat). ON by default. */
+    val autoConnectEnabled: Flow<Boolean> = context.dataStore.data.map { p ->
+        p[autoConnectKey] ?: true
+    }
+
+    suspend fun setAutoConnectEnabled(value: Boolean) {
+        context.dataStore.edit { it[autoConnectKey] = value }
+    }
+
+    /** Floor of the silent-dial exponential backoff, in seconds. The gap between
+     *  automatic reconnect attempts to a FAILING server starts here and doubles
+     *  (capped 15 min). Raise it to stay comfortably under a tight jail's
+     *  maxretry/findtime. Range 20..600, default 40. */
+    val silentReconnectFloorSec: Flow<Int> = context.dataStore.data.map { p ->
+        (p[silentReconnectFloorKey] ?: 40).coerceIn(20, 600)
+    }
+
+    suspend fun setSilentReconnectFloorSec(seconds: Int) {
+        context.dataStore.edit { it[silentReconnectFloorKey] = seconds.coerceIn(20, 600) }
     }
 
     /**

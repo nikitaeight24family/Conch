@@ -204,6 +204,34 @@ private fun ServerSection(
                     color = dim,
                 )
             }
+            // Disconnected → an explicit, immediate retry. The silent loop
+            // already self-heals on its own cadence (30s, 10-min cooldown after
+            // a refused auth), but a human must never have to wait it out: the
+            // tap clears the cooldown and connects NOW.
+            if (!entry.connected) {
+                val connectLog by panelVm.connectLog.collectAsState()
+                // The step trace sits LEFT of the button so a tap visibly does
+                // something — "Connecting… → Authenticating… → Connected ✓" or a
+                // concrete failure reason — instead of the old silent no-op.
+                connectLog?.let {
+                    Text(
+                        it,
+                        color = if (it.startsWith("Failed")) MaterialTheme.colorScheme.error else dim,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false).padding(end = 6.dp),
+                    )
+                }
+                Text(
+                    "[ retry ]",
+                    color = cyan,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .clickable { panelVm.retryConnectNow() }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                )
+            }
             ConnectionDot(connected = entry.connected)
         }
         ServerAgentPanel(
