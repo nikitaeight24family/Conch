@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Legacy (Android 11 and below) mirror of data_extraction_rules.xml — same
+    whitelist, same rationale; read that file's header for the full design.
+    requireFlags="clientSideEncryption" keeps server addresses out of any
+    cloud backup that is not end-to-end encrypted (honored on Android 9+;
+    older parsers ignore unknown attributes and still honor the whitelist).
+    encrypted_servers.xml (device-bound secrets) is kept out BY the whitelist —
+    lint forbids a redundant <exclude> for a path no <include> covers.
+-->
 <full-backup-content>
-    <exclude domain="sharedpref" path="encrypted_servers.xml"/>
-    <exclude domain="file" path="datastore/"/>
+    <include domain="database" path="sshai.db" requireFlags="clientSideEncryption"/>
+    <include domain="database" path="sshai.db-wal" requireFlags="clientSideEncryption"/>
+    <include domain="file" path="datastore/settings.preferences_pb"/>
+    <include domain="file" path="datastore/auth_methods.preferences_pb"/>
+    <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
 </full-backup-content>

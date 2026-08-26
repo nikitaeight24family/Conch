@@ -37,7 +37,7 @@ class SshKeyRepository(
     suspend fun loadSecret(id: String): SshKeySecrets? = secretsStore.loadKeySecret(id)
 
     suspend fun generateEd25519(name: String, comment: String): SshKey {
-        val generated = SshKeyGenerator.generateEd25519(comment.ifBlank { "sshai@android" })
+        val generated = SshKeyGenerator.generateEd25519(comment.ifBlank { "conch@android" })
         val key = SshKey(
             id = UUID.randomUUID().toString(),
             name = name.ifBlank { "Key ${System.currentTimeMillis() / 1000}" },
@@ -277,7 +277,7 @@ class SshKeyRepository(
         keyType.putPubKeyIntoBuffer(pub, buf)
         val pubBytes = buf.compactData
         val b64 = Base64.getEncoder().encodeToString(pubBytes)
-        val openSsh = "$keyType $b64 sshai@android"
+        val openSsh = "$keyType $b64 conch@android"
         val digest = MessageDigest.getInstance("SHA-256").digest(pubBytes)
         val fingerprint = "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(digest)
         return PublicInfo(openSsh, fingerprint, pub.algorithm)

@@ -1,3 +1,5 @@
 Novedades
-• El indicador de límite solo cuenta los límites a los que tu chat está realmente sujeto. El tope semanal de otro modelo ya no se lee como 100% mientras tu propia ventana sigue casi vacía.
-• Cuando el límite al borde es otro, la barra lo nombra: «Weekly 92%» en lugar de un 92% a secas.
+• Cambio de teléfono: los servidores y ajustes se transfieren con la copia de seguridad de Android y la migración entre dispositivos. Las contraseñas y claves se quedan en el dispositivo antiguo por diseño: vuelva a añadirlas una vez.
+• Menos memoria: imágenes del chat con presupuesto fijo, miniaturas decodificadas en pequeño y cachés que se liberan cuando el sistema lo pide.
+• Panel de agentes legible: una línea por agente.
+• Stop ya no se traga un mensaje en cola.

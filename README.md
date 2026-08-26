@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.3.9-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.4.0-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.3.9
+conch ▌ v0.4.0
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,25 @@ conch ▌ v0.3.9
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.4.0
+
+**Ready for Google Play's 2026 quality bar: leaner memory, and your data moves
+to a new phone.** Answering Play's two new app-quality requirements. Moving to
+a new device now brings your servers and settings along via Android backup and
+device-to-device transfer — passwords and private keys stay on the old device
+by design (they are hardware-bound; re-add them once), chat history never
+leaves your hardware, and a cloud backup of the server list only ever happens
+end-to-end encrypted. If an OEM migration tool drags the encrypted secrets
+blob over anyway, the app now heals itself instead of crash-looping. Memory
+got a hard diet: decoded chat images live in a fixed budget instead of
+accumulating for the chat's lifetime, thumbnails decode at thumbnail size
+(a 12 MP photo no longer becomes a ~48 MB bitmap behind a 64 dp chip), and
+every rebuildable cache frees itself the moment Android signals pressure.
+Also: the live agent panel is readable — one character-budgeted line per
+agent — and Stop no longer swallows a prompt waiting in the queue.
 
 ---
 

@@ -1351,21 +1351,21 @@ internal fun AttachmentChip(att: StagedAttachment, onRemove: () -> Unit) {
             //
             // Downsampled with inSampleSize rather than decoded whole: the chip is
             // 64dp, and a 12 MP phone JPEG is ~48 MB as a full-size Bitmap — one
-            // of those per chip is how you OOM a composer.
+            // of those per chip is how you OOM a composer. BOTH paths sample now
+            // (the `bytes` path used to decode whole — a "small pick" is still
+            // megabytes of JPEG, i.e. tens of MB of pixels), and RGB_565 halves
+            // the chip again: an opaque 64 dp thumbnail can't show the difference.
             val bitmap: ImageBitmap? = remember(att.id) {
                 SilentlyTry.logged("SshAi-ChatPrompt", "decode attachment bitmap") {
                     val file = att.localFile
                     if (att.bytes.isNotEmpty()) {
-                        BitmapFactory.decodeByteArray(att.bytes, 0, att.bytes.size)?.asImageBitmap()
+                        ai.eight24family.conch.util.Bitmaps
+                            .decodeSampled(att.bytes, maxDim = 256, lowColor = true)
+                            ?.asImageBitmap()
                     } else if (file != null && file.length() > 0L) {
-                        val probe = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeFile(file.absolutePath, probe)
-                        var scale = 1
-                        while (probe.outWidth / (scale * 2) >= 256) scale *= 2
-                        BitmapFactory.decodeFile(
-                            file.absolutePath,
-                            BitmapFactory.Options().apply { inSampleSize = scale },
-                        )?.asImageBitmap()
+                        ai.eight24family.conch.util.Bitmaps
+                            .decodeSampledFile(file.absolutePath, maxDim = 256, lowColor = true)
+                            ?.asImageBitmap()
                     } else {
                         null
                     }

@@ -11,6 +11,42 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.0] — 2026-08-27
+
+Google Play's two new 2026 app-quality requirements, implemented in full.
+
+### Added
+- **Transfer to a new device.** Android backup and device-to-device migration
+  now carry the server list, settings and the crash-reporting opt-out. The
+  rules are whitelists: chat history and caches never leave the device, and
+  passwords / private keys are excluded *and* hardware-bound (undecryptable
+  anywhere else by construction). Cloud backup of the server list requires
+  end-to-end encryption; device-to-device transfer is a direct local channel.
+- **Self-healing secrets store.** A secrets blob copied from another device by
+  an OEM migration tool used to crash the app on every launch; it now retries
+  once (transient Keystore flakes wipe nothing), then resets just that store —
+  servers survive, credentials are re-entered once.
+- **Memory-pressure hooks.** Every rebuildable cache (decoded chat images,
+  parsed-markdown LRU) registers with a central trim registry fired from
+  `onTrimMemory`, matching the Android 17 per-app memory limiter's contract.
+- Live agent panel computes its layout as pure, tested data: one
+  character-budgeted line per agent, shared fields lifted to the header.
+
+### Changed
+- Decoded inline chat images live in a hard budget (8 at a time, oldest out)
+  instead of accumulating for the chat's lifetime; evicted images repaint
+  from the disk cache on scroll-back.
+- Every thumbnail decodes at display size (attachment chips at ≤256 px,
+  queued-message thumbs at ≤96 px, RGB_565) — a 12 MP photo is no longer a
+  ~48 MB ARGB bitmap behind a 64 dp chip.
+
+### Fixed
+- Stop no longer kills a prompt that was queued behind the stopped turn: the
+  queue holds until the turn actually dies, and a turn started after Stop can
+  never be its victim.
+
+---
+
 ## [0.3.9] — 2026-08-22
 
 ### Added
@@ -1145,7 +1181,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.2.14...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.0
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
 [0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6

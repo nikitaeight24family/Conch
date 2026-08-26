@@ -17,7 +17,7 @@ data class GeneratedSshKey(
 
 object SshKeyGenerator {
 
-    fun generateEd25519(comment: String = "sshai@android"): GeneratedSshKey {
+    fun generateEd25519(comment: String = "conch@android"): GeneratedSshKey {
         val random = SecureRandom()
         val gen = Ed25519KeyPairGenerator().apply {
             init(Ed25519KeyGenerationParameters(random))

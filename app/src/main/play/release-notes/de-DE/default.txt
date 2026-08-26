@@ -1,3 +1,5 @@
-Was ist neu
-• Die Limit-Anzeige zählt nur noch Limits, denen dieser Chat wirklich unterliegt. Das Wochenlimit eines anderen Modells liest sich nicht mehr als 100%, während das eigene Fenster fast leer ist.
-• Ist ein anderes Limit dasjenige an der Wand, nennt der Balken es — „Weekly 92%“ statt eines nackten 92%.
+Neu in dieser Version
+• Umzug aufs neue Gerät: Server und Einstellungen wandern per Android-Backup und Gerät-zu-Gerät-Übertragung mit. Passwörter und Schlüssel bleiben bewusst auf dem alten Gerät — einmal neu hinterlegen.
+• Weniger Speicherverbrauch: Chat-Bilder mit festem Budget, Miniaturen klein dekodiert, Caches geben auf Systemsignal frei.
+• Agenten-Panel lesbar: eine Zeile pro Agent, nur Unterschiede.
+• Stop verschluckt keine wartende Nachricht mehr.

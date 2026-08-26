@@ -1065,7 +1065,7 @@ object UsageProbe {
     private val CODEX_LIVE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         if command -v codex >/dev/null 2>&1; then
-          { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"sshai","title":"sshai","version":"1.0"}}}'
+          { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"conch","title":"conch","version":"1.0"}}}'
             sleep 0.4
             printf '%s\n' '{"id":1,"method":"account/rateLimits/read","params":{}}'
             sleep 0.7

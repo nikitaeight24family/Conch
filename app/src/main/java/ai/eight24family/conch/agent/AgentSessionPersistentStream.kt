@@ -999,15 +999,26 @@ internal class AgentSessionPersistentStream(
             kotlinx.coroutines.delay(STOP_GRACE_MS)
             val escalate = when {
                 // FORCE the kill on procAlive alone. Stop was routed here BECAUSE
-                // we own a live process and the file says it's mid-turn; the normal
-                // Working gate would skip (state desynced), Stop would no-op, and
-                // the external pgrep kill took over — which, because it never set
-                // userCancelled, let the send-ack watchdog read the death as a drop
-                // and REDELIVER the prompt: (user, 2026-08-17). userCancelled is
-                // set above, so tearing OUR process down is clean and is never
-                // redelivered. clearQueue (in cancelCurrent) means no queued prompt
-                // can start inside the grace.
-                force -> procAlive
+                // we own a live process and the file says it's mid-turn; the
+                // normal Working gate would skip (state desynced), Stop would
+                // no-op, and the external pgrep kill took over — which, because it
+                // never set userCancelled, let the send-ack watchdog read the
+                // death as a drop and REDELIVER the prompt: (user, 2026-08-17).
+                // userCancelled is set above, so tearing OUR process down is clean
+                // and is never redelivered.
+                //
+                // ⚠ `turnDone === target` IS LOAD-BEARING HERE TOO, not only on
+                // the fenced branch below. clearQueue keeps the SESSION's own
+                // prompt queue out of the grace window, but the ViewModel's
+                // VISIBLE outbox is a separate queue and Stop deliberately does
+                // not clear it — a queued prompt released while the escalation is
+                // armed was written to stdin, started a turn, and then died with
+                // the process 800 ms later: (2026-08-26). Its bubble survived the
+                // loss (the user's words are never dropped), so the chat then
+                // carried a prompt with no answer that kept resurfacing on every
+                // re-entry. ChatViewModel now holds the queue until the stop has
+                // settled
+                force -> procAlive && turnDone === target
                 target != null -> shouldEscalateKill(
                     sameTurn = turnDone === target,
                     victimDone = target.isCompleted,

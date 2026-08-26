@@ -1,11 +1,55 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ backup/transfer rules (Google Play's "safe data transfer to a
+    new device" quality requirement, 2026). WHITELIST mode: the moment a
+    section has one <include>, everything not included is out — any NEW
+    persistence layer someone adds later stays device-local until it is
+    deliberately listed here (mirror of DataEraser's explicit-list policy).
+
+    What transfers and why:
+      - sshai.db (+ -wal)      Room: server rows, key METADATA (public half,
+                               fingerprint), chat bookkeeping. The user's
+                               actual belongings. The -wal file rides along so
+                               a restore sees the last committed state, not a
+                               possibly-stale checkpoint.
+      - datastore/settings     Preferences the user tuned by hand.
+      - datastore/auth_methods Which auth method each server uses — metadata,
+                               not credentials.
+      - ssh_ai_bootstrap_prefs The Sentry opt-out. A privacy CHOICE must
+                               follow the user to the new device.
+
+    What NEVER leaves the device (SEC-7, INVARIANTS.md) — everything below is
+    kept out BY the whitelist (lint forbids a redundant <exclude> for a path
+    no <include> covers, so the whitelist itself is the exclusion):
+      - encrypted_servers.xml  Passwords, private-key PEMs, passphrases. The
+                               keyset is wrapped by an Android-Keystore master
+                               key that cannot leave this device's hardware —
+                               a copy is undecryptable garbage anywhere else.
+                               SecretsStore self-heals if an OEM migration
+                               tool copies it around our rules.
+      - session_history cache  Chat bodies stay off Google's servers; they
+                               re-sync from the user's own server on demand.
+      - agent/sessions/upload caches — device-local, rebuilt on first use.
+
+    cloud-backup additionally requires client-side encryption
+    (disableIfNoEncryptionCapabilities): server addresses only ever reach a
+    cloud backup end-to-end encrypted with the device lockscreen secret.
+    device-transfer has no such gate — it is a direct, locally-encrypted
+    channel between the user's own two devices.
+-->
 <data-extraction-rules>
-    <cloud-backup>
-        <exclude domain="sharedpref" path="encrypted_servers.xml"/>
-        <exclude domain="file" path="datastore/"/>
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <include domain="database" path="sshai.db"/>
+        <include domain="database" path="sshai.db-wal"/>
+        <include domain="file" path="datastore/settings.preferences_pb"/>
+        <include domain="file" path="datastore/auth_methods.preferences_pb"/>
+        <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
     </cloud-backup>
     <device-transfer>
-        <exclude domain="sharedpref" path="encrypted_servers.xml"/>
-        <exclude domain="file" path="datastore/"/>
+        <include domain="database" path="sshai.db"/>
+        <include domain="database" path="sshai.db-wal"/>
+        <include domain="file" path="datastore/settings.preferences_pb"/>
+        <include domain="file" path="datastore/auth_methods.preferences_pb"/>
+        <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
     </device-transfer>
 </data-extraction-rules>

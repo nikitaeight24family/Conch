@@ -495,7 +495,7 @@ private fun GenerateKeyDialog(
     onConfirm: (name: String, comment: String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
-    var comment by remember { mutableStateOf("sshai@android") }
+    var comment by remember { mutableStateOf("conch@android") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Generate Ed25519 key") },

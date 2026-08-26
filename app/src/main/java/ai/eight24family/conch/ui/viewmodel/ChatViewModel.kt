@@ -1505,6 +1505,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         drainerBusy = s.drainerBusy,
                         mirroredTurnOpen = tailPollCoord.remoteFileOpen.value,
                         sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                        stopSettling = _stopSettling.value,
                     )
                 ) {
                     android.util.Log.i(
@@ -1614,21 +1615,80 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val pendingRedelivery = MutableStateFlow<List<String>>(emptyList())
 
     /** A Stop whose kill is not confirmed yet. Drives the "stopping…" honesty in
-     *  the UI and gates [armStopOrderWatcher]; never gates the queue. */
+     *  the UI and gates [armStopOrderWatcher]; never gates the queue — that is
+     *  [_stopSettling], which is a different and much shorter window. */
     private val _stopOrdered = MutableStateFlow(false)
     val stopOrdered: StateFlow<Boolean> = _stopOrdered.asStateFlow()
+
+    /**
+     * The few seconds in which a Stop is physically LANDING. See the
+     * `stopSettling` parameter of [shouldReleaseQueue] for what goes wrong
+     * without it; [armStopSettle] is what raises and retires it.
+     *
+     * Distinct from [_stopOrdered] on purpose. That one can stay true for
+     * minutes (a Stop pressed offline is owed until the server is reachable),
+     * and holding the queue that long would be a second way to lose the user's
+     * words. This one is bounded by [STOP_SETTLE_MAX_MS].
+     */
+    private val _stopSettling = MutableStateFlow(false)
+    private var stopSettleJob: Job? = null
+
+    /**
+     * Hold the queue until this Stop has actually landed, then let it go.
+     *
+     * "Landed" is: past the stream's own interrupt→teardown grace
+     * ([STOP_SETTLE_FLOOR_MS], deliberately longer than `STOP_GRACE_MS`) AND
+     * our CLI process is down. Capped by [STOP_SETTLE_MAX_MS] so a stop that
+     * never confirms — no transport, an orphan we only mirror — releases the
+     * queue anyway rather than stranding it.
+     *
+     * Polled rather than awaited because the two halves of a Stop (our own
+     * teardown and the server-side pgrep ladder) land independently and neither
+     * offers a completion the queue could suspend on.
+     */
+    private fun armStopSettle() {
+        _stopSettling.value = true
+        stopSettleJob?.cancel()
+        stopSettleJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(STOP_SETTLE_FLOOR_MS)
+            val deadline = System.currentTimeMillis() + (STOP_SETTLE_MAX_MS - STOP_SETTLE_FLOOR_MS)
+            while (System.currentTimeMillis() < deadline) {
+                val sess = _localSessionId.value?.let { activeSessions[it] }
+                if (sess?.hasLiveCliProcess() != true) break
+                kotlinx.coroutines.delay(200)
+            }
+            _stopSettling.value = false
+        }
+    }
+
+    /**
+     * Serialised writes of the persisted stop order.
+     *
+     * ⚠ ORDER, NOT JUST ATOMICITY. [stopCurrent] raises the order and the very
+     * next drain retires it, milliseconds apart. Both used to launch their own
+     * `Dispatchers.IO` coroutine, and two coroutines on a multi-threaded
+     * dispatcher have NO ordering guarantee — land them backwards and the
+     * retired order is what stays on disk. It is then permanent: every later
+     * re-entry re-arms [armStopOrderWatcher] from prefs, believes a stop is
+     * owed on that resume id, and kills turns for a Stop the user pressed
+     * minutes ago. `trySend` is called on the main thread from both sites, so
+     * the channel's FIFO IS the call order.
+     */
+    private val stopOrderWrites =
+        kotlinx.coroutines.channels.Channel<Pair<String, Boolean>>(
+            kotlinx.coroutines.channels.Channel.UNLIMITED,
+        )
+
+    private fun persistStopOrder(ordered: Boolean) {
+        val rid = _resumeId.value ?: return
+        stopOrderWrites.trySend(rid to ordered)
+    }
 
     /** Retire the stop order for this chat, in memory and on disk. */
     private fun clearStopOrder() {
         if (!_stopOrdered.value) return
         _stopOrdered.value = false
-        _resumeId.value?.let { rid ->
-            viewModelScope.launch(Dispatchers.IO) {
-                SilentlyTry.fired("SshAi-Chat", "clear stop order") {
-                    ServiceLocator.preferences.setStopOrder(rid, false)
-                }
-            }
-        }
+        persistStopOrder(false)
     }
 
     /**
@@ -1652,6 +1712,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 "SshAi-Chat", "read stop orders", emptySet<String>(),
             ) { ServiceLocator.preferences.stopOrders.first() }.orEmpty()
             if (rid in persisted) _stopOrdered.value = true
+            // The single writer. Armed only AFTER the persisted set has been
+            // read — the same ordering `restoreUnsentQueue` needs against its
+            // own writer, and for the same reason: a writer started first would
+            // race the read it depends on.
+            launch(Dispatchers.IO) {
+                for ((id, ordered) in stopOrderWrites) {
+                    SilentlyTry.fired("SshAi-Chat", "persist stop order") {
+                        ServiceLocator.preferences.setStopOrder(id, ordered)
+                    }
+                }
+            }
             while (true) {
                 kotlinx.coroutines.delay(STOP_RETRY_POLL_MS)
                 if (!_stopOrdered.value) continue
@@ -4533,6 +4604,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             // just gone false, so it must not gate itself.
                             mirroredTurnOpen = false,
                             sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                            stopSettling = _stopSettling.value,
                         )
                     ) {
                         drainOutbox(sess)
@@ -4582,6 +4654,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     drainerBusy = sess.drainerBusy,
                     mirroredTurnOpen = tailPollCoord.remoteFileOpen.value,
                     sessionReady = _stateBySession.value[sid] is SessionState.Running,
+                    stopSettling = _stopSettling.value,
                 )
                 if (!idle) { idleTicks = 0; continue }
                 if (++idleTicks < QUEUE_RELEASE_IDLE_TICKS) continue
@@ -4670,6 +4743,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * and starts the next one - (2026-08-18). The order is cleared by the very next
      * send/drain so the retry in (4) can never kill the turn the queue just
      * started.
+     *
+     * ⚠ AFTER THE TURN DIES — NOT WHILE IT IS DYING. (2026-08-26) — and because the
+     * bubble is never dropped, the chat was left carrying a question with no answer
+     * that resurfaced on every re-entry. [armStopSettle] holds the queue for
+     * exactly as long as the halt takes.
      */
     fun stopCurrent() {
         val sid = _localSessionId.value ?: return
@@ -4677,6 +4755,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // 1. INSTANT, before anything that can block or fail. The working row and
         //    the spinner both read these two.
         _stopOrdered.value = true
+        // Raised BEFORE the state flip below, which is what makes every release
+        // edge fire — the gate has to already be up when they do.
+        armStopSettle()
         if (_stateBySession.value[sid] is SessionState.Working) {
             _stateBySession.update { it + (sid to SessionState.Running) }
         }
@@ -4686,13 +4767,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // reappeared as a turn the user had explicitly halted.
         pendingRedelivery.value = emptyList()
         // 4. Persist the order so a dead transport only DELAYS the kill.
-        _resumeId.value?.let { rid ->
-            viewModelScope.launch(Dispatchers.IO) {
-                SilentlyTry.fired("SshAi-Chat", "persist stop order") {
-                    ServiceLocator.preferences.setStopOrder(rid, true)
-                }
-            }
-        }
+        persistStopOrder(true)
         // The route is a pure decision (pinned by StopRouteTest). The bug this
         // fixes: an owned live process routed to the EXTERNAL pgrep kill, which
         // races our own supervision — it never sets `userCancelled`, so the
@@ -5273,6 +5348,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 sessionsManager.closeIfBrandNew(serverId, agent, sid)
             }
         }
+        // Unhook the downloads coordinator from the process-lifetime
+        // MemoryPressure registry — its registered trim lambda would
+        // otherwise keep this whole ViewModel graph reachable forever.
+        downloadsCoord.close()
         super.onCleared()
     }
 
@@ -5397,6 +5476,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
         internal const val QUEUE_RELEASE_IDLE_TICKS = 3
 
+        /** The queue is held for AT LEAST this long after a Stop. Must exceed
+         *  [ai.eight24family.conch.agent.AgentSessionPersistentStream.STOP_GRACE_MS]
+         *  (800 ms) — that is the window in which the stream tears its own
+         *  process down, and a prompt handed over inside it dies with the
+         *  process. 1.2 s leaves 400 ms of margin over a slow teardown. */
+        internal const val STOP_SETTLE_FLOOR_MS = 1_200L
+
+        /** …and for no longer than this, however the kill ends. A Stop pressed
+         *  with no transport never gets its confirmation, and a queue held for
+         *  a confirmation that will never arrive is the user's words lost by a
+         *  different route. */
+        internal const val STOP_SETTLE_MAX_MS = 6_000L
+
         /**
          * The EXACT INVERSE of [shouldQueueSend], plus "there is something to
          * send and the session can take it". Pure so the release rule is pinned
@@ -5411,7 +5503,27 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             drainerBusy: Boolean,
             mirroredTurnOpen: Boolean,
             sessionReady: Boolean,
-        ): Boolean = hasQueue && sessionReady &&
+            /**
+             * A Stop is still LANDING — see [stopSettling].
+             *
+             * ⚠ THIS IS THE ONE THING THAT MAY HOLD THE QUEUE PAST IDLE, and it
+             * is not a change to what Stop does: the queued prompt still goes
+             * out and still starts the next turn, it just stops going out INTO
+             * THE KILL.
+             *
+             * Stop makes the session look idle instantly and on purpose — it
+             * flips the state out of Working in its first statement and clears
+             * `remoteFileOpen` — while the actual halt is still in flight: the
+             * stream has armed an interrupt→teardown ladder for `STOP_GRACE_MS`,
+             * and the server-side pgrep ladder runs INT→TERM→KILL for ~3 s more.
+             * Every release edge fired into that window, `send` wrote the prompt
+             * to a process that was about to be torn down, and the turn died at
+             * birth — (2026-08-26). The prompt's bubble survived (the user's
+             * words are never dropped), so the chat was left carrying a question
+             * with no answer that came back on every re-entry.
+             */
+            stopSettling: Boolean = false,
+        ): Boolean = hasQueue && sessionReady && !stopSettling &&
             !shouldQueueSend(
                 working = working,
                 runningWithBusyDrainer = drainerBusy,

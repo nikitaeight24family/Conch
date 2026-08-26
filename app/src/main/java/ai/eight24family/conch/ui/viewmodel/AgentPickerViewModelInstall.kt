@@ -348,7 +348,7 @@ internal class AgentPickerViewModelInstall(
                     if ! grep -q 'NVM_DIR' ~/.profile 2>/dev/null; then
                         cat >> ~/.profile <<'PROFEOF'
 
-# Added by ssh.ai install bootstrap
+# Added by Conch install bootstrap
 export NVM_DIR="${'$'}HOME/.nvm"
 [ -s "${'$'}NVM_DIR/nvm.sh" ] && . "${'$'}NVM_DIR/nvm.sh"
 [ -d "${'$'}HOME/.local/bin" ] && export PATH="${'$'}HOME/.local/bin:${'$'}PATH"

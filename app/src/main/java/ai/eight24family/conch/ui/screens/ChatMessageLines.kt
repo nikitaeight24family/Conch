@@ -230,7 +230,13 @@ import java.util.Locale
 // load) still misses the cache and goes through the debounced off-thread
 // parse, so the heat/battery win from that path stands.
 private data class MdCacheKey(val text: String, val codeBg: ULong, val codeFg: ULong)
-private val markdownCache = android.util.LruCache<MdCacheKey, AnnotatedString>(128)
+private val markdownCache = android.util.LruCache<MdCacheKey, AnnotatedString>(128).also {
+    // Each key holds the full message text and each value its parsed
+    // AnnotatedString — 128 long messages is real heap. Rebuildable from the
+    // message list at any time, so it registers for memory-pressure trimming
+    // (the app is off-screen when that fires; the re-parse is invisible).
+    ai.eight24family.conch.util.MemoryPressure.register("markdownCache") { it.evictAll() }
+}
 
 @Composable
 internal fun TerminalLine(

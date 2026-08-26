@@ -24,12 +24,14 @@ class QueueReleaseTest {
         drainerBusy: Boolean = false,
         mirrored: Boolean = false,
         ready: Boolean = true,
+        stopSettling: Boolean = false,
     ) = ChatViewModel.shouldReleaseQueue(
         hasQueue = hasQueue,
         working = working,
         drainerBusy = drainerBusy,
         mirroredTurnOpen = mirrored,
         sessionReady = ready,
+        stopSettling = stopSettling,
     )
 
     @Test
@@ -87,5 +89,35 @@ class QueueReleaseTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `a stop still landing holds the queue`() {
+        // Stop makes the session LOOK idle in its first statement — it flips
+        // the state out of Working and clears remoteFileOpen — while the halt
+        // is still in flight: the stream has armed an interrupt-then-teardown
+        // ladder for 800 ms and the server-side pgrep ladder runs for ~3 s
+        // more.
+        assertFalse(release(stopSettling = true))
+    }
+
+    @Test
+    fun `the hold ends with the stop, not with the stop ORDER`() {
+        // The two must never be conflated. A Stop pressed offline stays OWED
+        // for minutes (armStopOrderWatcher retries until the server is
+        // reachable); holding the queue that long would lose the user's words
+        // by a second route. `stopSettling` is bounded — STOP_SETTLE_MAX_MS —
+        // and once it drops the queue goes out exactly as Stop promises.
+        assertTrue(release(stopSettling = false))
+        assertTrue(ChatViewModel.STOP_SETTLE_MAX_MS <= 10_000L)
+    }
+
+    @Test
+    fun `the hold outlasts the stream's own kill window`() {
+        // The floor exists to cover AgentSessionPersistentStream.STOP_GRACE_MS
+        // (800 ms), the window in which the stream tears its OWN process down.
+        // Release inside it and the prompt is handed to a corpse.
+        assertTrue(ChatViewModel.STOP_SETTLE_FLOOR_MS > 800L)
+        assertTrue(ChatViewModel.STOP_SETTLE_FLOOR_MS < ChatViewModel.STOP_SETTLE_MAX_MS)
     }
 }

@@ -91,12 +91,63 @@ internal class ChatViewModelDownloads(
     val inlineImages: StateFlow<Map<String, InlineImage>> = _inlineImages.asStateFlow()
     private val inlineInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    private val trimKey = "inlineImages@${Integer.toHexString(System.identityHashCode(this))}"
+
+    init {
+        // Decoded inline bitmaps are the biggest heap objects this class owns
+        // (≤1600 px each — up to ~10 MB). When the UI goes off-screen
+        // (TRIM_MEMORY_UI_HIDDEN and up) drop them all: every consumer calls
+        // the idempotent loadInlineImage from composition, so a scrolled-back
+        // or reopened chat repaints from the on-disk cache in one frame.
+        ai.eight24family.conch.util.MemoryPressure.register(trimKey) { trimDecodedImages() }
+    }
+
+    /** Unhook from [ai.eight24family.conch.util.MemoryPressure]. The owning
+     *  ViewModel calls this from onCleared — without it the registered lambda
+     *  would keep this coordinator (and through it the whole VM graph)
+     *  reachable for the life of the process. */
+    fun close() {
+        ai.eight24family.conch.util.MemoryPressure.unregister(trimKey)
+    }
+
+    /** Drop every decoded bitmap, keep Loading/Failed states (a Failed entry
+     *  must not silently retry just because memory got tight). */
+    internal fun trimDecodedImages() {
+        _inlineImages.update { m -> m.filterValues { it !is InlineImage.Ready } }
+    }
+
+    private companion object {
+        /**
+         * Hard budget for decoded inline images held at once. "Bitmap memory"
+         * is its own Android-vitals metric under Google Play's memory-quality
+         * requirement; before this cap a screenshot-heavy chat accumulated an
+         * unbounded map of ≤1600 px bitmaps for the ViewModel's whole life.
+         * Eight ≈ one screen of images plus scroll margin — evicted paths
+         * vanish from the map, so the renderer's idempotent load re-issues on
+         * the next composition and repaints from the disk cache.
+         */
+        const val MAX_READY_IMAGES = 8
+    }
+
+    /** Insert [img]; a [InlineImage.Ready] additionally enforces
+     *  [MAX_READY_IMAGES] by dropping the OLDEST Ready entries (map insertion
+     *  order — first decoded, first out). Internal for the budget test. */
+    internal fun putInlineImage(path: String, img: InlineImage) {
+        _inlineImages.update { m ->
+            val next = m + (path to img)
+            if (img !is InlineImage.Ready) return@update next
+            val ready = next.keys.filter { next[it] is InlineImage.Ready }
+            if (ready.size <= MAX_READY_IMAGES) next
+            else next - ready.take(ready.size - MAX_READY_IMAGES).toSet()
+        }
+    }
+
     /** Download [remotePath] into memory + decode (downscaled) to an
      *  ImageBitmap for inline display. Idempotent; cached once Ready. */
     fun loadInlineImage(remotePath: String) {
         if (_inlineImages.value[remotePath] is InlineImage.Ready) return
         if (!inlineInFlight.add(remotePath)) return
-        _inlineImages.update { it + (remotePath to InlineImage.Loading) }
+        putInlineImage(remotePath, InlineImage.Loading)
         scope.launch(Dispatchers.IO) {
             try {
                 // 1. Local disk cache FIRST — render without touching the server.
@@ -108,7 +159,7 @@ internal class ChatViewModelDownloads(
                     if (cf.exists() && cf.length() > 0) decodeDownscaled(cf.readBytes()) else null
                 }
                 if (cached != null) {
-                    _inlineImages.update { it + (remotePath to InlineImage.Ready(cached)) }
+                    putInlineImage(remotePath, InlineImage.Ready(cached))
                     return@launch
                 }
                 // 2. Not cached → stream it from the server (and cache on success).
@@ -121,7 +172,7 @@ internal class ChatViewModelDownloads(
                     delay(300); waited += 300
                 }
                 val s = session ?: run {
-                    _inlineImages.update { it + (remotePath to InlineImage.Failed("no session")) }
+                    putInlineImage(remotePath, InlineImage.Failed("no session"))
                     return@launch
                 }
                 val buf = java.io.ByteArrayOutputStream()
@@ -134,13 +185,13 @@ internal class ChatViewModelDownloads(
                         val bmp = SilentlyTry.logged("SshAi-Chat", "decode inline image") {
                             decodeDownscaled(bytes)
                         }
-                        _inlineImages.update {
-                            it + (remotePath to (bmp?.let { b -> InlineImage.Ready(b) }
-                                ?: InlineImage.Failed("decode failed")))
-                        }
+                        putInlineImage(
+                            remotePath,
+                            bmp?.let { b -> InlineImage.Ready(b) } ?: InlineImage.Failed("decode failed"),
+                        )
                     }
                     is AgentSession.DownloadOutcome.Failed ->
-                        _inlineImages.update { it + (remotePath to InlineImage.Failed(outcome.reason)) }
+                        putInlineImage(remotePath, InlineImage.Failed(outcome.reason))
                 }
             } finally {
                 inlineInFlight.remove(remotePath)
@@ -166,7 +217,7 @@ internal class ChatViewModelDownloads(
                 decodeDownscaled(bytes)
             }
             if (bmp != null) {
-                _inlineImages.update { it + (remotePath to InlineImage.Ready(bmp)) }
+                putInlineImage(remotePath, InlineImage.Ready(bmp))
             }
         }
     }
@@ -194,16 +245,8 @@ internal class ChatViewModelDownloads(
 
     /** Decode JPEG/PNG/etc bytes, downscaled so a 12 MP phone screenshot
      *  doesn't blow the bitmap heap when shown thumbnail-sized in chat. */
-    private fun decodeDownscaled(bytes: ByteArray): androidx.compose.ui.graphics.ImageBitmap? {
-        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val max = 1600
-        var sample = 1
-        while (bounds.outWidth / sample > max || bounds.outHeight / sample > max) sample *= 2
-        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-        return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            ?.asImageBitmap()
-    }
+    private fun decodeDownscaled(bytes: ByteArray): androidx.compose.ui.graphics.ImageBitmap? =
+        ai.eight24family.conch.util.Bitmaps.decodeSampled(bytes, maxDim = 1600)?.asImageBitmap()
 
     /**
      * Kick off (or skip) an async `[ -f <path> ]` probe on the live SSH transport.

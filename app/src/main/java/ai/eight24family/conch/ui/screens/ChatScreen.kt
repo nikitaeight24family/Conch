@@ -336,7 +336,10 @@ fun ChatScreen(
     // reads the already-decoded bitmap from inlineImages so there's no re-fetch.
     val fullScreenImagePath by vm.fullScreenImage.collectAsState()
     val inlineImagesState by vm.inlineImages.collectAsState()
-    androidx.compose.runtime.LaunchedEffect(fullScreenImagePath) {
+    // Keyed on the map entry too: the decoded-bitmap budget (or a memory trim)
+    // can evict this path while the overlay is open — the entry disappearing
+    // re-runs the effect and the idempotent load repaints it from disk cache.
+    androidx.compose.runtime.LaunchedEffect(fullScreenImagePath, inlineImagesState[fullScreenImagePath]) {
         fullScreenImagePath?.let { vm.loadInlineImage(it) }
     }
     fullScreenImagePath?.let { p ->

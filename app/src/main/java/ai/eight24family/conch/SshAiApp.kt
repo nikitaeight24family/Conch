@@ -64,6 +64,28 @@ class SshAiApp : Application() {
         }
     }
 
+    // ── Memory pressure ──────────────────────────────────────────────────
+    // Google Play's memory-quality requirement tracks "Memory usage"
+    // (anonymous RSS + swap) in Android vitals, and Android 17's per-app
+    // memory limiter escalates zRAM-swap → kill on processes that keep
+    // growing. Our reaction: any trim signal drops every rebuildable cache
+    // (decoded inline chat images, the parsed-markdown LRU) via
+    // [MemoryPressure]. API 34+ only delivers UI_HIDDEN and
+    // BACKGROUND/MODERATE/COMPLETE — the RUNNING_* levels are deprecated —
+    // so the single `>= UI_HIDDEN` gate covers every signal that still
+    // exists, and UI-hidden is precisely when repaint cost is invisible.
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            ai.eight24family.conch.util.MemoryPressure.trimAll("onTrimMemory($level)")
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        ai.eight24family.conch.util.MemoryPressure.trimAll("onLowMemory")
+    }
+
     /**
      * sshj runs its transport reader on background threads it manages
      * itself. When the user taps Stop and we close the SSH session

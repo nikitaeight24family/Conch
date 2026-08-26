@@ -1,6 +1,5 @@
 What's new
-• Team and Enterprise subscriptions are recognized — no more false "no subscription".
-• Sign-in now grants full access: the server's own terminal is logged in too, and plan/limits show everywhere.
-• Account cards show email, plan and expiry. Limits appear right on the agent list.
-• Dropped connections reconnect themselves; sign-in retries instead of hanging.
-• The limit indicator counts only limits your chat is subject to, and names the one near the wall.
+• Moving to a new phone: your servers and settings now come along via Android backup and device-to-device transfer. Passwords and keys stay on the old device by design — re-add them once.
+• Leaner memory: chat images live in a fixed budget, thumbnails decode small, caches free themselves when Android asks.
+• The live agent panel is readable: one line per agent, differences only.
+• Stop no longer swallows a queued prompt.

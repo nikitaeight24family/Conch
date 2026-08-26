@@ -1,3 +1,5 @@
 Nouveautés
-• L'indicateur de limite ne compte plus que les limites auxquelles votre conversation est réellement soumise. Le plafond hebdomadaire d'un autre modèle ne se lit plus comme 100% alors que votre propre fenêtre est presque vide.
-• Quand c'est une autre limite qui touche au mur, la barre la nomme : « Weekly 92% » au lieu d'un simple 92%.
+• Changement de téléphone : serveurs et réglages suivent via la sauvegarde Android et le transfert d'appareil à appareil. Mots de passe et clés restent volontairement sur l'ancien appareil — ajoutez-les une fois.
+• Mémoire allégée : images du chat sous budget fixe, miniatures décodées en petit, caches libérés à la demande du système.
+• Panneau des agents lisible : une ligne par agent.
+• Stop n'avale plus un message en file.

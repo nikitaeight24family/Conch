@@ -333,7 +333,12 @@ private fun QueuedMessagesStrip(
                 q.thumbs.take(4).forEach { bytes ->
                     val bmp: ImageBitmap? = remember(bytes) {
                         runCatching {
-                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                            // 24 dp on screen — decode at most 96 px in RGB_565,
+                            // not the full multi-megapixel image (bitmap-memory
+                            // vital; the full decode was ~500× the shown pixels).
+                            ai.eight24family.conch.util.Bitmaps
+                                .decodeSampled(bytes, maxDim = 96, lowColor = true)
+                                ?.asImageBitmap()
                         }.getOrNull()
                     }
                     if (bmp != null) {
