@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.AgentScope
 import ai.eight24family.conch.agent.SubagentCatalog
-import ai.eight24family.conch.analytics.Telemetry
 import ai.eight24family.conch.data.SubagentService
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -142,8 +141,6 @@ class AgentEditViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 )
                 when (result) {
                     is SubagentService.SaveResult.Ok -> {
-                        if (isNew) Telemetry.subagentCreated()
-                        else Telemetry.subagentEdited()
                         _toast.value = "saved"
                         _saved.value = true
                     }
@@ -168,7 +165,6 @@ class AgentEditViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             try {
                 val ok = service.delete(p)
                 if (ok) {
-                    Telemetry.subagentDeleted()
                     _toast.value = "deleted"
                     _saved.value = true
                 } else {

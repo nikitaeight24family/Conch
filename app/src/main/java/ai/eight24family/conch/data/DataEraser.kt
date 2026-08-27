@@ -18,9 +18,6 @@ import java.io.File
  * privacy policy lies.
  *
  * **NOT erased by this method (out of scope):**
- *  - Crash reports already ingested by Sentry — those have to be
- *    deleted via Sentry's own data-subject endpoint. Privacy policy
- *    points users at the contact email for that.
  *  - Files we wrote to YOUR servers (`/tmp/conch_uploads/...`,
  *    memory/subagent files in `~/.claude/...`). Those are on hosts
  *    we don't control after we wrote them.
@@ -60,8 +57,7 @@ object DataEraser {
             File(app.filesDir, "datastore").deleteRecursively()
         }
 
-        // 4) SharedPreferences — including the `ssh_ai_bootstrap_prefs`
-        //    file used by Sentry init for synchronous opt-out reads.
+        // 4) SharedPreferences — every file in the directory.
         SilentlyTry.fired("SshAi-Eraser", "wipe shared_prefs dir") {
             File(app.dataDir, "shared_prefs").listFiles()?.forEach { it.delete() }
         }

@@ -59,7 +59,7 @@ scores neither doesn't belong in this file.
 - Buffered sends during handshake; battery-whitelist banner; persistent
   navigation; lifecycle-aware tail-poll (1.0.5)
 - Anonymous opt-in telemetry; GDPR data erasure; Terms of Service (1.0.2)
-- Sentry crash reporting with opt-out (1.0.1)
+- ~~Sentry crash reporting with opt-out (1.0.1)~~ — removed entirely in 0.4.1
 - Multi-server, multi-agent (Claude / Codex / Gemini) chat over SSH (1.0.0)
 - FIDO2 / CTAP2 hardware-key auth (USB + NFC) with deferred-tap UX (1.0.0)
 - Pool-based per-server SSH connection sharing (1.0.0)

@@ -6,7 +6,6 @@ import ai.eight24family.conch.agent.SlashCommand
 import ai.eight24family.conch.agent.SlashCommandKind
 import ai.eight24family.conch.agent.SlashCommands
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
-import ai.eight24family.conch.analytics.Telemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -189,7 +188,6 @@ internal class ChatViewModelSlash(
      * by typing `/diff`.
      */
     fun injectGitDiff() {
-        Telemetry.attachmentUploaded(Telemetry.AttachmentKind.GIT_DIFF)
         scope.launch(Dispatchers.IO) {
             val s = sessionAccess() ?: return@launch
             val cwd = observedCwd()
@@ -243,7 +241,6 @@ internal class ChatViewModelSlash(
         val s = sessionAccess() ?: return
         val agent = currentAgent()
         val filename = agent.memoryFilename
-        Telemetry.attachmentUploaded(Telemetry.AttachmentKind.INIT_PROMPT)
         val prompt = """
             Please analyse this codebase and create a $filename file containing:
             1. Build, lint, and test commands — especially how to run a single test.

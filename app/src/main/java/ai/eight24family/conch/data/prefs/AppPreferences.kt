@@ -15,21 +15,6 @@ import kotlinx.coroutines.flow.map
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK, CUSTOM }
 
-/** SharedPreferences file holding the few flags we need to read SYNCHRONOUSLY
- *  in `Application.onCreate()` (Sentry init can't wait on a DataStore Flow).
- *  Default values are mirrored into both: DataStore for the UI to bind via
- *  Compose, and SharedPreferences for fast bootstrap reads. */
-private const val FAST_PREFS_NAME = "ssh_ai_bootstrap_prefs"
-private const val KEY_CRASH_REPORTING = "crash_reporting_enabled"
-
-/** Read crash-reporting opt-in synchronously, from [Context]. Default = true.
- *  Used by [SshAiApp] when deciding whether to init Sentry; called BEFORE any
- *  ViewModel exists, so we can't go through DataStore. */
-fun isCrashReportingEnabled(context: Context): Boolean {
-    val sp = context.getSharedPreferences(FAST_PREFS_NAME, Context.MODE_PRIVATE)
-    return sp.getBoolean(KEY_CRASH_REPORTING, true)
-}
-
 /**
  * How aggressively the agent is allowed to act on its own. Mirrors the
  * approval/sandbox knobs each CLI exposes; we map them onto the same
@@ -775,25 +760,6 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setShowApprovalInChatBar(show: Boolean) {
         context.dataStore.edit { it[showApprovalInChatBarKey] = show }
-    }
-
-    // ── Crash reporting + telemetry ────────────────────────────
-    // Stored in BOTH a DataStore pref (so the Settings UI can collectAsState)
-    // and a SharedPreferences file (so SshAiApp.onCreate can read it
-    // synchronously before any coroutine has a chance to spin up).
-    private val crashReportingKey = booleanPreferencesKey("crash_reporting_enabled")
-
-    val crashReportingEnabled: Flow<Boolean> = context.dataStore.data.map { p ->
-        p[crashReportingKey] ?: true
-    }
-
-    suspend fun setCrashReportingEnabled(enabled: Boolean) {
-        // Write both copies. The SharedPreferences write is the one that
-        // takes effect on the NEXT launch's Sentry init; the DataStore copy
-        // drives the UI right now.
-        context.dataStore.edit { it[crashReportingKey] = enabled }
-        context.getSharedPreferences(FAST_PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_CRASH_REPORTING, enabled).apply()
     }
 
     private fun isValidHex(value: String): Boolean =

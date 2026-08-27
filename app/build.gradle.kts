@@ -62,7 +62,6 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.sentry.android)
     alias(libs.plugins.play.publisher)
 }
 
@@ -97,18 +96,12 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.4.0"
+        val baseVersionName = "0.4.1"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
-        // Sentry DSN baked in at build time — empty for local debug builds
-        // (no crash reporting), real value injected by CI from a secret on
-        // tagged release builds. SshAiApp.onCreate() skips Sentry init
-        // entirely when the field is blank.
-        val dsn = (project.findProperty("sentryDsn") as String?) ?: System.getenv("SENTRY_DSN") ?: ""
-        buildConfigField("String", "SENTRY_DSN", "\"$dsn\"")
     }
 
     val keystoreProps = Properties().apply {
@@ -212,7 +205,7 @@ android {
     // top-level `kotlin { compilerOptions { ... } }` block below.
     buildFeatures {
         compose = true
-        // Required for `BuildConfig.SENTRY_DSN` we add via buildConfigField.
+        // Required for VERBOSE_LOGS and the release-notes buildConfigField below.
         buildConfig = true
     }
     packaging {
@@ -262,45 +255,6 @@ kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
-}
-
-// Sentry Gradle plugin config: only really matters for release builds in CI,
-// where we have an auth token AND want R8 mapping uploaded so stacktraces
-// are deobfuscated in the dashboard. For local debug builds we keep
-// everything off so the build doesn't try to phone home to Sentry.
-sentry {
-    val sentryToken = System.getenv("SENTRY_AUTH_TOKEN")?.takeIf { it.isNotBlank() }
-    val sentryOrg = System.getenv("SENTRY_ORG")?.takeIf { it.isNotBlank() }
-    val sentryProj = System.getenv("SENTRY_PROJECT")?.takeIf { it.isNotBlank() }
-    // Only attempt the mapping upload when ALL three Sentry secrets are set.
-    // A misconfigured CI (e.g. token present but project slug wrong) 404'd
-    // the v1.0.9 release and skipped the GitHub Release publish entirely;
-    // the mapping upload is a nice-to-have, not a release blocker. With this
-    // gate, a partial Sentry config silently disables the upload and the
-    // signed APK still ships.
-    val mappingUploadOk = sentryToken != null && sentryOrg != null && sentryProj != null
-    autoUploadProguardMapping.set(mappingUploadOk)
-    includeProguardMapping.set(mappingUploadOk)
-    org.set(sentryOrg ?: "")
-    projectName.set(sentryProj ?: "sshai")
-    authToken.set(sentryToken ?: "")
-    // Our Sentry organization is hosted in the DE (Frankfurt) region.
-    // Without an explicit url, sentry-cli 2.39.1 hits the legacy
-    // `/api/0/organizations/<slug>/region/` (singular) endpoint on
-    // sentry.io for region discovery, which 404s for SaaS users and
-    // causes the mapping upload to fail with "Project does not exist".
-    // Pinning the URL skips that lookup entirely. SENTRY_URL env var
-    // (if set) still overrides this — useful if the org ever moves.
-    url.set(System.getenv("SENTRY_URL")?.takeIf { it.isNotBlank() } ?: "https://de.sentry.io")
-    // We add the SDK dependency manually below; turn off the plugin's
-    // auto-installation to avoid duplicate-dependency warnings.
-    autoInstallation { enabled.set(false) }
-    // Tracing instrumentation costs build time + APK size for features we
-    // don't surface yet (separate Phase 1.4 issue). Keep it off until
-    // performance traces are explicitly enabled.
-    tracingInstrumentation { enabled.set(false) }
-    // Don't upload native debug symbols — we have no native code.
-    uploadNativeSymbols.set(false)
 }
 
 dependencies {
@@ -420,8 +374,6 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-
-    implementation(libs.sentry.android)
 
     debugImplementation(libs.androidx.ui.tooling)
     // Compose UI test artifact ships an empty AndroidManifest.xml that needs

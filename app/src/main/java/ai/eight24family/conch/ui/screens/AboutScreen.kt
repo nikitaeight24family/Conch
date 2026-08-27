@@ -197,7 +197,7 @@ fun AboutScreen(
             }
 
             Section("privacy") {
-                Bullet("crash reports + a small set of feature-usage events go to Sentry — opt-out toggle in Settings → Privacy.")
+                Bullet("no analytics, no crash reporting, no telemetry of any kind. the app makes no network connection to anyone but the servers you add.")
                 Bullet("no chat contents, no file contents, no server hostnames or IPs leave the device.")
                 Bullet("full breakdown of what gets sent and what doesn't lives in the Privacy Policy below.")
             }

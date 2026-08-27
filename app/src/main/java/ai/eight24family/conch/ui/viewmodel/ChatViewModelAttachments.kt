@@ -2,7 +2,6 @@ package ai.eight24family.conch.ui.viewmodel
 
 import ai.eight24family.conch.agent.AgentSession
 import ai.eight24family.conch.agent.SessionState
-import ai.eight24family.conch.analytics.Telemetry
 import ai.eight24family.conch.data.UploadCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -63,9 +62,6 @@ internal class ChatViewModelAttachments(
         if (_attachments.value.size >= MAX_ATTACHMENTS) return
         val isImage = mimeType?.startsWith("image/") == true ||
             displayName.substringAfterLast('.', "").lowercase() in IMAGE_EXTS
-        Telemetry.attachmentUploaded(
-            if (isImage) Telemetry.AttachmentKind.PHOTO else Telemetry.AttachmentKind.FILE
-        )
         val attId = UUID.randomUUID().toString()
         _attachments.update {
             it + StagedAttachment(
@@ -154,9 +150,6 @@ internal class ChatViewModelAttachments(
         // [localFile], which is the whole point of the streaming path).
         val isImage = mimeType?.startsWith("image/") == true ||
             displayName.substringAfterLast('.', "").lowercase() in IMAGE_EXTS
-        Telemetry.attachmentUploaded(
-            if (isImage) Telemetry.AttachmentKind.PHOTO else Telemetry.AttachmentKind.FILE
-        )
         val attId = UUID.randomUUID().toString()
         _attachments.update {
             it + StagedAttachment(

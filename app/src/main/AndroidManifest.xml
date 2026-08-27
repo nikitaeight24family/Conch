@@ -89,8 +89,8 @@
         allowBackup: true since 0.3.9 — Google Play's "safe data transfer to a
         new device" quality requirement (2026-08). This does NOT reopen the
         SEC-7 hole (allowBackup=false, INVARIANTS.md): the rules files are
-        WHITELISTS, so only the server list (Room DB), settings and the
-        Sentry opt-out transfer. Chat history never leaves the device, and
+        WHITELISTS, so only the server list (Room DB) and settings
+        transfer. Chat history never leaves the device, and
         passwords / private keys (encrypted_servers.xml) are excluded AND
         Keystore-bound — undecryptable anywhere else by construction, with
         SecretsStore self-healing if an OEM tool copies the file anyway.
@@ -201,24 +201,6 @@
             android:name=".service.SshAiService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-
-        <!--
-            Disable Sentry's auto-init ContentProviders. The SDK ships them
-            so apps with a single hard-coded DSN can wire up with zero code.
-            Our DSN comes from BuildConfig (so debug builds without a DSN
-            don't init at all), which means the auto-init provider would
-            crash on launch with `DSN is required`. We init manually in
-            SshAiApp.onCreate() — guarded by `BuildConfig.SENTRY_DSN.isBlank()`
-            and by the user's opt-out preference.
-        -->
-        <provider
-            android:name="io.sentry.android.core.SentryInitProvider"
-            android:authorities="${applicationId}.SentryInitProvider"
-            tools:node="remove" />
-        <provider
-            android:name="io.sentry.android.core.SentryPerformanceProvider"
-            android:authorities="${applicationId}.SentryPerformanceProvider"
-            tools:node="remove" />
 
         <!--
             Shizuku discovery provider. Lets the Shizuku Manager app

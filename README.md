@@ -5,7 +5,7 @@
 <h1 align="center">Conch</h1>
 
 [![tests](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg)](https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml)
-[![release](https://img.shields.io/badge/release-v0.4.0-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.4.1-brightgreen.svg)](https://github.com/nikitaeight24family/Conch/releases/latest)
 [![Google Play](https://img.shields.io/badge/Google%20Play-Live-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ai.eight24family.conch)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ heavy lifting. Nothing is hosted by us — no proxies, no quotas, no cloud
 middleman. It's a terminal in your pocket, not a hosted AI service.
 
 ```
-conch ▌ v0.4.0
+conch ▌ v0.4.1
 // drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.
 ```
 
@@ -46,6 +46,22 @@ conch ▌ v0.4.0
 - Install from Play for automatic updates, or sideload the signed APK from
   [Releases](https://github.com/nikitaeight24family/Conch/releases/latest) — same
   signed build, your choice.
+
+---
+
+## What's new in 0.4.1
+
+**No telemetry at all — Sentry removed, not disabled.** The crash-reporting
+SDK, the Gradle plugin, the `Telemetry` object and its fifteen call sites, the
+manifest overrides, the CI secrets and the Settings → Privacy → Crash reporting
+toggle are all gone from the source, along with the preferences file that
+existed only to hold that toggle. Conch now opens **no network connection to
+anything except the servers you add yourself** — not "anonymised", not
+"opt-out", absent. The store listing no longer has to declare *approximate
+location*, which was only ever there because Sentry derived a country from the
+request IP at ingestion. The honest cost: a crash on your device is now
+invisible to us, so Play's own Android vitals is the only signal left and bug
+reports by email are the only channel. That trade was made deliberately.
 
 ---
 
@@ -628,9 +644,9 @@ JSONL bodies, preferences.
 
 **On your servers** (read/written the same way the CLI itself does): Claude
 Code `~/.claude/projects/.../*.jsonl`; Codex `~/.codex/sessions/.../*.jsonl`;
-Gemini rollouts under `~/.gemini`. Nothing leaves the device except over SSH
-to the servers you've added (plus opt-out Sentry crash reporting — no chat
-content, no identifiers).
+Gemini rollouts under `~/.gemini`. **Nothing leaves the device except over SSH
+to the servers you've added.** Since 0.4.1 there is no analytics, no crash
+reporting and no telemetry of any kind — not opt-out, absent.
 
 **Media you record** stays on the device until you send it. A voice message and
 a photo taken in the composer are written to the app's cache, attached to the

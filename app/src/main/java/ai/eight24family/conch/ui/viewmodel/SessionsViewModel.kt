@@ -5,7 +5,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.RemoteSession
-import ai.eight24family.conch.analytics.Telemetry
 import ai.eight24family.conch.data.MemoryService
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
 import ai.eight24family.conch.di.ServiceLocator
@@ -470,7 +469,6 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.Eagerly, AgentApprovalMode.YOLO)
 
     fun setApprovalMode(mode: AgentApprovalMode) {
-        Telemetry.approvalModeChanged(mode)
         viewModelScope.launch { ServiceLocator.preferences.setApprovalMode(mode) }
     }
 

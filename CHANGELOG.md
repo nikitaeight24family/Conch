@@ -11,6 +11,37 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.1] — 2026-08-27
+
+### Removed
+- **Sentry, and with it every last piece of telemetry.** The crash-reporting
+  SDK, the Gradle plugin, the `SENTRY_DSN` build field, the `Telemetry` object
+  and all fifteen of its call sites, the breadcrumb half of `SilentlyTry`, the
+  two manifest provider overrides, the CI secrets, and the
+  **Settings → Privacy → Crash reporting** toggle are all gone. The
+  `ssh_ai_bootstrap_prefs` file that existed only to hold that toggle's value
+  is gone too, along with its entries in both backup-rules whitelists.
+
+  Conch now opens **no network connection to anything except the servers you
+  add yourself**. Not "anonymised", not "opt-out" — absent.
+
+  Two things follow. The store listing no longer has to declare *approximate
+  location*: that line existed because Sentry derived a country and city from
+  the request IP at ingestion, and there is no longer a request. And a crash on
+  your device is now invisible to us — Play's own Android vitals is the only
+  signal left, so if something breaks, please write to
+  <nikita@eight24family.ai>. That is the trade, and it was made deliberately.
+
+### Changed
+- Privacy policy, data-deletion page, store listing and the in-app About screen
+  all rewritten around "we collect nothing", with the history of what used to
+  be collected stated plainly rather than quietly dropped.
+- `SilentlyTry.logged` / `loggedOrElse` / `fired` keep working exactly as
+  before and still record every swallowed exception — now as a WARN logcat
+  line, which is the only place an eaten failure surfaces.
+
+---
+
 ## [0.4.0] — 2026-08-27
 
 Google Play's two new 2026 app-quality requirements, implemented in full.
@@ -1182,6 +1213,7 @@ First public release.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
 [Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.0...HEAD
+[0.4.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.1
 [0.4.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.0
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
 [0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7

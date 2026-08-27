@@ -15,7 +15,7 @@ play = "4.0.0"
 # libraries whose ELF load segments are aligned to 4 KB instead of 16 KB, and
 # camera-core 1.3.4 ships `libimage_processing_util_jni.so` built with
 # max-page-size=4096. It was the ONLY offending library in the 0.2.11 bundle
-# (versionCode 616): sentry, datastore and graphics-path were all already at
+# (versionCode 616): datastore and graphics-path were all already at
 # 16384. zipalign cannot fix this — the alignment is baked into the prebuilt
 # .so, so the fix is the dependency version and nothing else. 1.4.0 is the
 # first release built with a 16 KB page size. `bundleRelease` now gates on this
@@ -106,8 +106,6 @@ robolectric = "4.15.1"
 androidxTest = "1.6.1"
 mockSshd = "2.13.2"
 xerialSqlite = "3.46.1.3"
-sentryAndroid = "7.18.1"
-sentryPlugin = "6.8.0"
 
 [libraries]
 androidx-photopicker-compose = { group = "androidx.photopicker", name = "photopicker-compose", version.ref = "photopicker" }
@@ -188,7 +186,6 @@ apache-mina-sshd-core = { group = "org.apache.sshd", name = "sshd-core", version
 xerial-sqlite-jdbc = { group = "org.xerial", name = "sqlite-jdbc", version.ref = "xerialSqlite" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
-sentry-android = { group = "io.sentry", name = "sentry-android", version.ref = "sentryAndroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -196,5 +193,4 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
-sentry-android = { id = "io.sentry.android.gradle", version.ref = "sentryPlugin" }
 play-publisher = { id = "com.github.triplet.play", version.ref = "play" }

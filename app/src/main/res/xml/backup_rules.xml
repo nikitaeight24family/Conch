@@ -13,5 +13,4 @@
     <include domain="database" path="sshai.db-wal" requireFlags="clientSideEncryption"/>
     <include domain="file" path="datastore/settings.preferences_pb"/>
     <include domain="file" path="datastore/auth_methods.preferences_pb"/>
-    <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
 </full-backup-content>

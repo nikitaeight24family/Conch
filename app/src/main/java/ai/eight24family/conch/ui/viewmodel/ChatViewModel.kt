@@ -12,7 +12,6 @@ import ai.eight24family.conch.agent.UsageReport
 import ai.eight24family.conch.agent.ServerStats
 import ai.eight24family.conch.agent.SessionState
 import ai.eight24family.conch.agent.SlashCommand
-import ai.eight24family.conch.analytics.Telemetry
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.domain.Server
 import ai.eight24family.conch.util.SilentlyTry
@@ -1947,7 +1946,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             )
 
     fun setApprovalMode(mode: ai.eight24family.conch.data.prefs.AgentApprovalMode) {
-        Telemetry.approvalModeChanged(mode)
         val agent = _currentAgent.value
         viewModelScope.launch {
             ServiceLocator.preferences.setApprovalModeFor(agent.name, mode)
@@ -2597,7 +2595,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         _activeAgents.update { it + agent }
         _resumeId.value = resumeIdParam
         _loadCameBackEmpty.value = false
-        Telemetry.chatSessionStarted(agent, isResume = resumeIdParam != null)
         // Reconnect carry-over (retry() passes the messages it was showing): paint
         // them immediately so the chat doesn't BLANK while the rebuilt session
         // reloads from cache/JSONL. DISPLAY-ONLY — AgentSession.history still
@@ -2688,16 +2685,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
         }
         _localSessionId.value = localId
-        // First-paint timing: cache-hit path is essentially instant.
-        // We open + immediately finish a transaction so the dashboard
-        // distribution shows the user-perceived latency from method
-        // entry to UI-renderable state. The from_cache tag splits the
-        // distribution into cache-warm vs cache-cold buckets.
-        Telemetry.startChatFirstPaint(
-            agent = agent,
-            fromCache = cachedParsed.isNotEmpty(),
-        )?.finish()
-
         // Search-opened read-only mode: cache is hydrated, _localSessionId is
         // set, the chat surface paints from the parsed JSONL. STOP here —
         // don't open an AgentSession. Without an SSH pool the agent's

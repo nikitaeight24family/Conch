@@ -1,10 +1,8 @@
 package ai.eight24family.conch
 
 import android.app.Application
-import ai.eight24family.conch.data.prefs.isCrashReportingEnabled
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.util.SilentlyTry
-import io.sentry.android.core.SentryAndroid
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.bouncycastle.jce.provider.BouncyCastleProvider
@@ -27,13 +25,12 @@ class SshAiApp : Application() {
         // last-known limit the INSTANT a chat opens — before the live fetch
         // (and before the user even taps-to-connect on SK servers).
         ai.eight24family.conch.agent.UsageProbe.preload()
-        initSentryIfEnabled()
         // Battery temp + CPU usage sampled every 5s to logcat tag
         // `SshAi-Perf`. DEBUG-ONLY (BUG-2): nothing in the app collects
         // PerfMonitor.snapshot, so in release it was a forever-loop logging
         // INFO every 5s + a /proc/stat CPU metric that SELinux denies on
-        // modern Android — i.e. dead numbers + breadcrumb spam + battery cost
-        // for zero benefit. The on-device heat-tracking it was built for only
+        // modern Android — i.e. dead numbers + battery cost for zero
+        // benefit. The on-device heat-tracking it was built for only
         // matters while we're actively profiling a debug build.
         if (BuildConfig.DEBUG) {
             ai.eight24family.conch.diagnostics.PerfMonitor.start(this)
@@ -97,7 +94,7 @@ class SshAiApp : Application() {
      *
      * We install a chained UncaughtExceptionHandler that swallows
      * exactly this one case and forwards everything else to whatever
-     * was there before (Sentry, system default).
+     * was there before (the system default).
      */
     private fun installSshjBrokenTransportSwallow() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
@@ -123,57 +120,6 @@ class SshAiApp : Application() {
                 return@setDefaultUncaughtExceptionHandler
             }
             previous?.uncaughtException(thread, throwable)
-        }
-    }
-
-    /**
-     * Initialise Sentry crash reporting. Skipped when:
-     *  - the build has no DSN (debug builds without `-PsentryDsn=...`)
-     *  - the user opted out in Settings → Privacy
-     *
-     * Read order matters: we use a SharedPreferences-backed flag rather
-     * than DataStore because Application.onCreate must NOT block on a
-     * coroutine. The opt-out toggle in the Settings UI writes both
-     * stores; the SharedPreferences copy is what we read here on next
-     * launch. Trade-off: opting out takes effect on the NEXT launch, not
-     * the current one — documented in the privacy policy.
-     */
-    private fun initSentryIfEnabled() {
-        val dsn = BuildConfig.SENTRY_DSN
-        if (dsn.isBlank()) return  // unsigned local debug build, etc.
-        if (!isCrashReportingEnabled(this)) return  // user opted out
-        SentryAndroid.init(this) { options ->
-            options.dsn = dsn
-            options.environment = if (BuildConfig.DEBUG) "debug" else "release"
-            options.release = "${BuildConfig.APPLICATION_ID}@${BuildConfig.VERSION_NAME}"
-            // Performance traces (Sentry's separate quota from error events).
-            // Debug: 1.0 so every transaction fires while we're testing.
-            // Release: 0.2 — 20% sample. Keeps us well inside free-tier
-            // 10k transactions/month even with heavy users.
-            options.tracesSampleRate = if (BuildConfig.DEBUG) 1.0 else 0.2
-            options.isDebug = BuildConfig.DEBUG
-            options.maxBreadcrumbs = 100
-            // Don't send IP, headers, or anything PII-shaped by default.
-            options.isSendDefaultPii = false
-            // Strip the entire user object before sending. Sentry server
-            // would otherwise resolve geo (city/country) from the IP at
-            // ingestion time and store that, even with `scrubIPAddresses`
-            // enabled at the project level. Setting `event.user = null`
-            // here means the SDK never gives Sentry anything user-shaped
-            // to derive geo from in the first place.
-            // Strip the entire user object before sending. Sentry server
-            // would otherwise resolve geo from the source IP at ingestion
-            // time and store country/city even with `scrubIPAddresses`
-            // enabled at the project level. Setting `event.user = null`
-            // here gives the SDK nothing user-shaped to send. The
-            // server-side relayPiiConfig also removes user.ip_address /
-            // user.id as a belt-and-braces. Country/city geo is enriched
-            // post-scrubbing by Sentry and we accept that — see the
-            // privacy policy for disclosure.
-            options.beforeSend = io.sentry.SentryOptions.BeforeSendCallback { event, _ ->
-                event.user = null
-                event
-            }
         }
     }
 }

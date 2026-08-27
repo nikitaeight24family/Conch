@@ -61,9 +61,6 @@ class SettingsViewModel : ViewModel() {
     val appScale: StateFlow<Float> = prefs.appScale
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1.0f)
 
-    val crashReportingEnabled: StateFlow<Boolean> = prefs.crashReportingEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
-
     val approvalMode: StateFlow<AgentApprovalMode> = prefs.approvalMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AgentApprovalMode.YOLO)
 
@@ -150,10 +147,6 @@ class SettingsViewModel : ViewModel() {
 
     fun setAppScale(value: Float) {
         viewModelScope.launch { prefs.setAppScale(value) }
-    }
-
-    fun setCrashReportingEnabled(enabled: Boolean) {
-        viewModelScope.launch { prefs.setCrashReportingEnabled(enabled) }
     }
 
     fun setApprovalMode(mode: AgentApprovalMode) {

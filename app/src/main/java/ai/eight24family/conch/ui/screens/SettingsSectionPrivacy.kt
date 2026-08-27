@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -12,7 +11,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,19 +21,11 @@ import ai.eight24family.conch.ui.viewmodel.SettingsViewModel
 
 @Composable
 internal fun SettingsSectionPrivacy(vm: SettingsViewModel) {
-    val crashReportingEnabled by vm.crashReportingEnabled.collectAsState()
     var confirmErase by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SettingsRow(
-            icon = Icons.Filled.BugReport,
-            title = "Crash reporting",
-            subtitle = "Anonymized crash + usage events. No messages, no hostnames, no user IDs. Takes effect next launch.",
-        ) {
-            androidx.compose.material3.Switch(
-                checked = crashReportingEnabled,
-                onCheckedChange = { vm.setCrashReportingEnabled(it) },
-            )
-        }
+        // No analytics row here on purpose. Conch sends nothing anywhere
+        // except the servers you configure — there is no reporting to switch
+        // off, so offering a toggle would imply something is running.
         SettingsRow(
             icon = Icons.Filled.DeleteForever,
             title = "Delete all data",

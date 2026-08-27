@@ -15,8 +15,6 @@
       - datastore/settings     Preferences the user tuned by hand.
       - datastore/auth_methods Which auth method each server uses — metadata,
                                not credentials.
-      - ssh_ai_bootstrap_prefs The Sentry opt-out. A privacy CHOICE must
-                               follow the user to the new device.
 
     What NEVER leaves the device (SEC-7, INVARIANTS.md) — everything below is
     kept out BY the whitelist (lint forbids a redundant <exclude> for a path
@@ -43,13 +41,11 @@
         <include domain="database" path="sshai.db-wal"/>
         <include domain="file" path="datastore/settings.preferences_pb"/>
         <include domain="file" path="datastore/auth_methods.preferences_pb"/>
-        <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
     </cloud-backup>
     <device-transfer>
         <include domain="database" path="sshai.db"/>
         <include domain="database" path="sshai.db-wal"/>
         <include domain="file" path="datastore/settings.preferences_pb"/>
         <include domain="file" path="datastore/auth_methods.preferences_pb"/>
-        <include domain="sharedpref" path="ssh_ai_bootstrap_prefs.xml"/>
     </device-transfer>
 </data-extraction-rules>

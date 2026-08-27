@@ -46,7 +46,7 @@ import ai.eight24family.conch.util.SilentlyTry
  *
  * Scope = runtime/shipped dependencies + bundled font assets ONLY. Test-only
  * libraries (JUnit, Robolectric, Espresso, Apache MINA SSHD, xerial sqlite-jdbc)
- * and build-time plugins (AGP, KSP, the Sentry Gradle plugin) are NOT bundled
+ * and build-time plugins (AGP, KSP) are NOT bundled
  * into the APK, so they carry no end-user attribution duty and are omitted.
  *
  * Single source of truth: [components] below + the asset text files. When a
@@ -238,7 +238,6 @@ private val components = listOf(
     OssComponent("sshj", "© sshj contributors (Jeroen van Erp et al.)", "0.39.0", APACHE_2_0),
     OssComponent("YubiKit for Android (android, fido)", "© Yubico AB", "2.7.0", APACHE_2_0),
     // ── MIT License ──
-    OssComponent("Sentry SDK for Android", "© Functional Software, Inc. (Sentry)", "7.18.1", MIT),
     OssComponent("Shizuku API (api, provider)", "© 2021 RikkaW", "13.1.5", MIT),
     // ── Bouncy Castle License ──
     OssComponent(

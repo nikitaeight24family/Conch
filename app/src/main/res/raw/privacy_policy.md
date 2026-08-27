@@ -1,8 +1,8 @@
-**Last updated: 2026-05-11**
+**Last updated: 2026-08-27**
 
-Conch is a native Android client that connects to **your own** SSH servers and runs your chosen AI agent (Claude Code, Codex CLI, or Gemini CLI) on them. Most of the data the app handles never leaves your device or your server. The exceptions — crash reports and feature-usage events — are described below in detail and can be turned off.
+Conch is a native Android client that connects to **your own** SSH servers and runs your chosen AI agent (Claude Code, Codex CLI, or Gemini CLI) on them. **No data the app handles leaves your device or your servers.** There is no analytics, no crash reporting and no telemetry of any kind, and Conch has no backend to send anything to. The only network connections the app opens are the SSH connections to the servers you add yourself.
 
-This document covers Conch for Android, version 0.2.x, distributed by **Conch Labs**.
+This document covers Conch for Android, version 0.4.x, distributed by **Conch Labs**.
 
 ## Data stored on this device
 
@@ -11,7 +11,7 @@ The app keeps the following on your phone, in encrypted local storage:
 - **Server records**: host, port, username, last-known agent. Stored in a Room database encrypted at rest via androidx.security AES-256.
 - **SSH credentials**: passwords (when used), private keys (PEM), optional passphrases. Encrypted via Android Keystore + EncryptedSharedPreferences. Never copied to anywhere else.
 - **Session cache**: per-CLI-session JSONL bodies and listings, so reopening a chat paints instantly. Stored under the app's private cache directory; cleared on uninstall or via the in-app data deletion control.
-- **Preferences**: theme, accent color, default agent, model choice, approval mode, crash-reporting opt-out flag.
+- **Preferences**: theme, accent color, default agent, model choice, approval mode.
 
 Nothing in this list is transmitted to Conch or to a third-party backend. The app has no backend service of its own.
 
@@ -41,32 +41,18 @@ A complete, verbatim list lives in the app at **About → Operations & Commands*
 
 The app maintains an **in-memory Activity Log** of the last 500 commands issued per server, viewable at the server's long-press menu → **Activity log**. The log includes timestamp, exit code, and the last ~200 characters of combined stdout / stderr. It is **not** persisted to disk and clears on app restart.
 
-## Crash reports and telemetry (Sentry)
+## Crash reports and telemetry
 
-To know when the app breaks for someone, Conch sends crash reports and a small set of feature-usage events to **Sentry** (sentry.io), a third-party error-tracking provider.
+**There are none.** Conch collects no analytics, sends no crash reports, and contains no telemetry, tracking or advertising SDK of any kind.
 
-**This is on by default.** You can turn it off in **Settings → Privacy → Crash reporting**. The toggle takes effect on the next app launch.
+Earlier versions (up to and including 0.4.0) sent crash reports and a small set of feature-usage events to Sentry, with an opt-out toggle in Settings. That was removed entirely in 0.4.1: the SDK, the Gradle plugin, the initialisation code and the setting are all gone from the source. Nothing replaced it.
 
-What we send to Sentry:
+The practical consequence, stated plainly: when Conch crashes on your device, we do not find out. If something breaks, please tell us at the contact address at the bottom of this page — that is now the only channel there is.
 
-- Crash and exception stack traces, deobfuscated using the R8 mapping uploaded at release time.
-- App version, Android version, device model.
-- Recent breadcrumbs of feature usage: which CLI you opened a chat with, what kind of attachment you sent (file / photo / git-diff / init-prompt), whether you created / edited / deleted a subagent, whether your approval mode changed and to what, when an SSH connection failed and what kind of failure.
-- Performance traces (sampled, 20% in production): timing of SSH handshake, agent bootstrap, chat first-paint.
+Two things follow from this that are worth being explicit about:
 
-What we do **not** send to Sentry:
-
-- Message contents of your chats with the AI.
-- Server hostnames or IP addresses of your servers.
-- Subagent body text, memory file contents, attached file contents.
-- Your IP address (scrubbed at Sentry's ingestion edge before storage).
-- Your user-agent identifier (stripped by the SDK before send).
-
-What Sentry derives server-side that we cannot prevent:
-
-- **Approximate geographic region** (country and city, based on the source IP of the request). Sentry resolves this at ingestion time and stores it. The IP itself is then dropped. We recognise this is technically location data; it is country/city level, not GPS, and is the only piece of geolocation Sentry holds.
-
-If you opt out, none of the above is sent.
+- **No approximate location.** Previous versions had to declare "approximate location" on the Play Store, because Sentry derived a country and city from the request IP at ingestion. With Sentry gone there is no request, no IP and no geolocation of any kind. Conch holds no location permission and cannot read your GPS.
+- **No device or user identifiers** are generated, stored or transmitted. The app never assigns you an id.
 
 ## Permissions
 
@@ -76,20 +62,20 @@ If you opt out, none of the above is sent.
 
 ## Your rights
 
-- **Right to opt out**: turn off Settings → Privacy → Crash reporting.
-- **Right to erasure (GDPR Art. 17)**: tap **Settings → Privacy → Delete all my data**. This wipes the local Room database, encrypted shared preferences, DataStore preferences, and all caches, then restarts the app. To request deletion of crash reports already received by Sentry, email the address below; we'll forward your Sentry user-id (if any) to them for removal.
-- **Right of access (GDPR Art. 15)**: email below. Note that with all PII strippings in place, we typically have nothing user-identifying to return.
+- **Right to erasure (GDPR Art. 17)**: tap **Settings → Privacy → Delete all my data**. This wipes the local Room database, encrypted shared preferences, DataStore preferences, and all caches, then restarts the app. Because nothing is ever sent off the device, there is no copy anywhere else for us to delete.
+- **Right of access (GDPR Art. 15)**: email below. We hold no data about you at all, so there is nothing to return.
 
 ## Third-party services used by the app
 
 | Service | Purpose | Privacy policy |
 |---|---|---|
-| Sentry (sentry.io) | Crash reporting + performance monitoring | https://sentry.io/privacy/ |
-| Anthropic / OpenAI / Google AI Studio | If you add API keys via the in-app browser, those requests go to those providers, governed by their policies. The app never sees your prompts to them | provider-specific |
+| Anthropic / OpenAI / Google AI Studio | If you sign in or add API keys via the in-app browser, those requests go to those providers, governed by their policies. The app never sees your prompts to them | provider-specific |
+
+No other third-party service receives anything from the app.
 
 ## Contact
 
-Questions, opt-out requests, or data-subject requests: [nikita@eight24family.ai](mailto:nikita@eight24family.ai)
+Questions, bug reports, or data-subject requests: [nikita@eight24family.ai](mailto:nikita@eight24family.ai)
 
 ## Changes
 

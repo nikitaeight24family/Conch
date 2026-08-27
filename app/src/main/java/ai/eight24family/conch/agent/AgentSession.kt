@@ -1,10 +1,8 @@
 package ai.eight24family.conch.agent
 
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
-import ai.eight24family.conch.analytics.Telemetry
 import ai.eight24family.conch.domain.Server
 import ai.eight24family.conch.domain.ServerSecrets
-import ai.eight24family.conch.ssh.FailureKind
 import ai.eight24family.conch.ssh.SshClient
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.CoroutineScope
@@ -434,11 +432,6 @@ class AgentSession(
         set(value) { sshLifecycle.skSigner = value }
 
     suspend fun start(): Result<Unit> = withContext(Dispatchers.IO) {
-        // Wrap the whole bootstrap in a Performance transaction so we can
-        // see real-world handshake + CLI-check timing in Sentry. Spans are
-        // sampled per `tracesSampleRate` in SshAiApp init.
-        val bootstrapTx = Telemetry.startAgentBootstrap(server.agent)
-        val handshakeTx = Telemetry.startSshHandshake(server.agent)
         try {
             _state.value = SessionState.Bootstrapping("connecting")
             // Emit the welcome banner IMMEDIATELY on a fresh chat — BEFORE the
@@ -458,7 +451,6 @@ class AgentSession(
                 ))
             }
             sshLifecycle.openSshClient()
-            handshakeTx?.finish()
             _state.value = SessionState.Bootstrapping("checking ${server.agent.cliCommand}")
             val check = ssh.execute(server, secrets, loginShell("command -v ${server.agent.cliCommand} || echo MISSING"))
                 .getOrNull().orEmpty()
@@ -489,28 +481,11 @@ class AgentSession(
                     ))
                 }
             }
-            bootstrapTx?.finish()
             Result.success(Unit)
         } catch (t: Throwable) {
             _state.value = SessionState.Failed(
                 ai.eight24family.conch.util.ErrorMessages.humanize(t, context = "bootstrap")
             )
-            handshakeTx?.finish(io.sentry.SpanStatus.INTERNAL_ERROR)
-            bootstrapTx?.finish(io.sentry.SpanStatus.INTERNAL_ERROR)
-            // Best-effort categorisation for telemetry. Mirror the
-            // FailureKind taxonomy used by SshClient.testConnection.
-            val kind = when {
-                t.message?.contains("not on PATH", ignoreCase = true) == true -> FailureKind.OTHER
-                t.message?.contains("authentication", ignoreCase = true) == true -> FailureKind.AUTH_PASSWORD_REJECTED
-                t.message?.contains("auth failed", ignoreCase = true) == true -> FailureKind.AUTH_KEY_REJECTED
-                t.message?.contains("UnknownHost", ignoreCase = true) == true ||
-                    t.message?.contains("not resolved", ignoreCase = true) == true -> FailureKind.HOST_NOT_RESOLVED
-                t.message?.contains("timeout", ignoreCase = true) == true -> FailureKind.TIMEOUT
-                t.message?.contains("unreachable", ignoreCase = true) == true ||
-                    t.message?.contains("connect", ignoreCase = true) == true -> FailureKind.NETWORK_UNREACHABLE
-                else -> FailureKind.OTHER
-            }
-            Telemetry.connectionFailed(kind, server.agent)
             close()
             Result.failure(t)
         }

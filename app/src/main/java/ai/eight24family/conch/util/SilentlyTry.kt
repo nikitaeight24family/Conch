@@ -1,9 +1,6 @@
 package ai.eight24family.conch.util
 
 import android.util.Log
-import io.sentry.Breadcrumb
-import io.sentry.Sentry
-import io.sentry.SentryLevel
 
 /**
  * Honest-name wrappers around `runCatching` (Durov critique #2).
@@ -21,11 +18,11 @@ import io.sentry.SentryLevel
  *      slow path forever.
  *
  * **The actual fix.** Even category (1) — intentional swallow — has a
- * real cost in production: a Sentry user reports "app frozen", and the
- * underlying `runCatching` that ate the OOM / IOException / whatever is
- * indistinguishable from working code. So [logged] writes a Sentry
- * breadcrumb on every failure. The breadcrumb attaches to the next
- * error report; we see what was swallowed in the lead-up.
+ * real cost: when the app misbehaves, the `runCatching` that ate the
+ * OOM / IOException / whatever is indistinguishable from working code.
+ * So [logged] writes a WARN logcat line naming the operation and the
+ * exception on every failure — visible in `adb logcat` and in a bug
+ * report the user sends, which is now the only place failures surface.
  *
  * **The mechanical sweep.** All `runCatching { ... }.getOrNull()` /
  * `.getOrDefault(x)` sites in the codebase are converted to
@@ -37,19 +34,19 @@ import io.sentry.SentryLevel
  * `IOException` / `SerializationException` rather than `Throwable`.
  * That's category (2) and requires per-site judgement. Tagged in
  * follow-up as «typed-catch sweep». But after this pass, the silent
- * swallows are gone — every uncaught failure leaves a breadcrumb.
+ * swallows are gone — every uncaught failure leaves a log line.
  */
 object SilentlyTry {
 
     /**
      * Run [block] and return null on any failure. Same wire as
      * `runCatching { … }.getOrNull()`, but the name advertises the
-     * intent: "I genuinely don't care if this fails, even Sentry."
+     * intent: "I genuinely don't care if this fails."
      *
      * Use sparingly. The default for any swallow should be [logged] —
      * use [nullOnError] only when the failure is so frequent and so
-     * benign that even a Sentry breadcrumb would be noise (e.g.
-     * sampled telemetry, hot polling probes where every miss is fine).
+     * benign that even a log line would be noise (e.g. hot polling
+     * probes where every miss is fine).
      */
     inline fun <R> nullOnError(block: () -> R): R? =
         try {
@@ -59,15 +56,13 @@ object SilentlyTry {
         }
 
     /**
-     * Run [block], return null on failure, and leave a Sentry
-     * breadcrumb + WARN-level logcat entry on every swallow.
+     * Run [block], return null on failure, and leave a WARN-level
+     * logcat entry on every swallow.
      *
-     * The breadcrumb persists in Sentry's session ring buffer and
-     * attaches to the next error event — so when a user reports a
-     * crash, the breadcrumbs preceding it show what got eaten on the
-     * way down. Without this, the chain "thing-X-failed → some
-     * downstream side-effect didn't happen → user noticed something
-     * weird" is invisible.
+     * Without this, the chain "thing-X-failed → some downstream
+     * side-effect didn't happen → user noticed something weird" is
+     * invisible: the log line is what makes an eaten failure findable
+     * afterwards.
      *
      * [tag] / [msg] format: tag is the source-file logcat tag
      * (`SshAi-Chat`, `SshAi-Pool`, …); msg names the operation
@@ -94,8 +89,8 @@ object SilentlyTry {
         }
 
     /**
-     * Fire-and-forget block — runs for side effects only. Logs +
-     * breadcrumbs on failure. Use for "kick this background task and
+     * Fire-and-forget block — runs for side effects only. Logs on
+     * failure. Use for "kick this background task and
      * don't wait for the result" patterns where the old code had
      * `runCatching { sideEffect() }` with no consumer.
      */
@@ -108,31 +103,11 @@ object SilentlyTry {
     }
 
     /**
-     * Public entry into the breadcrumb + log machinery, for use by
-     * existing call sites that have their own custom handler shape
-     * but still want the swallow recorded (`.onFailure { recordSwallow(...) }`).
+     * Public entry into the log machinery, for use by existing call
+     * sites that have their own custom handler shape but still want
+     * the swallow recorded (`.onFailure { recordSwallow(...) }`).
      */
     fun recordSwallow(tag: String, msg: String, t: Throwable) {
         Log.w(tag, "$msg — swallowed: ${t.javaClass.simpleName}: ${t.message}")
-        // Sentry's breadcrumb API: safe to call before init (no-op if
-        // Sentry isn't initialised, e.g. on debug builds without DSN,
-        // or in unit tests). The breadcrumb sits in the session ring
-        // buffer until either flushed to an event or evicted at 100
-        // crumbs (`SentryOptions.maxBreadcrumbs`, see SshAiApp).
-        try {
-            Sentry.addBreadcrumb(
-                Breadcrumb().apply {
-                    category = tag
-                    message = "$msg: ${t.javaClass.simpleName}: ${t.message}"
-                    level = SentryLevel.WARNING
-                    type = "error"
-                    setData("exception", t.javaClass.name)
-                }
-            )
-        } catch (_: Throwable) {
-            // Sentry's static API can throw on misconfigured builds;
-            // don't let observability infrastructure crash the
-            // observation site.
-        }
     }
 }
