@@ -107,7 +107,7 @@ object ChatIndexer {
                     SilentlyTry.loggedOrElse("SshAi-Indexer", "list sessions for indexer", emptyList<ai.eight24family.conch.agent.RemoteSession>()) {
                         if (pooled != null) {
                             // Ride the pooled client — no fresh handshake.
-                            discovery.list(agent) { cmd ->
+                            discovery.list(agent, key = "${server.id}:${agent.name}") { cmd ->
                                 SilentlyTry.logged("SshAi-Indexer", "exec list on pooled") {
                                     val sess = pooled.startSession()
                                     try {
@@ -115,7 +115,12 @@ object ChatIndexer {
                                         // happens HERE (execOnLive-style chokepoint).
                                         val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                         val out = java.io.ByteArrayOutputStream()
-                                        proc.inputStream.copyTo(out)
+                                        // Bounded read: the deadline wraps the READ, not the join after it.
+                                        ai.eight24family.conch.ssh.BoundedExec.drain(
+                                            proc, out,
+                                            deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                            maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                                        )
                                         proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                                         String(out.toByteArray(), Charsets.UTF_8)
                                     } finally { SilentlyTry.fired("SshAi-Indexer", "close list-exec session") { sess.close() } }
@@ -156,7 +161,12 @@ object ChatIndexer {
                                         try {
                                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                             val out = java.io.ByteArrayOutputStream()
-                                            proc.inputStream.copyTo(out)
+                                            // Bounded read: the deadline wraps the READ, not the join after it.
+                                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                                proc, out,
+                                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                                            )
                                             proc.join(120, java.util.concurrent.TimeUnit.SECONDS)
                                             String(out.toByteArray(), Charsets.UTF_8)
                                         } finally { SilentlyTry.fired("SshAi-Indexer", "close fetch-exec session") { sess.close() } }

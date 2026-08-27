@@ -285,14 +285,19 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
             // Discovery now rides the pooled client — fresh channel
             // per command, no extra handshake.
-            val raw = discovery.list(agent) { cmd ->
+            val raw = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                 withContext(Dispatchers.IO) {
                     SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (pool)") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                             val out = java.io.ByteArrayOutputStream()
-                            proc.inputStream.copyTo(out)
+                            // Bounded read: the deadline wraps the READ, not the join after it.
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                proc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                            )
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
                         } finally { SilentlyTry.fired("SshAi-Sessions", "close list-pool session") { sess.close() } }
@@ -362,14 +367,19 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // indicator the user needs for an auto-fired refresh.
         try {
             var execFailed = false
-            val raw = discovery.list(agent) { cmd ->
+            val raw = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (fresh)") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                             val out = java.io.ByteArrayOutputStream()
-                            proc.inputStream.copyTo(out)
+                            // Bounded read: the deadline wraps the READ, not the join after it.
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                proc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                            )
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
                         } finally { SilentlyTry.fired("SshAi-Sessions", "close list-fresh session") { sess.close() } }
@@ -410,7 +420,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // null from execOnLive means "channel + fallback both failed",
             // distinct from "ran fine, server has zero sessions".
             var execFailed = false
-            val raw = discovery.list(agent) { cmd ->
+            val raw = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                 val out = alive.execOnLive(cmd)
                 if (out == null) execFailed = true
                 out
@@ -816,7 +826,12 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val s = pooled.startSession()
             try {
                 val p = s.exec("stat -c %s -- $esc 2>/dev/null || stat -f %z -- $esc 2>/dev/null || wc -c < $esc 2>/dev/null")
-                val o = java.io.ByteArrayOutputStream(); p.inputStream.copyTo(o)
+                val o = java.io.ByteArrayOutputStream(); // Bounded read: the deadline wraps the READ, not the join after it.
+ ai.eight24family.conch.ssh.BoundedExec.drain(
+     p, o,
+     deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+     maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+ )
                 p.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 String(o.toByteArray(), Charsets.UTF_8).trim().lines().firstNotNullOfOrNull { it.trim().toLongOrNull() } ?: -1L
             } finally { SilentlyTry.fired("SshAi-Sessions", "close stat session") { s.close() } }
@@ -1090,7 +1105,12 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
                                 val p = sess.exec("tail -c +${start + 1} $q")
                                 val out = java.io.ByteArrayOutputStream()
-                                p.inputStream.copyTo(out, 64 * 1024)
+                                // Bounded read: the deadline wraps the READ, not the join after it.
+                                ai.eight24family.conch.ssh.BoundedExec.drain(
+                                    p, out,
+                                    deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.TRANSFER_MS,
+                                    maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.TRANSFER,
+                                )
                                 p.join(60, java.util.concurrent.TimeUnit.SECONDS)
                                 out.toByteArray()
                             } finally { SilentlyTry.fired("SshAi-Sessions", "close tail session") { sess.close() } }
@@ -1113,7 +1133,12 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             try {
                                 val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                                 val out = java.io.ByteArrayOutputStream()
-                                proc.inputStream.copyTo(out)
+                                // Bounded read: the deadline wraps the READ, not the join after it.
+                                ai.eight24family.conch.ssh.BoundedExec.drain(
+                                    proc, out,
+                                    deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                    maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                                )
                                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                                 String(out.toByteArray(), Charsets.UTF_8)
                             } finally { SilentlyTry.fired("SshAi-Sessions", "close prefetch session") { sess.close() } }

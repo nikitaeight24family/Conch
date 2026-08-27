@@ -383,7 +383,21 @@ for f in ~/.claude/projects/*/*.jsonl; do
   # First user message lives at the TOP of the file — bound the read to the
   # first 500 lines instead of grepping a possibly-100MB rollout end to end
   # (the listing's biggest per-file cost). 500 lines >> the first 8 user turns.
-  candidates=${'$'}(head -n 500 "${'$'}f" 2>/dev/null | grep '"type":"user"' | head -n 8 | tr '\t' ' ' | tr '\n' '\036')
+  # ⚠ AND CAP EACH CANDIDATE. The 8 records were shipped WHOLE, and a user
+  # record can be a pasted file or a tool-result blob: MEASURED on the dev server
+  # (2026-08-27, 140 sessions) the preview column alone was 7 871 379 B, one
+  # single session contributing 650 KB — to fill a 140-char subtitle. On a
+  # phone link collapsed to cwnd 1-4 (~7-40 KB/s, 1500 retransmits) that is
+  # 6+ minutes per listing, and with a refresh racing the first pass the user
+  # watched the dev server spin for 18 minutes while a second account (6 sessions, 132 605 B)
+  # finished instantly. Same server, same script — only the home dir differed.
+  # 600 BYTES, not 400: the JSON prefix before "content" measures <=163 B
+  # (p99==max over 799 real records), so 600 leaves >=437 B — comfortably more
+  # than 140 chars of Cyrillic at 2 B each — and needs no locale-correct
+  # character cut. extractSessionPreview falls back to a regex when the cut
+  # lands mid-JSON, so a truncated record still yields its text.
+  # Measured: 7.9 MB -> ~450 KB, ~17x.
+  candidates=${'$'}(head -n 500 "${'$'}f" 2>/dev/null | grep '"type":"user"' | head -n 8 | cut -b 1-600 | tr '\t' ' ' | tr '\n' '\036')
   # Claude's OWN auto-generated session title — the nice 4-6 word name shown in
   # `claude --resume`. Stored in the JSONL as {"type":"ai-title","aiTitle":"…"};
   # take the LAST one (it's regenerated/duplicated). Prepend it to the preview
@@ -457,14 +471,71 @@ done | sort -t'	' -k2 -rn | head -500
         // a warn per fragment plus an exception's cost, forever ("JSON input: "
         // with nothing after it, 2026-07-29).
         if (line.isBlank() || !line.trimStart().startsWith("{")) return ""
-        val obj = SilentlyTry.logged("SshAi-ClaudeSpec", "parse line json") { json.parseToJsonElement(line).jsonObject } ?: return ""
-        val msg = SilentlyTry.logged("SshAi-ClaudeSpec", "read message obj") { obj["message"]?.jsonObject } ?: return ""
-        val content = msg["content"] ?: return ""
+        val obj = SilentlyTry.logged("SshAi-ClaudeSpec", "parse line json") { json.parseToJsonElement(line).jsonObject }
+            ?: return textOfTruncated(line)
+        val msg = SilentlyTry.logged("SshAi-ClaudeSpec", "read message obj") { obj["message"]?.jsonObject }
+            ?: return textOfTruncated(line)
+        val content = msg["content"] ?: return textOfTruncated(line)
         return when (content) {
             is JsonPrimitive -> content.contentOrNull.orEmpty()
             is JsonArray -> firstTextFromBlocks(content)
             else -> ""
         }
+    }
+
+    /**
+     * Salvage the message text from a candidate record the listing CUT.
+     *
+     * The listing caps each candidate at 600 bytes (see listSessionsScript) —
+     * ~17x less traffic — which means the JSON usually ends mid-string and
+     * kotlinx cannot parse it. Without this, that saving would have been paid
+     * for with a blank subtitle on every row.
+     *
+     * Deliberately dumb and allocation-cheap: find the first `"text":"`
+     * (content blocks) or `"content":"` (plain-string content) and take what
+     * follows, up to an unescaped quote or to the end when the cut removed the
+     * closing quote. Only the escapes that actually occur inside a preview are
+     * decoded; a trailing backslash left by the cut is dropped rather than
+     * emitted. Callers `.take(140)`, so a partial tail is invisible.
+     */
+    private fun textOfTruncated(line: String): String {
+        for (key in arrayOf("\"text\":\"", "\"content\":\"")) {
+            var at = line.indexOf(key)
+            while (at >= 0) {
+                val from = at + key.length
+                var i = from
+                val sb = StringBuilder()
+                var closed = false
+                while (i < line.length) {
+                    val c = line[i]
+                    if (c == '\\') {
+                        // An escape at the very end means the cut ate its
+                        // partner — stop rather than guess.
+                        if (i + 1 >= line.length) break
+                        when (val e = line[i + 1]) {
+                            'n' -> sb.append('\n')
+                            't' -> sb.append('\t')
+                            'r' -> sb.append('\r')
+                            '"', '\\', '/' -> sb.append(e)
+                            // \uXXXX and anything else: skip the escape instead
+                            // of emitting garbage — this text is for reading.
+                            else -> Unit
+                        }
+                        i += 2
+                        continue
+                    }
+                    if (c == '"') { closed = true; break }
+                    sb.append(c)
+                    i++
+                }
+                val out = sb.toString().trim()
+                if (out.isNotEmpty()) return out
+                // A closed-but-empty value is a real empty field: keep looking.
+                if (!closed) break
+                at = line.indexOf(key, i)
+            }
+        }
+        return ""
     }
 
     private fun firstTextFromBlocks(arr: JsonArray): String {
@@ -543,6 +614,30 @@ case " ${'$'}CM " in
     # fallback — otherwise a fresh setup-token login probes as "login expired"
     # off the stale file while claude itself runs fine.
     [ -z "${'$'}TOK" ] && TOK="${'$'}CLAUDE_CODE_OAUTH_TOKEN"
+    # ⛔ READ THE REFRESH TOKEN AND THE EXPIRY *BEFORE* JUDGING ANYTHING.
+    #
+    # An access token lives ~8 h and the CLI renews it from the refresh
+    # token on its next run. Between those two moments the file holds a
+    # PERFECTLY NORMAL expired access token — and this probe used to take it,
+    # curl the profile, get 401, and stamp TOKEN_EXPIRED ("login expired")
+    # on an account that was fine. MEASURED on the dev server 2026-08-27: the row
+    # showed "login expired" at 19:41 while the credentials file had been
+    # refreshed at 19:40:25, expiresAt was 7.7 h in the FUTURE, the refresh
+    # token was valid until September, and a probe 90 s later wrote OK.
+    # The empty-token branch below already reasons correctly ("refresh token
+    # PRESENT => the CLI renews silently => UNKNOWN, do not block", pinned by
+    # CLAUDE-OAUTH-LIVE-TOKEN-1). The 401/403 branches never got the memo.
+    #
+    # Presence only — the VALUE is never read out, logged or emitted.
+    RTOK=${'$'}(sed -n -E 's/.*"refresh_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}CRED" 2>/dev/null | head -1)
+    # expiresAt is epoch MILLIS in the credentials file; compare in seconds.
+    EXPMS=${'$'}(sed -n -E 's/.*"expiresAt"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "${'$'}CRED" 2>/dev/null | head -1)
+    NOWS=${'$'}(date +%s)
+    # Expired access token + a refresh token that can renew it is NOT a dead
+    # login. Skip the curl too: it is a guaranteed 401 and a wasted 6 s.
+    if [ -n "${'$'}EXPMS" ] && [ -n "${'$'}RTOK" ] && [ "${'$'}{EXPMS%???}" -le "${'$'}NOWS" ]; then
+      echo "claude_run_state=UNKNOWN"; exit 0
+    fi
     if [ -z "${'$'}TOK" ]; then
       # Empty access token. This is a DEAD credential, not "logged in & ready":
       # the file can carry the claudeAiOauth KEYS with empty VALUES + expiresAt:0
@@ -554,7 +649,6 @@ case " ${'$'}CM " in
       # without consuming/rotating it (unsafe in a status probe) → UNKNOWN (don't
       # block; the turn / live-auth surfaces the truth). Previously this whole
       # branch just `exit 0`ed → no run_state → a dead session read as "ready".
-      RTOK=${'$'}(sed -n -E 's/.*"refresh_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}CRED" 2>/dev/null | head -1)
       if [ -z "${'$'}RTOK" ]; then echo "claude_run_state=TOKEN_EXPIRED"; else echo "claude_run_state=UNKNOWN"; fi
       exit 0
     fi
@@ -563,16 +657,25 @@ case " ${'$'}CM " in
     prof=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/profile" 2>/dev/null)
     PC=${'$'}(printf '%s' "${'$'}prof" | sed -n 's/^HTTP://p' | tail -1)
     PJ=${'$'}(printf '%s' "${'$'}prof" | sed '${'$'}d')
-    # profile 200 itself proves the token is live (validate is 405 on GET).
-    # 401 = auth dead. 403 needs the BODY: a `claude setup-token` login mints an
-    # INFERENCE-ONLY token (authorize URL literally has scope=user:inference), so
-    # profile/usage answer 403 permission_error "does not meet scope requirement"
-    # while the token is perfectly LIVE and turns run (verified: claude -p exit 0
-    # on exactly this state). That's OK — the subscription simply can't be
-    # pre-checked with it; the turn surfaces any problem. Any OTHER 403 = auth dead.
-    if [ "${'$'}PC" = "401" ]; then echo "claude_run_state=TOKEN_EXPIRED"; exit 0; fi
+    # profile 200 itself proves the token is live (validate is 405 on GET). 401 =
+    # THIS TOKEN is not accepted (NOT "auth dead" — see the 401 branch). 403 needs
+    # the BODY: a `claude setup-token` login mints an INFERENCE-ONLY token
+    # (authorize URL literally has scope=user:inference), so profile/usage answer
+    # 403 permission_error "does not meet scope requirement" while the token is
+    # perfectly LIVE and turns run (verified: claude -p exit 0 on exactly this
+    # state). the turn surfaces any problem. Any OTHER 403 = auth dead. 401 = THIS
+    # access token is not accepted. with a live refresh token the CLI recovers by
+    # itself, so the honest answer is "could not check" — never a block that greys
+    # out the send button.
+    if [ "${'$'}PC" = "401" ]; then
+      if [ -n "${'$'}RTOK" ]; then echo "claude_run_state=UNKNOWN"; else echo "claude_run_state=TOKEN_EXPIRED"; fi
+      exit 0
+    fi
     if [ "${'$'}PC" = "403" ]; then
-      if printf '%s' "${'$'}PJ" | grep -qE 'permission_error|scope requirement'; then echo "claude_run_state=OK"; else echo "claude_run_state=TOKEN_EXPIRED"; fi
+      if printf '%s' "${'$'}PJ" | grep -qE 'permission_error|scope requirement'; then echo "claude_run_state=OK"
+      # Same rule as 401: refreshable => "could not check", not "logged out".
+      elif [ -n "${'$'}RTOK" ]; then echo "claude_run_state=UNKNOWN"
+      else echo "claude_run_state=TOKEN_EXPIRED"; fi
       exit 0
     fi
     if [ "${'$'}PC" != "200" ]; then echo "claude_run_state=UNKNOWN"; exit 0; fi

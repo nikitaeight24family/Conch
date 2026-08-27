@@ -323,7 +323,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
             .filter { it.value.installed && it.value.loggedIn }.keys
         for (agent in agents) {
             val rawList = SilentlyTry.logged(TAG, "periodic list ${server.name}/${agent.name}") {
-                discovery.list(agent, exec)
+                discovery.list(agent, key = "${server.id}:${agent.name}", exec = exec)
             } ?: continue
             if (rawList.isEmpty()) continue
             historyCache.recordOwners(server.id, agent, rawList)
@@ -406,7 +406,12 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
                 val bytes = try {
                     val proc = sess.exec("tail -c +${remoteOff + 1} $q")
                     val out = java.io.ByteArrayOutputStream()
-                    proc.inputStream.copyTo(out, 64 * 1024)
+                    // Bounded read: the deadline wraps the READ, not the join after it.
+                    ai.eight24family.conch.ssh.BoundedExec.drain(
+                        proc, out,
+                        deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.TRANSFER_MS,
+                        maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.TRANSFER,
+                    )
                     proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                     out.toByteArray()
                 } finally {
@@ -453,7 +458,12 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
             try {
                 val proc = sess.exec("tail -c +${start + 1} $q")
                 val out = java.io.ByteArrayOutputStream()
-                proc.inputStream.copyTo(out, 64 * 1024)
+                // Bounded read: the deadline wraps the READ, not the join after it.
+                ai.eight24family.conch.ssh.BoundedExec.drain(
+                    proc, out,
+                    deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.TRANSFER_MS,
+                    maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.TRANSFER,
+                )
                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                 out.toByteArray()
             } finally {
@@ -648,7 +658,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
         val pooledExec: suspend (String) -> String? = buildPooledExec(pooledClient)
         val viaPool = " (via pooled SSH)"
 
-        val rawList = discovery.list(agent, pooledExec)
+        val rawList = discovery.list(agent, key = "${server.id}:${agent.name}", exec = pooledExec)
         // Record the durable owner for EVERY discovered session — including the
         // preview-blank ones dropped from the SessionsCache list below. A search
         // hit can land on any cached session (its body has searchable text even
@@ -818,7 +828,12 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
                 // sweep read "no sessions" with no error anywhere.
                 val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                 val out = java.io.ByteArrayOutputStream()
-                proc.inputStream.copyTo(out)
+                // Bounded read: the deadline wraps the READ, not the join after it.
+                ai.eight24family.conch.ssh.BoundedExec.drain(
+                    proc, out,
+                    deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                    maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                )
                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                 String(out.toByteArray(), Charsets.UTF_8)
             } finally { SilentlyTry.fired("SshAi-Prefetch", "close exec session") { sess.close() } }

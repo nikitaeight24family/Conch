@@ -96,7 +96,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.4.1"
+        val baseVersionName = "0.4.2"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

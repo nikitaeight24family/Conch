@@ -168,7 +168,7 @@ private val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("security", "Security", Icons.Filled.Lock,
         "SSH keys, lock-screen visibility"),
     SettingsCategory("privacy", "Privacy & data", Icons.Filled.Shield,
-        "Crash reporting, delete all data"),
+        "What is collected, and deleting it all"),
     SettingsCategory("about", "About", Icons.Filled.Info,
         "Version, licenses, privacy policy"),
 )

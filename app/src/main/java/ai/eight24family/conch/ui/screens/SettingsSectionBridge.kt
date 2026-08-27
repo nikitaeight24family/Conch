@@ -2,7 +2,6 @@ package ai.eight24family.conch.ui.screens
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -32,12 +31,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import ai.eight24family.conch.diagnostics.ShizukuShell
+import ai.eight24family.conch.diagnostics.ShizukuStage
+import ai.eight24family.conch.diagnostics.ShizukuWatch
+import ai.eight24family.conch.diagnostics.openShizukuApp
+import ai.eight24family.conch.diagnostics.shizukuStage
 import ai.eight24family.conch.ui.viewmodel.SettingsViewModel
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-private enum class BridgeStage { NotInstalled, NotRunning, NotGranted, Ready }
 
 /**
  * "Phone bridge (Shizuku)" — a state-aware, step-by-step guide that gets
@@ -53,12 +54,10 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    fun detect(): BridgeStage = when {
-        ShizukuShell.available() -> BridgeStage.Ready
-        ShizukuShell.bound() -> BridgeStage.NotGranted
-        ShizukuShell.installed(ctx) -> BridgeStage.NotRunning
-        else -> BridgeStage.NotInstalled
-    }
+    // One shared verdict (diagnostics/ShizukuReadiness) — the chat send gate
+    // reads the SAME function, so this screen and the block dialog can never
+    // disagree about whether the phone can run anything.
+    fun detect(): ShizukuStage = shizukuStage(ctx)
 
     var stage by remember { mutableStateOf(detect()) }
     var requesting by remember { mutableStateOf(false) }
@@ -68,7 +67,12 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
     // returns. Frozen while the consent dialog is up to avoid flicker.
     LaunchedEffect(Unit) {
         while (true) {
-            if (!requesting) stage = detect()
+            if (!requesting) {
+                stage = detect()
+                // Publish the same reading to the app-wide watch so the chat
+                // glyph / send gate can't lag behind what this screen shows.
+                ShizukuWatch.refresh()
+            }
             delay(1500)
         }
     }
@@ -84,15 +88,15 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
         )
 
         when (stage) {
-            BridgeStage.NotInstalled -> Step(1, "Install Shizuku",
+            ShizukuStage.NotInstalled -> Step(1, "Install Shizuku",
                 "A free, open-source helper that grants adb-shell rights on-device — no PC, no root.") {
-                OutlinedButton(onClick = { openShizuku(ctx) }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = { openShizukuApp(ctx) }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
                     Text("Install Shizuku")
                 }
             }
 
-            BridgeStage.NotRunning -> Step(2, "Start Shizuku",
+            ShizukuStage.NotRunning -> Step(2, "Start Shizuku",
                 "Wireless debugging — no PC. (Has to be redone after each reboot.)") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -101,7 +105,7 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
                     OutlinedButton(onClick = { openWirelessDebugging(ctx) }, modifier = Modifier.weight(1f)) {
                         Text("Wireless debugging")
                     }
-                    Button(onClick = { openShizuku(ctx) }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = { openShizukuApp(ctx) }, modifier = Modifier.weight(1f)) {
                         Text("Open Shizuku")
                     }
                 }
@@ -114,13 +118,13 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
                 )
             }
 
-            BridgeStage.NotGranted -> Step(3, "Allow Conch",
+            ShizukuStage.NotGranted -> Step(3, "Allow Conch",
                 "Shizuku is running — grant Conch access. One tap.") {
                 Button(
                     onClick = {
                         scope.launch {
                             requesting = true
-                            if (ShizukuShell.requestPermission()) stage = BridgeStage.Ready
+                            if (ShizukuShell.requestPermission()) stage = ShizukuStage.Ready
                             requesting = false
                         }
                     },
@@ -132,7 +136,7 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
                 }
             }
 
-            BridgeStage.Ready -> Step(null, "Ready ✓",
+            ShizukuStage.Ready -> Step(null, "Ready ✓",
                 "The agent can now read logs and run shell commands on this phone.",
                 icon = Icons.Filled.CheckCircle) {
                 Text(
@@ -160,22 +164,6 @@ private fun Step(
         subtitle = subtitle,
     )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
-}
-
-private fun openShizuku(ctx: Context) {
-    val launch = ctx.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-    if (launch != null) {
-        SilentlyTry.fired("SshAi-Settings", "open shizuku app") { ctx.startActivity(launch) }
-        return
-    }
-    SilentlyTry.fired("SshAi-Settings", "open shizuku play page") {
-        ctx.startActivity(
-            Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"),
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-    }
 }
 
 /**

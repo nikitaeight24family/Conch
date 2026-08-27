@@ -247,7 +247,24 @@ internal class ChatViewModelHaptics(
         if (lastTurnEndMs?.let { now - it < turnEndDebounceMs } == true) return
         announcedThisTurn = true
         lastTurnEndMs = now
-        perform(if (pendingBackground()) SshAiHaptic.TurnPausedBg else SshAiHaptic.TurnEnd)
+        val intent = if (pendingBackground()) SshAiHaptic.TurnPausedBg else SshAiHaptic.TurnEnd
+        // ⛔ THE ONE EVENT THE USER FEELS, AND IT USED TO LOG NOTHING.
+        //
+        // "It buzzed three times and there was no answer" (user,
+        // 2026-08-27) was UNDIAGNOSABLE: this class had zero Log calls,
+        // and the phone logcat buffer holds about thirty seconds. The
+        // whole event had to be reconstructed from the server rollout.
+        // Whatever else is true, the reason a buzz fired must be on the
+        // record: which turn, how long it ran, and whether the app was
+        // sure the turn had ended or only guessed from the state edge.
+        android.util.Log.i(
+            "SshAi-TurnLife",
+            "turn-end buzz: intent=$intent ranForMs=" +
+                (workingSinceMs?.let { now - it } ?: -1L) +
+                " wasWorking=$wasWorking sinceWorkingEndedMs=" +
+                (workingUntilMs?.let { now - it } ?: -1L),
+        )
+        perform(intent)
     }
 
     private fun onWorking(working: Boolean) {

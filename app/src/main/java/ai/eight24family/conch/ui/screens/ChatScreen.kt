@@ -125,6 +125,7 @@ fun ChatScreen(
     val bridgeStep by vm.bridgeStep.collectAsState()
     val bridgeLog by vm.bridgeLog.collectAsState()
     val bridgeUpdateNotice by vm.bridgeUpdateNotice.collectAsState()
+    val shizukuBlock by vm.shizukuBlock.collectAsState()
     val attachmentNotice by vm.attachmentNotice.collectAsState()
     val chatNotice by vm.chatNotice.collectAsState()
     var costWarning by remember {
@@ -275,6 +276,69 @@ fun ChatScreen(
                     androidx.compose.material3.TextButton(onClick = { vm.dismissBridge() }) {
                         androidx.compose.material3.Text("Cancel")
                     }
+                }
+            },
+        )
+    }
+
+    // SHIZUKU IS BROKEN AND THIS CHAT DRIVES THE PHONE → the send was refused
+    // and the user is told, with the one button that fixes it. Before this, a
+    // dead Shizuku was visible only as a dim glyph: the message went to the
+    // agent, the agent believed the phone was attached, and the whole turn was
+    // spent failing `conch-bridge` calls (user, 2026-08-27).
+    shizukuBlock?.let { stage ->
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        // Re-read while the dialog is up. Coming back from the Shizuku app
+        // fires no binder event when nothing changed, and once it IS fixed the
+        // held message goes out on its own — the user already pressed send.
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            while (true) {
+                kotlinx.coroutines.delay(1_500)
+                vm.recheckShizukuAndMaybeSend()
+            }
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                input = vm.takeHeldShizukuText() ?: input
+                vm.dismissShizukuBlock()
+            },
+            title = { androidx.compose.material3.Text(stage.blockTitle) },
+            text = {
+                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
+                    androidx.compose.material3.Text(stage.blockBody)
+                    androidx.compose.material3.Text(
+                        "Your message is kept — it goes out by itself as soon as Shizuku works.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        if (stage == ai.eight24family.conch.diagnostics.ShizukuStage.NotGranted) {
+                            // One tap, no trip to another app.
+                            vm.grantShizukuAndMaybeSend()
+                        } else {
+                            ai.eight24family.conch.diagnostics.openShizukuApp(ctx)
+                        }
+                    },
+                ) { androidx.compose.material3.Text(stage.blockAction) }
+            },
+            dismissButton = {
+                androidx.compose.foundation.layout.Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)) {
+                    // The question may not need the phone at all.
+                    androidx.compose.material3.TextButton(onClick = { vm.sendDespiteShizuku() }) {
+                        androidx.compose.material3.Text("Send anyway")
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            // Give the message back — it was taken out of the
+                            // composer by a send that never happened.
+                            input = vm.takeHeldShizukuText() ?: input
+                            vm.dismissShizukuBlock()
+                        },
+                    ) { androidx.compose.material3.Text("Cancel") }
                 }
             },
         )
@@ -689,6 +753,10 @@ fun ChatScreen(
                             if (warn != null) {
                                 costWarning = warn
                             } else {
+                                // A send into a phone-wired chat with Shizuku
+                                // down is refused inside send() and the text is
+                                // HELD there — Cancel on that dialog puts it
+                                // back in the composer, so clearing here is safe.
                                 vm.send(cmd); input = ""; vm.clearInputDraft()
                             }
                         }

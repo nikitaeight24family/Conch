@@ -20,6 +20,12 @@ class SshAiApp : Application() {
         ai.eight24family.conch.util.AppForeground.install(this)
         // Connectivity signal — drives "no internet, message queued".
         ai.eight24family.conch.util.NetworkCost.install(this)
+        // Shizuku readiness, PUSH-based (Shizuku's own addBinderDeadListener /
+        // addBinderReceivedListenerSticky). A service killed by the OEM skin —
+        // ColorOS does this in the background — has to stop looking like
+        // "phone connected" the moment it dies, not one poll later: that gap is
+        // how a whole turn got spent on a phone that could not run anything.
+        ai.eight24family.conch.diagnostics.ShizukuWatch.start(this)
         ServiceLocator.init(this)
         // Warm the usage/limit cache from disk early so the bar shows the
         // last-known limit the INSTANT a chat opens — before the live fetch

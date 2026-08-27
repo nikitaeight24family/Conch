@@ -336,7 +336,12 @@ internal class AgentPickerViewModelRefresh(
                         try {
                             val proc = sess.exec(cmd)
                             val out = java.io.ByteArrayOutputStream()
-                            proc.inputStream.copyTo(out)
+                            // Bounded read: the deadline wraps the READ, not the join after it.
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                proc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                            )
                             proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
                         } finally { SilentlyTry.fired("SshAi-AgentPicker", "close pool probe session") { sess.close() } }
@@ -422,7 +427,12 @@ internal class AgentPickerViewModelRefresh(
                         try {
                             val proc = sess.exec(cmd)
                             val out = java.io.ByteArrayOutputStream()
-                            proc.inputStream.copyTo(out)
+                            // Bounded read: the deadline wraps the READ, not the join after it.
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                proc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                            )
                             proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
                         } finally { SilentlyTry.fired(tag, "close quiet reprobe session") { sess.close() } }
@@ -631,7 +641,12 @@ internal class AgentPickerViewModelRefresh(
                         try {
                             val cmdProc = sess.exec(cmd)
                             val out = java.io.ByteArrayOutputStream()
-                            cmdProc.inputStream.copyTo(out)
+                            // Bounded read: the deadline wraps the READ, not the join after it.
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                cmdProc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                            )
                             cmdProc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
                         } finally { SilentlyTry.fired("SshAi-AgentPicker", "close post-connect probe session") { sess.close() } }

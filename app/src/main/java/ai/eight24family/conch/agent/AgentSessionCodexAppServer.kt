@@ -121,6 +121,12 @@ internal class AgentSessionCodexAppServer(
     @Volatile private var turnReasoning = 0L
     @Volatile private var turnDurationMs: Long? = null
 
+    /** The text of the turn currently in flight, kept so an interrupt that
+     *  landed before codex took the prompt can hand it back instead of losing
+     *  it. Cleared in runTurn's `finally` — a stale copy must never be
+     *  redelivered on a LATER turn's abort. */
+    @Volatile private var lastPromptText: String? = null
+
     // Last model/effort we echoed, so a mid-chat picker change surfaces a one-
     // line note (parity with Claude's live-effort display) instead of changing
     // silently — effort/model ARE sent per-turn but were invisible (roadmap #7).
@@ -163,6 +169,9 @@ internal class AgentSessionCodexAppServer(
                 history.emitMsg(CodexMessageParser.note("effort · $curEffort", tone = AgentMessage.EventNote.Tone.INFO))
             lastEchoModel = curModel ?: lastEchoModel
             lastEchoEffort = curEffort ?: lastEchoEffort
+            // Hold the prompt for the duration of the turn — see the
+            // interrupted-with-no-tokens branch in the turn/completed handler.
+            lastPromptText = text
             val turnReqId = reqCounter.incrementAndGet()
             val resp = rpc(
                 turnReqId,
@@ -213,6 +222,7 @@ internal class AgentSessionCodexAppServer(
         } finally {
             turnDone = null
             activeTurnId = null
+            lastPromptText = null
             sshLifecycle.userCancelled = false
             onThinkingTokens(null)
             history.flushStreamingBuffer()
@@ -283,6 +293,25 @@ internal class AgentSessionCodexAppServer(
     private suspend fun ensureReady(): Boolean {
         val authPrep = getAuthPrep()
         if (procAlive && launchedAuthPrep == authPrep && threadId != null) return true
+        // ⛔ A COLD START IS NOT "THE AGENT IS THINKING".
+        //
+        // Launching app-server and resuming a thread takes real time, and
+        // until it finishes codex has not even RECEIVED the prompt.
+        // MEASURED in the user rollout (2026-08-27): the gap between
+        // task_started and the prompt being recorded was +7.85 s on the
+        // first turn of a resumed thread, against +0.04..0.36 s once warm.
+        // On screen those seconds were an ordinary working spinner, which
+        // is exactly how long a person waits before pressing Stop — and a
+        // Stop inside this window used to eat the message (see the
+        // interrupted-with-no-tokens branch in the turn/completed handler).
+        // One honest row costs nothing and names the wait.
+        history.emitMsg(
+            CodexMessageParser.note(
+                if (getResumeId() != null) "starting codex · resuming session"
+                else "starting codex",
+                tone = AgentMessage.EventNote.Tone.INFO,
+            ),
+        )
         if (procAlive) android.util.Log.d(tag, "auth prep changed → restarting app-server")
         teardownProcess()
 
@@ -450,6 +479,47 @@ internal class AgentSessionCodexAppServer(
                 val turn = SilentlyTry.logged(tag, "turn obj") { params["turn"]?.jsonObject }
                 val status = turn?.str("status").orEmpty()
                 turnDurationMs = turn?.str("durationMs")?.toLongOrNull()
+                // ⛔ AN INTERRUPT THAT LANDED BEFORE THE MODEL RAN = THE PROMPT
+                // NEVER EXISTED ANYWHERE, AND WE ARE THE ONLY ONES WHO HAVE IT.
+                //
+                // MEASURED in the user's own rollout (2026-08-27, codex thread
+                // 01a03e35): `task_started` at 21:35:44.969, then straight to
+                // `turn_aborted reason=interrupted` at 21:35:51.190 — 6.2 s, and
+                // NO user_message record for that turn at all. Five
+                // `task_started` against four `user_message` in the file: one
+                // prompt is simply missing. Cold start costs 6-8 s before codex
+                // records the prompt (measured: +7.85 s on the first turn of a
+                // resumed thread, +0.04..0.36 s once warm), which is exactly how
+                // long a person waits on a silent spinner before hitting Stop.
+                //
+                // runTurn's "reconnect, don't re-send" reasoning ("the
+                // app-server acked turn/start, so it HAS the prompt, recoverable
+                // by resume") does not hold here — the rollout proves it never
+                // persisted it. Zero token accounting is the discriminator: a
+                // real mid-answer Stop always has tokens; this has none.
+                //
+                // Hands it to the SAME undelivered path a dead transport uses,
+                // which the VM turns back into the user's words (draft / retry).
+                // NOT a re-send: auto-redelivery into a live turn is what
+                // produced duplicate prompts once already (see the turnSeq
+                // generation-fence note, 2026-07-31).
+                if (status == "interrupted" && turnIn == 0L && turnOut == 0L) {
+                    val lost = lastPromptText
+                    android.util.Log.w(
+                        tag,
+                        "turn interrupted with no token usage — codex never took the prompt " +
+                            "(${lost?.length ?: 0}B); handing it back instead of losing it",
+                    )
+                    if (!lost.isNullOrBlank()) {
+                        onPromptUndelivered(lost)
+                        history.emitMsg(
+                            CodexMessageParser.note(
+                                "prompt not delivered — stopped before codex received it",
+                                tone = AgentMessage.EventNote.Tone.WARN,
+                            ),
+                        )
+                    }
+                }
                 if (status == "failed") {
                     val errMsg = SilentlyTry.logged(tag, "turn error") {
                         turn?.get("error")?.jsonObject?.str("message")
