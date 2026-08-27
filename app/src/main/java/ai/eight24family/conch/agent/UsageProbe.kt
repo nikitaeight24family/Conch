@@ -480,6 +480,12 @@ object UsageProbe {
             Agent.CLAUDE -> if (fast) return cached(serverId, agent) else CLAUDE_USAGE_CMD
             Agent.CODEX -> if (fast) CODEX_FAST_CMD else CODEX_LIVE_CMD
             Agent.GEMINI -> return null // no machine-readable quota
+            // Grok bills in grok.com credits (weekly/monthly windows live
+            // behind its billing endpoint / ACP x.ai/session/usage — a
+            // follow-up); Copilot bills in AI credits, surfaced per-turn from
+            // the stream's assistant.usage events. Neither has a plan-window
+            // probe yet → the panel shows this chat's spend instead.
+            Agent.GROK, Agent.COPILOT -> return null
         }
         val out = execOnServer(serverId, cmd)?.takeIf { it.isNotBlank() } ?: return null
         // The server answered and said "no credentials": this is a real logout,
@@ -492,7 +498,7 @@ object UsageProbe {
         val windows = when (agent) {
             Agent.CLAUDE -> parseClaude(out)
             Agent.CODEX -> parseCodex(out)
-            Agent.GEMINI -> emptyList()
+            Agent.GEMINI, Agent.GROK, Agent.COPILOT -> emptyList()
         }
         val raw = if (windows.isEmpty()) null else UsageReport(
             windows = windows,

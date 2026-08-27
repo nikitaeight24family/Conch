@@ -3,8 +3,8 @@ package ai.eight24family.conch.agent
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 
 /**
- * Identifier for one of the three CLIs we drive: Claude Code, OpenAI Codex,
- * Google Gemini.
+ * Identifier for one of the five CLIs we drive: Claude Code, OpenAI Codex,
+ * Google Gemini, xAI Grok Build, GitHub Copilot CLI.
  *
  * **Per-CLI behavior lives in [ai.eight24family.conch.agent.spec.AgentCliSpec]
  * implementations** (one in each `agent.<cli>` sub-package). This enum
@@ -25,6 +25,8 @@ enum class Agent {
     CLAUDE,
     CODEX,
     GEMINI,
+    GROK,
+    COPILOT,
     ;
 
     /** Human-readable name shown in pickers. Delegates to spec. */

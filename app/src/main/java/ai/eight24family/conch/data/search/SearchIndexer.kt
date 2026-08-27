@@ -449,6 +449,17 @@ class SearchIndexer(
         dup.get(head)
         val s = String(head, Charsets.UTF_8)
         return when {
+            // Grok updates.jsonl: ACP session/update records — no top-level
+            // "type" at all, so this can't shadow anyone.
+            s.contains("\"method\":\"session/update\"") ||
+                s.contains("\"method\":\"_x.ai/session/update\"") ||
+                s.contains("\"sessionUpdate\":\"") -> Agent.GROK
+            // Copilot events.jsonl: namespaced dotted types — checked BEFORE
+            // Claude's broad `"type":"user"`+`"message"` net.
+            s.contains("\"type\":\"session.start\"") ||
+                s.contains("\"type\":\"user.message\"") ||
+                s.contains("\"type\":\"assistant.message\"") ||
+                s.contains("\"type\":\"session.mcp_servers_loaded\"") -> Agent.COPILOT
             s.contains("\"type\":\"thread.started\"") ||
                 s.contains("\"type\":\"turn.started\"") ||
                 s.contains("\"type\":\"turn.completed\"") ||

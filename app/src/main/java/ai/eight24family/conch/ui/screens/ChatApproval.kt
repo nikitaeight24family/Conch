@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoFixHigh
@@ -56,6 +57,17 @@ internal fun ApprovalShield(
      *  would quietly run in some other mode would be a lie, so the row appears
      *  only where the wire word exists. */
     planSupported: Boolean = false,
+    /**
+     * What the flag audit found for THIS server + agent, or null when it has
+     * not run. Drives the footer line and the per-row "rejected" marking.
+     *
+     * The modes are labels over CLI flags, and the flags drift: a mode can stop
+     * meaning what its name says without anything on screen changing. So the
+     * sheet states what was actually verified, against which version, and
+     * marks any mode the installed binary refuses. Unknown is shown as unknown
+     * — never as verified.
+     */
+    flagAudit: ai.eight24family.conch.agent.CliFlagAudit.Report? = null,
 ) {
     val cyan = MaterialTheme.colorScheme.primary
     val tertiary = MaterialTheme.colorScheme.tertiary
@@ -80,6 +92,8 @@ internal fun ApprovalShield(
             if (planSupported) {
                 ApprovalRow(
                     mode = AgentApprovalMode.PLAN,
+                    rejectedByCli = flagAudit?.modes
+                        ?.firstOrNull { it.mode == AgentApprovalMode.PLAN }?.accepted == false,
                     title = "plan",
                     subtitle = "research only · nothing changes until you accept the plan",
                     icon = Icons.Outlined.Map,
@@ -89,6 +103,8 @@ internal fun ApprovalShield(
             }
             ApprovalRow(
                 mode = AgentApprovalMode.SAFE,
+                rejectedByCli = flagAudit?.modes
+                    ?.firstOrNull { it.mode == AgentApprovalMode.SAFE }?.accepted == false,
                 title = "safe",
                 subtitle = "CLI defaults · tool writes may stall in headless",
                 icon = Icons.Outlined.Shield,
@@ -97,6 +113,8 @@ internal fun ApprovalShield(
             )
             ApprovalRow(
                 mode = AgentApprovalMode.AUTO,
+                rejectedByCli = flagAudit?.modes
+                    ?.firstOrNull { it.mode == AgentApprovalMode.AUTO }?.accepted == false,
                 title = "auto",
                 subtitle = "auto-approve edits · escalate on failure",
                 icon = Icons.Filled.Shield,
@@ -105,12 +123,34 @@ internal fun ApprovalShield(
             )
             ApprovalRow(
                 mode = AgentApprovalMode.YOLO,
+                rejectedByCli = flagAudit?.modes
+                    ?.firstOrNull { it.mode == AgentApprovalMode.YOLO }?.accepted == false,
                 title = "yolo",
                 subtitle = "bypass sandbox · no approvals · trusted hosts only",
                 icon = Icons.Filled.Bolt,
                 selected = mode == AgentApprovalMode.YOLO,
                 onPick = onPick,
             )
+            // WHAT WAS ACTUALLY VERIFIED, AND AGAINST WHAT.
+            //
+            // These four rows are labels over CLI flags the app hardcodes, and
+            // the flags drift — asked in public 2026-08-27, and an audit found
+            // the drift had already happened: codex 0.149.1 rejected the SAFE
+            // and AUTO invocations while YOLO still worked. A mode's name is
+            // not evidence, so the sheet prints the evidence: the version the
+            // mapping was replayed against, the version installed now, and any
+            // mode the binary currently refuses. Blank when never audited —
+            // "unknown" is a legitimate answer, "verified" is not.
+            flagAudit?.let { audit ->
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                Text(
+                    audit.summary(),
+                    color = if (audit.rejected.isNotEmpty()) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
             // Sends a per-CLI prompt that asks the agent to relax its own
             // approval config (claude → settings.json, codex → config.toml,
@@ -163,10 +203,11 @@ internal fun ApprovalShield(
             text = {
                 Text(
                     "This tells the agent to rewrite its OWN approval config on the server " +
-                        "(claude settings.json · codex config.toml · gemini settings.json) so it " +
-                        "stops asking for approval — permanently, for every future turn in this " +
-                        "CLI, not just now — then resume the current task. Only do this on a host " +
-                        "you trust.",
+                        "(claude settings.json · codex config.toml · gemini settings.json · " +
+                        "grok config.toml; Copilot has no such config — its agent explains " +
+                        "the shield toggle instead) so it stops asking for approval — " +
+                        "permanently, for every future turn in this CLI, not just now — then " +
+                        "resume the current task. Only do this on a host you trust.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             },
@@ -193,6 +234,11 @@ private fun ApprovalRow(
     icon: ImageVector,
     selected: Boolean,
     onPick: (AgentApprovalMode) -> Unit,
+    /** The installed CLI rejected this mode's flags when the audit replayed
+     *  them. Shown, not hidden: the mode is still selectable (the audit can be
+     *  stale, and a CLI can accept what its --help never mentions), but the row
+     *  says plainly that this one does not currently parse. */
+    rejectedByCli: Boolean = false,
 ) {
     val cyan = MaterialTheme.colorScheme.primary
     val tertiary = MaterialTheme.colorScheme.tertiary
@@ -225,7 +271,7 @@ private fun ApprovalRow(
                     }
                 }
                 Text(
-                    subtitle,
+                    if (rejectedByCli) "⚠ rejected by the installed CLI · $subtitle" else subtitle,
                     color = outline,
                     style = MaterialTheme.typography.labelSmall,
                 )

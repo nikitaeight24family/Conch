@@ -48,8 +48,21 @@ internal class AgentPickerViewModelInstall(
      * [AgentPickerViewModelOAuth.startOAuthLogin] installs the CLI then logs
      * in). Delegates to the manager's suspend runner.
      */
-    suspend fun doInstall(agent: Agent, forceLatest: Boolean) {
-        AgentInstallManager.runAndWait(serverId, agent, buildInstallScript(agent, forceLatest), forceLatest)
+    suspend fun doInstall(
+        agent: Agent,
+        forceLatest: Boolean,
+        /**
+         * Reinstall even though the binary is already on PATH, WITHOUT moving
+         * to a newer version. The repair path needs exactly this: the old
+         * `forceLatest = true` was the only way to skip the
+         * already-installed fast path, so a repair silently doubled as an
+         * upgrade — and an upgrade can change what SAFE/AUTO/YOLO grant
+         * (see the pin comment in [buildInstallScript]).
+         */
+        forceReinstall: Boolean = false,
+    ) {
+        val script = buildInstallScript(agent, forceLatest, forceReinstall)
+        AgentInstallManager.runAndWait(serverId, agent, script, forceLatest || forceReinstall)
     }
 
     /**
@@ -153,7 +166,11 @@ internal class AgentPickerViewModelInstall(
      *   4. Probe — if found, exit 0. If not, also try `sudo npm` as
      *      a last-ditch retry for system-wide install.
      */
-    private fun buildInstallScript(agent: Agent, forceLatest: Boolean = false): String {
+    private fun buildInstallScript(
+        agent: Agent,
+        forceLatest: Boolean = false,
+        forceReinstall: Boolean = false,
+    ): String {
         val pkg = agent.npmPackage
         val bin = agent.cliCommand
         val isClaude = agent == Agent.CLAUDE
@@ -161,11 +178,31 @@ internal class AgentPickerViewModelInstall(
         // version instead of returning whatever's cached locally. Used
         // for update flow (existing version present, newer version
         // wanted).
-        val npmTarget = if (forceLatest) "$pkg@latest" else pkg
+        // ⛔ PIN, don't reach for whatever @latest happens to be.
+        //
+        // A fresh install lands on the version whose mode flags were actually
+        // replayed through the CLI's parser (spec/CliContract). Asked in public
+        // 2026-08-27: "an app that auto-installs the CLIs could quietly change
+        // the permissions a mode grants after an update" — and an audit of the
+        // installed binaries found exactly that had already happened: at codex
+        // 0.149.1 the SAFE and AUTO invocations were rejected at parse time
+        // while YOLO still worked.
+        //
+        // `forceLatest` is the explicit "Update" tap and still goes to @latest:
+        // the user asked for the newest, and the flag audit re-runs afterwards
+        // so an unverified version cannot pass for a verified one.
+        val pinned = ai.eight24family.conch.agent.spec.CliContracts[agent]?.pinnedVersion
+        val npmTarget = when {
+            forceLatest -> "$pkg@latest"
+            pinned != null -> "$pkg@$pinned"
+            else -> pkg
+        }
         // Update flow skips the "already installed → exit 0" fast path
         // — that fast-path was THE bug that made `[ update ]` taps
         // silently no-op when the binary was already on PATH.
-        val skipEarlyExit = forceLatest
+        // Reinstalling a BROKEN install has to get past the
+        // already-on-PATH fast path too, not just an update.
+        val skipEarlyExit = forceLatest || forceReinstall
         return """
             set +e
             export DEBIAN_FRONTEND=noninteractive

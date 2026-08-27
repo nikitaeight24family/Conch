@@ -712,7 +712,11 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // force=true: this fires as the login COMPLETES (creds written), so it
         // must bypass the "skip refresh during login" gate in refreshCoord.
         refresh = { user -> refreshCoord.refresh(user, force = true) },
-        doInstall = { agent, force -> installCoord.doInstall(agent, force) },
+        // The repair path passes forceLatest=false and asks for a
+        // REINSTALL of the pinned version — never a silent upgrade.
+        doInstall = { agent, force ->
+            installCoord.doInstall(agent, forceLatest = force, forceReinstall = !force)
+        },
         shellEscape = ::shellEscape,
         onLoginSuccess = ::onLoginSuccess,
     )

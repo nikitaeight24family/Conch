@@ -129,9 +129,7 @@ class ServersViewModel : ViewModel() {
         // Belt-and-suspenders: any AgentSession not yet migrated to the pool.
         for (info in mgr.active.value) {
             if (info.serverId in ids) continue
-            val alive = mgr.findAnyAlive(info.serverId, Agent.CLAUDE)
-                ?: mgr.findAnyAlive(info.serverId, Agent.CODEX)
-                ?: mgr.findAnyAlive(info.serverId, Agent.GEMINI)
+            val alive = Agent.entries.firstNotNullOfOrNull { mgr.findAnyAlive(info.serverId, it) }
             if (alive != null) ids += info.serverId
         }
         return ids

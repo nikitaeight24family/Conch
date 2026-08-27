@@ -176,9 +176,9 @@ internal class AgentPickerViewModelRefresh(
                         if (runProbeViaPooledClient(pooled)) return@launch
                         android.util.Log.d("SshAi-AgentPicker", "  pooled probe failed — falling back to touch flow")
                     }
-                    val alive = ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CLAUDE)
-                        ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CODEX)
-                        ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.GEMINI)
+                    val alive = Agent.entries.firstNotNullOfOrNull {
+                        ServiceLocator.agentSessions.findAnyAlive(serverId, it)
+                    }
                     if (alive != null) {
                         if (runProbeViaAliveSession(alive)) return@launch
                         android.util.Log.d("SshAi-AgentPicker", "  alive-session probe failed — falling back to touch flow")
@@ -415,9 +415,9 @@ internal class AgentPickerViewModelRefresh(
         val tag = "SshAi-AgentPicker"
         val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
         val alive = if (pooled == null) {
-            ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CLAUDE)
-                ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.CODEX)
-                ?: ServiceLocator.agentSessions.findAnyAlive(serverId, Agent.GEMINI)
+            Agent.entries.firstNotNullOfOrNull {
+                ServiceLocator.agentSessions.findAnyAlive(serverId, it)
+            }
         } else null
         val execLambda: (suspend (String) -> String?)? = when {
             pooled != null -> { cmd ->

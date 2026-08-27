@@ -70,6 +70,23 @@ object ClaudeSpec : AgentCliSpec {
 
     override val supportsControlProtocol = true
 
+    /** Claude has the real `--permission-mode plan`. */
+    override val supportsPlanMode = true
+
+    /** Claude Code's OWN TUI flair — the sparkle cycle + gerund vocabulary.
+     * Lives HERE (not in ChatStatusRows) so no other agent can inherit the
+     * look by accident. */
+    override val spinnerGlyphs: List<String> =
+        listOf("✶", "✻", "✽", "✢", "·", "✢", "✽", "✻")
+
+    override val spinnerVerbs: List<String> = listOf(
+        "Working", "Thinking", "Pondering", "Brewing", "Conjuring", "Crafting",
+        "Computing", "Synthesizing", "Cogitating", "Ruminating", "Noodling",
+        "Percolating", "Marinating", "Simmering", "Mulling", "Imagining",
+        "Ideating", "Inferring", "Forging", "Generating", "Improvising",
+        "Tinkering", "Vibing", "Herding", "Manifesting", "Processing",
+    )
+
     /** The catalog comes from the `initialize` handshake — the CLI's own
      *  registry, complete by construction. */
     override val catalogIsAuthoritative = true

@@ -4,15 +4,15 @@
 
 <p align="center">
   <a href="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml"><img src="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
-  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.4.3-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
+  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.4.4-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
   <a href="https://play.google.com/store/apps/details?id=ai.eight24family.conch"><img src="https://img.shields.io/badge/Google%20Play-live-a78bfa?style=flat-square&logo=google-play&logoColor=white&labelColor=0b0b0f" alt="Google Play" /></a>
   <img src="https://img.shields.io/badge/telemetry-none-f39c6b?style=flat-square&labelColor=0b0b0f" alt="no telemetry" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial-7b7b8a?style=flat-square&labelColor=0b0b0f" alt="licence" /></a>
 </p>
 
 <p align="center">
-  A native Android client that drives <b>Claude Code</b>, <b>OpenAI Codex</b> and
-  <b>Gemini CLI</b> on the servers you already own.<br />
+  A native Android client that drives <b>Claude Code</b>, <b>OpenAI Codex</b>,
+  <b>Gemini CLI</b>, <b>xAI Grok</b> and <b>GitHub Copilot CLI</b> on the servers you already own.<br />
   Nothing is hosted by us — your phone talks straight to your machine over SSH.
 </p>
 
@@ -86,10 +86,11 @@ Android 8.0 (API 26) and up. Hardware security keys need USB-OTG or NFC.
 ## what it does
 
 ### Three agents, one app
-Claude Code, Codex CLI and Gemini CLI, each driven through its own real flags —
+Claude Code, Codex CLI, Gemini CLI, Grok Build and Copilot CLI, each driven through its own real flags —
 resume ids, approval modes and model pickers are per-agent, not a lowest common
 denominator. Each has its own stream parser (stream-json for Claude, rollout
-JSONL for Codex, Gemini events for Gemini), and the model picker is probed live
+JSONL for Codex, Gemini events for Gemini, ACP records for Grok, typed JSONL
+events for Copilot), and the model picker is probed live
 from the CLI rather than hardcoded.
 
 ### Sessions that survive
@@ -148,7 +149,7 @@ the Android Keystore.
 ### Agent control
 **SAFE / AUTO / YOLO** approval modes mapped onto each CLI's native sandbox and
 permission flags. A **memory editor** for `CLAUDE.md` / `AGENTS.md` /
-`GEMINI.md`, global and per-project, edited directly on the server. A
+`GEMINI.md` / `AGENT.md` / `copilot-instructions.md`, global and per-project, edited directly on the server. A
 **subagents browser and editor** (Claude) and **slash commands** with inline
 autocomplete, including your own from `~/.claude/commands/*.md`.
 
@@ -197,7 +198,9 @@ JSONL bodies, preferences.
 
 **On your servers** (read and written exactly the way the CLI itself does):
 Claude Code `~/.claude/projects/.../*.jsonl`, Codex
-`~/.codex/sessions/.../*.jsonl`, Gemini rollouts under `~/.gemini`.
+`~/.codex/sessions/.../*.jsonl`, Gemini rollouts under `~/.gemini`, Grok
+sessions under `~/.grok/sessions`, Copilot sessions under
+`~/.copilot/session-state`.
 
 **Media you record** stays on the device until you send it. A voice message or
 a photo taken in the composer is written to the app's cache, attached to the

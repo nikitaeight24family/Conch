@@ -1,6 +1,4 @@
 Neu
-• Die Sitzungsliste dreht nicht mehr endlos. Ein Server mit hunderten Sitzungen schickte Megabyte für eine zweizeilige Zeile; die Abfrage ist rund 16x leichter und jeder Lesevorgang hat jetzt eine Frist.
-• Kein „login expired“ mehr bei intakter Anmeldung.
-• Telefonbrücke: kann Shizuku keine Befehle ausführen, sagt Conch das vor dem Zug.
-• Eine vor der CLI gestoppte Nachricht kommt zurück, statt zu verschwinden.
-• About verlinkt conch-labs.com.
+• Zwei neue Agenten: xAI Grok und GitHub Copilot CLI — Chat, Sitzungen mit eigenen Titeln, Fortsetzen, Modellauswahl, Anmeldung in der App. Gleichwertig zu Claude, Codex und Gemini.
+• Jeder Agent behält sein Gesicht: echtes Logo, eigener Spinner.
+• Sicherheitsmodi werden auditiert: getestete CLI-Version wird fixiert, Flags jedes Modus nach der Installation im CLI selbst geprüft, Verifiziertes wird angezeigt.

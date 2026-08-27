@@ -44,6 +44,17 @@ enum class AuthMethod(
     GEMINI_OAUTH(Agent.GEMINI, "oauth", "Login with Google", "personal OAuth"),
     GEMINI_API_KEY(Agent.GEMINI, "api", "API key", "GEMINI_API_KEY · AI Studio", needsApiKey = true),
     GEMINI_VERTEX(Agent.GEMINI, "vertex", "Vertex AI", "GCP project / ADC / service account"),
+
+    // ── xAI Grok Build ──
+    GROK_OAUTH(Agent.GROK, "oauth", "Sign in with Grok", "grok.com account · device code"),
+    GROK_API_KEY(Agent.GROK, "api", "API key", "XAI_API_KEY · console.x.ai", needsApiKey = true),
+
+    // ── GitHub Copilot CLI ──
+    COPILOT_OAUTH(Agent.COPILOT, "oauth", "GitHub sign-in", "device code · any Copilot plan"),
+    COPILOT_TOKEN(Agent.COPILOT, "token", "Access token", "COPILOT_GITHUB_TOKEN · fine-grained PAT", needsApiKey = true),
+    /** Detected-only: Copilot auto-uses the `gh` CLI's token when nothing
+     *  else is configured. Not switchable from the app — display row. */
+    COPILOT_GH(Agent.COPILOT, "gh", "GitHub CLI token", "reused from `gh` login"),
     ;
 
     companion object {

@@ -307,6 +307,17 @@ internal class AgentPickerViewModelOAuth(
                     // headless OAuth bootstrap (per
                     // google-gemini.github.io/gemini-cli docs).
                     Agent.GEMINI -> "BROWSER=true gemini auth login --oauth"
+                    // **Device-code flows** — the smoothest pattern of all:
+                    // the CLI prints a URL (Grok's even embeds the user code
+                    // in it) and POLLS by itself. The user opens the URL on
+                    // the phone, approves, and the CLI writes its credential
+                    // — no callback capture, no code paste-back. Our creds
+                    // poller (checkAuthOnly, 3 s) sees the fresh credential
+                    // and closes the dialog.
+                    Agent.GROK -> "GROK_DISABLE_AUTOUPDATER=1 grok login --device-code"
+                    // Copilot defaults to device-code on SSH already; the
+                    // explicit flag pins it against future default changes.
+                    Agent.COPILOT -> "copilot login --device-code --no-auto-update"
                 }
                 // RemoteEnv owns the PATH story — a hand-rolled copy here had
                 // drifted to a subset (no homebrew/volta/bun/asdf/pnpm/snap),
@@ -581,6 +592,17 @@ internal class AgentPickerViewModelOAuth(
                                 }
                             }
                         }
+                        // Copilot's device flow can pause on a gh-style
+                        // "Press Enter to open github.com/login/device…"
+                        // gate. There is no browser here — answer Enter so
+                        // the CLI proceeds to polling; the URL + code are
+                        // already captured for the dialog.
+                        if (agent == Agent.COPILOT &&
+                            line.contains("press enter", ignoreCase = true)
+                        ) {
+                            delay(200); key("\r")
+                            android.util.Log.d(tag, "login(COPILOT) — press-enter gate → Enter")
+                        }
                         // URL extraction. PRIMARY source: the OSC-8 hyperlink
                         // TARGET on the RAW line (`ESC]8;id=…;<URL>BEL`) — that's
                         // the complete, verbatim URL. The on-screen visible text is
@@ -667,8 +689,24 @@ internal class AgentPickerViewModelOAuth(
                     // never see an error — they just see the dialog say
                     // "Repairing…" for a bit and then come back with a
                     // working URL button.
-                    android.util.Log.d(tag, "login($agent) — recovering: doInstall(forceLatest=true)")
-                    doInstall(agent, true)
+                    //
+                    // ⛔ REPAIR, NOT UPGRADE — forceLatest is false here.
+                    //
+                    // This is the ONE path that installs a CLI without the user
+                    // tapping anything, and it used to pass `true`, i.e. jump to
+                    // whatever `@latest` was at that moment. That is precisely
+                    // the hole raised in public on 2026-08-27: an unattended
+                    // update can change what SAFE/AUTO/YOLO actually grant,
+                    // because the mode→flag mapping does not consult the
+                    // version. And it is not theoretical — the audit found
+                    // codex 0.149.1 rejecting the SAFE and AUTO invocations
+                    // while YOLO still worked.
+                    //
+                    // A repair should restore the version whose flags were
+                    // verified (spec/CliContract's pin), never silently move the
+                    // user forward. Moving forward stays an explicit tap.
+                    android.util.Log.d(tag, "login($agent) — recovering: doInstall(pinned, forceLatest=false)")
+                    doInstall(agent, false)
                     android.util.Log.d(tag, "login($agent) — recovering: relaunching startOAuthLogin")
                     // Re-launch through the public entry point. It
                     // cancels our `loginJob` slot and starts a fresh
@@ -1185,6 +1223,23 @@ internal class AgentPickerViewModelOAuth(
             // here — see above. Combined with the rm of any stale oauth_creds at
             // login start, this fires only on the real, freshly-written token.
             Agent.GEMINI -> "grep -qsE '\"refresh_token\"[[:space:]]*:[[:space:]]*\"[^\"]+\"' ~/.gemini/oauth_creds.json ~/.config/gemini/oauth_creds.json 2>/dev/null"
+            // Grok: `grok login --device-code` writes ~/.grok/auth.json on
+            // approval (hot-reloaded by the CLI). Freshness-gated like the
+            // others so a pre-existing login can't count.
+            Agent.GROK ->
+                "f=~/.grok/auth.json; [ -s \"\$f\" ] && " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0) && " +
+                    "[ \"\$m\" -gt $sinceEpoch ]"
+            // Copilot: on a keyring-less server the token lands in the plain
+            // text settings store under ~/.copilot ("copilotToken" key).
+            // Fresh mtime + the key both required — the CLI touches its
+            // config on startup, so mtime alone would false-positive within
+            // the first poll.
+            Agent.COPILOT ->
+                "for f in ~/.copilot/config.json ~/.copilot/settings.json; do " +
+                    "[ -f \"\$f\" ] || continue; " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0); " +
+                    "[ \"\$m\" -gt $sinceEpoch ] && grep -qs '\"copilotToken\"' \"\$f\" && exit 0; done; exit 1"
         }
         return SilentlyTry.loggedOrElse("SshAi-AgentPicker", "checkAuthOnly probe", false) {
             client.startSession().use { sess ->
