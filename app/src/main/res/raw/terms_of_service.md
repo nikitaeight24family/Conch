@@ -17,7 +17,7 @@ By using the App, you confirm that:
 
 ## 3. Licence and commercial use
 
-Both the App's source code and the compiled binary distributed via the Play Store and GitHub Releases are licensed under [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+Both the App's source code and the compiled binary distributed via the Play Store and GitHub Releases are licensed under [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 
 - **Free for any noncommercial purpose** — personal use, hobby projects, study and research, education, charitable and government use.
 - **Commercial use requires a separate commercial licence** from Eight 24 Family LLC. That includes use by a company or other organisation as part of its business operations, redistribution, white-labelling, and embedding the App in a product you sell.
