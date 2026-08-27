@@ -93,6 +93,35 @@ interface AgentCliSpec {
     val supportsControlProtocol: Boolean get() = false
 
     /**
+     * Whether the CLI has a REAL plan/read-only permission mode we can pass
+     * (Claude `--permission-mode plan`, Grok `--permission-mode plan`,
+     * Copilot `--plan`). Gates the "Plan" row in the approval shield — a
+     * mode the CLI would silently coerce to something else must not be
+     * offered. Replaces the old `agent == Agent.CLAUDE` branch in
+     * ChatTopBar (per-agent UI modularity invariant).
+     */
+    val supportsPlanMode: Boolean get() = false
+
+    /**
+     * Glyph cycle for the chat's working spinner — the agent's OWN TUI
+     * flair (Claude's sparkle ✶✻✽✢, Grok's ◆ bullet pulse, Copilot's
+     * blinking mascot eyes). Null = the neutral `| / - \` CLI spinner.
+     * Kept on the spec so no shared UI file ever branches on agent
+     * identity for branding (user 2026-06-30: rendering Claude's sparkle
+     * for other agents made them "look like Claude" — the same rule now
+     * protects Grok/Copilot from inheriting anyone else's look).
+     */
+    val spinnerGlyphs: List<String>? get() = null
+
+    /**
+     * Rotating verb vocabulary for the working spinner (Claude's
+     * "Pondering…/Brewing…" gerunds). Null = the flat neutral "Working".
+     * One verb is picked per turn (seeded from turn start), matching the
+     * CLI's own behavior of not re-rolling mid-turn.
+     */
+    val spinnerVerbs: List<String>? get() = null
+
+    /**
      * True when [probeAvailableModels] returns the CLI's OWN REGISTRY — a
      * complete, authoritative list — rather than something scraped or guessed.
      * Only such a result may CONFIRM model keys (see

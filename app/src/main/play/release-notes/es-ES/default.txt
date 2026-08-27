@@ -1,6 +1,4 @@
 Novedades
-• La lista de sesiones ya no gira sin fin. Un servidor con cientos de sesiones enviaba megabytes para rellenar dos líneas; ese listado es ~16x más liviano y cada lectura tiene ahora un plazo.
-• Ya no aparece “login expired” con la sesión válida.
-• Puente con el teléfono: si Shizuku no puede ejecutar comandos, Conch lo dice antes de gastar un turno.
-• Un mensaje detenido antes de llegar a la CLI vuelve, no desaparece.
-• About enlaza conch-labs.com.
+• Dos agentes nuevos: xAI Grok y GitHub Copilot CLI — chat, sesiones con sus títulos, reanudar, selector de modelo, inicio de sesión en la app. Al nivel de Claude, Codex y Gemini.
+• Cada agente conserva su cara: logotipo real y su propio indicador.
+• Modos de seguridad auditados: se instala la versión probada del CLI, los flags de cada modo se verifican en el propio CLI tras instalar, y se muestra lo verificado.

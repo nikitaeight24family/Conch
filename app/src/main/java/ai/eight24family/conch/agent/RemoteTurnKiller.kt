@@ -60,9 +60,9 @@ internal object RemoteTurnKiller {
         require(isKillableResumeId(resumeId)) { "unsafe resume id" }
         return "rid='" + resumeId + "'; " +
             "pids=\$(pgrep -af \"\$rid\" 2>/dev/null | " +
-            "awk '\$2 !~ /(^|\\/|-)((ba|da|a|z)?sh)\$/ && /(claude|codex|gemini)/ {print \$1}'); " +
+            "awk '\$2 !~ /(^|\\/|-)((ba|da|a|z)?sh)\$/ && /(claude|codex|gemini|grok|copilot)/ {print \$1}'); " +
             "if [ -z \"\$pids\" ]; then " +
-            "pids=\$(pgrep -f \"(claude|codex|gemini).*\$rid\" 2>/dev/null | grep -v \"^\$\$\\\$\"); fi; " +
+            "pids=\$(pgrep -f \"(claude|codex|gemini|grok|copilot).*\$rid\" 2>/dev/null | grep -v \"^\$\$\\\$\"); fi; " +
             // pgrep output is one pid PER LINE; the sentinel echo below quotes
             // $pids, so without this flatten the verdict line would carry only
             // the first pid and the rest would arrive as bare-number lines.

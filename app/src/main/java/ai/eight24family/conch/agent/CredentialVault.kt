@@ -60,6 +60,12 @@ class CredentialVault(
         Agent.CODEX -> "\$HOME/.codex/auth.json"
         Agent.GEMINI -> "\$HOME/.gemini/oauth_creds.json"
         Agent.CLAUDE -> "\$HOME/.claude/.credentials.json"
+        Agent.GROK -> "\$HOME/.grok/auth.json"
+        // Keyring-less servers (the typical VPS): `copilot login` falls back
+        // to "a plain text config file under ~/.copilot/" — the settings
+        // store carries the copilotToken secret. Best-known location; a
+        // keyring-backed desktop login has no file for slots to copy.
+        Agent.COPILOT -> "\$HOME/.copilot/config.json"
     }
 
     /** Env var the API key lives under (in ~/.profile). */
@@ -67,6 +73,8 @@ class CredentialVault(
         Agent.CODEX -> "OPENAI_API_KEY"
         Agent.GEMINI -> "GEMINI_API_KEY"
         Agent.CLAUDE -> "ANTHROPIC_API_KEY"
+        Agent.GROK -> "XAI_API_KEY"
+        Agent.COPILOT -> "COPILOT_GITHUB_TOKEN"
     }
 
     /** SECOND live mechanism for Claude OAuth: a `claude setup-token` login
@@ -77,7 +85,7 @@ class CredentialVault(
      * half left the server LOGGED IN after "remove account". */
     private val oauthEnvVar: String? = when (agent) {
         Agent.CLAUDE -> "CLAUDE_CODE_OAUTH_TOKEN"
-        else -> null
+        Agent.CODEX, Agent.GEMINI, Agent.GROK, Agent.COPILOT -> null
     }
 
     private val slotsDir = "\$HOME/.sshai-auth/${agent.name.lowercase()}/slots"

@@ -1809,6 +1809,8 @@ private fun ApiKeyDialog(
         Agent.CLAUDE -> "sk-ant-..." to "ANTHROPIC_API_KEY"
         Agent.CODEX -> "sk-..." to "OPENAI_API_KEY"
         Agent.GEMINI -> "AIza..." to "GEMINI_API_KEY"
+        Agent.GROK -> "xai-..." to "XAI_API_KEY"
+        Agent.COPILOT -> "github_pat_..." to "COPILOT_GITHUB_TOKEN"
     }
     androidx.compose.ui.window.Dialog(onDismissRequest = onCancel) {
         Surface(

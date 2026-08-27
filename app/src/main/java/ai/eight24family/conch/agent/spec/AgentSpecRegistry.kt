@@ -3,7 +3,9 @@ package ai.eight24family.conch.agent.spec
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.claude.ClaudeSpec
 import ai.eight24family.conch.agent.codex.CodexSpec
+import ai.eight24family.conch.agent.copilot.CopilotSpec
 import ai.eight24family.conch.agent.gemini.GeminiSpec
+import ai.eight24family.conch.agent.grok.GrokSpec
 
 /**
  * Single source of truth that maps `Agent` enum values to their per-CLI
@@ -21,6 +23,8 @@ object AgentSpecRegistry {
         Agent.CLAUDE to ClaudeSpec,
         Agent.CODEX to CodexSpec,
         Agent.GEMINI to GeminiSpec,
+        Agent.GROK to GrokSpec,
+        Agent.COPILOT to CopilotSpec,
     )
 
     /** Spec for [agent]. Throws if a future Agent enum value is added without

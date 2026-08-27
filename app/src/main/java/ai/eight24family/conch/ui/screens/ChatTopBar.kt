@@ -808,7 +808,16 @@ internal fun TerminalTopBar(
                     menuOpen = approvalMenuOpen,
                     onToggle = onToggleApprovalMenu,
                     onPick = onSelectApproval,
-                    planSupported = agent == Agent.CLAUDE,
+                    planSupported = ai.eight24family.conch.agent.spec
+                        .AgentSpecRegistry[agent].supportsPlanMode,
+                    // Collected, not read once: the audit lands asynchronously
+                    // after an install/update, and the sheet must show the
+                    // fresh verdict the next time it opens rather than whatever
+                    // was true when this bar was first composed.
+                    flagAudit = ai.eight24family.conch.agent.CliFlagAuditStore.reports
+                        .collectAsState().value[
+                        "$serverId:${agent.name}",
+                    ],
                     onAskAgentToRelax = {
                         onAskAgentToRelaxApprovals()
                         onToggleApprovalMenu()

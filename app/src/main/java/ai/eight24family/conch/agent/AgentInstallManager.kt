@@ -210,5 +210,55 @@ object AgentInstallManager {
             ServiceLocator.agentStatusCache.save(serverId, merged)
         }
         android.util.Log.d(TAG, "post-install status refreshed for $serverId")
+        auditFlags(serverId, pooled)
     }
+
+    /**
+     * After the binary changes, REPLAY the mode flags through it.
+     *
+     * This is the moment a mode's meaning can shift without anything on screen
+     * changing, so it is the moment to check. The audit costs one SSH command
+     * and no tokens ([CliFlagAudit] appends `--help`, so the CLI parses and
+     * exits before any model call), and the verdict is cached for the mode sheet
+     * to show. Found on the very first run: codex 0.149.1 rejecting the SAFE and
+     * AUTO invocations while YOLO still worked.
+     */
+    private suspend fun auditFlags(
+        serverId: String,
+        pooled: net.schmizz.sshj.SSHClient,
+    ) {
+        for (agent in Agent.entries) {
+            if (ai.eight24family.conch.agent.spec.CliContracts[agent] == null) continue
+            val report = CliFlagAudit.runQuietly(agent) { cmd ->
+                withContext(Dispatchers.IO) {
+                    SilentlyTry.logged(TAG, "flag audit exec") {
+                        val sess = pooled.startSession()
+                        try {
+                            val proc = sess.exec("bash -lc " + shellQuote(cmd))
+                            val out = java.io.ByteArrayOutputStream()
+                            ai.eight24family.conch.ssh.BoundedExec.drain(
+                                proc, out,
+                                deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                                maxBytes = 256L * 1024,
+                            )
+                            proc.join(30, TimeUnit.SECONDS)
+                            String(out.toByteArray(), Charsets.UTF_8)
+                        } finally {
+                            SilentlyTry.fired(TAG, "close flag audit session") { sess.close() }
+                        }
+                    }
+                }
+            } ?: continue
+            ai.eight24family.conch.agent.CliFlagAuditStore.put(serverId, report)
+            if (report.rejected.isNotEmpty()) {
+                android.util.Log.w(
+                    TAG,
+                    "FLAG DRIFT on $serverId/${agent.name}: ${report.summary()}",
+                )
+            }
+        }
+    }
+
+    /** Single-quote for `bash -lc` — the audit script carries $ and quotes. */
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 }

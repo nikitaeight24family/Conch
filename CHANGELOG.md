@@ -11,6 +11,24 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.4] — 2026-08-28
+
+### Added
+- **Two new agents: xAI Grok Build and GitHub Copilot CLI.** Full first-class
+  integrations alongside Claude, Codex and Gemini: streaming chat, session
+  listing/resume with the CLI's own titles, per-agent brand marks and spinners,
+  device-code sign-in for both, model catalogs from each CLI's own registry,
+  reasoning-effort control (Grok), plan mode, turn-state mirroring off each
+  CLI's own session files, and npm install/update like the others.
+- **Approval modes are version-pinned and audited.** Every agent's
+  SAFE/AUTO/YOLO(/PLAN) flag mapping is recorded against the CLI version it was
+  tested on, installs pin that version (`@latest` only on an explicit Update
+  tap), and after every install the flags are replayed through the CLI's own
+  parser — a rejected mode is marked in the shield sheet instead of failing
+  silently at send time.
+
+---
+
 ## [0.4.3] — 2026-08-27
 
 Everything in 0.4.2, plus the one thing it was missing.

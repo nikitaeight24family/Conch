@@ -1009,6 +1009,8 @@ internal class ChatViewModelTailPoll(
             Agent.CLAUDE -> "claude"
             Agent.CODEX -> "codex"
             Agent.GEMINI -> "gemini"
+            Agent.GROK -> "grok"
+            Agent.COPILOT -> "copilot"
         }
         // Only Claude's layout lets us tie a live process to THIS session: its
         // rollouts live at ~/.claude/projects/<cwd with / → ->/<uuid>.jsonl, so a

@@ -97,11 +97,36 @@ object CodexSpec : AgentCliSpec {
         //
         // The old `--full-auto` flag is deprecated and replaced by this pair
         // of approval/sandbox flags.
+        // ⛔ THESE ARE NOT DECORATIVE — THEY WERE BROKEN, AND ONLY THE SAFE ONES.
+        //
+        // Replayed through the installed parser on 2026-08-27 (codex-cli
+        // 0.149.1):
+        //   codex exec --ask-for-approval untrusted --sandbox read-only
+        //     -> error: unexpected argument '--ask-for-approval' found   (exit 2)
+        //   codex --ask-for-approval untrusted
+        //     -> error: invalid value 'untrusted'  [possible values: on-request, never]
+        //   codex exec --dangerously-bypass-approvals-and-sandbox
+        //     -> ACCEPTED
+        //
+        // So SAFE and AUTO died at parse time on this path while YOLO — the one
+        // mode that grants everything — kept working. `--ask-for-approval` is a
+        // TOP-LEVEL flag now, and in a non-interactive `exec` run there is
+        // nobody to answer an approval request anyway: the sandbox IS the
+        // policy here. read-only for SAFE, workspace-write for AUTO.
+        //
+        // The primary Codex path (app-server, CodexAppServerWire.approvalToPolicy)
+        // is unaffected — it already sends the current `on-request`/`never`
+        // policies over JSON-RPC. This is the one-shot fallback, which is what
+        // runs when the app-server handshake fails, i.e. exactly on the older
+        // or stranger installs that need it most.
+        //
+        // Flags are declared once in spec/CliContract and audited by
+        // agent/CliFlagAudit after every install; keep the two in step.
         val approvalArg = when (input.approvalMode) {
-            // No plan mode in Codex — read-only + ask is the honest neighbour.
+            // No plan mode in Codex — read-only is the honest neighbour.
             AgentApprovalMode.PLAN,
-            AgentApprovalMode.SAFE -> " --ask-for-approval untrusted --sandbox read-only"
-            AgentApprovalMode.AUTO -> " --ask-for-approval never --sandbox workspace-write"
+            AgentApprovalMode.SAFE -> " --sandbox read-only"
+            AgentApprovalMode.AUTO -> " --sandbox workspace-write"
             AgentApprovalMode.YOLO -> " --dangerously-bypass-approvals-and-sandbox"
         }
         // Resume is its own subcommand under `exec`, NOT a `--resume` flag.

@@ -93,6 +93,21 @@ object AuthSelector {
             AuthMethod.GEMINI_VERTEX ->
                 geminiSelectType("vertex-ai") + "export GOOGLE_GENAI_USE_VERTEXAI=true; "
 
+            // ── Grok: per-request precedence is session token (auth.json) →
+            //    XAI_API_KEY, so oauth needs no selector; forcing the API key
+            //    over a live auth.json has no supported selector — the key
+            //    only takes effect when no session token is active. ──
+            AuthMethod.GROK_OAUTH -> "unset XAI_API_KEY; "
+            AuthMethod.GROK_API_KEY -> "" // key already in env; token (if any) wins by CLI design
+
+            // ── Copilot: env tokens BEAT stored OAuth (COPILOT_GITHUB_TOKEN >
+            //    GH_TOKEN > GITHUB_TOKEN > stored login > gh CLI token), so
+            //    steering to the stored login = clearing the env overrides.
+            //    The token method needs nothing forced — it already outranks. ──
+            AuthMethod.COPILOT_OAUTH -> "unset COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
+            AuthMethod.COPILOT_TOKEN -> ""
+            AuthMethod.COPILOT_GH -> "unset COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
+
             null -> "" // no method chosen → launch unchanged (CLI default)
         }
 

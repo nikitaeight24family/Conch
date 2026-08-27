@@ -4,7 +4,7 @@ These Terms of Service ("Terms") govern your use of **Conch** ("the App"), a mob
 
 ## 1. What the App is
 
-Conch is a thin native Android client that connects to **SSH servers you already own or have permission to use** and runs an AI command-line tool of your choice (Claude Code, Codex CLI, or Gemini CLI) on those servers. The App does not host, proxy, or process any AI requests on our infrastructure — we have no infrastructure beyond your installation. Your SSH credentials, prompts, and any output stay between your phone and your servers.
+Conch is a thin native Android client that connects to **SSH servers you already own or have permission to use** and runs an AI command-line tool of your choice (Claude Code, Codex CLI, Gemini CLI, Grok Build, or GitHub Copilot CLI) on those servers. The App does not host, proxy, or process any AI requests on our infrastructure — we have no infrastructure beyond your installation. Your SSH credentials, prompts, and any output stay between your phone and your servers.
 
 ## 2. Your responsibilities
 

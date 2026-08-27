@@ -101,7 +101,7 @@ fun AboutScreen(
                     style = MaterialTheme.typography.titleLarge
                 )
                 Text(
-                    "// drive Claude Code, Codex or Gemini CLI on your own servers, from your phone.",
+                    "// drive Claude Code, Codex, Gemini, Grok or Copilot CLI on your own servers, from your phone.",
                     color = outline,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace
@@ -122,14 +122,14 @@ fun AboutScreen(
 
             Section("what it is") {
                 Bullet("a thin native Android client over SSH — your servers stay your servers.")
-                Bullet("speaks each CLI you already have installed on the host: claude / codex / gemini.")
+                Bullet("speaks each CLI you already have installed on the host: claude / codex / gemini / grok / copilot.")
                 Bullet("nothing extra to install on the host. just SSH access and the CLI binary.")
                 Bullet("no hosted backend on our side. no AI quotas, no cloud middleman.")
             }
 
             Section("sessions & search") {
                 Bullet("one unified home — every chat across all your servers × agents, newest first, like a messenger.")
-                Bullet("each row shows the session's own name (Claude's title; first message for Codex/Gemini), its server, and the last message.")
+                Bullet("each row shows the session's own name (the CLI's title where it has one — Claude/Grok/Copilot; first message otherwise), its server, and the last message.")
                 Bullet("full-text search across every cached session — tap a hit to jump straight to the matching message.")
                 Bullet("last-activity time is tracked per session and persists across restarts, so the order stays honest even offline.")
             }
@@ -180,6 +180,8 @@ fun AboutScreen(
                 Bullet("Claude Code: ~/.claude/projects/.../*.jsonl  +  ~/.claude/CLAUDE.md (memory)  +  ~/.claude/agents/*.md (subagents).")
                 Bullet("Codex: ~/.codex/sessions/.../*.jsonl  +  ~/.codex/AGENTS.md.")
                 Bullet("Gemini: rollouts under ~/.gemini  +  ~/.gemini/GEMINI.md.")
+                Bullet("Grok: sessions under ~/.grok/sessions  +  ~/.grok/rules/AGENT.md.")
+                Bullet("Copilot: sessions under ~/.copilot/session-state  +  ~/.copilot/copilot-instructions.md.")
                 Bullet("file uploads land in /tmp/conch_uploads/ until the server reboots or you delete them.")
                 Bullet("we read/write these the same paths the CLI itself uses — nothing proprietary.")
             }
@@ -206,7 +208,9 @@ fun AboutScreen(
                 Bullet("\"Claude\" and the Claude mark are trademarks of Anthropic PBC.")
                 Bullet("\"OpenAI\", \"Codex\" and the OpenAI mark are trademarks of OpenAI L.L.C.")
                 Bullet("\"Gemini\" and the Google mark are trademarks of Google LLC.")
-                Bullet("Conch is not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI, or Google. Marks are used here solely to identify which CLI the user is driving.")
+                Bullet("\"Grok\" and the Grok mark are trademarks of xAI Corp.")
+                Bullet("\"GitHub\", \"Copilot\" and the Copilot mark are trademarks of GitHub, Inc. (a Microsoft company).")
+                Bullet("Conch is not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI, Google, xAI, GitHub, or Microsoft. Marks are used here solely to identify which CLI the user is driving.")
             }
 
             HorizontalDivider(color = outline.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))

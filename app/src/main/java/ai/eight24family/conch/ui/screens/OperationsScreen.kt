@@ -85,18 +85,19 @@ fun OperationsScreen(onBack: () -> Unit) {
             )
 
             OpSection("Probing — read-only status checks") {
-                OpBullet("which claude / which codex / which gemini — find the CLI on PATH.")
+                OpBullet("which claude / codex / gemini / grok / copilot — find the CLI on PATH.")
                 OpBullet("<cli> --version — read the installed version.")
-                OpBullet("npm view @openai/codex version / @google/gemini-cli version — read the latest published version (Codex / Gemini are npm-only).")
+                OpBullet("npm view @openai/codex / @google/gemini-cli / @xai-official/grok / @github/copilot version — read the latest published version.")
                 OpBullet("curl -sI https://claude.ai/install.sh | grep ETag — best-effort latest-Claude marker.")
+                OpBullet("grok models — Grok's own login + model-catalog check (local state, no generation).")
                 OpBullet("stat -c %s <path> / stat -f %z <path> — file size for download icons + tail-poll detection.")
                 OpBullet("pgrep -f <session-uuid> — is THIS chat's CLI still running on the host? Drives the spinner.")
-                OpBullet("ls / cat for the agent's own JSONL session files under ~/.claude, ~/.codex, ~/.gemini.")
+                OpBullet("ls / cat for the agent's own JSONL session files under ~/.claude, ~/.codex, ~/.gemini, ~/.grok, ~/.copilot.")
             }
 
             OpSection("Install / update agents") {
                 OpBullet("curl -fsSL https://claude.ai/install.sh | bash — Anthropic's official installer for Claude Code.")
-                OpBullet("npm install -g @openai/codex / npm install -g @google/gemini-cli — global CLI install (per-user prefix).")
+                OpBullet("npm install -g @openai/codex / @google/gemini-cli / @xai-official/grok / @github/copilot — global CLI install (per-user prefix).")
                 OpBullet("sudo -n npm install -g … — passwordless-sudo retry when the npm prefix needs root. SKIPPED if sudo prompts for password.")
                 OpBullet("apt-get / dnf / pacman / apk / brew install nodejs npm — only when npm is missing entirely. SKIPPED if you don't have admin access.")
                 OpBullet("curl -fsSL https://deb.nodesource.com/setup_22.x | bash — Node 22 channel when distro npm is too old for Codex.")
@@ -107,6 +108,8 @@ fun OperationsScreen(onBack: () -> Unit) {
                 OpBullet("claude --print --output-format json [--resume <uuid>] [--model …] [--permission-mode …] \"<user-prompt>\" — Claude Code one-shot.")
                 OpBullet("codex exec [resume <uuid>] [--ask-for-approval …] [--sandbox …] \"<user-prompt>\" — Codex one-shot.")
                 OpBullet("gemini [--yolo] \"<user-prompt>\" — Gemini one-shot.")
+                OpBullet("grok -p \"<user-prompt>\" --output-format streaming-messages-json [-r <uuid>] [--permission-mode …] — Grok Build one-shot.")
+                OpBullet("copilot -p \"<user-prompt>\" --output-format json [--resume=<uuid>] [--allow-all-tools | --yolo] — Copilot CLI one-shot.")
                 OpBullet("Prompts come directly from the chat input you typed — nothing is added behind your back.")
             }
 

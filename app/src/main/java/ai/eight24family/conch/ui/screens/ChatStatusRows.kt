@@ -173,8 +173,12 @@ internal fun WorkingStatusRow(
         }
         return
     }
-    val isClaudeAgent = agent == ai.eight24family.conch.agent.Agent.CLAUDE
-    val glyphs = if (isClaudeAgent) WORK_GLYPHS else WORK_GLYPHS_GENERIC
+    // Spinner identity comes from the SPEC — each agent's own glyphs/verbs
+    // (Claude's sparkle, Grok's ◆ pulse, Copilot's blinking eyes) or the
+    // neutral defaults. No agent-identity branch lives in this shared file
+    // anymore (per-agent UI modularity invariant).
+    val spec = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
+    val glyphs = spec.spinnerGlyphs ?: WORK_GLYPHS_GENERIC
     val glyph = glyphs[((now / 250L) % glyphs.size).toInt()]
     // ONE gerund per turn — picked from the turn-start, NOT re-rolled as time
     // passes. startMs is NOT actually constant within a turn: the feeder switches
@@ -184,8 +188,9 @@ internal fun WorkingStatusRow(
     // switch) and reset only when the row leaves composition at turn end (audit,
     // 2026-06-14).
     val verbSeed = remember(startMs > 0L) { startMs }
-    val verb = if (isClaudeAgent)
-        WORK_VERBS[(((verbSeed / 1000L) % WORK_VERBS.size + WORK_VERBS.size) % WORK_VERBS.size).toInt()]
+    val verbs = spec.spinnerVerbs
+    val verb = if (!verbs.isNullOrEmpty())
+        verbs[(((verbSeed / 1000L) % verbs.size + verbs.size) % verbs.size).toInt()]
     else "Working"
     // Minutes like the CLI's «(1m13s · …)» — not a raw «104s». Compact (no space
     // inside «1m13s») so the whole line fits one row (user, 2026-06-14).
@@ -264,20 +269,11 @@ internal fun WaitingForBackgroundRow(count: Int) {
     }
 }
 
-/** Glyph cycle — same family Claude's TUI rotates through. */
-private val WORK_GLYPHS = listOf("✶", "✻", "✽", "✢", "·", "✢", "✽", "✻")
-
-/** Plain CLI spinner for non-Claude agents — deliberately NOT Claude's sparkle. */
+/** Plain CLI spinner for agents whose spec declares no glyphs of their own —
+ *  deliberately NOT any specific CLI's flair. Each agent's real identity
+ *  (Claude's sparkle, Grok's ◆ pulse, Copilot's blinking eyes) lives on its
+ *  spec as [ai.eight24family.conch.agent.spec.AgentCliSpec.spinnerGlyphs]. */
 private val WORK_GLYPHS_GENERIC = listOf("|", "/", "-", "\\")
-
-/** Running gerunds — Claude Code's own spinner vocabulary (a subset). */
-private val WORK_VERBS = listOf(
-    "Working", "Thinking", "Pondering", "Brewing", "Conjuring", "Crafting",
-    "Computing", "Synthesizing", "Cogitating", "Ruminating", "Noodling",
-    "Percolating", "Marinating", "Simmering", "Mulling", "Imagining",
-    "Ideating", "Inferring", "Forging", "Generating", "Improvising",
-    "Tinkering", "Vibing", "Herding", "Manifesting", "Processing",
-)
 
 /**
  * "Agent is thinking" indicator row — legacy 3-dot spinner. The chat now
