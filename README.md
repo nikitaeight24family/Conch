@@ -204,7 +204,7 @@ a photo taken in the composer is written to the app's cache, attached to the
 chat, and swept after a day. Everything travels over your own SSH connection
 and nowhere else.
 
-Full detail: [privacy policy](https://nikitaeight24family.github.io/conch-pages/privacy.html).
+Full detail: [privacy policy](https://conch-labs.com/privacy.html).
 
 ---
 
@@ -229,7 +229,7 @@ What a security review will find:
 
 → **[contact@eight24family.ai](mailto:contact@eight24family.ai)** — licensing,
 procurement, security questionnaires. The
-[terms of service](https://nikitaeight24family.github.io/conch-pages/terms.html)
+[terms of service](https://conch-labs.com/terms.html)
 are published in full if your legal team would rather start there.
 
 ---
@@ -332,9 +332,9 @@ The store screenshots — the same screens with a headline over them — live in
 <p align="center">
   <sub>
   <b>Conch</b> · <code>ai.eight24family.conch</code> · published by Eight 24 Family LLC<br />
-  <a href="https://nikitaeight24family.github.io/conch-pages/">website</a> ·
-  <a href="https://nikitaeight24family.github.io/conch-pages/privacy.html">privacy</a> ·
-  <a href="https://nikitaeight24family.github.io/conch-pages/terms.html">terms</a> ·
+  <a href="https://conch-labs.com/">website</a> ·
+  <a href="https://conch-labs.com/privacy.html">privacy</a> ·
+  <a href="https://conch-labs.com/terms.html">terms</a> ·
   <a href="mailto:nikita@eight24family.ai">support</a> ·
   <a href="mailto:contact@eight24family.ai">licensing</a>
   </sub>
