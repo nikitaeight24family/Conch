@@ -39,9 +39,7 @@
 <p align="center">
   <sub>
   Every session from every server · agents probed and installed per host · tool calls and diffs inline · your accent, font and scale<br />
-  full-text search across sessions · FIDO2 over NFC · what it collects (nothing) · SAFE / AUTO / YOLO<br /><br />
-  <i>Rendered from the app's own font, palette and layout with fictional servers, rather than captured from a phone full of real ones.<br />
-  Device captures of the same screens are in <a href="screenshots">screenshots/</a>.</i>
+  full-text search across sessions · FIDO2 over NFC · what it collects (nothing) · SAFE / AUTO / YOLO
   </sub>
 </p>
 
