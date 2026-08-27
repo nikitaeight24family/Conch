@@ -656,8 +656,11 @@ your own SSH connection and nowhere else — there is no backend to send them to
 
 ## Known limitations
 
-- **You bring the compute.** No hosted backend by design — you need your own
-  SSH server with Claude Code / Codex / Gemini installed and logged in.
+- **You bring the compute.** No hosted backend by design — you need a server
+  you can SSH into, plus your own Anthropic / OpenAI / Google account. You do
+  not need to prepare the server: Conch installs Node and the agent CLI on it
+  and runs the provider sign-in from the phone. A bare VPS needs root or sudo
+  for that first install.
 - **Phone bridge needs Shizuku** and only polls while Conch is in the
   foreground; backgrounded, it pauses (Android background-I/O limits) and
   surfaces a clear timeout.

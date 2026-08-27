@@ -1,6 +1,6 @@
-**Last updated: 2026-04-30**
+**Last updated: 2026-08-27**
 
-These Terms of Service ("Terms") govern your use of **Conch** ("the App"), a mobile client published by **Conch Labs** ("we", "us"). By installing or using the App you accept these Terms. If you don't accept them, don't use the App.
+These Terms of Service ("Terms") govern your use of **Conch** ("the App"), a mobile client published by **Eight 24 Family LLC** (trading as Conch Labs) ("we", "us"). By installing or using the App you accept these Terms. If you don't accept them, don't use the App.
 
 ## 1. What the App is
 
@@ -15,11 +15,14 @@ By using the App, you confirm that:
 - You don't use the App for **illegal activity**, network attacks against systems you don't own, generation of malware, or any other use prohibited by applicable law.
 - You're old enough to enter into a binding contract in your jurisdiction.
 
-## 3. License
+## 3. Licence and commercial use
 
-The App's source code is published under the **PolyForm Noncommercial 1.0.0** license. Personal, hobby, research, education, government, and non-profit use is free. Commercial redistribution requires a separate commercial license — contact the email below.
+Both the App's source code and the compiled binary distributed via the Play Store and GitHub Releases are licensed under [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/).
 
-These Terms are about your use of the **compiled binary** distributed via the Play Store and GitHub Releases. They do not modify the source-code license.
+- **Free for any noncommercial purpose** — personal use, hobby projects, study and research, education, charitable and government use.
+- **Commercial use requires a separate commercial licence** from Eight 24 Family LLC. That includes use by a company or other organisation as part of its business operations, redistribution, white-labelling, and embedding the App in a product you sell.
+
+A commercial licence is granted in writing and does not arise from these Terms. To ask about one, or to send a security questionnaire or vendor-onboarding paperwork: [contact@eight24family.ai](mailto:contact@eight24family.ai).
 
 ## 4. Updates
 
@@ -31,13 +34,13 @@ The App is provided **"as is"** and **"as available"** without warranties of any
 
 ## 6. Limitation of liability
 
-To the maximum extent permitted by applicable law, **Conch Labs** shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to: lost data, lost servers, accidental file deletions caused by an agent we connected to, leaked secrets, downtime, or lost profits — whether based on warranty, contract, tort, or any other legal theory, even if we were advised of the possibility of such damages.
+To the maximum extent permitted by applicable law, **Eight 24 Family LLC** shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to: lost data, lost servers, accidental file deletions caused by an agent we connected to, leaked secrets, downtime, or lost profits — whether based on warranty, contract, tort, or any other legal theory, even if we were advised of the possibility of such damages.
 
 If a court rejects the disclaimer above, our total liability is capped at **the amount you paid us for the App, or USD $5, whichever is greater**.
 
 ## 7. Indemnity
 
-You agree to indemnify and hold harmless Conch Labs from any claim, damage, or expense arising out of (a) your use of the App, (b) your breach of these Terms, (c) actions an AI agent takes on your servers while you were using the App, or (d) your violation of any third party's rights.
+You agree to indemnify and hold harmless Eight 24 Family LLC from any claim, damage, or expense arising out of (a) your use of the App, (b) your breach of these Terms, (c) actions an AI agent takes on your servers while you were using the App, or (d) your violation of any third party's rights.
 
 ## 8. Termination
 
@@ -62,4 +65,6 @@ If you live in a jurisdiction where mandatory consumer-protection laws apply dif
 
 ## 12. Contact
 
-Questions about these Terms: [nikita@eight24family.ai](mailto:nikita@eight24family.ai)
+Questions about these Terms, licensing, procurement or security review: [contact@eight24family.ai](mailto:contact@eight24family.ai)
+
+Bug reports and support: [nikita@eight24family.ai](mailto:nikita@eight24family.ai)
