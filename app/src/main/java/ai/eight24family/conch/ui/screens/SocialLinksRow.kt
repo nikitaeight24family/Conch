@@ -24,10 +24,15 @@ import ai.eight24family.conch.util.SilentlyTry
  * brand logos at the bottom of About. Each logo IS the link — no text labels,
  * no separate rows, no hand-drawn glyphs.
  *
- * Tapping opens the NATIVE app first (Telegram / X / LinkedIn via their custom
- * URI scheme) and only falls back to the browser if that app isn't installed.
+ * One mark in the row is not a brand: the globe, which is Conch's own site and
+ * leads the row. Everything else about the law holds for it — no label, no
+ * separate row, and the glyph is Material's, not drawn by hand.
+ *
+ * Tapping opens the NATIVE app first (Telegram / LinkedIn via their custom URI
+ * scheme) and only falls back to the browser if that app isn't installed.
  * Earlier this fired the https URL straight at the system, which Android hands
- * to the browser even when the app is installed.
+ * to the browser even when the app is installed. The site has no app scheme,
+ * so it goes to the browser directly.
  */
 @Composable
 internal fun SocialLinksRow(modifier: Modifier = Modifier) {
@@ -37,9 +42,9 @@ internal fun SocialLinksRow(modifier: Modifier = Modifier) {
     // res, native-app URI (empty = no scheme), https fallback, a11y label
     data class Social(val res: Int, val app: String, val web: String, val label: String)
     val links = listOf(
+        Social(R.drawable.ic_link_site, "", "https://conch-labs.com", "Conch website"),
         Social(R.drawable.ic_logo_telegram, "tg://resolve?domain=conchapplication", "https://t.me/conchapplication", "Conch on Telegram"),
         Social(R.drawable.ic_logo_github, "", "https://github.com/nikitaeight24family/Conch", "Conch on GitHub"),
-        Social(R.drawable.ic_logo_x, "twitter://user?screen_name=nikita824family", "https://x.com/nikita824family", "Conch on X"),
         Social(R.drawable.ic_logo_linkedin, "linkedin://in/nikita-zotov-aa4b143ab", "https://www.linkedin.com/in/nikita-zotov-aa4b143ab/", "Maker on LinkedIn"),
     )
 

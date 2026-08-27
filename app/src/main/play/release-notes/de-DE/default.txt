@@ -1,5 +1,6 @@
 Neu
 • Die Sitzungsliste dreht nicht mehr endlos. Ein Server mit hunderten Sitzungen schickte Megabyte für eine zweizeilige Zeile; die Abfrage ist rund 16x leichter und jeder Lesevorgang hat jetzt eine Frist.
-• Kein „login expired“ mehr, während die Anmeldung intakt ist.
-• Telefonbrücke: kann Shizuku keine Befehle ausführen, sagt Conch das vor dem Zug — mit einem Tipp zur Behebung.
-• Eine vor Erreichen der CLI gestoppte Nachricht kommt zurück, statt zu verschwinden.
+• Kein „login expired“ mehr bei intakter Anmeldung.
+• Telefonbrücke: kann Shizuku keine Befehle ausführen, sagt Conch das vor dem Zug.
+• Eine vor der CLI gestoppte Nachricht kommt zurück, statt zu verschwinden.
+• About verlinkt conch-labs.com.

@@ -1,5 +1,6 @@
 Nouveautés
-• La liste des sessions ne tourne plus indéfiniment. Un serveur avec des centaines de sessions envoyait des mégaoctets pour deux lignes ; ce listing est ~16x plus léger et chaque lecture a désormais un délai.
+• La liste des sessions ne tourne plus indéfiniment. Un serveur avec des centaines de sessions envoyait des mégaoctets pour deux lignes ; ce listing est ~16x plus léger et chaque lecture a un délai.
 • Plus de « login expired » alors que la connexion est valide.
 • Pont téléphone : si Shizuku ne peut pas exécuter de commandes, Conch le dit avant de dépenser un tour.
-• Un message arrêté avant d'atteindre la CLI revient au lieu de disparaître.
+• Un message arrêté avant la CLI revient au lieu de disparaître.
+• About renvoie vers conch-labs.com.

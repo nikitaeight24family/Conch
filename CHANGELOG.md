@@ -11,6 +11,25 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.3] — 2026-08-27
+
+Everything in 0.4.2, plus the one thing it was missing.
+
+### Changed
+- **About** links **conch-labs.com**, leading the row of marks at the bottom of
+  the screen. The X account left the row, and its logo left the resources with
+  it — no drawable kept around for a link nobody follows.
+
+### Note
+0.4.2 (versionCode 816) was live in Play production for about forty minutes
+before being pulled back to a draft: it went out without the About change, and
+a versionCode cannot go down, so the only way to supersede it on the devices
+that took it is a version above it. 0.4.3 is that version — same code as 816
+plus the site link. Anyone who never saw 816 loses nothing; the 0.4.2 section
+below is still the honest record of what changed.
+
+---
+
 ## [0.4.2] — 2026-08-27
 
 Four faults, one root each, all four measured on real devices and real servers
@@ -1287,7 +1306,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.3
 [0.4.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.2
 [0.4.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.1
 [0.4.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.0
