@@ -314,7 +314,12 @@ internal class AgentSessionSshLifecycle(
                 try {
                     val cmd = sess.exec(command)
                     val out = java.io.ByteArrayOutputStream()
-                    cmd.inputStream.copyTo(out)
+                    // Bounded read: the deadline wraps the READ, not the join after it.
+                    ai.eight24family.conch.ssh.BoundedExec.drain(
+                        cmd, out,
+                        deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.COMMAND_MS,
+                        maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.COMMAND,
+                    )
                     cmd.join(15, TimeUnit.SECONDS)
                     val str = String(out.toByteArray(), Charsets.UTF_8)
                     ai.eight24family.conch.data.ServerActivityLog.append(

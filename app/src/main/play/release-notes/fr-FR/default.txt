@@ -1,5 +1,5 @@
 Nouveautés
-• Changement de téléphone : serveurs et réglages suivent via la sauvegarde Android et le transfert d'appareil à appareil. Mots de passe et clés restent volontairement sur l'ancien appareil — ajoutez-les une fois.
-• Mémoire allégée : images du chat sous budget fixe, miniatures décodées en petit, caches libérés à la demande du système.
-• Panneau des agents lisible : une ligne par agent.
-• Stop n'avale plus un message en file.
+• La liste des sessions ne tourne plus indéfiniment. Un serveur avec des centaines de sessions envoyait des mégaoctets pour deux lignes ; ce listing est ~16x plus léger et chaque lecture a désormais un délai.
+• Plus de « login expired » alors que la connexion est valide.
+• Pont téléphone : si Shizuku ne peut pas exécuter de commandes, Conch le dit avant de dépenser un tour.
+• Un message arrêté avant d'atteindre la CLI revient au lieu de disparaître.

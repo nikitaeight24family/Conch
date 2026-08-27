@@ -1,5 +1,5 @@
 What's new
-• Moving to a new phone: your servers and settings now come along via Android backup and device-to-device transfer. Passwords and keys stay on the old device by design — re-add them once.
-• Leaner memory: chat images live in a fixed budget, thumbnails decode small, caches free themselves when Android asks.
-• The live agent panel is readable: one line per agent, differences only.
-• Stop no longer swallows a queued prompt.
+• The session list no longer spins forever. A server with hundreds of sessions used to stream megabytes just to fill a two-line row; that listing is ~16x lighter and every read now has a deadline.
+• No more "login expired" while your login is perfectly fine.
+• Phone bridge: if Shizuku can't run commands, Conch tells you before spending a turn, with one tap to fix it.
+• A message stopped before the CLI received it comes back instead of vanishing.

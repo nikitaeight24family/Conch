@@ -442,7 +442,12 @@ internal class AgentSessionRunOneShot(
                 try {
                     val p = s.exec(RemoteEnv.portable(cmd))
                     val o = java.io.ByteArrayOutputStream()
-                    p.inputStream.copyTo(o)
+                    // Bounded read: the deadline wraps the READ, not the join after it.
+                    ai.eight24family.conch.ssh.BoundedExec.drain(
+                        p, o,
+                        deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.COMMAND_MS,
+                        maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.COMMAND,
+                    )
                     p.join(20, TimeUnit.SECONDS)
                     String(o.toByteArray(), Charsets.UTF_8)
                 } finally { SilentlyTry.fired("SshAi-Turn", "close failover session") { s.close() } }

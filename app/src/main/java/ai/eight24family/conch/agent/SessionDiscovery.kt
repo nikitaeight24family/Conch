@@ -165,14 +165,37 @@ class SessionDiscovery(private val ssh: SshClient) {
      */
     suspend fun list(
         agent: Agent,
+        /**
+         * Single-flight key, normally `"<serverId>:<agent>"`. When two callers
+         * ask for the same key at once the second RIDES the first pass instead
+         * of starting its own.
+         *
+         * ⛔ WHY. A listing is not cheap and it is not idempotent in cost: on
+         * the user's phone (2026-08-27) a refresh landed while the first pass
+         * was still streaming, and `ps` on the server showed TWO `bash -lc`
+         * pipelines of the same script alive at 18 and 13 minutes, splitting a
+         * link that was already down to ~20 KB/s. Two passes did not make the
+         * list arrive sooner — they made it arrive at half speed.
+         *
+         * null opts out (a caller that genuinely wants its own pass).
+         */
+        key: String? = null,
         exec: suspend (cmd: String) -> String?,
     ): List<RemoteSession> =
         withContext(Dispatchers.IO) {
-            val script = AgentSpecRegistry[agent].listSessionsScript ?: return@withContext emptyList()
-            val cmd = "bash -lc " + shellEscape(script)
-            val out = exec(cmd).orEmpty()
-            parseLines(agent, out)
+            if (key == null) return@withContext listOnce(agent, exec)
+            ListingSingleFlight.run(key) { listOnce(agent, exec) }
         }
+
+    private suspend fun listOnce(
+        agent: Agent,
+        exec: suspend (cmd: String) -> String?,
+    ): List<RemoteSession> {
+        val script = AgentSpecRegistry[agent].listSessionsScript ?: return emptyList()
+        val cmd = "bash -lc " + shellEscape(script)
+        val out = exec(cmd).orEmpty()
+        return parseLines(agent, out)
+    }
 
     private fun parseLines(agent: Agent, output: String): List<RemoteSession> {
         val spec = AgentSpecRegistry[agent]

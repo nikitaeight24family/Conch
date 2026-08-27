@@ -119,8 +119,15 @@ open class SshClient {
                     val cmd = session.exec(ai.eight24family.conch.agent.RemoteEnv.portable(command))
                     val out = ByteArrayOutputStream()
                     val err = ByteArrayOutputStream()
-                    cmd.inputStream.copyTo(out)
-                    cmd.errorStream.copyTo(err)
+                    // Bounded read, and stdout+stderr CONCURRENTLY: the deadline
+                    // wraps the READ (not the join after it), and draining the two
+                    // streams in sequence is a deadlock as soon as a command fills
+                    // the stderr pipe mid-run.
+                    BoundedExec.drainBoth(
+                        cmd, out, err,
+                        deadlineMs = BoundedExec.Deadline.COMMAND_MS,
+                        maxBytes = BoundedExec.Cap.COMMAND,
+                    )
                     cmd.join(60, TimeUnit.SECONDS)
                     val exit = cmd.exitStatus ?: -1
                     buildString {
@@ -165,8 +172,12 @@ open class SshClient {
             val cmd = session.exec(ai.eight24family.conch.agent.RemoteEnv.portable(command))
             val out = ByteArrayOutputStream()
             val err = ByteArrayOutputStream()
-            cmd.inputStream.copyTo(out)
-            cmd.errorStream.copyTo(err)
+            // Same bounded, concurrent drain as the pooled path above.
+            BoundedExec.drainBoth(
+                cmd, out, err,
+                deadlineMs = BoundedExec.Deadline.COMMAND_MS,
+                maxBytes = BoundedExec.Cap.COMMAND,
+            )
             cmd.join(60, TimeUnit.SECONDS)
             val exit = cmd.exitStatus ?: -1
             session.close()

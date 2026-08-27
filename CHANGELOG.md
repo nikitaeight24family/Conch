@@ -11,6 +11,81 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.2] — 2026-08-27
+
+Four faults, one root each, all four measured on real devices and real servers
+rather than reasoned about.
+
+### Fixed
+- **The session list could spin forever.** The Claude listing shipped eight
+  whole user records per session as the "preview" for a two-line row: measured
+  at 7 871 379 bytes for 140 sessions, one session alone contributing 650 KB.
+  A second account on the same host with 6 sessions produced 132 605 bytes and
+  finished instantly — that 59× was the entire difference between "works" and
+  "hangs". Each candidate record is now cut to 600 bytes server-side (the JSON
+  prefix before `content` measures ≤163 B over 799 real records, so 600 leaves
+  more than the 140 characters the row displays), and the parser salvages the
+  text when the cut lands mid-JSON. Verified against the live server:
+  499 054 bytes, 139 rows, 9 seconds.
+- **Every remote read now has a deadline that wraps the read.** All 27 exec
+  sites were `copyTo(out)` followed by `join(15, SECONDS)` — and `join` only
+  starts counting once the read has already returned, so the read itself was
+  unbounded. With a phone link collapsed to a 1–4 segment congestion window
+  and 1509 retransmits, two listing pipelines were found alive on the server at
+  18 and 13 minutes, blocked writing output nobody could consume. On deadline
+  the channel is now closed, which is the only thing that unblocks a socket
+  read and also kills the remote command. Byte ceilings added alongside.
+- **`stdout` and `stderr` are drained concurrently.** Draining them in sequence
+  deadlocks as soon as a command fills the stderr pipe mid-run.
+- **A refresh no longer doubles the traffic.** Concurrent identical listings
+  collapse into one pass; the second pass never made the list arrive sooner, it
+  halved the speed of the one already in flight.
+- **"login expired" on a login that was fine.** An access token lives about
+  eight hours and the CLI renews it from the refresh token on its next run;
+  between those moments the probe took the expired token, got a 401, and
+  stamped a permanent block. Measured: the row said "login expired" while the
+  credential file had been refreshed 75 seconds earlier, its expiry was 7.7
+  hours in the future, and the refresh token was valid for another three weeks.
+  A 401 or non-scope 403 now consults the refresh token — refreshable means
+  "could not check", never a block — and the expiry is read before the request
+  is spent at all.
+- **A block that could not be cleared.** A run-state verdict preserved through
+  an inconclusive probe now expires after 30 minutes. Preservation was one-way:
+  only a concrete reading could clear a block, and on a server whose probes
+  cannot land there is never a concrete reading, so a single wrong verdict was
+  permanent.
+- **A message stopped before the CLI received it comes back.** An interrupt
+  that lands before the agent has taken the prompt hands the text back instead
+  of losing it — measured against a rollout with five turn-starts and only four
+  recorded prompts. Routed through the existing undelivered-prompt path, never
+  an automatic re-send.
+- **The cold start is visible.** Resuming a thread takes real seconds before the
+  agent has even received the prompt (measured: 7.85 s cold against 0.04–0.36 s
+  warm), and those seconds used to be indistinguishable from a working spinner —
+  which is exactly how long a person waits before pressing Stop.
+
+### Added
+- **The phone bridge refuses to waste a turn.** If Shizuku cannot execute
+  commands, a send into a phone-wired chat is stopped and the user is told
+  which state it is in — not installed, service stopped, or access revoked —
+  with one button that fixes it. The message is kept and goes out by itself
+  once Shizuku works. Previously the message reached the agent, the agent
+  believed the phone was attached, and the whole turn was spent on bridge calls
+  that came back as errors.
+- **Shizuku readiness is push-based**, using Shizuku's own binder-death
+  listener, so a service killed by an aggressive Android skin stops looking
+  like "phone connected" the moment it dies.
+- **Turn lifecycle logging.** Every send records who asked for it, and the
+  end-of-turn haptic records why it fired.
+
+### Changed
+- The phone-bridge setup prompt is never sent into a chat twice (two such turns
+  cost 96 508 input tokens in one session), and every handshake in a chat is
+  collapsed to a single status row rather than only the first — the raw setup
+  instructions no longer appear as if the user had typed them.
+
+---
+
 ## [0.4.1] — 2026-08-27
 
 ### Removed
@@ -1212,7 +1287,8 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.2
 [0.4.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.1
 [0.4.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.0
 [0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8

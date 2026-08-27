@@ -32,6 +32,17 @@ private val Context.statusDataStore by preferencesDataStore(name = "agent_status
 
 class AgentStatusCache(private val context: Context) {
 
+    /**
+     * How long a BLOCK run-state may be carried forward on preserved evidence
+     * alone before the app stops presenting it as fact.
+     *
+     * 30 minutes: long enough to ride out a bad stretch of link (the probe
+     * cadence is seconds), short enough that a verdict the user disagrees with
+     * cannot outlive the session he is sitting in. Only BLOCK states expire this
+     * way — a preserved OK/WARN costs nothing if it is stale.
+     */
+    private val BLOCK_VERDICT_TTL_MS = 30 * 60_000L
+
     data class Snapshot(
         val statuses: Map<Agent, AgentStatus>,
         val lastCheckedAt: Long?,
@@ -164,7 +175,38 @@ class AgentStatusCache(private val context: Context) {
                         // Never resurrect a limit verdict whose reset already
                         // passed — preserving it here was exactly how a stale
                         // "rate limited" outlived its own reset time.
-                        val oldSt = expireTransient(ClaudeRunState.fromToken(old?.getOrNull(8)), oldData)
+                        val oldSt0 = expireTransient(ClaudeRunState.fromToken(old?.getOrNull(8)), oldData)
+                        // ⛔ AND NEVER PRESERVE A BLOCK FOREVER.
+                        //
+                        // Preservation exists so one "couldn't check" doesn't
+                        // downgrade a real NO_SUBSCRIPTION to "ready". But it is
+                        // one-way: only a CONCRETE reading can clear a block, and
+                        // on a server whose probes keep failing there is never a
+                        // concrete reading. So a single wrong verdict — one 401 on
+                        // an access token the CLI was about to renew — became
+                        // permanent, and the row read "login expired" for as long
+                        // as the link stayed bad (user, 2026-08-27; the probes
+                        // couldn't land because the same server's listing was
+                        // saturating the channel).
+                        //
+                        // A block we cannot re-confirm within the window stops
+                        // being a fact. It clears to null → the UI shows the
+                        // ordinary "not checked" state and the send button lives;
+                        // if the block is real, the next successful probe restores
+                        // it within seconds. Getting it wrong in THIS direction
+                        // costs one failed turn that says why. The other direction
+                        // costs the user their app.
+                        val oldTs = old?.getOrNull(2)?.toLongOrNull() ?: 0L
+                        val ageMs = ts - oldTs
+                        val stale = oldSt0 != null && oldSt0.isBlocked && ageMs > BLOCK_VERDICT_TTL_MS
+                        if (stale) {
+                            android.util.Log.w(
+                                "SshAi-StatusCache",
+                                "dropping unconfirmed ${oldSt0.name} for $serverId " +
+                                    "(${ageMs / 60_000} min old, probes not landing)",
+                            )
+                        }
+                        val oldSt = if (stale) null else oldSt0
                         if (oldSt != null && oldSt != ClaudeRunState.UNKNOWN) {
                             s = status.copy(
                                 claudeState = oldSt,

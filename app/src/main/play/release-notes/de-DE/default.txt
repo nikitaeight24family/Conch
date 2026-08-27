@@ -1,5 +1,5 @@
-Neu in dieser Version
-• Umzug aufs neue Gerät: Server und Einstellungen wandern per Android-Backup und Gerät-zu-Gerät-Übertragung mit. Passwörter und Schlüssel bleiben bewusst auf dem alten Gerät — einmal neu hinterlegen.
-• Weniger Speicherverbrauch: Chat-Bilder mit festem Budget, Miniaturen klein dekodiert, Caches geben auf Systemsignal frei.
-• Agenten-Panel lesbar: eine Zeile pro Agent, nur Unterschiede.
-• Stop verschluckt keine wartende Nachricht mehr.
+Neu
+• Die Sitzungsliste dreht nicht mehr endlos. Ein Server mit hunderten Sitzungen schickte Megabyte für eine zweizeilige Zeile; die Abfrage ist rund 16x leichter und jeder Lesevorgang hat jetzt eine Frist.
+• Kein „login expired“ mehr, während die Anmeldung intakt ist.
+• Telefonbrücke: kann Shizuku keine Befehle ausführen, sagt Conch das vor dem Zug — mit einem Tipp zur Behebung.
+• Eine vor Erreichen der CLI gestoppte Nachricht kommt zurück, statt zu verschwinden.
