@@ -1,5 +1,6 @@
 What's new
-• The session list no longer spins forever. A server with hundreds of sessions used to stream megabytes just to fill a two-line row; that listing is ~16x lighter and every read now has a deadline.
-• No more "login expired" while your login is perfectly fine.
-• Phone bridge: if Shizuku can't run commands, Conch tells you before spending a turn, with one tap to fix it.
-• A message stopped before the CLI received it comes back instead of vanishing.
+• The session list no longer spins forever. A server with hundreds of sessions used to stream megabytes to fill a two-line row; that listing is ~16x lighter and every read now has a deadline.
+• No more "login expired" while your login is fine.
+• Phone bridge: if Shizuku can't run commands, Conch tells you before spending a turn.
+• A message stopped before the CLI got it comes back instead of vanishing.
+• About links conch-labs.com.
