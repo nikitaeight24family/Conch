@@ -23,15 +23,25 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/conch_01.jpg" width="21%" />
-  <img src="screenshots/conch_02.jpg" width="21%" />
-  <img src="screenshots/conch_03.jpg" width="21%" />
-  <img src="screenshots/conch_04.jpg" width="21%" />
+  <img src="screenshots/screen_sessions.jpg" width="23%" />
+  <img src="screenshots/screen_agents.jpg" width="23%" />
+  <img src="screenshots/screen_chat.jpg" width="23%" />
+  <img src="screenshots/screen_appearance.jpg" width="23%" />
+</p>
+
+<p align="center">
+  <img src="screenshots/screen_search.jpg" width="23%" />
+  <img src="screenshots/screen_hardware_key.jpg" width="23%" />
+  <img src="screenshots/screen_about.jpg" width="23%" />
+  <img src="screenshots/screen_approval.jpg" width="23%" />
 </p>
 
 <p align="center">
   <sub>
-  Every session from every server · agents probed per host · tool calls and diffs inline · attach a photo over the same SSH channel
+  Every session from every server · agents probed and installed per host · tool calls and diffs inline · your accent, font and scale<br />
+  full-text search across sessions · FIDO2 over NFC · what it collects (nothing) · SAFE / AUTO / YOLO<br /><br />
+  <i>Rendered from the app's own font, palette and layout with fictional servers, rather than captured from a phone full of real ones.<br />
+  Device captures of the same screens are in <a href="screenshots">screenshots/</a>.</i>
   </sub>
 </p>
 
@@ -317,6 +327,9 @@ Flow throughout.
 - **Commercial use needs a separate licence** from Eight 24 Family LLC — including use by a company as part of its business operations, redistribution, white-labelling, and embedding Conch in a product you sell. → [contact@eight24family.ai](mailto:contact@eight24family.ai)
 
 Version history lives in [CHANGELOG.md](CHANGELOG.md).
+
+The store screenshots — the same screens with a headline over them — live in
+[`screenshots/promo/`](screenshots/promo).
 
 <p align="center">
   <sub>
