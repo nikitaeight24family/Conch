@@ -79,6 +79,11 @@ internal class AgentPickerViewModelApiKey(
         // Copilot's "key" is a GitHub token (fine-grained PAT with the
         // "Copilot Requests" permission) — its highest-precedence env var.
         Agent.COPILOT -> "COPILOT_GITHUB_TOKEN"
+        Agent.QWEN -> "OPENAI_API_KEY"
+        Agent.CURSOR -> "CURSOR_API_KEY"
+        Agent.OPENCODE -> "ANTHROPIC_API_KEY"
+        Agent.CRUSH -> "ANTHROPIC_API_KEY"
+        Agent.CONTINUE -> "ANTHROPIC_API_KEY"
     }
 
     /**

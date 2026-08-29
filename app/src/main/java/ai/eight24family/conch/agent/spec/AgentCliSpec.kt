@@ -46,8 +46,62 @@ interface AgentCliSpec {
     /** Binary on the server's PATH. Used by `command -v` probes. */
     val cliCommand: String
 
-    /** npm package name, used by the "install hint" copy in error toasts. */
-    val npmPackage: String
+    /**
+     * npm package name, used by the installer, the `npm view` latest-version
+     * probe and the "install hint" copy in error toasts.
+     *
+     * **null when the CLI is not distributed on npm at all** — then
+     * [officialInstallCommand] carries the real channel. Null is not a
+     * cosmetic detail: guessing a package name here would make the installer
+     * run `npm install -g <guess>`, and for Cursor that guess resolves to an
+     * UNRELATED squatted package (`cursor-agent`, a dead 2025 task-list
+     * library by a third party, no binary in it). Never invent a name to
+     * satisfy the type.
+     */
+    val npmPackage: String?
+
+    /**
+     * The vendor's OWN installer, when npm is not the canonical channel
+     * (Claude Code's `claude.ai/install.sh`, Cursor's `cursor.com/install`).
+     * Run before the npm cascade; null = npm is the channel.
+     *
+     * Lives on the spec so the installer never branches on agent identity —
+     * it used to say `if (agent == Agent.CLAUDE)` in two places, which is
+     * exactly the leak that makes every new agent a hunt through shared code.
+     */
+    val officialInstallCommand: String? get() = null
+
+    /**
+     * The command that starts this CLI's OAuth sign-in on the SERVER, driven
+     * over our PTY channel so the URL/code can be relayed to the phone.
+     *
+     * **null = this CLI has no sign-in we can drive headlessly**, and the
+     * picker must steer to an API key instead of showing a button that hangs
+     * on a machine with no browser. Never guess a command here: a login that
+     * silently blocks is indistinguishable from a broken server.
+     *
+     * Lives on the spec for the same reason as [officialInstallCommand] — the
+     * login flow used to switch on agent identity in shared UI code.
+     */
+    val oauthLoginCommand: String? get() = null
+
+    /**
+     * What a third-party agent guard installed on the USER'S SERVER calls this
+     * CLI, or null when no such guard knows it.
+     *
+     * Conch neither ships, installs, nor invokes any guard — those tools hook
+     * each CLI through the CLI's own hook system, so they already cover a Conch
+     * turn the moment the user installs one on their box. All the app does is
+     * READ whether one is active and say so, the same way it reports a CLI's
+     * version: state, not advice, and nothing new in the launch path.
+     *
+     * Concretely this is HOL Guard's harness id (`hol-guard status --json` →
+     * `harnesses[].harness`). Verified against hol-guard 3.0.18, which knows
+     * claude-code, codex, copilot, cursor, gemini, grok and opencode — but NOT
+     * qwen, crush or continue, which therefore leave this null and show nothing
+     * rather than an unearned "unprotected".
+     */
+    val guardHarnessId: String? get() = null
 
     /** Drawable resource id of the agent's brand mark. Used by hit rows in
      *  search results, the agent picker, and anywhere a compact visual
@@ -101,6 +155,20 @@ interface AgentCliSpec {
      * ChatTopBar (per-agent UI modularity invariant).
      */
     val supportsPlanMode: Boolean get() = false
+
+    /**
+     * A one-line TRUTH about approvals when this CLI does not prompt in the
+     * headless mode we drive it in. Null = it behaves as the shield implies.
+     *
+     * It is a sentence rather than a flag because the truths differ and a
+     * shared blurb would be wrong for someone: Crush executes every tool
+     * unprompted and its modes cannot restrain it at all (only a deny list in
+     * its own config can), while Continue never asks either but its read-only
+     * modes genuinely REMOVE tools from the model's reach. Both were measured,
+     * and the shield prints whichever applies instead of showing an icon that
+     * implies a protection the CLI does not provide.
+     */
+    val approvalsCaveat: String? get() = null
 
     /**
      * Glyph cycle for the chat's working spinner — the agent's OWN TUI
@@ -207,6 +275,26 @@ interface AgentCliSpec {
      * Caller wraps in `bash -lc '<script>'`.
      */
     val listSessionsScript: String?
+
+    /**
+     * How to READ one saved session back, for CLIs that keep their history in
+     * a **database instead of a per-session file** (opencode and Crush both
+     * use SQLite). Return null — the default — when the listing's `path`
+     * column is a real file and the caller should just `cat` it.
+     *
+     * The contract: [listSessionsScript] puts an opaque MARKER in the path
+     * column (by convention `<agent>://<id>`), this method recognises its own
+     * marker and returns a shell command whose stdout is fed to
+     * [parseStreamLine] line by line — exactly as a file's contents would be.
+     * A spec whose export prints ONE whole JSON document is free to do that,
+     * as long as its parser expands that document into the turn's messages.
+     *
+     * A marker path is also what keeps the tail-poll away from a binary
+     * database: `stat` on it fails, the poll reports "no file", and the mirror
+     * falls back to the app-driven turn flag instead of streaming a SQLite
+     * file down a phone link.
+     */
+    fun sessionReadCommand(path: String): String? = null
 
     /**
      * Turn the opaque `raw_preview` field from [listSessionsScript] into the

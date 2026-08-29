@@ -6,7 +6,7 @@
     <string name="nav_settings">Settings</string>
 
     <string name="servers_empty_title">No servers yet</string>
-    <string name="servers_empty_subtitle">Add a server.\nDrive it with Claude, Codex, Gemini, Grok or Copilot.</string>
+    <string name="servers_empty_subtitle">Add a server.\nDrive it with Claude, Codex, Gemini, Grok, Copilot, Qwen, Cursor, opencode, Crush or Continue.</string>
     <string name="servers_add">Add server</string>
 
     <string name="add_server_title">Add server</string>

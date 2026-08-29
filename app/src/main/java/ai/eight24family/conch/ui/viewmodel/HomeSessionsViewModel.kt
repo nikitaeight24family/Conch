@@ -314,6 +314,80 @@ class HomeSessionsViewModel : ViewModel() {
         return n
     }
     private val aiTitleRe = Regex("\"aiTitle\":\"([^\"]*)\"")
+    /**
+     * Sessions whose body-derived bits (Claude's ai-title, the last-message
+     * preview) are not memoized YET, mapped to the agent that can parse them and
+     * the row's last-activity stamp so the warm pass starts with what the user is
+     * actually looking at.
+     *
+     * ⛔ WHY THIS EXISTS. [reload] used to call [titleFromBody] and
+     * [lastMessageFromBody] inline for every row. Both are memoized, so on a warm
+     * process they cost nothing — but on a COLD START the memos are empty, and the
+     * first paint had to mmap and parse the tail of every cached body first: 380
+     * sessions x 128 KB of JSONL, each line through the agent's own stream parser,
+     * before a single row could appear. That is the (user, 2026-08-29) — the data
+     * was on disk the whole time, the list was just behind ~48 MB of parsing. Rows
+     * now paint from the cache alone and the bodies are read afterwards, newest
+     * first, re-painting as they land.
+     */
+    private val coldBodies = java.util.concurrent.ConcurrentHashMap<String, Pair<Agent, Long>>()
+
+    @Volatile private var warmingBodies = false
+
+    /** Memoized ai-title only — never touches disk. Registers a miss for the warm
+     *  pass; the row falls back to the listing's own title until then. */
+    private fun titleFromBodyMemo(sessionId: String, agent: Agent, lastActiveMs: Long): String? {
+        bodyTitleCache[sessionId]?.let { return it.ifEmpty { null } }
+        if (ServiceLocator.historyCache.size(sessionId) > 0L) {
+            coldBodies[sessionId] = agent to lastActiveMs
+        }
+        return null
+    }
+
+    /** Memoized last message only — never touches disk beyond the length check the
+     *  memo is keyed on. A miss falls back to the server listing's preview, which
+     *  is already in the sessions cache: a slightly older line beats an empty row. */
+    private fun lastMessageMemo(sessionId: String, agent: Agent, lastActiveMs: Long): String? {
+        val size = ServiceLocator.historyCache.size(sessionId)
+        if (size <= 0L) return null
+        lastMsgCache[sessionId]?.let { (sz, m) -> if (sz == size) return m.ifEmpty { null } }
+        coldBodies[sessionId] = agent to lastActiveMs
+        return null
+    }
+
+    /**
+     * Fill the body memos in the background, newest row first, re-painting after
+     * every batch. Runs only while the user is looking (the same gate [reload]
+     * uses) and only one pass at a time.
+     */
+    private fun warmBodiesIfNeeded() {
+        if (warmingBodies || coldBodies.isEmpty()) return
+        warmingBodies = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                while (ai.eight24family.conch.util.AppForeground.isForeground) {
+                    val batch = coldBodies.entries
+                        .sortedByDescending { it.value.second }
+                        .take(WARM_BATCH)
+                        .map { it.key to it.value.first }
+                    if (batch.isEmpty()) break
+                    for ((id, agent) in batch) {
+                        coldBodies.remove(id)
+                        SilentlyTry.fired("SshAi-Home", "warm body preview") {
+                            if (agent == Agent.CLAUDE) titleFromBody(id)
+                            lastMessageFromBody(id, agent)
+                        }
+                    }
+                    // Repaint with what just landed instead of making the user
+                    // wait for the whole backlog.
+                    reload()
+                }
+            } finally {
+                warmingBodies = false
+            }
+        }
+    }
+
     private fun titleFromBody(sessionId: String): String? {
         bodyTitleCache[sessionId]?.let { return it.ifEmpty { null } }
         val t = SilentlyTry.nullOnError {
@@ -465,11 +539,14 @@ class HomeSessionsViewModel : ViewModel() {
                     // re-listed (device key dropped / offline). sess.copy keeps the
                     // UI reading row.session.title.
                     val resolvedTitle = sess.title
-                        ?: if (agent == Agent.CLAUDE) titleFromBody(sess.id) else null
+                        ?: if (agent == Agent.CLAUDE) titleFromBodyMemo(sess.id, agent, lastActiveMs) else null
                     val rowSess = if (sess.title == null && resolvedTitle != null)
                         sess.copy(title = resolvedTitle) else sess
                     // The chat's last message — dim preview under the name (all agents).
-                    val lastMsg = lastMessageFromBody(sess.id, agent)
+                    // Memo or the listing's preview; the body is read off the
+                    // critical path (see [coldBodies]).
+                    val lastMsg = lastMessageMemo(sess.id, agent, lastActiveMs)
+                        ?: sess.preview.takeIf { it.isNotBlank() }
                     out += HomeSessionRow(
                         s.id, s.name, s.username, s.host, s.port, rowSess, working, unread, lastActiveMs, lastMsg,
                         phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
@@ -566,7 +643,14 @@ class HomeSessionsViewModel : ViewModel() {
         // which after the recency sort is the most-recently-active copy.
         _rows.value = out.distinctBy { it.serverId + "|" + it.session.agent.name + "|" + it.session.id }
         _loadedOnce.value = true
+        // The list is on screen; NOW go read the bodies whose previews are missing.
+        warmBodiesIfNeeded()
     }
+
+    /** How many bodies one warm batch reads before the list repaints. Big enough
+     *  that a 380-session backlog drains in a handful of passes, small enough that
+     *  the first repaint (the visible top of the list) lands almost at once. */
+    private val WARM_BATCH = 40
 
     /** Last by-agent row counts we logged, so [reload] logs only on change. */
     @Volatile private var lastLoggedCounts: Map<String, Int> = emptyMap()

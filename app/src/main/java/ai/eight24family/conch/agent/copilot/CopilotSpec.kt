@@ -58,6 +58,7 @@ object CopilotSpec : AgentCliSpec {
     override val displayName = "Copilot CLI"
     override val cliCommand = "copilot"
     override val npmPackage = "@github/copilot"
+    override val guardHarnessId = "copilot"
     override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_copilot
 
     /** Copilot has custom agents (`~/.copilot/agents`, `.github/agents`), but
@@ -72,6 +73,11 @@ object CopilotSpec : AgentCliSpec {
 
     /** Copilot has a REAL plan mode (`--plan` / `--mode plan`). */
     override val supportsPlanMode = true
+
+    /** Copilot already defaults to device-code in an SSH session; the explicit
+     *  flag pins that against a future default change, and `--no-auto-update`
+     *  keeps a 100 MB self-replace out of the login path. */
+    override val oauthLoginCommand = "copilot login --device-code --no-auto-update"
 
     /** The Copilot mascot's blinking eyes are drawn with quadrant blocks
      *  (▘▝ open → ╴╶ half → closed); the spinner cycles that family —

@@ -1,0 +1,14 @@
+<!-- opencode brand mark (the bracketed block). Trademark of SST /
+     opencode maintainers; used here for nominative identification of the
+     opencode agent in our UI. Source: lobehub/icons static SVG set (MIT).
+     Trademark notice in AboutScreen. White fill so the mark stays legible
+     on the dark cyberpunk-CLI surface (opencode's own mark is monochrome). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16 6H8v12h8V6zm4 16H4V2h16v20z" />
+</vector>

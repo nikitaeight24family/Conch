@@ -98,6 +98,7 @@ internal class AgentPickerViewModelInstall(
                 SUDO="sudo -n"
             fi
             echo "removing $bin…"
+            ${if (pkg != null) """
             # 1. npm uninstall — user prefix, then default prefix, then sudo.
             if command -v npm >/dev/null 2>&1; then
                 npm config set prefix "${'$'}HOME/.local" 2>&1 || true
@@ -112,6 +113,10 @@ internal class AgentPickerViewModelInstall(
                 . "${'$'}HOME/.nvm/nvm.sh" 2>/dev/null
                 command -v npm >/dev/null 2>&1 && npm uninstall -g $pkg 2>&1 || true
             fi
+            """ else """
+            # 1-2. Not an npm package — nothing for npm to uninstall. The
+            #      vendor installer's own tree is removed with the binary below.
+            """}
             # 3. Hard-remove the binary from every known install location
             #    (official installer / tarball drop their own symlink/wrapper
             #    that npm uninstall never sees).
@@ -173,7 +178,10 @@ internal class AgentPickerViewModelInstall(
     ): String {
         val pkg = agent.npmPackage
         val bin = agent.cliCommand
-        val isClaude = agent == Agent.CLAUDE
+        // The vendor's own installer, when npm is not the channel — read off
+        // the spec, never branched on agent identity here.
+        val officialInstall = ai.eight24family.conch.agent.spec
+            .AgentSpecRegistry[agent].officialInstallCommand
         // `@latest` suffix forces npm to fetch the registry's current
         // version instead of returning whatever's cached locally. Used
         // for update flow (existing version present, newer version
@@ -193,6 +201,7 @@ internal class AgentPickerViewModelInstall(
         // so an unverified version cannot pass for a verified one.
         val pinned = ai.eight24family.conch.agent.spec.CliContracts[agent]?.pinnedVersion
         val npmTarget = when {
+            pkg == null -> null // not on npm — the vendor installer is the channel
             forceLatest -> "$pkg@latest"
             pinned != null -> "$pkg@$pinned"
             else -> pkg
@@ -227,7 +236,7 @@ internal class AgentPickerViewModelInstall(
             # one stays at /usr/local/bin/$bin shadowing it via PATH.
             CURRENT_BIN="${'$'}(command -v $bin 2>/dev/null || true)"
             case "${'$'}CURRENT_BIN" in
-                /usr/local/bin/*|/usr/bin/*)
+                ${if (pkg == null) "" else """/usr/local/bin/*|/usr/bin/*)
                     # System path — update via system npm with sudo.
                     #
                     # CRITICAL: pin the prefix to where the binary ACTUALLY lives
@@ -259,11 +268,13 @@ internal class AgentPickerViewModelInstall(
                         if "${'$'}CURRENT_BIN" --version 2>/dev/null | head -1; then exit 0; fi
                     fi
                     ;;
+                """}
                 "${'$'}HOME"/.local/bin/$bin)
-                    # User-prefix install. Claude → installer; others → npm.
-                    ${if (isClaude) """
+                    # User-prefix install. Vendor installer where there is one;
+                    # npm otherwise.
+                    ${if (officialInstall != null) """
                     if command -v curl >/dev/null 2>&1; then
-                        curl -fsSL https://claude.ai/install.sh | bash 2>&1
+                        $officialInstall 2>&1
                         if "${'$'}HOME/.local/bin/$bin" --version 2>/dev/null | head -1; then exit 0; fi
                     fi
                     """ else """
@@ -283,15 +294,21 @@ internal class AgentPickerViewModelInstall(
             if command -v $bin >/dev/null 2>&1; then exit 0; fi
             """.trimIndent()}
 
-            ${if (isClaude) """
-            # 1. Claude Code — use the official Anthropic installer.
-            #    Lands in ~/.local/bin/claude, already on PATH (and
-            #    Debian's ~/.profile picks up ~/.local/bin too).
+            ${if (officialInstall != null) """
+            # 1. The vendor's OWN installer (Claude Code, Cursor). Lands in
+            #    ~/.local/bin/$bin, already on PATH (and Debian's ~/.profile
+            #    picks up ~/.local/bin too).
             if command -v curl >/dev/null 2>&1; then
-                curl -fsSL https://claude.ai/install.sh | bash 2>&1
+                $officialInstall 2>&1
                 if command -v $bin >/dev/null 2>&1; then exit 0; fi
             fi
             """ else ""}
+            ${if (pkg == null) """
+            # This CLI does not ship on npm, so there is no npm cascade to
+            # fall through to: the vendor installer above is the only channel.
+            # Fall through to the verification block, which reports honestly
+            # whether the binary appeared.
+            """ else """
 
             # 2. Ensure recent Node. Codex requires 22+, Gemini 20+.
             #    Debian/Ubuntu apt nodejs is too old — use NodeSource.
@@ -426,6 +443,7 @@ PROFEOF
                     fi
                 fi
             fi
+            """}
 
             # Final verification — RUN the binary directly from every
             # known install location. If it executes (exit 0 from its

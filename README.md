@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml"><img src="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
-  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.4.4-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
+  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.4.7-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
   <a href="https://play.google.com/store/apps/details?id=ai.eight24family.conch"><img src="https://img.shields.io/badge/Google%20Play-live-a78bfa?style=flat-square&logo=google-play&logoColor=white&labelColor=0b0b0f" alt="Google Play" /></a>
   <img src="https://img.shields.io/badge/telemetry-none-f39c6b?style=flat-square&labelColor=0b0b0f" alt="no telemetry" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial-7b7b8a?style=flat-square&labelColor=0b0b0f" alt="licence" /></a>
@@ -85,13 +85,23 @@ Android 8.0 (API 26) and up. Hardware security keys need USB-OTG or NFC.
 
 ## what it does
 
-### Three agents, one app
-Claude Code, Codex CLI, Gemini CLI, Grok Build and Copilot CLI, each driven through its own real flags —
-resume ids, approval modes and model pickers are per-agent, not a lowest common
-denominator. Each has its own stream parser (stream-json for Claude, rollout
-JSONL for Codex, Gemini events for Gemini, ACP records for Grok, typed JSONL
-events for Copilot), and the model picker is probed live
-from the CLI rather than hardcoded.
+### Ten agents, one app
+Claude Code, Codex CLI, Gemini CLI, Grok Build, Copilot CLI, Qwen Code, Cursor
+CLI, opencode, Crush and Continue CLI — each driven through its own real flags,
+so resume ids, approval modes and model pickers are per-agent rather than a
+lowest common denominator. Each has its own stream parser (stream-json for
+Claude, rollout JSONL for Codex, Gemini events for Gemini, ACP records for Grok,
+typed JSONL for Copilot, the Claude Agent SDK vocabulary for Qwen, NDJSON for
+Cursor, six event types for opencode, and — for the two that emit no structured
+stream at all — plain output plus a read-back through the CLI's own export). Two
+of them keep history in SQLite instead of files, so a session is replayed with
+the CLI's export command rather than a file path. The model picker is probed
+live from the CLI rather than hardcoded.
+
+Where a CLI cannot enforce something, the app says so instead of implying it:
+Crush runs every tool unprompted in headless mode and Continue picks its toolset
+up front, and both state that on the shield rather than showing an approval
+prompt that will never appear.
 
 ### Sessions that survive
 Chats are the CLI's own session files on your disk, so you can resume days

@@ -85,14 +85,15 @@ fun OperationsScreen(onBack: () -> Unit) {
             )
 
             OpSection("Probing — read-only status checks") {
-                OpBullet("which claude / codex / gemini / grok / copilot — find the CLI on PATH.")
+                OpBullet("which claude / codex / gemini / grok / copilot / qwen / cursor-agent / opencode / crush / cn — find the CLI on PATH.")
                 OpBullet("<cli> --version — read the installed version.")
                 OpBullet("npm view @openai/codex / @google/gemini-cli / @xai-official/grok / @github/copilot version — read the latest published version.")
                 OpBullet("curl -sI https://claude.ai/install.sh | grep ETag — best-effort latest-Claude marker.")
                 OpBullet("grok models — Grok's own login + model-catalog check (local state, no generation).")
                 OpBullet("stat -c %s <path> / stat -f %z <path> — file size for download icons + tail-poll detection.")
                 OpBullet("pgrep -f <session-uuid> — is THIS chat's CLI still running on the host? Drives the spinner.")
-                OpBullet("ls / cat for the agent's own JSONL session files under ~/.claude, ~/.codex, ~/.gemini, ~/.grok, ~/.copilot.")
+                OpBullet("ls / cat for the agent's own session files under ~/.claude, ~/.codex, ~/.gemini, ~/.grok, ~/.copilot, ~/.qwen, ~/.cursor, ~/.continue.")
+                OpBullet("opencode session list / export, crush session list / show, qwen sessions list — read-only session queries for CLIs that keep history in a database instead of files.")
             }
 
             OpSection("Install / update agents") {
@@ -110,6 +111,11 @@ fun OperationsScreen(onBack: () -> Unit) {
                 OpBullet("gemini [--yolo] \"<user-prompt>\" — Gemini one-shot.")
                 OpBullet("grok -p \"<user-prompt>\" --output-format streaming-messages-json [-r <uuid>] [--permission-mode …] — Grok Build one-shot.")
                 OpBullet("copilot -p \"<user-prompt>\" --output-format json [--resume=<uuid>] [--allow-all-tools | --yolo] — Copilot CLI one-shot.")
+                OpBullet("qwen -p \"<user-prompt>\" -o stream-json --approval-mode … — Qwen Code one-shot.")
+                OpBullet("cursor-agent -p \"<user-prompt>\" --output-format stream-json [--mode plan | --auto-review | --force] — Cursor one-shot.")
+                OpBullet("opencode run --format json --dir <cwd> [--auto] — opencode one-shot (prompt piped in on stdin).")
+                OpBullet("crush run -q [-m provider/model] \"<user-prompt>\" < /dev/null — Crush one-shot.")
+                OpBullet("cn --resume --format json [--readonly|--auto] -p \"<user-prompt>\" — Continue one-shot.")
                 OpBullet("Prompts come directly from the chat input you typed — nothing is added behind your back.")
             }
 

@@ -46,8 +46,19 @@ object CliFlagAudit {
         /** Version the mapping was verified against, null when unrecorded. */
         val testedVersion: String?,
         val modes: List<ModeVerdict>,
+        /**
+         * False when this CLI's parser ignores flag values in the presence of
+         * `--help` (yargs), so the probe proves nothing. The verdicts are then
+         * NOT evidence and must not be shown as such — see
+         * [ai.eight24family.conch.agent.spec.CliContract.validatesUnderHelp].
+         */
+        val probeIsMeaningful: Boolean = true,
     ) {
-        val rejected: List<AgentApprovalMode> get() = modes.filter { !it.accepted }.map { it.mode }
+        /** Nothing may be called rejected on the strength of a probe that
+         *  cannot fail — a blind pass is not a pass. */
+        val rejected: List<AgentApprovalMode> get() =
+            if (!probeIsMeaningful) emptyList()
+            else modes.filter { !it.accepted }.map { it.mode }
         val allAccepted: Boolean get() = modes.isNotEmpty() && modes.all { it.accepted }
         /** Running something newer than what was checked. Not an error — a fact
          *  worth showing, because THIS is the window drift lives in. */
@@ -58,6 +69,13 @@ object CliFlagAudit {
         /** One line for the mode sheet. Never claims more than was checked. */
         fun summary(): String = when {
             testedVersion == null -> "modes not audited for this agent"
+            // The probe cannot fail on this parser, so say what IS known (the
+            // version the mapping was checked against by hand) and never the
+            // word "verified".
+            !probeIsMeaningful ->
+                "tested against $testedVersion" +
+                    (installedVersion?.let { " · you're on $it" } ?: "") +
+                    " · this CLI can't be re-checked automatically"
             installedVersion == null -> "tested against $testedVersion · installed version unknown"
             rejected.isNotEmpty() ->
                 "⚠ ${rejected.joinToString("/") { it.name }} rejected by $installedVersion " +
@@ -100,7 +118,10 @@ object CliFlagAudit {
                 )
             }
         }
-        val report = Report(agent, version, contract.testedVersion, verdicts)
+        val report = Report(
+            agent, version, contract.testedVersion, verdicts,
+            probeIsMeaningful = contract.validatesUnderHelp,
+        )
         android.util.Log.i(
             TAG,
             "$cli audit: installed=$version tested=${contract.testedVersion} " +

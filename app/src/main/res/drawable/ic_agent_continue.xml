@@ -1,0 +1,21 @@
+<!-- Continue agent mark. "Continue" is a trademark of Continue Dev, Inc.
+     This is NOT a reproduction of their logo — no vector of it ships under a
+     licence we can use. It is our own glyph in Continue's OWN palette: the
+     three stops of the gradient its CLI paints with (#473b7b → #3584a7 →
+     #30d2be), on the forward-chevron idea its name carries. Trademark notice
+     in AboutScreen. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#473B7B"
+        android:pathData="M3,4l5,8l-5,8h4l5,-8l-5,-8z" />
+    <path
+        android:fillColor="#3584A7"
+        android:pathData="M10,4l5,8l-5,8h4l5,-8l-5,-8z" />
+    <path
+        android:fillColor="#30D2BE"
+        android:pathData="M18.5,10.5h3v3h-3z" />
+</vector>

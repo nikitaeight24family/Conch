@@ -1216,26 +1216,25 @@ private fun BridgeConnectedRow() {
     }
 }
 
-/** "connecting phone… N%" — shown while the bridge handshake runs (all its
- *  technical ping/pong/Bash steps are hidden behind it). The % ramps smoothly to
- *  ~95% over ~8.5s; the row is replaced by [BridgeConnectedRow] (100%) the moment
- *  the phone confirms. English only (UI string). */
+/** "connecting phone…" — shown while the bridge handshake runs (all its
+ *  technical ping/pong/Bash steps are hidden behind it). Replaced by
+ *  [BridgeConnectedRow] the moment the phone confirms. English only (UI string). */
 @Composable
 private fun BridgeConnectingRow() {
-    val pct = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
     val stalled = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        while (pct.value < 95) {
-            kotlinx.coroutines.delay(90)
-            pct.value = pct.value + 1
-        }
-        // Ramp done. If this row is STILL on screen ~30 s later it was never
-        // replaced by the "phone connected" row — the handshake stalled (e.g.
-        // the turn died). Flip to a quiet "couldn't connect" instead of sitting
-        // at 95% forever (user, 2026-06-27: "connecting 95%" ghost). A real
+        // ⛔ NO PROGRESS NUMBER HERE. This row used to ramp a counter 0 → 95 % over
+        // ~8.5 s. The row now states what is happening and nothing more.
+        //
+        // The one piece of real state it still carries: if this row is STILL mounted
+        // ~38 s on it was never replaced by the "phone connected" row — the handshake
+        // stalled (e.g. the turn died). Flip to a quiet "couldn't connect" rather than
+        // sit here forever (user, 2026-06-27: the "connecting 95%" ghost). A real
         // success swaps this System row for BridgeConnectedRow, unmounting this
-        // composable and cancelling the timer — so no false "failed".
-        kotlinx.coroutines.delay(30_000)
+        // composable and cancelling the timer — so it can never print a false
+        // failure. 38 s is deliberately past `conch-bridge`'s own 30 s deadline, so
+        // when the agent has something to say about the failure, it says it first.
+        kotlinx.coroutines.delay(38_000)
         stalled.value = true
     }
     if (stalled.value) {
@@ -1257,7 +1256,7 @@ private fun BridgeConnectingRow() {
         )
         Spacer(Modifier.size(6.dp))
         Text(
-            text = "connecting phone… ${pct.value}%",
+            text = "connecting phone…",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
         )

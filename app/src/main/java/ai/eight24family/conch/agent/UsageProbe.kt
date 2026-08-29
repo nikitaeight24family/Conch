@@ -485,7 +485,15 @@ object UsageProbe {
             // follow-up); Copilot bills in AI credits, surfaced per-turn from
             // the stream's assistant.usage events. Neither has a plan-window
             // probe yet → the panel shows this chat's spend instead.
-            Agent.GROK, Agent.COPILOT -> return null
+            // Qwen bills through whatever OpenAI-compatible endpoint the user
+            // configured (its own spend ledgers live in ~/.qwen/usage/, which
+            // is spend, not a plan window); Cursor's quota is behind an
+            // auth-gated surface with no machine-readable form.
+            // opencode and Crush bill through whichever provider the user
+            // configured, so there is no plan window to read; their per-turn
+            // spend rides the stream instead.
+            Agent.GROK, Agent.COPILOT, Agent.QWEN, Agent.CURSOR,
+            Agent.OPENCODE, Agent.CRUSH, Agent.CONTINUE -> return null
         }
         val out = execOnServer(serverId, cmd)?.takeIf { it.isNotBlank() } ?: return null
         // The server answered and said "no credentials": this is a real logout,
@@ -498,7 +506,9 @@ object UsageProbe {
         val windows = when (agent) {
             Agent.CLAUDE -> parseClaude(out)
             Agent.CODEX -> parseCodex(out)
-            Agent.GEMINI, Agent.GROK, Agent.COPILOT -> emptyList()
+            Agent.GEMINI, Agent.GROK, Agent.COPILOT,
+            Agent.QWEN, Agent.CURSOR, Agent.OPENCODE, Agent.CRUSH,
+            Agent.CONTINUE -> emptyList()
         }
         val raw = if (windows.isEmpty()) null else UsageReport(
             windows = windows,
@@ -798,6 +808,19 @@ object UsageProbe {
             // SECONDS in the CLI's get_usage cache — accept both.
             val resetEpochSec = windowResetEpochSec(body)
             val resetEpochMs = resetEpochSec?.let { it * 1000 }
+            // An UNRECOGNISED window sitting at exactly 0 % with no reset time
+            // carries no information: it is a bucket this account has never
+            // touched. Claude's payload ships internal codenames in that state —
+            // `nimbus_quill` turned up on the user's panel as "Nimbus quill · 0%"
+            // — and printing them turns a usage panel into a changelog of
+            // unreleased models. The canonical windows are never hidden (a real 0
+            // % on the weekly is real news), and any unknown bucket that has
+            // usage OR a live reset still shows up on its own, so a genuinely new
+            // model appears the moment it costs something. That was the point of
+            // parsing every window.
+            val known = key == "five_hour" || key == "seven_day" ||
+                key.startsWith("five_hour_") || key.startsWith("seven_day_")
+            if (!known && util <= 0f && resetEpochSec == null) return@mapNotNull null
             val perModel = key != "five_hour" && key != "seven_day" &&
                 (key.startsWith("five_hour_") || key.startsWith("seven_day_"))
             key to window(

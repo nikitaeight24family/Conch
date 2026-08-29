@@ -252,72 +252,21 @@ internal class AgentPickerViewModelOAuth(
             // being launched — the finally must not clear the dialog it hands over.
             var autoRetrying = false
             try {
-                val cmd = when (agent) {
-                    // The REAL /login, driven through the TUI over our PTY — NOT
-                    // `setup-token`. setup-token mints an inference-only env
-                    // token: the terminal's interactive claude said "Not logged
-                    // in" right after a Conch login, per-model limits and the
-                    // plan were unknowable, and /model silently broke on the
-                    // missing user:profile scope. /login writes the full-scope
-                    // ~/.claude/.credentials.json that EVERY consumer reads —
-                    // terminal, Conch probes, bridges. The wizard's stops are
-                    // keyed in the read loop below: trust prompt → Enter,
-                    // composer ready → type "/login", method menu → Enter
-                    // (subscription is preselected), then the same URL +
-                    // paste-code shapes setup-token used (verified against
-                    // 2.1.234 by driving the live TUI in a pty, 2026-08-18).
-                    Agent.CLAUDE -> "claude"
-                    // **moltbot pattern.** Default `codex login` (no
-                    // `--device-auth`) listens on `localhost:1455` and
-                    // prints an OAuth URL whose `redirect_uri` is
-                    // `http://localhost:1455/auth/callback`. User opens
-                    // the URL on their phone, signs in, OpenAI 302's
-                    // them to that callback — phone browser shows
-                    // "Connection refused" but the URL bar now contains
-                    // the full callback URL with `?code=...&state=...`.
-                    // User copies that URL back into our dialog;
-                    // [submitCodexCallback] curl-fetches it on the
-                    // SERVER via the pooled SSH (`curl 'http://
-                    // localhost:1455/auth/callback?…'`). The CLI's
-                    // listener finally gets the hit, exchanges the
-                    // code for a token, writes `~/.codex/auth.json`.
-                    // Poller closes the dialog.
-                    //
-                    // `BROWSER=true` suppresses any attempt to spawn
-                    // xdg-open on the headless box (would fail anyway,
-                    // but cleaner stdout).
-                    //
-                    // We don't use `--device-auth` because OpenAI's
-                    // workspace admins can disable it (and have, per
-                    // the user's actual experience). The localhost-
-                    // callback flow doesn't depend on workspace policy.
-                    Agent.CODEX -> "BROWSER=true codex login"
-                    // Same moltbot pattern as Codex — `BROWSER=true`
-                    // suppresses xdg-open, CLI listens on a localhost
-                    // port (RANDOM, unlike Codex's fixed 1455), prints
-                    // the OAuth URL to stdout. User opens URL on phone,
-                    // signs in, Google 302's to `localhost:<port>/
-                    // oauth2callback?code=…`, user pastes the callback
-                    // URL back, we curl it on the server through the
-                    // pooled SSH. CLI exchanges + writes
-                    // `~/.gemini/oauth_creds.json`. Port is extracted
-                    // from the user's pasted URL (not hardcoded).
-                    //
-                    // Command: `gemini auth login --oauth` — TUI-free
-                    // headless OAuth bootstrap (per
-                    // google-gemini.github.io/gemini-cli docs).
-                    Agent.GEMINI -> "BROWSER=true gemini auth login --oauth"
-                    // **Device-code flows** — the smoothest pattern of all:
-                    // the CLI prints a URL (Grok's even embeds the user code
-                    // in it) and POLLS by itself. The user opens the URL on
-                    // the phone, approves, and the CLI writes its credential
-                    // — no callback capture, no code paste-back. Our creds
-                    // poller (checkAuthOnly, 3 s) sees the fresh credential
-                    // and closes the dialog.
-                    Agent.GROK -> "GROK_DISABLE_AUTOUPDATER=1 grok login --device-code"
-                    // Copilot defaults to device-code on SSH already; the
-                    // explicit flag pins it against future default changes.
-                    Agent.COPILOT -> "copilot login --device-code --no-auto-update"
+                // Each CLI's sign-in command lives on its SPEC (with the
+                // rationale for the exact form — moltbot callback vs device
+                // code vs TUI wizard). A null means the CLI has no sign-in we
+                // can drive on a machine with no browser: we say so instead of
+                // launching something that would hang until the watchdog.
+                val cmd = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].oauthLoginCommand
+                if (cmd == null) {
+                    android.util.Log.w(tag, "startOAuthLogin: $agent has no headless sign-in — steering to API key")
+                    loginRequestMut.value = AgentPickerViewModel.LoginRequest(
+                        agent, serverId, null, null,
+                        "${agent.displayName} has no sign-in that works without a browser on the server. " +
+                            "Add an API key instead — long-press this row to switch method.",
+                        stalled = true,
+                    )
+                    return@launch
                 }
                 // RemoteEnv owns the PATH story — a hand-rolled copy here had
                 // drifted to a subset (no homebrew/volta/bun/asdf/pnpm/snap),
@@ -1235,6 +1184,32 @@ internal class AgentPickerViewModelOAuth(
             // Fresh mtime + the key both required — the CLI touches its
             // config on startup, so mtime alone would false-positive within
             // the first poll.
+            // Qwen's own OAuth tier was discontinued, so this branch only ever
+            // fires for a legacy credential — kept honest rather than dropped.
+            Agent.QWEN ->
+                "f=~/.qwen/oauth_creds.json; [ -f \"\$f\" ] && " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0) && " +
+                    "[ \"\$m\" -gt $sinceEpoch ]"
+            // A finished Cursor login persists tokens; the poller must see a
+            // FRESH write, so a server that was already signed in can't make
+            // the dialog claim success before the user did anything.
+            Agent.CURSOR ->
+                "for f in ~/.cursor/auth.json ~/.cursor/cli-config.json; do " +
+                    "[ -f \"\$f\" ] || continue; " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0); " +
+                    "[ \"\$m\" -gt $sinceEpoch ] && grep -qsE '\"(accessToken|authInfo)\"' \"\$f\" && exit 0; done; exit 1"
+            // Neither has a sign-in we drive (oauthLoginCommand is null for
+            // both: opencode runs on a free tier plus provider keys, Crush is
+            // configured purely by environment), so these branches exist for
+            // exhaustiveness and answer honestly rather than pretending.
+            Agent.OPENCODE ->
+                "f=~/.local/share/opencode/auth.json; [ -s \"\$f\" ] && " +
+                    "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0) && " +
+                    "[ \"\$m\" -gt $sinceEpoch ]"
+            Agent.CRUSH -> "false"
+            // Hub authentication was REMOVED from this CLI — `cn login` throws.
+            // There is nothing to poll for.
+            Agent.CONTINUE -> "false"
             Agent.COPILOT ->
                 "for f in ~/.copilot/config.json ~/.copilot/settings.json; do " +
                     "[ -f \"\$f\" ] || continue; " +

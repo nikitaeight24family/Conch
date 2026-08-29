@@ -1,4 +1,4 @@
 Novedades
-• Dos agentes nuevos: xAI Grok y GitHub Copilot CLI — chat, sesiones con sus títulos, reanudar, selector de modelo, inicio de sesión en la app. Al nivel de Claude, Codex y Gemini.
-• Cada agente conserva su cara: logotipo real y su propio indicador.
-• Modos de seguridad auditados: se instala la versión probada del CLI, los flags de cada modo se verifican en el propio CLI tras instalar, y se muestra lo verificado.
+• Cinco agentes más — diez en total. Qwen Code, Cursor, opencode, Crush y Continue se suman a Claude, Codex, Gemini, Grok y Copilot: cada uno con su parser, sesiones, selector de modelo y logotipo.
+• La lista de sesiones vuelve a abrirse al instante: ya no espera a leer cada chat guardado.
+• El puente del teléfono responde con la pantalla apagada y los avisos de límite muestran el porcentaje real.

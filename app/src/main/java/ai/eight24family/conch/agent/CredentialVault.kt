@@ -61,6 +61,19 @@ class CredentialVault(
         Agent.GEMINI -> "\$HOME/.gemini/oauth_creds.json"
         Agent.CLAUDE -> "\$HOME/.claude/.credentials.json"
         Agent.GROK -> "\$HOME/.grok/auth.json"
+        Agent.QWEN -> "\$HOME/.qwen/oauth_creds.json"
+        // A completed login (and an API-key exchange, which mints tokens from
+        // the key) persists into `~/.cursor/auth.json`; `cli-config.json`
+        // holds the non-secret config beside it. Never read — presence and
+        // copying only.
+        Agent.CURSOR -> "\$HOME/.cursor/auth.json"
+        // opencode stores provider credentials in its own data dir; Crush has
+        // no credential file at all (providers come from the environment).
+        Agent.OPENCODE -> "\$HOME/.local/share/opencode/auth.json"
+        Agent.CRUSH -> "\$HOME/.config/crush/crush.json"
+        // Continue has no credential file of its own — a provider key lives in
+        // its config.yaml or the environment.
+        Agent.CONTINUE -> "\$HOME/.continue/config.yaml"
         // Keyring-less servers (the typical VPS): `copilot login` falls back
         // to "a plain text config file under ~/.copilot/" — the settings
         // store carries the copilotToken secret. Best-known location; a
@@ -75,6 +88,15 @@ class CredentialVault(
         Agent.CLAUDE -> "ANTHROPIC_API_KEY"
         Agent.GROK -> "XAI_API_KEY"
         Agent.COPILOT -> "COPILOT_GITHUB_TOKEN"
+        // Qwen talks to OpenAI-compatible endpoints; OPENAI_API_KEY (with
+        // OPENAI_BASE_URL) is its documented headless setup.
+        Agent.QWEN -> "OPENAI_API_KEY"
+        Agent.CURSOR -> "CURSOR_API_KEY"
+        // Both are provider-agnostic: the key is whichever provider the user
+        // picked. ANTHROPIC_API_KEY is the most common default for each.
+        Agent.OPENCODE -> "ANTHROPIC_API_KEY"
+        Agent.CRUSH -> "ANTHROPIC_API_KEY"
+        Agent.CONTINUE -> "ANTHROPIC_API_KEY"
     }
 
     /** SECOND live mechanism for Claude OAuth: a `claude setup-token` login
@@ -85,7 +107,8 @@ class CredentialVault(
      * half left the server LOGGED IN after "remove account". */
     private val oauthEnvVar: String? = when (agent) {
         Agent.CLAUDE -> "CLAUDE_CODE_OAUTH_TOKEN"
-        Agent.CODEX, Agent.GEMINI, Agent.GROK, Agent.COPILOT -> null
+        Agent.CODEX, Agent.GEMINI, Agent.GROK, Agent.COPILOT,
+        Agent.QWEN, Agent.CURSOR, Agent.OPENCODE, Agent.CRUSH, Agent.CONTINUE -> null
     }
 
     private val slotsDir = "\$HOME/.sshai-auth/${agent.name.lowercase()}/slots"

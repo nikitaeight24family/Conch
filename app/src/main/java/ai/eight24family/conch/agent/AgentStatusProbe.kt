@@ -30,6 +30,21 @@ data class AgentStatus(
     /** Currently-installed binary's reported version (e.g. `2.1.150`).
      *  Null when not installed or version parsing failed. */
     val installedVersion: String? = null,
+    /**
+     * Whether a third-party agent guard running on the SERVER is currently
+     * protecting THIS CLI. Read-only: Conch never installs, launches or
+     * consults one — those tools hook each CLI through the CLI's own hooks, so
+     * they already cover our turns the moment the user installs one.
+     *
+     *   null  — no guard on this server, or it does not know this CLI
+     *   true  — guard is on and manages this CLI's harness
+     *   false — guard is installed and knows this CLI, but is not managing it
+     *
+     * Deliberately three states: a flat Boolean would have to call "no guard
+     * installed" and "guard installed but this CLI is uncovered" the same
+     * thing, and only one of those is worth a word on screen.
+     */
+    val guardProtecting: Boolean? = null,
     /** Latest published version of the CLI per its primary channel
      *  (Claude → claude.ai installer; Codex/Gemini → npm registry).
      *  Null when probe couldn't reach the channel. */
@@ -110,6 +125,98 @@ class AgentStatusProbe(private val ssh: SshClient) {
          *  server's value → it still shows "update" instead of a misleading
          *  "log in" for a CLI that's plainly behind. Process-scoped. */
         private val knownLatest = java.util.concurrent.ConcurrentHashMap<Agent, String>()
+
+    /** Internal (not private) so the k=v → status fold — including the guard
+     *  block's three states — is testable without an SSH server. */
+    internal fun parse(text: String): Map<Agent, AgentStatus> {
+        val kv = text.lineSequence()
+            .mapNotNull { line ->
+                val eq = line.indexOf('=').takeIf { it > 0 } ?: return@mapNotNull null
+                line.substring(0, eq).trim() to line.substring(eq + 1).trim()
+            }
+            .toMap()
+        fun y(key: String) = kv[key].equals("y", ignoreCase = true)
+        // Server-wide guard state (see GUARD_PROBE_LINES), folded per-agent below.
+        val guardPresent = y("guard_present")
+        val guardOn = y("guard_on")
+        val guardManaged = (kv["guard_managed"] ?: "")
+            .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        // Each spec's statusProbeLines emits:
+        //   <agent>_inst    = y/n
+        //   <agent>_ver     = installed semver (e.g. "2.1.150") or empty
+        //   <agent>_latest  = latest published semver or empty
+        //   <agent>_methods = csv of detected auth-method keys (e.g. "oauth,vertex")
+        //   <agent>_active  = the currently-active method key (or empty)
+        // loggedIn is derived: any configured method == logged in. (The old
+        // single `_auth=y/n` line missed Vertex/ADC for Gemini → false
+        // "not logged in"; per-method detection fixes that.)
+        return AgentSpecRegistry.all.associate { spec ->
+            val tag = spec.agent.name.lowercase()
+            var methods = (kv["${tag}_methods"] ?: "")
+                .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            // LIVE auth result (when the spec ran the CLI for real): "n" = the
+            // CLI demanded re-auth, so the on-disk OAuth cred is NOT usable —
+            // drop the OAuth methods so the badge can't falsely claim "OAuth /
+            // ready". "y" confirms; absent = not checked (fall back to presence).
+            val authok = kv["${tag}_authok"]
+            if (authok == "n") methods = methods - setOf("oauth", "chatgpt")
+            // No live verdict yet for an agent that HAS a live check + an OAuth
+            // cred → pending. The row renders "checking" (not "ready"/"OAuth")
+            // so a present-but-revoked cred is never flashed as usable.
+            val pendingLive = authok == null &&
+                spec.liveAuthProbeLines.isNotBlank() &&
+                methods.any { it == "oauth" || it == "chatgpt" }
+            // The probe reports which method the CLI will ACTUALLY use (the
+            // explicit selection: Gemini's settings.json selectedType, Claude's
+            // env precedence, Codex's `login status`). A CLI honors that
+            // selection over a stray credential it isn't configured to use —
+            // e.g. Gemini with settings selectedType=oauth-personal but NO OAuth
+            // credential ignores an API-key NAME sitting in .bashrc and demands
+            // an OAuth login. So when an explicit selection exists and is NOT
+            // among the usable methods, the agent is NOT ready: it must read
+            // "log in", never a false "API ready" (the bug the user hit). For
+            // Claude/Codex `selected ⊆ methods` always holds (active's condition
+            // is a subset of the method's), so this is a no-op for them.
+            val selected = kv["${tag}_active"]?.trim()?.takeIf { it.isNotEmpty() }
+            val selectedUnusable = selected != null && selected !in methods
+            // Latest version is REGISTRY-GLOBAL (server-independent). Remember the
+            // newest value any server reported, and if THIS server's probe came
+            // back blank (e.g. ethernetservers where `npm view @google/gemini-cli`
+            // returned nothing), fall back to it — otherwise a plainly-behind CLI
+            // shows "log in" instead of "update" just because one box couldn't run
+            // `npm view`.
+            val rawLatest = kv["${tag}_latest"]?.trim()?.takeIf { it.isNotEmpty() }
+            if (rawLatest != null) {
+                val prev = knownLatest[spec.agent]
+                if (prev == null || isVersionLessThan(prev, rawLatest)) knownLatest[spec.agent] = rawLatest
+            }
+            val effectiveLatest = rawLatest ?: knownLatest[spec.agent]
+            spec.agent to AgentStatus(
+                installed = y("${tag}_inst"),
+                loggedIn = methods.isNotEmpty() && !selectedUnusable,
+                installedVersion = kv["${tag}_ver"]?.trim()?.takeIf { it.isNotEmpty() },
+                latestVersion = effectiveLatest,
+                methods = methods,
+                // Active comes from the probe (settings.json / auth.json shape
+                // / env precedence). If undeterminable but exactly ONE method
+                // is configured, that one is implicitly active (cleaner ● in
+                // the switcher). Must still be one of the (live-filtered) methods.
+                activeMethod = selected?.takeIf { it in methods } ?: methods.singleOrNull(),
+                liveAuthPending = pendingLive && !selectedUnusable,
+                // Claude Code run-state (see AgentStatus.claudeState). The probe
+                // emits `<agent>_run_state=<NAME>` (+ optional `<agent>_run_data`)
+                // only for Claude in OAuth mode; absent ⇒ null (not applicable).
+                claudeState = ClaudeRunState.fromToken(kv["${tag}_run_state"]),
+                claudeStateData = kv["${tag}_run_data"]?.trim()?.takeIf { it.isNotEmpty() },
+                claudePlan = kv["${tag}_plan"]?.trim()?.takeIf { it.isNotEmpty() },
+                // Only a CLI the guard actually knows can be reported on; the rest
+                // stay null and say nothing (see AgentCliSpec.guardHarnessId).
+                guardProtecting = spec.guardHarnessId
+                    ?.takeIf { guardPresent }
+                    ?.let { guardOn && it in guardManaged },
+            )
+        }
+    }
 
         /**
          * OS pre-probe. Deliberately NOT `bash -lc`, NOT [RemoteEnv.portable]:
@@ -313,90 +420,65 @@ class AgentStatusProbe(private val ssh: SshClient) {
         // reads an unordered map); subshells also isolate the specs' helper
         // functions from each other.
         val body = pathPrep + "\nCPD=\$(mktemp -d 2>/dev/null || echo /tmp/conch-probe.\$\$)\nmkdir -p \"\$CPD\"\n" +
-            AgentSpecRegistry.all.mapIndexed { i, spec ->
+            (AgentSpecRegistry.all.mapIndexed { i, spec ->
                 "( {\n" + spec.statusProbeLines + "\n} > \"\$CPD/$i.out\" ) &"
-            }.joinToString("\n") +
+            } + listOf("( {\n" + GUARD_PROBE_LINES + "\n} > \"\$CPD/guard.out\" ) &"))
+                .joinToString("\n") +
             "\nwait\ncat \"\$CPD\"/*.out 2>/dev/null\nrm -rf \"\$CPD\""
         return RemoteEnv.portable("bash -lc " + shellEscape(body))
     }
 
-    private fun parse(text: String): Map<Agent, AgentStatus> {
-        val kv = text.lineSequence()
-            .mapNotNull { line ->
-                val eq = line.indexOf('=').takeIf { it > 0 } ?: return@mapNotNull null
-                line.substring(0, eq).trim() to line.substring(eq + 1).trim()
-            }
-            .toMap()
-        fun y(key: String) = kv[key].equals("y", ignoreCase = true)
-        // Each spec's statusProbeLines emits:
-        //   <agent>_inst    = y/n
-        //   <agent>_ver     = installed semver (e.g. "2.1.150") or empty
-        //   <agent>_latest  = latest published semver or empty
-        //   <agent>_methods = csv of detected auth-method keys (e.g. "oauth,vertex")
-        //   <agent>_active  = the currently-active method key (or empty)
-        // loggedIn is derived: any configured method == logged in. (The old
-        // single `_auth=y/n` line missed Vertex/ADC for Gemini → false
-        // "not logged in"; per-method detection fixes that.)
-        return AgentSpecRegistry.all.associate { spec ->
-            val tag = spec.agent.name.lowercase()
-            var methods = (kv["${tag}_methods"] ?: "")
-                .split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            // LIVE auth result (when the spec ran the CLI for real): "n" = the
-            // CLI demanded re-auth, so the on-disk OAuth cred is NOT usable —
-            // drop the OAuth methods so the badge can't falsely claim "OAuth /
-            // ready". "y" confirms; absent = not checked (fall back to presence).
-            val authok = kv["${tag}_authok"]
-            if (authok == "n") methods = methods - setOf("oauth", "chatgpt")
-            // No live verdict yet for an agent that HAS a live check + an OAuth
-            // cred → pending. The row renders "checking" (not "ready"/"OAuth")
-            // so a present-but-revoked cred is never flashed as usable.
-            val pendingLive = authok == null &&
-                spec.liveAuthProbeLines.isNotBlank() &&
-                methods.any { it == "oauth" || it == "chatgpt" }
-            // The probe reports which method the CLI will ACTUALLY use (the
-            // explicit selection: Gemini's settings.json selectedType, Claude's
-            // env precedence, Codex's `login status`). A CLI honors that
-            // selection over a stray credential it isn't configured to use —
-            // e.g. Gemini with settings selectedType=oauth-personal but NO OAuth
-            // credential ignores an API-key NAME sitting in .bashrc and demands
-            // an OAuth login. So when an explicit selection exists and is NOT
-            // among the usable methods, the agent is NOT ready: it must read
-            // "log in", never a false "API ready" (the bug the user hit). For
-            // Claude/Codex `selected ⊆ methods` always holds (active's condition
-            // is a subset of the method's), so this is a no-op for them.
-            val selected = kv["${tag}_active"]?.trim()?.takeIf { it.isNotEmpty() }
-            val selectedUnusable = selected != null && selected !in methods
-            // Latest version is REGISTRY-GLOBAL (server-independent). Remember the
-            // newest value any server reported, and if THIS server's probe came
-            // back blank (e.g. ethernetservers where `npm view @google/gemini-cli`
-            // returned nothing), fall back to it — otherwise a plainly-behind CLI
-            // shows "log in" instead of "update" just because one box couldn't run
-            // `npm view`.
-            val rawLatest = kv["${tag}_latest"]?.trim()?.takeIf { it.isNotEmpty() }
-            if (rawLatest != null) {
-                val prev = knownLatest[spec.agent]
-                if (prev == null || isVersionLessThan(prev, rawLatest)) knownLatest[spec.agent] = rawLatest
-            }
-            val effectiveLatest = rawLatest ?: knownLatest[spec.agent]
-            spec.agent to AgentStatus(
-                installed = y("${tag}_inst"),
-                loggedIn = methods.isNotEmpty() && !selectedUnusable,
-                installedVersion = kv["${tag}_ver"]?.trim()?.takeIf { it.isNotEmpty() },
-                latestVersion = effectiveLatest,
-                methods = methods,
-                // Active comes from the probe (settings.json / auth.json shape
-                // / env precedence). If undeterminable but exactly ONE method
-                // is configured, that one is implicitly active (cleaner ● in
-                // the switcher). Must still be one of the (live-filtered) methods.
-                activeMethod = selected?.takeIf { it in methods } ?: methods.singleOrNull(),
-                liveAuthPending = pendingLive && !selectedUnusable,
-                // Claude Code run-state (see AgentStatus.claudeState). The probe
-                // emits `<agent>_run_state=<NAME>` (+ optional `<agent>_run_data`)
-                // only for Claude in OAuth mode; absent ⇒ null (not applicable).
-                claudeState = ClaudeRunState.fromToken(kv["${tag}_run_state"]),
-                claudeStateData = kv["${tag}_run_data"]?.trim()?.takeIf { it.isNotEmpty() },
-                claudePlan = kv["${tag}_plan"]?.trim()?.takeIf { it.isNotEmpty() },
-            )
-        }
-    }
+    /**
+     * Reads a third-party agent guard's state off the server. ONE block for all
+     * agents (the guard is per-machine, its coverage is per-CLI), running in the
+     * same parallel fan-out as the specs, so it costs wall time only when it is
+     * the slowest branch.
+     *
+     * CACHED, because it is expensive: `hol-guard status --json` measured 6.65 s
+     * on a warm machine — it walks every harness's artifacts — which is more
+     * than the whole rest of the probe. Keyed on the mtime of `~/.hol-guard`,
+     * exactly the way `conch_ver` keys on a binary's mtime: that directory
+     * changes when a harness is installed, repaired or disconnected, which is
+     * precisely when this answer changes.
+     *
+     * Parsed with awk rather than python. Guard IS a Python package so an
+     * interpreter is certainly present, but a heredoc inside this doubly-escaped
+     * body is a trap for whoever edits it next. The pretty-printed JSON always
+     * puts `"harness": "<id>"` above that object's `"managed": true`, so keeping
+     * the last id seen is enough. Should a future guard emit compact JSON the
+     * match finds nothing and the app shows NO guard state at all: it can
+     * under-report, never over-report. An unearned "protected" is the single
+     * outcome that would actually matter.
+     */
+    private val GUARD_PROBE_LINES: String =
+        "if command -v hol-guard >/dev/null 2>&1; then\n" +
+        "  gm=\$(stat -Lc %Y \"\$HOME/.hol-guard\" 2>/dev/null || stat -L -f %m \"\$HOME/.hol-guard\" 2>/dev/null || echo 0)\n" +
+        "  gcf=\"\$HOME/.cache/conch/guard\"\n" +
+        "  gk=\$(head -1 \"\$gcf\" 2>/dev/null)\n" +
+        // mtime alone is not quite enough: it catches an entry added or removed
+        // in ~/.hol-guard, but a guard that rewrites state inside a SUBdirectory
+        // touches the subdirectory, not the parent — and a cache that can never
+        // expire would keep answering with yesterday's coverage. A 6 h ceiling
+        // bounds that to one stale window at a cost of four probes a day.
+        "  gage=\$(( \$(date +%s) - \$(stat -Lc %Y \"\$gcf\" 2>/dev/null || stat -L -f %m \"\$gcf\" 2>/dev/null || echo 0) ))\n" +
+        "  if [ -f \"\$gcf\" ] && [ \"\$gk\" = \"\$gm\" ] && [ \"\$gage\" -lt 21600 ] 2>/dev/null; then\n" +
+        "    tail -n +2 \"\$gcf\" 2>/dev/null\n" +
+        "  else\n" +
+        "    gj=\$(mktemp 2>/dev/null || echo /tmp/conch-guard.\$\$)\n" +
+        "    conch_timeout 25 hol-guard status --json > \"\$gj\" 2>/dev/null\n" +
+        "    if [ -s \"\$gj\" ]; then\n" +
+        "      gon=n; grep -q '\"protection_off\": *false' \"\$gj\" && gon=y\n" +
+        "      gmg=\$(awk -F'\"' '/\"harness\": *\"/ {h=\$4} /\"managed\": *true/ {if (h != \"\") print h}' \"\$gj\" | tr '\n' ',' | sed 's/,\$//')\n" +
+        "      mkdir -p \"\$HOME/.cache/conch\" 2>/dev/null\n" +
+        "      { printf '%s\n' \"\$gm\"; printf 'guard_present=y\n'; printf 'guard_on=%s\n' \"\$gon\"; printf 'guard_managed=%s\n' \"\$gmg\"; } > \"\$gcf\" 2>/dev/null\n" +
+        "      printf 'guard_present=y\n'; printf 'guard_on=%s\n' \"\$gon\"; printf 'guard_managed=%s\n' \"\$gmg\"\n" +
+        "    else\n" +
+        "      printf 'guard_present=y\n'\n" +
+        "    fi\n" +
+        "    rm -f \"\$gj\"\n" +
+        "  fi\n" +
+        "else\n" +
+        "  printf 'guard_present=n\n'\n" +
+        "fi"
+
 }

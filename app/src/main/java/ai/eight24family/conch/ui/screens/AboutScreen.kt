@@ -101,7 +101,7 @@ fun AboutScreen(
                     style = MaterialTheme.typography.titleLarge
                 )
                 Text(
-                    "// drive Claude Code, Codex, Gemini, Grok or Copilot CLI on your own servers, from your phone.",
+                    "// drive ten agent CLIs on your own servers, from your phone.",
                     color = outline,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace
@@ -122,7 +122,7 @@ fun AboutScreen(
 
             Section("what it is") {
                 Bullet("a thin native Android client over SSH — your servers stay your servers.")
-                Bullet("speaks each CLI you already have installed on the host: claude / codex / gemini / grok / copilot.")
+                Bullet("speaks each CLI you already have installed on the host: claude / codex / gemini / grok / copilot / qwen / cursor-agent / opencode / crush / cn.")
                 Bullet("nothing extra to install on the host. just SSH access and the CLI binary.")
                 Bullet("no hosted backend on our side. no AI quotas, no cloud middleman.")
             }
@@ -182,6 +182,11 @@ fun AboutScreen(
                 Bullet("Gemini: rollouts under ~/.gemini  +  ~/.gemini/GEMINI.md.")
                 Bullet("Grok: sessions under ~/.grok/sessions  +  ~/.grok/rules/AGENT.md.")
                 Bullet("Copilot: sessions under ~/.copilot/session-state  +  ~/.copilot/copilot-instructions.md.")
+                Bullet("Qwen Code: sessions under ~/.qwen/projects  +  ~/.qwen/QWEN.md.")
+                Bullet("Cursor: transcripts under ~/.cursor/projects  +  AGENTS.md.")
+                Bullet("opencode: sessions in ~/.local/share/opencode/opencode.db  +  ~/.config/opencode/AGENTS.md.")
+                Bullet("Crush: sessions in each project's .crush/crush.db  +  ~/.config/crush/CRUSH.md.")
+                Bullet("Continue: sessions under ~/.continue/sessions  +  AGENTS.md.")
                 Bullet("file uploads land in /tmp/conch_uploads/ until the server reboots or you delete them.")
                 Bullet("we read/write these the same paths the CLI itself uses — nothing proprietary.")
             }
@@ -210,7 +215,12 @@ fun AboutScreen(
                 Bullet("\"Gemini\" and the Google mark are trademarks of Google LLC.")
                 Bullet("\"Grok\" and the Grok mark are trademarks of xAI Corp.")
                 Bullet("\"GitHub\", \"Copilot\" and the Copilot mark are trademarks of GitHub, Inc. (a Microsoft company).")
-                Bullet("Conch is not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI, Google, xAI, GitHub, or Microsoft. Marks are used here solely to identify which CLI the user is driving.")
+                Bullet("\"Qwen\" and the Qwen mark are trademarks of Alibaba Group.")
+                Bullet("\"Cursor\" and the Cursor mark are trademarks of Anysphere, Inc.")
+                Bullet("\"opencode\" and its mark are trademarks of their respective owners.")
+                Bullet("\"Crush\" and \"Charm\" are trademarks of Charmbracelet, Inc. Our Crush glyph is our own, drawn in their palette — not their logo.")
+                Bullet("\"Continue\" is a trademark of Continue Dev, Inc. Our Continue glyph is our own — not their logo.")
+                Bullet("Conch is not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI, Google, xAI, GitHub, Microsoft, Alibaba, Anysphere, Charm, or Continue Dev. Marks are used here solely to identify which CLI the user is driving.")
             }
 
             HorizontalDivider(color = outline.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))

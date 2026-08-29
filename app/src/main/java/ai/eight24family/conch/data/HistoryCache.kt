@@ -447,20 +447,43 @@ class HistoryCache internal constructor(private val rootDir: File) {
     /** Cached-body byte size the user had seen at last view; null = never
      *  viewed (never badge a session the user hasn't opened at all). */
     fun seenBytes(sessionId: String): Long? {
+        seenMemo[sessionId]?.let { return if (it == SEEN_NONE) null else it }
         val f = seenFile(sessionId)
-        if (!f.exists()) return null
-        return SilentlyTry.logged("SshAi-HistCache", "read seen watermark") {
+        val v = if (!f.exists()) null else SilentlyTry.logged("SshAi-HistCache", "read seen watermark") {
             f.readText(Charsets.UTF_8).trim().toLongOrNull()
         }
+        seenMemo[sessionId] = v ?: SEEN_NONE
+        return v
+    }
+
+    /**
+     * Watermark memo. The home list asks for every cached session's watermark on
+     * every reload — 380 sessions on this phone, a tick every 2.5 s — so the
+     * uncached version was ~380 `exists()` plus a `readText()` each, forever, in
+     * a directory holding over a thousand files.
+     *
+     * "No watermark on disk" (a session never opened) is worth remembering just
+     * as much as a number, and a ConcurrentHashMap cannot store null, hence the
+     * sentinel. Every writer in this class goes through [writeSeen], and nothing
+     * outside this process writes these files, so the memo cannot drift.
+     */
+    private val seenMemo = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Sentinel for "checked, and there is no watermark file". */
+    private val SEEN_NONE = Long.MIN_VALUE
+
+    /** The ONE place a watermark reaches disk — so the memo is never stale. */
+    private fun writeSeen(sessionId: String, value: Long) {
+        seenFile(sessionId).writeText(value.toString(), Charsets.UTF_8)
+        seenMemo[sessionId] = value
     }
 
     /** Stamp the watermark. Monotonic — a stale writer (background collector
      *  of a chat the user already left) can't roll a fresher view back. */
     fun markSeenBytes(sessionId: String, bytes: Long) {
         SilentlyTry.fired("SshAi-HistCache", "write seen watermark") {
-            val f = seenFile(sessionId)
-            val prev = if (f.exists()) f.readText(Charsets.UTF_8).trim().toLongOrNull() ?: 0L else -1L
-            if (bytes > prev) f.writeText(bytes.toString(), Charsets.UTF_8)
+            val prev = seenBytes(sessionId) ?: -1L
+            if (bytes > prev) writeSeen(sessionId, bytes)
         }
     }
 
@@ -546,7 +569,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
             // while naming the same remote position, and the monotonic guard
             // would (correctly, for its own callers) refuse that.
             SilentlyTry.fired("SshAi-HistCache", "rebase seen after re-tail") {
-                seenFile(sessionId).writeText(rebased.toString(), Charsets.UTF_8)
+                writeSeen(sessionId, rebased)
             }
         }
         SilentlyTry.fired("SshAi-HistCache", "index session after tail save") {
@@ -661,9 +684,8 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun rebaseSeenAfterRewrite(sessionId: String, oldSize: Long) {
         val seen = seenBytes(sessionId) ?: return
         if (seen < oldSize) return  // genuinely unread content existed — keep it
-        val f = seenFile(sessionId)
         SilentlyTry.fired("SshAi-HistCache", "rebase seen watermark after rewrite") {
-            f.writeText(size(sessionId).toString(), Charsets.UTF_8)
+            writeSeen(sessionId, size(sessionId))
         }
         android.util.Log.d(
             "SshAi-HistCache",
@@ -697,6 +719,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     }
 
     fun forget(sessionId: String) {
+        seenMemo.remove(sessionId)
         SilentlyTry.fired("SshAi-HistCache", "delete owner sidecar") { ownerFile(sessionId).delete() }
         val f = file(sessionId)
         if (!f.exists()) return

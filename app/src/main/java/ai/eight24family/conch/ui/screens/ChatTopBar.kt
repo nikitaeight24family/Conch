@@ -810,6 +810,8 @@ internal fun TerminalTopBar(
                     onPick = onSelectApproval,
                     planSupported = ai.eight24family.conch.agent.spec
                         .AgentSpecRegistry[agent].supportsPlanMode,
+                    approvalsCaveat = ai.eight24family.conch.agent.spec
+                        .AgentSpecRegistry[agent].approvalsCaveat,
                     // Collected, not read once: the audit lands asynchronously
                     // after an install/update, and the sheet must show the
                     // fresh verdict the next time it opens rather than whatever

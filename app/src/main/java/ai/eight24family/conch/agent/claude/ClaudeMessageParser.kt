@@ -784,15 +784,27 @@ object ClaudeMessageParser {
                 }
                 val status = info?.let { firstString(it, "status") }.orEmpty()
                 val window = info?.let { firstString(it, "rateLimitType", "rate_limit_type") }
-                    ?.replace('_', ' ')
+                    ?.let { limitWindowLabel(it) }
                 val pct = info?.let {
                     SilentlyTry.logged("SshAi-ClaudeParse", "read utilization") {
                         it["utilization"]?.jsonPrimitive?.content?.toDoubleOrNull()
                     }
+                }?.let { raw ->
+                    // ⚠ TWO CONVENTIONS FOR ONE FIELD. The usage ENDPOINT reports
+                    // utilization as 0..100 (five_hour.utilization=3.0, measured on
+                    // the dev server — see UsageProbe); the unified-ratelimit
+                    // HEADERS, which is what this pushed event carries, report a
+                    // FRACTION (0.25). `toInt()` on the fraction truncated to zero,
+                    // so the banner read "seven day · 0%" while the user's own usage
+                    // bar said 25% (his screenshot, 2026-08-29). Normalize both.
+                    if (raw <= 1.0) raw * 100.0 else raw
                 }
                 val tail = listOfNotNull(
                     window,
-                    pct?.let { "${it.toInt()}%" },
+                    // "close to the limit · 0%" contradicts itself. If the number
+                    // rounds away, name the window and print no number at all —
+                    // never a figure the rest of the app disagrees with.
+                    pct?.let { kotlin.math.round(it).toInt() }?.takeIf { it > 0 }?.let { "$it%" },
                 ).joinToString(" · ")
                 when (status) {
                     "rejected" -> listOf(
@@ -1785,4 +1797,14 @@ object ClaudeMessageParser {
         SilentlyTry.logged("SshAi-ClaudeParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
     private fun uuid(): String = ParserHelpers.uuid()
+
+    /** Wire keys ("seven_day") are CLI internals. The banner speaks the same
+     *  words the usage bar does, so one screen never names a window two ways.
+     *  Unknown keys degrade to spaced words rather than vanishing. */
+    private fun limitWindowLabel(key: String): String = when (key) {
+        "five_hour" -> "5-hour"
+        "seven_day" -> "weekly"
+        "seven_day_oauth_apps" -> "weekly · apps"
+        else -> key.replace('_', ' ')
+    }
 }
