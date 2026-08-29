@@ -3,8 +3,8 @@ package ai.eight24family.conch.agent
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 
 /**
- * Identifier for one of the five CLIs we drive: Claude Code, OpenAI Codex,
- * Google Gemini, xAI Grok Build, GitHub Copilot CLI.
+ * Identifier for one of the CLIs we drive: Claude Code, OpenAI Codex, Google
+ * Gemini, xAI Grok Build, GitHub Copilot CLI, Qwen Code, Cursor CLI.
  *
  * **Per-CLI behavior lives in [ai.eight24family.conch.agent.spec.AgentCliSpec]
  * implementations** (one in each `agent.<cli>` sub-package). This enum
@@ -27,6 +27,11 @@ enum class Agent {
     GEMINI,
     GROK,
     COPILOT,
+    QWEN,
+    CURSOR,
+    OPENCODE,
+    CRUSH,
+    CONTINUE,
     ;
 
     /** Human-readable name shown in pickers. Delegates to spec. */
@@ -35,8 +40,9 @@ enum class Agent {
     /** Binary on the server's PATH. Delegates to spec. */
     val cliCommand: String get() = AgentSpecRegistry[this].cliCommand
 
-    /** npm package name (e.g. `@anthropic-ai/claude-code`). Delegates to spec. */
-    val npmPackage: String get() = AgentSpecRegistry[this].npmPackage
+    /** npm package name (e.g. `@anthropic-ai/claude-code`), or null when the
+     *  CLI ships outside npm. Delegates to spec. */
+    val npmPackage: String? get() = AgentSpecRegistry[this].npmPackage
 
     /** Whether `~/.<cli>/agents/` user-authored subagents are a thing.
      *  Delegates to spec. */

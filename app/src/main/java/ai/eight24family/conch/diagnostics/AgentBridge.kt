@@ -65,26 +65,45 @@ class AgentBridge(
             // this just polls — `ls` of a missing inbox is a harmless no-op
             // (2>/dev/null). No uninvited writes to anyone's server.
             while (isActive) {
-                // The bridge contract is FOREGROUND-ONLY (CLAUDE.md §11.5:
-                // "When ssh.ai is backgrounded, polling pauses") — but this
-                // loop never actually paused: 1 800 SSH execs/hour/server
-                // around the clock, radio wakeups included, whether or not
-                // anyone could possibly issue a request. Honor the contract:
-                // backgrounded → no exec, long sleep (the CLI's 30 s timeout
-                // already tells the agent "phone may be backgrounded").
-                if (!ai.eight24family.conch.util.AppForeground.isForeground) {
-                    delay(POLL_INTERVAL_BACKGROUND_MS)
+                val foreground = ai.eight24family.conch.util.AppForeground.isForeground
+                // Has the user ever wired a chat on THIS server to the phone? Only
+                // then can a `conch-bridge` request appear in its inbox at all.
+                val wired = SilentlyTry.loggedOrElse("SshAi-AgentBridge", "read phone-wired servers", false) {
+                    ai.eight24family.conch.di.ServiceLocator.preferences.phoneBridgeSessions
+                        .first().any { it.startsWith("$serverId:") }
+                }
+                // ⚠ BACKGROUNDED IS NOT DEAD. This loop used to `continue` past
+                // tick() whenever the app was off screen, on the strength of
+                // CLAUDE.md §11.5 ("polling pauses"). That switched the bridge OFF in
+                // precisely the situation the product exists for — send a task,
+                // pocket the phone, let the agent work — so every `conch-bridge ping`
+                // the agent issued with the screen off died on the CLI's 30 s
+                // deadline while Shizuku was granted and the phone was wide awake.
+                //
+                // The battery win it was reaching for (2026-08-10) lives in the
+                // CADENCE, not in silence, and the honest gate is "could a request
+                // even arrive?", not "is anyone looking?":
+                //   on screen                → 2 s   (1800 execs/h, as before)
+                //   off screen, phone wired  → 10 s  (360/h — −80 %, still 3× inside
+                //                                     the 30 s deadline)
+                //   off screen, never wired  → no exec at all, just re-check
+                // So a server the phone was never attached to costs exactly what it
+                // did after 2026-08-10: nothing.
+                if (!foreground && !wired) {
+                    delay(POLL_INTERVAL_IDLE_MS)
                     continue
                 }
                 runCatching { tick() }
                     .onFailure { android.util.Log.w(tag, "tick failed: ${it.message}") }
-                // Data-saver bumps the inbox poll 2s → 10s. Most users
-                // never invoke `conch-bridge` requests at all, so the
-                // 5× longer round-trip cadence is invisible.
                 val dataSaver = SilentlyTry.loggedOrElse("SshAi-AgentBridge", "read data saver pref", false) {
                     ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
                 }
-                delay(if (dataSaver) POLL_INTERVAL_MS * 5 else POLL_INTERVAL_MS)
+                val base = if (foreground) POLL_INTERVAL_MS else POLL_INTERVAL_BACKGROUND_MS
+                // Data-saver stretches the cadence 5× — but never past the ceiling.
+                // An interval at or beyond the CLI's 30 s deadline stops being "slow"
+                // and becomes "never answers" (10 s × 5 = 50 s would have re-broken
+                // exactly what this loop just fixed).
+                delay((if (dataSaver) base * 5 else base).coerceAtMost(POLL_INTERVAL_CEILING_MS))
             }
         }
     }
@@ -301,9 +320,16 @@ class AgentBridge(
         /** Max inline text size before falling back to a separate .data file. */
         private const val INLINE_LIMIT = 8 * 1024
         private const val POLL_INTERVAL_MS = 2_000L
-        /** Backgrounded: no SSH exec at all, just a slow liveness nap so the
-         *  loop resumes ~promptly on foreground. */
-        private const val POLL_INTERVAL_BACKGROUND_MS = 15_000L
+        /** Off screen but the phone IS wired to this server: keep answering, 5×
+         *  slower. The agent can ping at any moment while the phone is pocketed. */
+        private const val POLL_INTERVAL_BACKGROUND_MS = 10_000L
+        /** Off screen and no chat here was ever wired to the phone: no SSH exec at
+         *  all, just a slow nap so the loop resumes ~promptly on foreground. */
+        private const val POLL_INTERVAL_IDLE_MS = 15_000L
+        /** Hard ceiling on any computed interval. `conch-bridge` waits 30 s
+         *  (CONCH_BRIDGE_TIMEOUT_S) and then exits 2; a cadence anywhere near that
+         *  turns every request into a timeout. */
+        private const val POLL_INTERVAL_CEILING_MS = 12_000L
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
         // Strict UUID-v4-shape patterns; reject anything else before it reaches the shell.
         private val UUID_REGEX = Regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")

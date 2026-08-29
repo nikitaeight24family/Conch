@@ -2,6 +2,9 @@ package ai.eight24family.conch.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -17,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -117,115 +121,131 @@ fun SubagentRosterRow(
 
         if (!expanded) return@Column
 
-        for (r in rows) {
-            val stateColor: Color = when (r.state) {
-                RowState.FAILED -> MaterialTheme.colorScheme.error
-                RowState.DONE -> MaterialTheme.colorScheme.outline
-                else -> MaterialTheme.colorScheme.tertiary
-            }
-            val open = r.key in openRows
-            val fillAlpha = if (r.state == RowState.DONE) FILL_ALPHA_DONE else FILL_ALPHA_LIVE
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        openRows = if (open) openRows - r.key else openRows + r.key
-                    }
-                    // THE FILL. Drawn behind the row and its sub-line together,
-                    // so one agent reads as one block of cost. Width is read
-                    // inside drawBehind — a draw-time subscription, so a
-                    // progress tick that moves the bar invalidates the GPU
-                    // layer instead of recomposing the whole panel (the same
-                    // rule AgentThinkingRow follows).
-                    .drawBehind {
-                        if (r.share <= 0f) return@drawBehind
-                        drawRect(
-                            color = stateColor.copy(alpha = fillAlpha),
-                            size = Size(size.width * r.share, size.height),
-                        )
-                    }
-                    .padding(start = 10.dp, top = 1.dp, bottom = 1.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = r.glyph + " ",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = stateColor,
-                    )
-                    r.identity?.let {
-                        // Only reached on a MIXED fan-out — on a uniform one the
-                        // header said it once and these characters go to the task.
-                        Text(
-                            text = "$it  ",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                        )
-                    }
-                    Text(
-                        text = r.task,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = true),
-                    )
-                    if (r.metrics.isNotEmpty()) {
-                        Text(
-                            text = "  ${r.metrics}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (r.state == RowState.FAILED) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.outline
-                            },
-                            maxLines = 1,
-                        )
-                    }
+        // ⛔ THE COMPOSER OUTRANKS THIS PANEL. The roster is PINNED above the
+        // prompt (not a list item), so an expanded fan-out grows the pinned block
+        // directly: 13 agents at two lines each, stacked on top of an expanded
+        // usage panel, pushed the input row clean off the bottom of the screen —
+        // the message list holds the only `weight`, so it collapses to nothing and
+        // everything below simply overflows. Bound it to a fraction of the screen
+        // and let the roster scroll inside itself; a fan-out can be any size, the
+        // screen cannot.
+        val maxRosterHeight = LocalConfiguration.current.screenHeightDp.dp * ROSTER_MAX_SCREEN_FRACTION
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = maxRosterHeight)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            for (r in rows) {
+                val stateColor: Color = when (r.state) {
+                    RowState.FAILED -> MaterialTheme.colorScheme.error
+                    RowState.DONE -> MaterialTheme.colorScheme.outline
+                    else -> MaterialTheme.colorScheme.tertiary
                 }
-                // STATE line — never a result (see rule 2 in the display file).
-                r.sub?.let {
-                    Text(
-                        text = "↳ $it",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (r.state == RowState.FAILED) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 14.dp),
-                    )
-                }
-                if (open) {
-                    // The agent's full identity and cost, spelled out — the row
-                    // has no width for this and the header speaks for the whole
-                    // fan-out, so a tap is the only honest place for it.
-                    Text(
-                        text = r.detailMeta,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(start = 14.dp, top = 1.dp),
-                    )
-                    // Its own words. WRAPPED, not ellipsized: the user opened
-                    // this row precisely to read them, and four lines of an
-                    // agent's conclusion is what the old one-line `↳` was
-                    // failing to be.
-                    r.detailText?.let {
+                val open = r.key in openRows
+                val fillAlpha = if (r.state == RowState.DONE) FILL_ALPHA_DONE else FILL_ALPHA_LIVE
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            openRows = if (open) openRows - r.key else openRows + r.key
+                        }
+                        // THE FILL. Drawn behind the row and its sub-line together,
+                        // so one agent reads as one block of cost. Width is read
+                        // inside drawBehind — a draw-time subscription, so a
+                        // progress tick that moves the bar invalidates the GPU
+                        // layer instead of recomposing the whole panel (the same
+                        // rule AgentThinkingRow follows).
+                        .drawBehind {
+                            if (r.share <= 0f) return@drawBehind
+                            drawRect(
+                                color = stateColor.copy(alpha = fillAlpha),
+                                size = Size(size.width * r.share, size.height),
+                            )
+                        }
+                        .padding(start = 10.dp, top = 1.dp, bottom = 1.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = it,
+                            text = r.glyph + " ",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = stateColor,
+                        )
+                        r.identity?.let {
+                            // Only reached on a MIXED fan-out — on a uniform one the
+                            // header said it once and these characters go to the task.
+                            Text(
+                                text = "$it  ",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                            )
+                        }
+                        Text(
+                            text = r.task,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = true),
+                        )
+                        if (r.metrics.isNotEmpty()) {
+                            Text(
+                                text = "  ${r.metrics}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (r.state == RowState.FAILED) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.outline
+                                },
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    // STATE line — never a result (see rule 2 in the display file).
+                    r.sub?.let {
+                        Text(
+                            text = "↳ $it",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (r.state == RowState.FAILED) {
                                 MaterialTheme.colorScheme.error
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
-                            maxLines = 6,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 14.dp, top = 1.dp, bottom = 2.dp),
+                            modifier = Modifier.padding(start = 14.dp),
                         )
+                    }
+                    if (open) {
+                        // The agent's full identity and cost, spelled out — the row
+                        // has no width for this and the header speaks for the whole
+                        // fan-out, so a tap is the only honest place for it.
+                        Text(
+                            text = r.detailMeta,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(start = 14.dp, top = 1.dp),
+                        )
+                        // Its own words. WRAPPED, not ellipsized: the user opened
+                        // this row precisely to read them, and four lines of an
+                        // agent's conclusion is what the old one-line `↳` was
+                        // failing to be.
+                        r.detailText?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (r.state == RowState.FAILED) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                maxLines = 6,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 14.dp, top = 1.dp, bottom = 2.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -237,5 +257,11 @@ fun SubagentRosterRow(
  *  one still moving, so it gets the readable tint; a finished agent stays on
  *  the panel for reference and must not out-shout it. Both are low enough that
  *  the text on top keeps full contrast in either theme. */
+/** How much of the screen an expanded roster may claim before it starts
+ *  scrolling inside itself. Chosen against the other pinned panel: the usage
+ *  bar is capped at 0.28, so even both open at once leave the prompt row and a
+ *  slice of the conversation on screen. */
+private const val ROSTER_MAX_SCREEN_FRACTION = 0.38f
+
 private const val FILL_ALPHA_LIVE = 0.14f
 private const val FILL_ALPHA_DONE = 0.07f

@@ -43,6 +43,7 @@ object GeminiSpec : AgentCliSpec {
     override val displayName = "Gemini CLI"
     override val cliCommand = "gemini"
     override val npmPackage = "@google/gemini-cli"
+    override val guardHarnessId = "gemini"
     override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_gemini
 
     override val supportsSubagents = false
@@ -51,6 +52,15 @@ object GeminiSpec : AgentCliSpec {
     override val supportsCustomSlashCommands = false
     override val supportsResume = true
     override val supportsPreSetSessionId = false
+
+    /**
+     * Same moltbot pattern as Codex — `BROWSER=true` suppresses xdg-open, the
+     * CLI listens on a RANDOM localhost port (unlike Codex's fixed 1455) and
+     * prints the OAuth URL; the pasted callback URL is curl'd server-side and
+     * the CLI writes `~/.gemini/oauth_creds.json`. The port is read out of the
+     * user's pasted URL, never hardcoded.
+     */
+    override val oauthLoginCommand = "BROWSER=true gemini auth login --oauth"
 
     override val memoryFilename = "GEMINI.md"
     override val memoryGlobalPath = "\$HOME/.gemini/GEMINI.md"

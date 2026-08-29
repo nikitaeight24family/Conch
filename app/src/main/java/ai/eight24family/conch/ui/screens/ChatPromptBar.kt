@@ -3,6 +3,7 @@ package ai.eight24family.conch.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.key
@@ -397,6 +398,11 @@ private fun CodeBlockedBanner(text: String) {
     }
 }
 
+/** How much of the screen the expanded usage panel may claim before it scrolls
+ *  inside itself. Paired with SubagentRosterRow's 0.38 so that both panels open
+ *  at once still leave the prompt row — and a slice of chat — on screen. */
+private const val USAGE_PANEL_MAX_SCREEN_FRACTION = 0.28f
+
 @Composable
 private fun UsageBar(
     usage: UsageBarState,
@@ -422,7 +428,20 @@ private fun UsageBar(
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut(),
         ) {
-            UsagePanel(report, cost, contextBreakdown, contextLoading, claudePlan)
+            // ⛔ BOUNDED, like the roster above it. Both panels are pinned above
+            // the prompt row, and the message list holds the only `weight` — so
+            // two expanded panels simply overflow the column and take the input
+            // row off screen with them (user, 2026-08-29). A cap plus its own
+            // scroll keeps every window reachable without ever costing the prompt.
+            val maxPanelHeight = androidx.compose.ui.platform.LocalConfiguration
+                .current.screenHeightDp.dp * USAGE_PANEL_MAX_SCREEN_FRACTION
+            Column(
+                Modifier
+                    .heightIn(max = maxPanelHeight)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                UsagePanel(report, cost, contextBreakdown, contextLoading, claudePlan)
+            }
         }
 
         // Collapsed bar — ALWAYS rendered at a CONSTANT height, so it reserves

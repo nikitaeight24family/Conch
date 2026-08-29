@@ -66,12 +66,29 @@ object CodexSpec : AgentCliSpec {
     override val displayName = "Codex CLI"
     override val cliCommand = "codex"
     override val npmPackage = "@openai/codex"
+    override val guardHarnessId = "codex"
     override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_codex
 
     override val supportsSubagents = false
     override val supportsCustomSlashCommands = false  // CLI has /status etc. but no user-authored
     override val supportsResume = true
     override val supportsPreSetSessionId = false  // CLI assigns the UUID; we read thread.started.thread_id
+
+    /**
+     * **moltbot pattern.** Default `codex login` (no `--device-auth`) listens
+     * on `localhost:1455` and prints an OAuth URL whose `redirect_uri` is
+     * `http://localhost:1455/auth/callback`. The user opens the URL on the
+     * phone, signs in, OpenAI 302s them to that callback — the phone browser
+     * shows "Connection refused" but the URL bar now holds the full callback
+     * with `?code=…&state=…`, which we curl on the SERVER through the pooled
+     * SSH so the CLI's own listener completes the exchange.
+     *
+     * NOT `--device-auth`: OpenAI workspace admins can disable it (and have,
+     * in this user's experience). The localhost-callback flow doesn't depend
+     * on workspace policy. `BROWSER=true` suppresses xdg-open on the headless
+     * box.
+     */
+    override val oauthLoginCommand = "BROWSER=true codex login"
 
     override val memoryFilename = "AGENTS.md"
     override val memoryGlobalPath = "\$HOME/.codex/AGENTS.md"

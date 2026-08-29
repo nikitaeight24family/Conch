@@ -2800,10 +2800,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         var cachedParsed: List<AgentMessage> = emptyList()
         var cachedBytesLen = 0L
         if (resumeIdParam != null) {
-            ai.eight24family.conch.util.Logx.d("SshAi-HistCache") {
-                val (total, uniq, bytes) = ServiceLocator.historyCache.duplicationStats(resumeIdParam)
-                "dup-stats sid=${resumeIdParam.take(8)} lines=$total unique=$uniq " +
-                    "dupes=${total - uniq} bytes=$bytes"
+            // ⛔ OFF THE OPEN PATH. This is a forensic counter: it walks the WHOLE
+            // cached body and hashes every line. `Logx.d` is compiled out of
+            // release builds, but it is unconditionally ON for debug — the variant
+            // that actually lives on the phone — so opening a chat paid a full-file
+            // scan before the first message could be drawn. Measured on the owner's
+            // device 2026-08-29: the five largest bodies are 32.6, 31.9, 23.2, 21.7
+            // and 21.4 MB, and `duplicationStats` skips only past 32 MB — so the
+            // biggest chats were scanned end to end, on the MAIN thread, every
+            // open. Same number, same log line — just after the chat is on screen,
+            // on IO.
+            viewModelScope.launch(Dispatchers.IO) {
+                ai.eight24family.conch.util.Logx.d("SshAi-HistCache") {
+                    val (total, uniq, bytes) = ServiceLocator.historyCache.duplicationStats(resumeIdParam)
+                    "dup-stats sid=${resumeIdParam.take(8)} lines=$total unique=$uniq " +
+                        "dupes=${total - uniq} bytes=$bytes"
+                }
             }
         }
         if (resumeIdParam != null) {

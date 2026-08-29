@@ -1108,11 +1108,34 @@ private fun MethodBadges(
     cyan: androidx.compose.ui.graphics.Color,
     dim: androidx.compose.ui.graphics.Color,
 ) {
-    if (checking || status == null || status.methods.isEmpty()) return
+    if (checking || status == null) return
+    if (status.methods.isEmpty() && status.guardProtecting != true) return
     Row(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // A third-party guard on the SERVER is protecting this CLI. Shown only
+        // when it is actually true: "guard installed but not covering this one"
+        // is a real state, but it is not an achievement badge, and a chip whose
+        // meaning turned on its COLOUR alone would be unreadable next to the
+        // auth chips. Nothing here is ours — Conch installs nothing and calls
+        // nothing; the guard hooks the CLI itself, so it already covers our
+        // turns. The word stays generic on purpose: naming a vendor on the row
+        // would tie the app's copy to one product.
+        if (status.guardProtecting == true) {
+            Text(
+                "Guard",
+                style = MaterialTheme.typography.labelSmall,
+                color = cyan,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .background(
+                        cyan.copy(alpha = 0.13f),
+                        androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+                    )
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
         for (key in status.methods.toList().sorted()) {
             val isActive = key == status.activeMethod
             val c = if (isActive) cyan else dim
@@ -1811,6 +1834,15 @@ private fun ApiKeyDialog(
         Agent.GEMINI -> "AIza..." to "GEMINI_API_KEY"
         Agent.GROK -> "xai-..." to "XAI_API_KEY"
         Agent.COPILOT -> "github_pat_..." to "COPILOT_GITHUB_TOKEN"
+        // Qwen speaks OpenAI-compatible endpoints, so the key is whatever that
+        // endpoint issues — `sk-` is the common shape, not a promise.
+        Agent.QWEN -> "sk-..." to "OPENAI_API_KEY"
+        Agent.CURSOR -> "Cursor API key" to "CURSOR_API_KEY"
+        // Provider-agnostic: the key belongs to whichever provider the user
+        // runs them against, and Anthropic's is the common default.
+        Agent.OPENCODE -> "sk-ant-..." to "ANTHROPIC_API_KEY"
+        Agent.CRUSH -> "sk-ant-..." to "ANTHROPIC_API_KEY"
+        Agent.CONTINUE -> "sk-ant-..." to "ANTHROPIC_API_KEY"
     }
     androidx.compose.ui.window.Dialog(onDismissRequest = onCancel) {
         Surface(

@@ -51,6 +51,23 @@ object ClaudeSpec : AgentCliSpec {
     override val displayName = "Claude Code"
     override val cliCommand = "claude"
     override val npmPackage = "@anthropic-ai/claude-code"
+    override val guardHarnessId = "claude-code"
+
+    /** Anthropic's primary channel. The npm package above still tracks it in
+     *  lockstep and stays the fallback + the `npm view` version source. */
+    override val officialInstallCommand = "curl -fsSL https://claude.ai/install.sh | bash"
+
+    /**
+     * The REAL `/login`, driven through the TUI over our PTY — NOT
+     * `setup-token`. setup-token mints an inference-only env token: the
+     * terminal's interactive claude said "Not logged in" right after a Conch
+     * login, per-model limits and the plan were unknowable, and `/model`
+     * silently broke on the missing `user:profile` scope. `/login` writes the
+     * full-scope `~/.claude/.credentials.json` that EVERY consumer reads —
+     * terminal, Conch probes, bridges. The wizard's stops (trust prompt,
+     * composer, method menu) are keyed in the login read loop.
+     */
+    override val oauthLoginCommand = "claude"
     override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_claude
 
     override val supportsSubagents = true

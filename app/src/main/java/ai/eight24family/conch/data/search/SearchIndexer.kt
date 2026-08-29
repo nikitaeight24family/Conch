@@ -460,6 +460,19 @@ class SearchIndexer(
                 s.contains("\"type\":\"user.message\"") ||
                 s.contains("\"type\":\"assistant.message\"") ||
                 s.contains("\"type\":\"session.mcp_servers_loaded\"") -> Agent.COPILOT
+            // Qwen's persisted records carry `provenance` — a field no other
+            // agent writes — and Gemini-shaped `parts` inside a Claude-shaped
+            // envelope. Checked before Claude's broad `"type":"user"` net.
+            s.contains("\"provenance\":\"real_user\"") ||
+                s.contains("\"provenance\":\"assistant_output\"") -> Agent.QWEN
+            // opencode and Crush keep sessions in SQLite; what reaches the
+            // indexer is their EXPORT document, recognisable by its own keys.
+            s.contains("\"sessionID\":\"ses_") -> Agent.OPENCODE
+            s.contains("\"tool_call_id\"") && s.contains("\"parts\"") -> Agent.CRUSH
+            // Continue keeps one plain-JSON file per session; `editorState`
+            // beside a history entry is its own, and nobody else's.
+            s.contains("\"editorState\"") ||
+                (s.contains("\"history\"") && s.contains("\"sessionId\"")) -> Agent.CONTINUE
             s.contains("\"type\":\"thread.started\"") ||
                 s.contains("\"type\":\"turn.started\"") ||
                 s.contains("\"type\":\"turn.completed\"") ||

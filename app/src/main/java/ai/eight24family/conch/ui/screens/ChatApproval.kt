@@ -53,10 +53,16 @@ internal fun ApprovalShield(
      * icon itself, we don't want a redundant shield button beside it.
      */
     showAnchorIcon: Boolean = true,
-    /** Only Claude has a real `plan` permission mode. Offering it where the CLI
-     *  would quietly run in some other mode would be a lie, so the row appears
-     *  only where the wire word exists. */
+    /** Only some CLIs have a real `plan` permission mode. Offering it where the
+     *  CLI would quietly run in some other mode would be a lie, so the row
+     *  appears only where the wire word exists. */
     planSupported: Boolean = false,
+    /**
+     * Non-null when the CLI does not prompt for approvals in headless mode —
+     * the spec's own sentence about what that means for it. Shown above the
+     * mode rows, so it is read BEFORE a mode is picked. State, not advice.
+     */
+    approvalsCaveat: String? = null,
     /**
      * What the flag audit found for THIS server + agent, or null when it has
      * not run. Drives the footer line and the per-row "rejected" marking.
@@ -89,6 +95,16 @@ internal fun ApprovalShield(
             }
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = onToggle) {
+            if (approvalsCaveat != null) {
+                Text(
+                    approvalsCaveat,
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+            }
             if (planSupported) {
                 ApprovalRow(
                     mode = AgentApprovalMode.PLAN,

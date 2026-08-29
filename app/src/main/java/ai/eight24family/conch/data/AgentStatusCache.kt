@@ -92,6 +92,14 @@ class AgentStatusCache(private val context: Context) {
                 installed = installed,
                 loggedIn = loggedIn,
                 installedVersion = parts.getOrNull(5)?.takeIf { it.isNotEmpty() },
+                // Anything that is not exactly "y"/"n" — an old row, or a stray
+                // pipe inside the free-text field before it — reads as "unknown",
+                // which shows nothing. It can lose the chip, never invent one.
+                guardProtecting = when (parts.getOrNull(10)) {
+                    "y" -> true
+                    "n" -> false
+                    else -> null
+                },
                 // Prefer THIS server's own fetched latest; fall back to the
                 // registry-global only when it's blank (don't override a real
                 // per-server value — Claude's installer channel can differ).
@@ -222,7 +230,18 @@ class AgentStatusCache(private val context: Context) {
                         "${s.installedVersion.orEmpty()}|${s.latestVersion.orEmpty()}|" +
                         "${s.liveAuthPending}|" +
                         "${s.claudeState?.name.orEmpty()}|" +
-                        (s.claudeStateData.orEmpty())
+                        (s.claudeStateData.orEmpty()) +
+                        // Guard coverage, appended last so every older row still
+                        // parses. Three states, so "" is NOT the same as "n":
+                        // blank means nobody has looked, "n" means we looked and
+                        // this CLI is uncovered. Without persisting it the chip
+                        // would appear on a live probe and silently vanish on the
+                        // next cold start — the picker reads this cache first.
+                        "|" + when (s.guardProtecting) {
+                            true -> "y"
+                            false -> "n"
+                            null -> ""
+                        }
                 // Persist the registry-global latest per agent (server-independent),
                 // taking the newest seen. A server whose own `npm view` failed
                 // reuses this in load() → correct "update" verdict even offline.

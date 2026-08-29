@@ -139,8 +139,18 @@ class SessionDiscovery(private val ssh: SshClient) {
      *  prefetcher can run it and pipe stdout STRAIGHT to disk, instead of
      *  buffering the whole (possibly 100+ MB) file in RAM — the String-based
      *  fetch above OOM'd on very large rollouts. */
-    fun catCommand(path: String): String =
-        "bash -lc " + shellEscape("cat ${shellEscape(path)}")
+    fun catCommand(path: String): String {
+        // DB-backed CLIs (opencode, Crush) have no readable per-session file:
+        // their listing emits an `<agent>://<id>` marker and the owning spec
+        // turns it back into an export command. Asking every spec — rather
+        // than switching on an Agent here — keeps that knowledge where the
+        // rest of each CLI's quirks live; a spec answers only for its own
+        // marker and null for everything else.
+        for (spec in AgentSpecRegistry.all) {
+            spec.sessionReadCommand(path)?.let { return "bash -lc " + shellEscape(it) }
+        }
+        return "bash -lc " + shellEscape("cat ${shellEscape(path)}")
+    }
 
     /**
      * Like [catCommand] but reads at most [maxBytes] + 1 bytes.
@@ -152,8 +162,17 @@ class SessionDiscovery(private val ssh: SshClient) {
      * at all and still pulled every uncached session whole, through the same
      * String path that already OOM'd on a large rollout.
      */
-    fun catCappedCommand(path: String, maxBytes: Long): String =
-        "bash -lc " + shellEscape("head -c ${maxBytes + 1} ${shellEscape(path)}")
+    fun catCappedCommand(path: String, maxBytes: Long): String {
+        // Same marker handling as [catCommand] — a DB-backed session is read
+        // through its spec's export command, bounded by piping through `head`
+        // so the cap applies to an export exactly as it does to a file.
+        for (spec in AgentSpecRegistry.all) {
+            spec.sessionReadCommand(path)?.let {
+                return "bash -lc " + shellEscape("$it | head -c ${maxBytes + 1}")
+            }
+        }
+        return "bash -lc " + shellEscape("head -c ${maxBytes + 1} ${shellEscape(path)}")
+    }
 
     /**
      * Variant that runs the discovery script through a caller-provided

@@ -1,6 +1,6 @@
 **Last updated: 2026-08-27**
 
-Conch is a native Android client that connects to **your own** SSH servers and runs your chosen AI agent (Claude Code, Codex CLI, Gemini CLI, Grok Build, or GitHub Copilot CLI) on them. **No data the app handles leaves your device or your servers.** There is no analytics, no crash reporting and no telemetry of any kind, and Conch has no backend to send anything to. The only network connections the app opens are the SSH connections to the servers you add yourself.
+Conch is a native Android client that connects to **your own** SSH servers and runs your chosen AI agent (Claude Code, Codex CLI, Gemini CLI, Grok Build, GitHub Copilot CLI, Qwen Code, Cursor CLI, opencode, Crush, or Continue CLI) on them. **No data the app handles leaves your device or your servers.** There is no analytics, no crash reporting and no telemetry of any kind, and Conch has no backend to send anything to. The only network connections the app opens are the SSH connections to the servers you add yourself.
 
 This document covers Conch for Android, version 0.4.x, published by **Eight 24 Family LLC** (trading as Conch Labs).
 
@@ -17,7 +17,7 @@ Nothing in this list is transmitted to Conch or to a third-party backend. The ap
 
 ## Data sent to your SSH servers
 
-When you start a chat, the app opens an SSH connection (sshj 0.39) to a server you configured and runs the CLI of your choice (`claude` / `codex` / `gemini` / `grok` / `copilot`) over that channel. From your server's perspective, the traffic is identical to you running the CLI yourself over `ssh user@host`.
+When you start a chat, the app opens an SSH connection (sshj 0.39) to a server you configured and runs the CLI of your choice (`claude` / `codex` / `gemini` / `grok` / `copilot` / `qwen` / `cursor-agent` / `opencode` / `crush` / `cn`) over that channel. From your server's perspective, the traffic is identical to you running the CLI yourself over `ssh user@host`.
 
 Files and images you attach are uploaded to `/tmp/conch_uploads/` on the server via SSH `cat > path`. They live there until the server reboots or you delete them.
 
@@ -31,7 +31,7 @@ The app executes shell commands on the SSH-accessible server you connect to. Eve
 
 A complete, verbatim list lives in the app at **About → Operations & Commands**.
 
-- **Probing — read-only status checks.** `which claude` / `codex` / `gemini` / `grok` / `copilot`, `<cli> --version`, `npm view @openai/codex version`, `npm view @google/gemini-cli version`, `npm view @xai-official/grok version`, `npm view @github/copilot version`, `curl -sI https://claude.ai/install.sh`, `stat`, `pgrep`, `ls` / `cat` of the agent's own session files under `~/.claude` / `~/.codex` / `~/.gemini` / `~/.grok` / `~/.copilot`.
+- **Probing — read-only status checks.** `which claude` / `codex` / `gemini` / `grok` / `copilot` / `qwen` / `cursor-agent` / `opencode` / `crush` / `cn`, `<cli> --version`, `npm view @openai/codex version`, `npm view @google/gemini-cli version`, `npm view @xai-official/grok version`, `npm view @github/copilot version`, `curl -sI https://claude.ai/install.sh`, `stat`, `pgrep`, `ls` / `cat` of the agent's own session files under `~/.claude` / `~/.codex` / `~/.gemini` / `~/.grok` / `~/.copilot` / `~/.qwen` / `~/.cursor` / `~/.continue`, plus read-only session queries (`opencode session list`, `crush session show`) for the CLIs that keep history in a local database instead of files.
 - **Install / update agents.** `curl -fsSL https://claude.ai/install.sh | bash` (Anthropic's official installer for Claude Code), `npm install -g @openai/codex` / `@google/gemini-cli` / `@xai-official/grok` / `@github/copilot`, `sudo -n npm install -g <pkg>` retry when the npm prefix needs root (only succeeds if you have passwordless sudo — the app does not handle password prompts), `apt-get`/`dnf`/`pacman`/`apk`/`brew install nodejs npm` as a last-resort bootstrap when npm is missing. Only triggered when you tap **[ install ]** or **[ update ]**.
 - **Run agents.** `claude --print --output-format json [--resume <uuid>] [--model …] [--permission-mode …] "<user-prompt>"`, `codex exec [resume <uuid>] [--ask-for-approval …] [--sandbox …] "<user-prompt>"`, `gemini [--yolo] "<user-prompt>"`, `grok -p "<user-prompt>" --output-format streaming-messages-json [-r <uuid>] [--permission-mode …]`, `copilot -p "<user-prompt>" --output-format json [--resume=<uuid>] [--allow-all-tools | --yolo]`. The `<user-prompt>` is exactly the text you typed into the chat — the app does not inject hidden instructions.
 - **File operations.** `cat <path>` to read, `cat > <path>` to write (memory editor save, attachment upload, in-app text-editor save-back), `sha256sum <path>` for download deduplication, `test -f` / `mkdir -p` / `stat` for path checks, `rm /tmp/conch_uploads/<file>` only when you tap the X next to an attached file in chat.

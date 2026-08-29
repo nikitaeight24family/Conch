@@ -11,6 +11,85 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.7] — 2026-08-29
+
+### Fixed
+- **The session list is instant again.** Opening the app showed nothing for
+  seconds before the chats appeared. The data was on disk the whole time: the
+  first paint was waiting on the last-message preview for every cached session,
+  and those are read by parsing the tail of each chat body — 380 sessions x
+  128 KB of JSONL through the agent's own stream parser, ~48 MB of work, before
+  a single row could be drawn. Rows now paint from the cache immediately (with
+  the listing's own preview) and the bodies are read afterwards, newest first,
+  repainting as they land.
+- **Opening a chat no longer waits on a full-file scan.** A diagnostic counter
+  walked the entire cached body and hashed every line on the open path. It is
+  compiled out of release builds but always on in debug, and it skips only past
+  32 MB — so the biggest chats were read end to end, on the main thread, every
+  single open. It now runs after the chat is on screen, off the main thread.
+- **The unread watermark stopped hammering the disk.** It was read from its own
+  file for every session on every list refresh — hundreds of file lookups every
+  2.5 seconds — and is now memoized, with every writer going through one place
+  so the memo cannot drift from disk.
+
+---
+
+## [0.4.6] — 2026-08-29
+
+### Added
+- **Five more agents: Qwen Code, Cursor CLI, opencode, Crush and Continue CLI**
+  — ten in total. Each arrives with its own streaming parser, session listing
+  and history replay, model picker, approval-mode mapping replayed through the
+  real binary, brand mark and working spinner. Two of them keep history in
+  SQLite rather than files, so a session can now be read back through the CLI's
+  own export command instead of a file path.
+- **The shield tells the truth about CLIs that never ask.** Crush executes every
+  tool unprompted in headless mode and Continue decides its toolset up front;
+  both now say so above the mode rows instead of showing a shield that implies
+  a prompt that never comes.
+- **Installer and sign-in are no longer agent-specific code.** A CLI that ships
+  outside npm (Cursor) declares its vendor installer on its spec, and a CLI with
+  no headless sign-in says so and steers to an API key rather than opening a
+  login that would hang on a server with no browser.
+- **The picker shows when a third-party guard on your server is protecting a
+  CLI.** Guards like HOL Guard hook each CLI through the CLI's own hook system,
+  so one installed on your box already covers the turns Conch drives. The app
+  installs nothing, launches nothing and adds nothing to the launch path — it
+  reads the state and shows a `Guard` chip on the agents it actually covers. The
+  read is cached against the guard's own state directory, because asking costs
+  ~6.6 s.
+
+### Fixed
+- The flag audit no longer reports "verified" for CLIs whose parser ignores flag
+  values when `--help` is present (yargs — Gemini, Qwen). A probe that cannot
+  fail is not evidence, and it now says so.
+- **The phone bridge answered nothing while the app was off screen.** Polling
+  paused entirely when the app was backgrounded, so a `conch-bridge ping` issued
+  by an agent with the phone in a pocket died on the CLI's own 30 s deadline —
+  in exactly the situation the product is built for. It now keeps answering off
+  screen at a fifth of the rate, and stays fully idle only on servers whose
+  chats were never wired to the phone.
+- **A rate-limit warning could report 0%.** The pushed limit event carries
+  utilization as a fraction (0.25), while the usage endpoint reports a percent;
+  truncating the fraction printed "seven day · 0%" next to a usage bar that
+  said 25%. The two conventions are normalized, and the window is named the way
+  the usage bar names it. A percentage that rounds away is now left out rather
+  than printed as zero.
+- **Unused rate-limit windows no longer appear in the usage panel.** Claude's
+  payload ships internal model codenames sitting at 0% with no reset time
+  ("Nimbus quill"); an unrecognized window in that state carries no information
+  and is dropped. Any window with usage or a live reset still surfaces on its
+  own, so a genuinely new model still appears the moment it costs something.
+- **The input row could be pushed off screen.** Expanding both the subagent
+  roster and the usage panel — both pinned above the prompt — overflowed the
+  column. Each is now bounded to a fraction of the screen and scrolls inside
+  itself; the composer can no longer be squeezed out.
+- **"connecting phone… 95%" is gone.** The phone-connect row counted up a
+  percentage that measured nothing. It now says what it is doing, and still
+  flips to a quiet "couldn't connect" when a handshake stalls.
+
+---
+
 ## [0.4.4] — 2026-08-28
 
 ### Added
@@ -1324,7 +1403,10 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.7
+[0.4.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.6
+[0.4.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.4
 [0.4.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.3
 [0.4.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.2
 [0.4.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.1

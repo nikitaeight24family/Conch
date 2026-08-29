@@ -71,19 +71,59 @@ class AgentMetadataTest {
     }
 
     @Test
-    fun `each agent has a distinct filename`() {
-        // CLAUDE.md / AGENTS.md / GEMINI.md — no collisions.
-        val filenames = Agent.entries.map { it.memoryFilename }
-        assertEquals(filenames.size, filenames.toSet().size)
+    fun `global memory paths are distinct`() {
+        // THE collision that matters: two agents writing global memory to one
+        // file would silently feed one CLI's instructions to another, forever.
+        // Every CLI keeps its own config dir, so this must always hold.
+        val globals = Agent.entries.map { it.memoryGlobalPath }
+        assertEquals("global memory paths collide: $globals", globals.size, globals.toSet().size)
     }
 
     @Test
-    fun `cli command and npm package look sane`() {
+    fun `project memory filenames repeat only for the shared standard`() {
+        // Project-level filenames MAY legitimately repeat: `AGENTS.md` is a
+        // published cross-vendor convention that several CLIs genuinely read,
+        // and pointing one of them at an invented private filename would make
+        // the memory editor write a file that CLI never loads — worse than the
+        // collision. Any OTHER repeat is a copy-paste bug.
+        val repeated = Agent.entries.map { it.memoryFilename }
+            .groupingBy { it }.eachCount()
+            .filterValues { it > 1 }.keys
+        assertEquals(
+            "only the shared AGENTS.md standard may repeat, found: $repeated",
+            emptySet<String>(), repeated - "AGENTS.md",
+        )
+    }
+
+    @Test
+    fun `cli command looks sane`() {
         Agent.entries.forEach {
-            assertTrue("cliCommand should be lowercase letters: ${it.cliCommand}",
-                it.cliCommand.matches(Regex("[a-z]+")))
-            assertTrue("npmPackage should look like @scope/pkg: ${it.npmPackage}",
-                it.npmPackage.startsWith("@") && it.npmPackage.contains("/"))
+            // Lowercase, may carry hyphens (`cursor-agent`). No spaces, no
+            // paths, no flags — it is exec'd and pgrep'd verbatim.
+            assertTrue("cliCommand should be a lowercase binary name: ${it.cliCommand}",
+                it.cliCommand.matches(Regex("[a-z][a-z0-9-]*")))
+        }
+    }
+
+    @Test
+    fun `every agent has an install channel`() {
+        // npmPackage is nullable BECAUSE some CLIs (Cursor) ship only through
+        // the vendor's own installer — and inventing an npm name there would
+        // point our installer at a squatted package. The real invariant is
+        // that each agent has at least ONE channel: npm, or the vendor script.
+        Agent.entries.forEach { agent ->
+            val spec = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
+            val pkg = spec.npmPackage
+            assertTrue(
+                "${agent.name} has neither an npm package nor an official installer",
+                pkg != null || spec.officialInstallCommand != null,
+            )
+            if (pkg != null) {
+                assertTrue(
+                    "npmPackage should be a package id (scoped or plain): $pkg",
+                    pkg.matches(Regex("(@[a-z0-9._-]+/)?[a-z0-9._-]+")),
+                )
+            }
         }
     }
 

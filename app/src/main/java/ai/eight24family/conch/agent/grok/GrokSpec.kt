@@ -67,6 +67,7 @@ object GrokSpec : AgentCliSpec {
     override val displayName = "Grok Build"
     override val cliCommand = "grok"
     override val npmPackage = "@xai-official/grok"
+    override val guardHarnessId = "grok"
     override val iconRes = ai.eight24family.conch.R.drawable.ic_agent_grok
 
     /** Grok spawns subagents (spawn_subagent tool, `.grok/agents/`), but the
@@ -86,6 +87,12 @@ object GrokSpec : AgentCliSpec {
 
     /** Grok has a REAL plan mode: `--permission-mode plan`. */
     override val supportsPlanMode = true
+
+    /** Device-code flow — the smoothest of all: the CLI prints a URL with the
+     *  user code embedded and POLLS by itself, so there is no callback to
+     *  capture and no code to paste back. The creds poller sees the fresh
+     *  `~/.grok/auth.json` and closes the dialog. */
+    override val oauthLoginCommand = "GROK_DISABLE_AUTOUPDATER=1 grok login --device-code"
 
     /** Grok's own tool bullets: `◆` is its default block marker; the cycle
      *  pulses through its documented bullet charset — deliberately NOT

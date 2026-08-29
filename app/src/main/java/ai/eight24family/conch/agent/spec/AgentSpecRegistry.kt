@@ -4,8 +4,13 @@ import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.claude.ClaudeSpec
 import ai.eight24family.conch.agent.codex.CodexSpec
 import ai.eight24family.conch.agent.copilot.CopilotSpec
+import ai.eight24family.conch.agent.cont.ContinueSpec
+import ai.eight24family.conch.agent.crush.CrushSpec
+import ai.eight24family.conch.agent.cursor.CursorSpec
 import ai.eight24family.conch.agent.gemini.GeminiSpec
 import ai.eight24family.conch.agent.grok.GrokSpec
+import ai.eight24family.conch.agent.opencode.OpencodeSpec
+import ai.eight24family.conch.agent.qwen.QwenSpec
 
 /**
  * Single source of truth that maps `Agent` enum values to their per-CLI
@@ -25,6 +30,11 @@ object AgentSpecRegistry {
         Agent.GEMINI to GeminiSpec,
         Agent.GROK to GrokSpec,
         Agent.COPILOT to CopilotSpec,
+        Agent.QWEN to QwenSpec,
+        Agent.CURSOR to CursorSpec,
+        Agent.OPENCODE to OpencodeSpec,
+        Agent.CRUSH to CrushSpec,
+        Agent.CONTINUE to ContinueSpec,
     )
 
     /** Spec for [agent]. Throws if a future Agent enum value is added without

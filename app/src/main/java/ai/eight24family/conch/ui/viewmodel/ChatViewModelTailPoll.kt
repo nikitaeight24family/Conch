@@ -1011,6 +1011,15 @@ internal class ChatViewModelTailPoll(
             Agent.GEMINI -> "gemini"
             Agent.GROK -> "grok"
             Agent.COPILOT -> "copilot"
+            Agent.QWEN -> "qwen"
+            // The installer symlinks both `agent` and `cursor-agent` to the
+            // same file, and the executable inside the package is itself
+            // `cursor-agent` — so pgrep matches whichever alias was invoked.
+            // A bare `agent` pattern would match half the process table.
+            Agent.CURSOR -> "cursor-agent"
+            Agent.OPENCODE -> "opencode"
+            Agent.CRUSH -> "crush"
+            Agent.CONTINUE -> "cn"
         }
         // Only Claude's layout lets us tie a live process to THIS session: its
         // rollouts live at ~/.claude/projects/<cwd with / → ->/<uuid>.jsonl, so a

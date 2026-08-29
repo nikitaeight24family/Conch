@@ -48,6 +48,21 @@ data class CliModeContract(
 data class CliContract(
     val agent: Agent,
     /**
+     * Whether this CLI's argument parser VALIDATES flag values even when
+     * `--help` is present — which is the whole basis of the audit probe.
+     *
+     * ⚠ It is not universal, and assuming it silently turns the audit into a
+     * rubber stamp. Measured 2026-08-28: clap (codex) and commander (cursor)
+     * validate first, so `--mode bogus --help` fails loudly. **yargs (gemini,
+     * qwen) short-circuits on `--help` and exits 0 for ANY value** — the
+     * deliberately-wrong `--approval-mode auto_edit --help` was "accepted",
+     * while the same flags without `--help` were rejected with the real
+     * choices list. An audit that reports "verified" there would be inventing
+     * the verification it exists to provide, so those contracts declare false
+     * and the audit reports them as unverifiable instead.
+     */
+    val validatesUnderHelp: Boolean = true,
+    /**
      * The CLI version the mode mapping in this app was verified against, by
      * running every mode's flags through the CLI's own parser. Not a guess and
      * not the newest — the one that was actually checked.
@@ -107,6 +122,9 @@ object CliContracts {
 
     private val gemini = CliContract(
         agent = Agent.GEMINI,
+        // yargs: `--help` wins over value validation, so the flag audit cannot
+        // speak for this CLI (measured on its Qwen sibling, same parser).
+        validatesUnderHelp = false,
         testedVersion = "0.57.0",
         pinnedVersion = "0.57.0",
         modes = listOf(
@@ -150,6 +168,85 @@ object CliContracts {
         ),
     )
 
+    private val qwen = CliContract(
+        agent = Agent.QWEN,
+        // yargs — see [CliContract.validatesUnderHelp]. Verified the hard way
+        // on 2026-08-28: with `--help` every value passed, including Gemini's
+        // `auto_edit`; WITHOUT it, the same run answered
+        // `Invalid values: Argument: approval-mode, Given: "auto_edit",
+        //  Choices: "plan", "default", "auto-edit", "auto", "yolo"`.
+        validatesUnderHelp = false,
+        testedVersion = "0.22.2",
+        pinnedVersion = "0.22.2",
+        // All four replayed for real (no `--help`) against 0.22.2 on
+        // 2026-08-28: each reached execution and failed only on auth, which is
+        // proof the parser took them. Note the HYPHEN in `auto-edit` — the
+        // Gemini spelling this CLI forked from is now a hard parse failure.
+        modes = listOf(
+            CliModeContract(AgentApprovalMode.PLAN, listOf("--approval-mode", "plan")),
+            CliModeContract(AgentApprovalMode.SAFE, listOf("--approval-mode", "default")),
+            CliModeContract(AgentApprovalMode.AUTO, listOf("--approval-mode", "auto-edit")),
+            CliModeContract(AgentApprovalMode.YOLO, listOf("--approval-mode", "yolo")),
+        ),
+    )
+
+    private val opencode = CliContract(
+        agent = Agent.OPENCODE,
+        testedVersion = "1.18.23",
+        pinnedVersion = "1.18.23",
+        // PLAN is an AGENT, not a permission flag: `--agent plan` is read-only.
+        // SAFE adds nothing — the headless ruleset auto-REJECTS anything that
+        // needs permission and hands the model the refusal as a tool error, so
+        // it neither prompts nor hangs. `--auto` (aliases --yolo,
+        // --dangerously-skip-permissions) answers "once" to every ask, while
+        // explicit deny rules in the user's own config still win over it.
+        modes = listOf(
+            CliModeContract(AgentApprovalMode.PLAN, listOf("--agent", "plan")),
+            CliModeContract(AgentApprovalMode.SAFE, emptyList()),
+            CliModeContract(AgentApprovalMode.AUTO, listOf("--auto")),
+            CliModeContract(AgentApprovalMode.YOLO, listOf("--auto")),
+        ),
+    )
+
+    private val cursor = CliContract(
+        agent = Agent.CURSOR,
+        testedVersion = "2026.08.25-3e8eec8",
+        // Inert for this agent: Cursor ships through its own installer, which
+        // takes no version, so nothing pins it — recorded for the sheet's
+        // "tested against" line, not as a promise the installer can keep.
+        pinnedVersion = "2026.08.25-3e8eec8",
+        // Replayed live under WSL on 2026-08-28: the three flag modes and the
+        // bare default all parsed and failed only on auth, while `--mode bogus`
+        // was rejected with "Allowed choices are plan, ask" — so this parser
+        // (commander) really does validate, `--help` included.
+        // ⚠ NEVER emit --force together with --auto-review: the CLI exits 1
+        // with "pick one". They are separate modes here, never merged.
+        modes = listOf(
+            CliModeContract(AgentApprovalMode.PLAN, listOf("--mode", "plan")),
+            // No flag: the allowlist default, which headless AUTO-REJECTS tool
+            // calls rather than prompting — read-only in practice, never a hang.
+            CliModeContract(AgentApprovalMode.SAFE, emptyList()),
+            CliModeContract(AgentApprovalMode.AUTO, listOf("--auto-review")),
+            CliModeContract(AgentApprovalMode.YOLO, listOf("--force")),
+        ),
+    )
+
+    private val continueCli = CliContract(
+        agent = Agent.CONTINUE,
+        testedVersion = "1.5.47",
+        pinnedVersion = "1.5.47",
+        // Measured tool sets, not guesses: default/`--readonly` expose
+        // Read,List,Bash,Fetch,… and `--auto` ADDS Write,Edit. `--readonly`
+        // alone is therefore NOT the safe option it reads as — it keeps the
+        // shell, which headless runs unprompted — so PLAN removes Bash too.
+        modes = listOf(
+            CliModeContract(AgentApprovalMode.PLAN, listOf("--readonly", "--exclude", "Bash")),
+            CliModeContract(AgentApprovalMode.SAFE, listOf("--readonly")),
+            CliModeContract(AgentApprovalMode.AUTO, listOf("--auto")),
+            CliModeContract(AgentApprovalMode.YOLO, listOf("--auto")),
+        ),
+    )
+
     /**
      * null = no contract recorded for this agent, so nothing here may claim its
      * modes were verified. Callers must show "not audited" rather than invent a
@@ -161,5 +258,14 @@ object CliContracts {
         Agent.GEMINI -> gemini
         Agent.GROK -> grok
         Agent.COPILOT -> copilot
+        Agent.QWEN -> qwen
+        Agent.CURSOR -> cursor
+        Agent.OPENCODE -> opencode
+        // ⚠ DELIBERATELY NULL. Crush's headless `run` enforces no approvals at
+        // all (CrushSpec.approvalsEnforced = false) and rejects `-y` outright,
+        // so there is no mode→flag mapping to record. A contract here would be
+        // claiming an audit of flags that do not exist.
+        Agent.CRUSH -> null
+        Agent.CONTINUE -> continueCli
     }
 }

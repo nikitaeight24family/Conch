@@ -1,0 +1,22 @@
+<!-- Crush agent mark. "Crush" and the Charm marks are trademarks of Charm
+     (Charmbracelet, Inc.). This is NOT a reproduction of their logo: their
+     wordmark is drawn from randomly-stretched half-blocks, which does not
+     survive as a 24dp icon. It is our own glyph in Crush's OWN visual
+     language — the half-block letterform bars of its TUI, carrying its
+     signature Charple → Dolly gradient stops (#6B50FF / #FF60FF) that the
+     terminal itself paints. Trademark notice in AboutScreen. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#6B50FF"
+        android:pathData="M3,4h5v7H3z" />
+    <path
+        android:fillColor="#9B54FF"
+        android:pathData="M9.5,4h5v16h-5z" />
+    <path
+        android:fillColor="#FF60FF"
+        android:pathData="M16,13h5v7h-5z" />
+</vector>
