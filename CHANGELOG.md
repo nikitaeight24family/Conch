@@ -11,6 +11,42 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.9] — 2026-08-30
+
+### Added
+- **A real Linux, on the phone, with no computer and no server.** Alpine with
+  its package manager: 25 000 packages, from python and git to compilers,
+  installed from inside it. It runs as an ordinary app would — no root, nothing
+  unlocked, nothing outside its own folder touched. Paths are rewritten by a
+  ptrace runtime that needs no privilege at all, and the userland believes it is
+  root only within its own tree while the kernel still sees an unprivileged uid.
+  Measured on a phone: `apk add python3` pulls 32 packages and python runs.
+- **It installs with no network at all.** The runtime and the whole userland
+  ship inside the app, so setting it up works in flight mode. Once it is there
+  the environment uses the phone's connection like anything else, so `apk`
+  reaches its mirrors normally. The one thing it needs is the phone bridge armed
+  once, because only the shell's own directory may hold something runnable.
+- **`conch-bridge linux '<cmd>'`** — the agent on your server can run commands
+  inside it, behind the same switch as `shell`. It is the shell: the runtime
+  grants nothing `shell` did not already have.
+
+### Changed
+- **Linux is reached from the machines list, not from Settings.** It is a
+  machine, in the same sense the servers on that list are machines, so
+  `[ + linux ]` sits beside `[ + add server ]` and opens its own screen. In
+  Settings it read as a preference about the app, which is the wrong idea of it.
+
+### Fixed
+- **A test could hang the whole suite, and did — for hours.** It asserted that a
+  device answering the legacy ADB handshake must be refused. That was true until
+  the same handshake became the only path that survives leaving Wi-Fi: the
+  client now signs the challenge, the test's device double never answered, and
+  the read blocked forever. Two tests replace it and pin the real exchange — a
+  trusted key completes with no dialog, an unknown key is offered, which is what
+  makes the phone ask its owner.
+
+---
+
 ## [0.4.8] — 2026-08-30
 
 ### Added
