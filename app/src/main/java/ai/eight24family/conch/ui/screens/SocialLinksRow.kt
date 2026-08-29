@@ -28,11 +28,11 @@ import ai.eight24family.conch.util.SilentlyTry
  * leads the row. Everything else about the law holds for it — no label, no
  * separate row, and the glyph is Material's, not drawn by hand.
  *
- * Tapping opens the NATIVE app first (Telegram / LinkedIn via their custom URI
- * scheme) and only falls back to the browser if that app isn't installed.
- * Earlier this fired the https URL straight at the system, which Android hands
- * to the browser even when the app is installed. The site has no app scheme,
- * so it goes to the browser directly.
+ * Tapping opens the NATIVE app first (Telegram via its custom URI scheme) and
+ * only falls back to the browser if that app isn't installed. Earlier this
+ * fired the https URL straight at the system, which Android hands to the
+ * browser even when the app is installed. The site has no app scheme, so it
+ * goes to the browser directly.
  */
 @Composable
 internal fun SocialLinksRow(modifier: Modifier = Modifier) {
@@ -45,7 +45,6 @@ internal fun SocialLinksRow(modifier: Modifier = Modifier) {
         Social(R.drawable.ic_link_site, "", "https://conch-labs.com", "Conch website"),
         Social(R.drawable.ic_logo_telegram, "tg://resolve?domain=conchapplication", "https://t.me/conchapplication", "Conch on Telegram"),
         Social(R.drawable.ic_logo_github, "", "https://github.com/nikitaeight24family/Conch", "Conch on GitHub"),
-        Social(R.drawable.ic_logo_linkedin, "linkedin://in/nikita-zotov-aa4b143ab", "https://www.linkedin.com/in/nikita-zotov-aa4b143ab/", "Maker on LinkedIn"),
     )
 
     Row(

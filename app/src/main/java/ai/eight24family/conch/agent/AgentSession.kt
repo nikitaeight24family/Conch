@@ -151,6 +151,7 @@ class AgentSession(
         getState = { _state.value },
         getResumeId = { resumeId },
         setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
+        dropResumeId = { resumeId = null },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getReasoningOverride = { reasoningEffortOverride },

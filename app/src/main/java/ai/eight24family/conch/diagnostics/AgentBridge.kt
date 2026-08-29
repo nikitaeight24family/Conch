@@ -72,13 +72,13 @@ class AgentBridge(
                     ai.eight24family.conch.di.ServiceLocator.preferences.phoneBridgeSessions
                         .first().any { it.startsWith("$serverId:") }
                 }
-                // ⚠ BACKGROUNDED IS NOT DEAD. This loop used to `continue` past
-                // tick() whenever the app was off screen, on the strength of
-                // CLAUDE.md §11.5 ("polling pauses"). That switched the bridge OFF in
-                // precisely the situation the product exists for — send a task,
-                // pocket the phone, let the agent work — so every `conch-bridge ping`
-                // the agent issued with the screen off died on the CLI's 30 s
-                // deadline while Shizuku was granted and the phone was wide awake.
+                // ⚠ BACKGROUNDED IS NOT DEAD. This loop used to `continue` past tick()
+                // whenever the app was off screen, on the strength of CLAUDE.md §11.5
+                // ("polling pauses"). That switched the bridge OFF in precisely the
+                // situation the product exists for — send a task, pocket the phone,
+                // let the agent work — so every `conch-bridge ping` the agent issued
+                // with the screen off died on the CLI's 30 s deadline while the phone
+                // was wide awake and perfectly able to answer.
                 //
                 // The battery win it was reaching for (2026-08-10) lives in the
                 // CADENCE, not in silence, and the honest gate is "could a request
@@ -125,9 +125,9 @@ class AgentBridge(
             "ls -1 \$HOME/.conch-bridge/inbox/ 2>/dev/null"
         )
         // Heartbeat = CHANNEL layer only: non-null `ls` ⇒ SSH up AND this poller
-        // running ⇒ the phone is reachable for bridge requests. Shizuku (the
-        // privileged-capability layer) is checked LIVE at glyph-render time, NOT
-        // folded in here — the two are independent (Shizuku can be OOM-killed while
+        // running ⇒ the phone is reachable for bridge requests. The privileged
+        // layer (a shell connection) is checked LIVE at glyph-render time, NOT
+        // folded in here — the two are independent (a shell session can drop while
         // the channel keeps polling), and a live check flips the glyph in ~2s
         // instead of waiting out this heartbeat's window.
         if (raw != null) BridgeHealth.markAlive(serverId)
@@ -355,7 +355,7 @@ interface BridgeHandler {
         BridgeResponse.err("audio not implemented")
 
     /** Run an arbitrary shell command at shell UID (adb-shell equivalent)
-     *  via Shizuku. `args.command` = the command string. */
+     *  at adb-shell level. `args.command` = the command string. */
     suspend fun handleShell(args: JsonObject): BridgeResponse =
         BridgeResponse.err("shell not implemented")
 }
@@ -427,11 +427,25 @@ class DefaultBridgeHandler(
             } ?: LogCaptureService.CaptureRequest.Level.Verbose,
             maxLines = args["lines"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 2_000,
             sinceTime = args["since"]?.jsonPrimitive?.contentOrNull,
-            tierOverride = args["tier"]?.jsonPrimitive?.contentOrNull?.let {
-                SilentlyTry.logged("SshAi-AgentBridge", "parse tier override") {
-                    LogCaptureService.Tier.valueOf(it.lowercase().replaceFirstChar(Char::titlecase))
-                }
-            },
+            // ⚠ The CLI's words are not the enum's names, and pretending they are
+            // silently broke `--tier own`: valueOf("Own") never matched OwnUid,
+            // the parse failed, the override was dropped and the caller got the
+            // auto-pick while believing it had forced a tier. Map explicitly.
+            tierOverride = args["tier"]?.jsonPrimitive?.contentOrNull
+                ?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                ?.let { name ->
+                    when (name) {
+                        "adb", "shell", "device" -> LogCaptureService.Tier.Adb
+                        "own", "ownuid", "own-uid", "app" -> LogCaptureService.Tier.OwnUid
+                        else -> {
+                            android.util.Log.w(
+                                "SshAi-AgentBridge",
+                                "unknown log tier '$name' — falling back to the automatic pick",
+                            )
+                            null
+                        }
+                    }
+                },
         )
         val res = logs.capture(req)
         val meta = mapOf(
@@ -445,22 +459,29 @@ class DefaultBridgeHandler(
     override suspend fun handleShell(args: JsonObject): BridgeResponse {
         val command = args["command"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: return BridgeResponse.err("shell: missing 'command'")
-        if (!ShizukuShell.available()) {
-            return BridgeResponse.err(
-                if (ShizukuShell.bound())
-                    "Shizuku is running but Conch isn't granted — open Conch → Settings → Phone bridge → Enable."
-                else
-                    "Shizuku not available — install + start the Shizuku app, then grant Conch in Settings → Phone bridge."
+
+        // Conch's OWN ADB client — the only route to the shell uid there is now.
+        // It speaks ADB to this device over its own loopback with a key the
+        // device was paired with; no helper app is involved at any point.
+        val r = ai.eight24family.conch.adb.LocalAdbShell.exec(command)
+            ?: return BridgeResponse.err(
+                // Say what is missing, and say it in the order the user has to
+                // do it. Android hands out this privilege only through Wireless
+                // Debugging, and the platform itself refuses to arm that unless
+                // the phone is associated with a Wi-Fi network — so the second
+                // sentence is a fact about Android, not about Conch.
+                "No shell access yet: pair Conch with this phone once in " +
+                    "Settings → Phone bridge, then turn Wireless debugging on. " +
+                    "Android only allows that while connected to Wi-Fi; after the " +
+                    "first pairing no code is ever needed again.",
             )
-        }
-        val r = ShizukuShell.exec(command)
         // stdout is the primary payload (clean for the agent to parse).
         // exit code, a stderr snippet, and flags ride in metadata — the
         // CLI prints metadata to its own stderr.
         val meta = mapOf(
             "exit" to JsonPrimitive(r.exitCode),
             "truncated" to JsonPrimitive(r.truncated),
-            "timed_out" to JsonPrimitive(r.timedOut),
+            "timed_out" to JsonPrimitive(false),
             "stderr" to JsonPrimitive(r.stderr.take(4000)),
         )
         return BridgeResponse.ok(r.stdout, meta)

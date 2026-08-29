@@ -50,7 +50,7 @@ import ai.eight24family.conch.ui.viewmodel.ServersViewModel
  * add-user / delete live). No connect-on-tap, no long-press menu, no status
  * bottom-sheet — all of that moved onto the detail page so the list stays a
  * dead-simple "pick a server to manage". Rows are sorted by host so a machine's
- * users (alice@host, bob@host) sit together.
+ * users (user@x, user@example.com) sit together.
  */
 @Composable
 fun ServersScreen(
@@ -228,30 +228,38 @@ private fun ServerRow(
     }
 }
 
-/** Agent logos on a server row, just left of the connection dot. Logged-in =
- *  FULL COLOUR; installed-but-not-authed = GREYSCALE + dimmed; not-installed
- *  omitted. Same vector logos as the agent picker. */
+/**
+ * Agent logos on a server row, just left of the connection dot — one per agent
+ * that is READY on that server: installed AND signed in, the same condition the
+ * picker prints `[ ready ]` for.
+ *
+ * It used to show every INSTALLED agent and grey out the ones without an
+ * account, which put a row of dim marks on a server where nothing could actually
+ * be opened. At ten agents that reads as clutter rather than information. A logo
+ * here now means one thing: tap this server and that agent will work.
+ *
+ * All ten are eligible — the list walks [Agent.entries], so a newly added CLI
+ * appears here the moment it is set up, with no edit to this screen.
+ */
 @Composable
 private fun AgentLogos(statuses: Map<Agent, AgentStatus>?) {
-    val installed = Agent.entries.filter { statuses?.get(it)?.installed == true }
-    if (installed.isEmpty()) return
-    val grey = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) }
+    val ready = Agent.entries.filter {
+        val s = statuses?.get(it)
+        s?.installed == true && s.loggedIn
+    }
+    if (ready.isEmpty()) return
     Row(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(end = 8.dp),
     ) {
-        installed.forEach { agent ->
-            val authed = statuses?.get(agent)?.loggedIn == true
+        ready.forEach { agent ->
             Image(
                 painter = painterResource(
                     ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].iconRes,
                 ),
                 contentDescription = agent.displayName,
-                colorFilter = if (authed) null else grey,
-                modifier = Modifier
-                    .size(10.dp)
-                    .then(if (authed) Modifier else Modifier.alpha(0.55f)),
+                modifier = Modifier.size(10.dp),
             )
         }
     }

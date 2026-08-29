@@ -110,6 +110,10 @@ object ServiceLocator {
         SecretsStore(appContext)
     }
 
+    /** The same store, for the one credential that is not a server's: the key
+     *  this phone's own ADB access is pinned to (see LocalAdbShell). */
+    val secretsStore: SecretsStore get() = secrets
+
     val sshKeyRepository: SshKeyRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         SshKeyRepository(db.sshKeyDao(), secrets)
     }

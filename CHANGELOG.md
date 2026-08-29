@@ -11,6 +11,67 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.4.8] — 2026-08-30
+
+### Added
+- **Conch reaches this phone's shell by itself.** Reading the device's logs or
+  running a command on it needs the `shell` uid, which an ordinary app does not
+  have. Conch now speaks ADB to the phone over its own loopback interface,
+  authenticated by a key the device is paired with once — the wire protocol, the
+  SPAKE2 pairing exchange, the TLS carrier and the shell channel are all
+  implemented here. No helper app to install, keep updated, or re-grant.
+- **The pairing code is typed into a notification.** Android shows the six
+  digits inside its own dialog, and that dialog cancels the pairing the instant
+  it closes — so a field on our own screen was unusable by construction. The
+  notification shade draws over the dialog without dismissing it: Conch spots
+  the dialog by itself (it is advertised over mDNS while it is open), asks for
+  the digits there, and takes you back to the chat you started from.
+- **A connection that survives leaving Wi-Fi.** Android's wireless debugging is
+  gated on a Wi-Fi association and is torn down the moment it drops. The legacy
+  `adb tcpip` listener is not — it runs until the phone reboots, needs no
+  network of any kind, and is reached over loopback like everything else. Conch
+  now speaks that handshake too, and tries it first.
+
+### Changed
+- **The agent picker leads with three names.** Claude, Codex and Gemini stay in
+  view; the rest fold behind "More", with a count of what is there.
+- **The phone handshake leaves one row in the chat.** The instructions Conch
+  injects, the queue they pass through, the tool call, its output, the ready
+  token and both turn markers are plumbing — and plumbing is not conversation.
+  Anything actually said inside that turn is still carried out of it.
+
+### Fixed
+- **Nothing about the phone refuses a message any more.** A send into a
+  phone-wired chat used to be held back with a dialog demanding that wireless
+  debugging be turned on. On mobile data that cannot be done at all — Android
+  reverts the setting within milliseconds without a Wi-Fi association — so the
+  app stood between its owner and an agent that runs on the server regardless.
+  The phone is an accessory to that agent, and an unreachable accessory is not
+  a reason to stop working.
+- **A working shell is never dropped.** An open loopback socket keeps serving
+  after Android switches wireless debugging off; the listener is only needed to
+  make a NEW connection. A liveness probe that closed the session on a single
+  hiccup destroyed exactly that, permanently, because nothing could reopen it.
+- **A session the agent will not resume no longer kills the chat.** The id
+  comes from the agent itself and can still be refused later. The message is now
+  re-sent as a fresh session with one line saying so, instead of dying with the
+  CLI's exit code and taking every later message with it.
+- **The session list stopped burning CPU on expected failures.** It ran a strict
+  JSON parse over lines the server's listing script cuts, so failure is the
+  normal case — and each one threw and logged. Across a few hundred cached
+  sessions that is thousands of exceptions per rebuild of the list.
+- **Crash on opening any chat.** Two initialisation-order faults in the same
+  file, both fixed at the root: the constants involved are compile-time now, so
+  there is no order left to get wrong.
+
+### Removed
+- **Shizuku.** The helper app, its provider, its permission plumbing and every
+  mention of it. Conch obtains shell access itself now, so a second app that had
+  to be installed, updated and re-armed after every reboot is no longer part of
+  anyone's setup.
+
+---
+
 ## [0.4.7] — 2026-08-29
 
 ### Fixed

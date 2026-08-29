@@ -175,7 +175,7 @@ class ServerDiagnosticsTest {
     fun `private IP detection — public addresses`() {
         assertFalse(ServerDiagnostics.isPrivateOrLocal("8.8.8.8"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("1.1.1.1"))
-        assertFalse(ServerDiagnostics.isPrivateOrLocal("198.51.100.10"))
+        assertFalse(ServerDiagnostics.isPrivateOrLocal("203.0.113.11"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("2001:db8::1"))
         assertFalse(ServerDiagnostics.isPrivateOrLocal("server.example.com"))
     }
@@ -211,6 +211,68 @@ class ServerDiagnosticsTest {
         assertTrue("should mention binary or hex bytes", out.contains("binary"))
     }
 
+    // ─────── a refusal right after a working connection ───────
+
+    private fun refused() = TcpProbe.Outcome.Failed(
+        TcpProbe.Outcome.Failed.Kind.Refused,
+        java.net.ConnectException("refused"),
+    )
+
+    @Test
+    fun `a refusal minutes after the host answered reads as a ban, not a closed port`() {
+        // The case that cost the owner an hour: fail2ban REJECTS, so a ban is
+        // byte-for-byte a closed port at the socket. History is the only thing
+        // that separates them.
+        val r = classify(outcome = refused(), hostWorkedAgoMs = 4 * 60 * 1000L)
+        assertTrue(r is Diagnosis.LikelyIpBanned)
+        assertTrue("must lead with the ban, not with the daemon",
+            r.reasons.first().contains("accepted a connection"))
+        assertTrue("must name the tool that does this",
+            r.reasons.any { it.contains("fail2ban") })
+        assertTrue("must say it clears itself",
+            r.reasons.any { it.contains("clears itself") })
+        assertTrue("must offer the remedy that actually worked",
+            r.reasons.any { it.contains("different address") })
+    }
+
+    @Test
+    fun `a ban is explained as covering every account on the machine`() {
+        // He had two servers on one host and both died together; that is the
+        // signature of an IP ban and the copy has to say so.
+        val r = classify(outcome = refused(), hostWorkedAgoMs = 60_000L) as Diagnosis.LikelyIpBanned
+        assertTrue(r.reasons.any { it.contains("on your IP") && it.contains("every server") })
+    }
+
+    @Test
+    fun `an old success does not excuse a closed port`() {
+        // Yesterday proves nothing: a daemon can stop and a port can move.
+        val r = classify(outcome = refused(), hostWorkedAgoMs = 26 * 60 * 60 * 1000L)
+        assertTrue(r is Diagnosis.ServerUpSshDown)
+    }
+
+    @Test
+    fun `a host we have never reached still gets the ordinary advice`() {
+        assertTrue(classify(outcome = refused(), hostWorkedAgoMs = null) is Diagnosis.ServerUpSshDown)
+    }
+
+    @Test
+    fun `a nonsensical negative age is ignored rather than trusted`() {
+        // Clocks move. A "success in the future" must not turn into a diagnosis.
+        assertTrue(classify(outcome = refused(), hostWorkedAgoMs = -5_000L) is Diagnosis.ServerUpSshDown)
+    }
+
+    @Test
+    fun `history changes nothing for a timeout`() {
+        // Only a REFUSAL looks like a ban; silence is still silence.
+        val r = classify(
+            outcome = TcpProbe.Outcome.Failed(
+                TcpProbe.Outcome.Failed.Kind.Timeout, java.net.SocketTimeoutException("t"),
+            ),
+            hostWorkedAgoMs = 60_000L,
+        )
+        assertTrue(r is Diagnosis.ServerNotResponding)
+    }
+
     // ─────── helpers ───────
 
     private fun classify(
@@ -218,5 +280,6 @@ class ServerDiagnosticsTest {
         port: Int = 22,
         outcome: TcpProbe.Outcome,
         hasNetwork: Boolean = true,
-    ): Diagnosis = ServerDiagnostics.classifyPure(host, port, outcome, hasNetwork)
+        hostWorkedAgoMs: Long? = null,
+    ): Diagnosis = ServerDiagnostics.classifyPure(host, port, outcome, hasNetwork, hostWorkedAgoMs)
 }

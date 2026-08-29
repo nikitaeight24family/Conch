@@ -224,33 +224,22 @@ internal class AgentPickerViewModelRefresh(
                         )
                         return@launch
                     }
-                    // Explicit refresh — surface WHY the host is unreachable
-                    // (typed diagnosis via a ~3s TCP probe) BEFORE asking for a
-                    // physical tap, so the user doesn't pay the tap + PIN only to
-                    // learn the server is dead. The full SSH connect inside
-                    // `pool.userConnect` does the same check 15s later.
-                    val tcp = ai.eight24family.conch.ssh.TcpProbe.probe(server.host, server.port)
-                    // The TcpProbe also reads a 16-byte banner on connect — so
-                    // WrongPort and SilentSsh get caught here too, before the tap.
-                    val diag = ai.eight24family.conch.ssh.ServerDiagnostics.classify(
-                        host = server.host,
-                        port = server.port,
-                        outcome = tcp,
-                        context = ServiceLocator.appContext,
-                    )
-                    if (diag !is ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Ok) {
-                        android.util.Log.w(
-                            "SshAi-AgentPicker",
-                            "pre-flight diagnosis for ${server.host}:${server.port} → ${diag::class.simpleName}"
-                        )
-                        // Race re-check: a background prefetcher might
-                        // have opened a pool client during the probe.
-                        if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
-                            diagnosisMut.value = diag
-                        }
-                        probingMut.value = false; userRefreshingMut.value = false
-                        return@launch
-                    }
+                    // ⛔ NO PRE-FLIGHT PROBE. There used to be a ~3 s TCP probe
+                    // here, so a user would not pay a tap and a PIN just to learn
+                    // the host was dead. It opened its own socket to the SSH port
+                    // and dropped it before authenticating — a preauth disconnect
+                    // in the server's log, and the owner's own fail2ban banned his
+                    // phone for three of those in ten minutes with no failed login
+                    // anywhere in the file.
+                    //
+                    // Nothing is lost by dropping it. The tap is DEFERRED to
+                    // userauth (see DeferredCtapSkSigner): TCP, the version
+                    // exchange and the key exchange all happen first, so a host
+                    // that is down fails the connection before the signer is ever
+                    // asked for anything — and that failure is classified into the
+                    // same typed diagnosis by
+                    // ServerDiagnostics.fromConnectFailure. One connection, which
+                    // stays up when it works.
                     skTouchRequestMut.value = AgentPickerViewModel.SkTouchRequest(
                         // Always EITHER at auth time — transport is a physical
                         // contact channel, not a property of the credential.
@@ -268,34 +257,11 @@ internal class AgentPickerViewModelRefresh(
                     probingMut.value = false; userRefreshingMut.value = false
                     return@launch
                 }
-                // Pre-flight TCP for non-SK paths too — same UX win
-                // (~4 s typed diagnosis vs. 15 s sshj timeout with an
-                // obscure exception class name). ONLY on an explicit user
-                // gesture: this used to run on every init/ON_RESUME
-                // navigation too, and each probe is a preauth disconnect in
-                // sshd's log — background refreshes were feeding the user's
-                // fail2ban a steady drip of them until the phone's IP got
-                // banned. An auto refresh has no user staring at a spinner,
-                // so it can afford the slow honest path below instead.
-                if (userTriggered) {
-                    val tcp = ai.eight24family.conch.ssh.TcpProbe.probe(server.host, server.port)
-                    val diag = ai.eight24family.conch.ssh.ServerDiagnostics.classify(
-                        host = server.host,
-                        port = server.port,
-                        outcome = tcp,
-                        context = ServiceLocator.appContext,
-                    )
-                    if (diag !is ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Ok) {
-                        android.util.Log.w(
-                            "SshAi-AgentPicker",
-                            "pre-flight diagnosis for ${server.host}:${server.port} → ${diag::class.simpleName}"
-                        )
-                        if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
-                            diagnosisMut.value = diag
-                        }
-                        return@launch
-                    }
-                }
+                // The non-SK path had the same pre-flight probe, for the same
+                // reason and with the same cost — a socket opened to the SSH port
+                // and closed before authenticating. Gone for good; the diagnosis
+                // now comes out of the connection below, which is the one we were
+                // always going to make.
                 probe.probe(server, secrets)
                     .onSuccess { result ->
                         // The fresh (non-SK) probe has no reusable connection to
@@ -311,8 +277,32 @@ internal class AgentPickerViewModelRefresh(
                         lastCheckedAtMut.value = System.currentTimeMillis()
                         firstProbeDoneMut.value = true
                     }
-                    .onFailure {
-                        errorMut.value = ai.eight24family.conch.util.ErrorMessages.humanize(it)
+                    .onFailure { cause ->
+                        // The real attempt failed — which is exactly the evidence
+                        // the deleted pre-flight used to buy with its own socket.
+                        // Refusal, timeout, DNS and routing all arrive here, and
+                        // the ban heuristic ("this host answered minutes ago")
+                        // still applies, so the user gets the same typed
+                        // explanation without a second connection.
+                        val diag = ai.eight24family.conch.ssh.ServerDiagnostics.fromConnectFailure(
+                            host = server.host,
+                            port = server.port,
+                            cause = cause,
+                            context = ServiceLocator.appContext,
+                            hostWorkedAgoMs = ServiceLocator.sshConnectionPool
+                                .hostSucceededAgoMs(server.host, server.port),
+                        )
+                        if (diag !is ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Ok &&
+                            ServiceLocator.sshConnectionPool.peek(serverId) == null
+                        ) {
+                            android.util.Log.w(
+                                "SshAi-AgentPicker",
+                                "connect failed for ${server.host}:${server.port} → ${diag::class.simpleName}",
+                            )
+                            diagnosisMut.value = diag
+                        } else {
+                            errorMut.value = ai.eight24family.conch.util.ErrorMessages.humanize(cause)
+                        }
                     }
             } catch (t: Throwable) {
                 errorMut.value = t.message ?: t.javaClass.simpleName

@@ -58,7 +58,7 @@ fun SettingsScreen(
 ) {
     var openCategory by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Deep-link: a screen (e.g. chat → "Connect phone" with Shizuku off) can ask
+    // Deep-link: a screen (e.g. chat → "Connect phone" with no shell) can ask
     // us to open straight at a category instead of the index. Consumed once.
     androidx.compose.runtime.LaunchedEffect(Unit) {
         ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory?.let {
@@ -160,7 +160,7 @@ private val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("connection", "Connection", Icons.Filled.Cable,
         "SSH timeouts, background reliability"),
     SettingsCategory("bridge", "Phone bridge", Icons.Filled.Terminal,
-        "Let the agent read logs & run commands (Shizuku)"),
+        "Let the agent read logs & run commands on this phone"),
     SettingsCategory("input", "Input", Icons.Filled.Keyboard,
         "Send-on-enter, keyboard shortcuts"),
     SettingsCategory("files", "Files", Icons.Filled.Folder,

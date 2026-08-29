@@ -118,14 +118,14 @@ fun ChatScreen(
     val attachments by vm.attachments.collectAsState()
     val selectedModel by vm.selectedModel.collectAsState()
 
-    // Phone bridge (paperclip → "Connect phone to server"): if Shizuku isn't
-    // set up, send the user to Settings to do it; if it is, confirm before we
-    // write the conch-bridge helper to THIS server, then the VM prompts the
-    // agent. We never touch a server uninvited.
+    // Phone bridge (paperclip → "Connect phone to server"): if this phone
+    // cannot run commands yet, send the user to Settings to pair it; if it can,
+    // confirm before we write the conch-bridge helper to THIS server, then the
+    // VM prompts the agent. We never touch a server uninvited.
     val bridgeStep by vm.bridgeStep.collectAsState()
     val bridgeLog by vm.bridgeLog.collectAsState()
     val bridgeUpdateNotice by vm.bridgeUpdateNotice.collectAsState()
-    val shizukuBlock by vm.shizukuBlock.collectAsState()
+    val bridgeUpdateBusy by vm.bridgeUpdateBusy.collectAsState()
     val attachmentNotice by vm.attachmentNotice.collectAsState()
     val chatNotice by vm.chatNotice.collectAsState()
     var costWarning by remember {
@@ -204,11 +204,19 @@ fun ChatScreen(
             onRewindFiles = { vm.rewindFilesConfirmed() },
         )
     }
+    // Came back from pairing — finish the connect that was interrupted. The user
+    // pressed the button once; pressing it again is the app's bookkeeping, not
+    // their decision.
+    val pendingReturn by ai.eight24family.conch.ui.navigation.PhoneBridgeReturn.pending.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(pendingReturn) {
+        vm.resumeBridgeConnectIfThisChatAskedFor()
+    }
     androidx.compose.runtime.LaunchedEffect(bridgeStep) {
         if (bridgeStep == ChatViewModel.BridgeStep.NeedSettings) {
             vm.dismissBridge()
-            // Land directly in the Phone-bridge section (the "open Shizuku" button),
-            // not the Settings index — the user came here to enable the bridge.
+            // Remember WHO asked, so the pairing can hand the user back here.
+            vm.rememberBridgeReturn()
+            // Land directly in the Phone-bridge section, not the Settings index.
             ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory = "bridge"
             onOpenSettings()
         }
@@ -237,7 +245,7 @@ fun ChatScreen(
                             ChatViewModel.BridgeStep.Confirm ->
                                 "Conch installs a small helper (conch-bridge) on this server over your SSH " +
                                     "connection. After that the agent can run shell commands and read logs on " +
-                                    "THIS phone via Shizuku. Nothing leaves your device except to your own server."
+                                    "THIS phone at adb-shell level. Nothing leaves your device except to your own server."
                             ChatViewModel.BridgeStep.Installing ->
                                 "Writing conch-bridge to the server over SSH…"
                             ChatViewModel.BridgeStep.Done ->
@@ -246,6 +254,11 @@ fun ChatScreen(
                                 "Couldn't install the bridge:\n\n$bridgeLog"
                         },
                     )
+                    if (step == ChatViewModel.BridgeStep.Installing) {
+                        androidx.compose.material3.LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                     if (step == ChatViewModel.BridgeStep.Confirm) {
                         bridgeHostWarning?.let { w ->
                             androidx.compose.material3.Text(
@@ -272,7 +285,9 @@ fun ChatScreen(
                 }
             },
             dismissButton = {
-                if (step == ChatViewModel.BridgeStep.Confirm || step == ChatViewModel.BridgeStep.Failed) {
+                if (step == ChatViewModel.BridgeStep.Confirm ||
+                    step == ChatViewModel.BridgeStep.Failed
+                ) {
                     androidx.compose.material3.TextButton(onClick = { vm.dismissBridge() }) {
                         androidx.compose.material3.Text("Cancel")
                     }
@@ -281,68 +296,19 @@ fun ChatScreen(
         )
     }
 
-    // SHIZUKU IS BROKEN AND THIS CHAT DRIVES THE PHONE → the send was refused
-    // and the user is told, with the one button that fixes it. Before this, a
-    // dead Shizuku was visible only as a dim glyph: the message went to the
-    // agent, the agent believed the phone was attached, and the whole turn was
-    // spent failing `conch-bridge` calls (user, 2026-08-27).
-    shizukuBlock?.let { stage ->
-        val ctx = androidx.compose.ui.platform.LocalContext.current
-        // Re-read while the dialog is up. Coming back from the Shizuku app
-        // fires no binder event when nothing changed, and once it IS fixed the
-        // held message goes out on its own — the user already pressed send.
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            while (true) {
-                kotlinx.coroutines.delay(1_500)
-                vm.recheckShizukuAndMaybeSend()
-            }
-        }
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = {
-                input = vm.takeHeldShizukuText() ?: input
-                vm.dismissShizukuBlock()
-            },
-            title = { androidx.compose.material3.Text(stage.blockTitle) },
-            text = {
-                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
-                    androidx.compose.material3.Text(stage.blockBody)
-                    androidx.compose.material3.Text(
-                        "Your message is kept — it goes out by itself as soon as Shizuku works.",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.outline,
-                    )
-                }
-            },
-            confirmButton = {
-                androidx.compose.material3.TextButton(
-                    onClick = {
-                        if (stage == ai.eight24family.conch.diagnostics.ShizukuStage.NotGranted) {
-                            // One tap, no trip to another app.
-                            vm.grantShizukuAndMaybeSend()
-                        } else {
-                            ai.eight24family.conch.diagnostics.openShizukuApp(ctx)
-                        }
-                    },
-                ) { androidx.compose.material3.Text(stage.blockAction) }
-            },
-            dismissButton = {
-                androidx.compose.foundation.layout.Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)) {
-                    // The question may not need the phone at all.
-                    androidx.compose.material3.TextButton(onClick = { vm.sendDespiteShizuku() }) {
-                        androidx.compose.material3.Text("Send anyway")
-                    }
-                    androidx.compose.material3.TextButton(
-                        onClick = {
-                            // Give the message back — it was taken out of the
-                            // composer by a send that never happened.
-                            input = vm.takeHeldShizukuText() ?: input
-                            vm.dismissShizukuBlock()
-                        },
-                    ) { androidx.compose.material3.Text("Cancel") }
-                }
-            },
-        )
-    }
+    // ⛔ NOTHING ABOUT THE PHONE STOPS A MESSAGE ANY MORE.
+    //
+    // A dialog used to stand in front of the chat saying "Wireless debugging is
+    // off" and hold the message back until it was fixed. On mobile data that is
+    // unfixable — Android will not run wireless debugging without a Wi-Fi
+    // association, measured on this phone (setting adb_wifi_enabled=1 is reverted
+    // by the framework within milliseconds) — so the app sat between the owner
+    // and his own agent over a phone feature he had not asked to use
+    // (2026-08-29). The agent lives on the SERVER; the phone is an accessory to
+    // it. An accessory being unreachable is not a reason to refuse work.
+    //
+    // What tells the truth instead: the dim phone glyph, and `conch-bridge`
+    // itself, which reports the phone as unreachable to the agent that asks.
 
     // Chats opened from a global-search hit get to STAY even when not
     // connected: HistoryCache renders the conversation from local
@@ -573,7 +539,12 @@ fun ChatScreen(
                 // a tiny, dismissible nudge pointing at the Server-settings
                 // updater. We never force-update from a chat.
                 bridgeUpdateNotice?.let { notice ->
-                    BridgeUpdateBanner(notice = notice, onDismiss = { vm.dismissBridgeUpdateNotice() })
+                    BridgeUpdateBanner(
+                        notice = notice,
+                        busy = bridgeUpdateBusy,
+                        onUpdate = { vm.retryBridgeUpdate() },
+                        onDismiss = { vm.dismissBridgeUpdateNotice() },
+                    )
                 }
 
                 // A send refused because a staged file never reached the server.
@@ -753,7 +724,7 @@ fun ChatScreen(
                             if (warn != null) {
                                 costWarning = warn
                             } else {
-                                // A send into a phone-wired chat with Shizuku
+                                // A send into a phone-wired chat with no shell
                                 // down is refused inside send() and the text is
                                 // HELD there — Cancel on that dialog puts it
                                 // back in the composer, so clearing here is safe.
@@ -786,12 +757,27 @@ fun ChatScreen(
     )
 }
 
-/** Thin amber line shown above the chat when the server's conch-bridge is older
- *  than the version this app ships. Informational only — it points the user at
- *  the Server-settings updater (one-button Install/Update/Remove there). */
+/**
+ * Thin line above the chat about the server's `conch-bridge` version.
+ *
+ * TWO STATES, AND THEY READ DIFFERENTLY, because they are different events:
+ *
+ * • done — the app already updated the script on the server. Nothing to do; it
+ * says so and offers only "ok". The old banner announced this same success as "⬆
+ * Bridge update available … update it in Server settings", sending the user off
+ * to redo finished work (owner, 2026-08-29). • failed — the one case that needs
+ * a person, so the action lives HERE. a screen change for that is a detour, not
+ * a step.
+ */
 @Composable
-private fun BridgeUpdateBanner(notice: String, onDismiss: () -> Unit) {
-    val amber = MaterialTheme.colorScheme.tertiary
+private fun BridgeUpdateBanner(
+    notice: ChatViewModel.BridgeNotice,
+    busy: Boolean,
+    onUpdate: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val tint = if (notice.failed) MaterialTheme.colorScheme.tertiary
+    else MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
     androidx.compose.foundation.layout.Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -799,13 +785,18 @@ private fun BridgeUpdateBanner(notice: String, onDismiss: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         androidx.compose.material3.Text(
-            "⬆ Bridge update available ($notice) — update it in Server settings",
-            color = amber,
+            (if (notice.failed) "⬆ " else "✓ ") + notice.text,
+            color = tint,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
         )
+        if (notice.failed) {
+            androidx.compose.material3.TextButton(onClick = onUpdate, enabled = !busy) {
+                androidx.compose.material3.Text(if (busy) "updating…" else "update")
+            }
+        }
         androidx.compose.material3.TextButton(onClick = onDismiss) {
-            androidx.compose.material3.Text("dismiss")
+            androidx.compose.material3.Text(if (notice.failed) "later" else "ok")
         }
     }
 }

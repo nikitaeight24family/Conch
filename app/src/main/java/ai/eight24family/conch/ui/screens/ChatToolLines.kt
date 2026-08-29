@@ -483,11 +483,11 @@ private val TASK_LIST_LINE_RX = Regex("""^#?(\d+)\.\s*\[([a-z_]+)\]\s*(.+)$""")
  * agent deletes stale tasks), and any deletion outside our parsed window left
  * ghosts — the phone showed «+16 completed» and struck-through tasks from hours
  * ago while the terminal showed 9 rows. Two corrections: 1. Every TaskList
- * RESULT is an authoritative snapshot of the whole list — REPLACE the board with
- * it (deletions included, wherever they happened). 2. Completed rows are only
- * "fresh" (struck through in the panel) when their completing update landed
- * after the user's last prompt; older completions fold into the «… +N completed»
- * counter, like the CLI.
+ * RESULT is an authoritative snapshot of the whole list — REPLACE the board
+ * with it (deletions included, wherever they happened). 2. Completed rows are
+ * only "fresh" (struck through in the panel) when their completing update
+ * landed after the user's last prompt; older completions fold into the «… +N
+ * completed» counter, like the CLI.
  */
 internal fun foldTaskBoard(messages: List<AgentMessage>): List<TaskBoardRow> {
     val createSubjects = HashMap<String, String>()          // toolUseId → subject

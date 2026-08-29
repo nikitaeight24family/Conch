@@ -10,170 +10,218 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import ai.eight24family.conch.diagnostics.ShizukuShell
-import ai.eight24family.conch.diagnostics.ShizukuStage
-import ai.eight24family.conch.diagnostics.ShizukuWatch
-import ai.eight24family.conch.diagnostics.openShizukuApp
-import ai.eight24family.conch.diagnostics.shizukuStage
+import ai.eight24family.conch.adb.LocalAdbShell
+import ai.eight24family.conch.adb.PairingNotifier
+import ai.eight24family.conch.adb.PairingWatcher
 import ai.eight24family.conch.ui.viewmodel.SettingsViewModel
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
- * "Phone bridge (Shizuku)" — a state-aware, step-by-step guide that gets
- * the user from nothing to "the agent can run adb-shell commands on this
- * phone", showing ONLY the current step. It auto-advances as the live
- * Shizuku state changes (polled), so a pro just taps the one prominent
- * action and moves on; the detailed instructions sit quietly beneath it
- * for whoever needs them. This is the only UI that grants the Shizuku
- * permission.
+ * "Phone bridge" — letting the agent read this phone's logs and run commands on
+ * it, and nothing else.
+ *
+ * ⛔ TWO STATES, BOTH OBSERVED. There used to be three, and the third — "paired,
+ * just arm the switch" — was read from a stored flag. A remembered claim about a
+ * phone that can be un-paired from Android's own dialog at any moment, on a
+ * device we cannot ask while adbd is unreachable. It went stale, the screen
+ * showed a ✓ it could not back up, and correcting it meant writing a value by
+ * hand: not a fix for one user, let alone everyone (owner, 2026-08-29).
+ *
+ * So this screen shows what it can see: either a command can run right now, or
+ * it cannot. The remedy is one flow either way, because both halves of it live
+ * behind the same Android switch — arm Wireless debugging, and if the phone does
+ * not recognise Conch, open its pairing dialog. Conch notices that dialog by
+ * itself and asks for the six digits in a notification.
+ *
+ * ⚠ The Wi-Fi sentence is a fact about Android, not about Conch: the platform
+ * refuses to arm wireless debugging unless the phone is associated with a Wi-Fi
+ * network, and reverts the setting within milliseconds otherwise (measured).
+ * Nothing on the device gets around it without root, so never promise softer.
  */
 @Composable
 internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsViewModel) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
 
-    // One shared verdict (diagnostics/ShizukuReadiness) — the chat send gate
-    // reads the SAME function, so this screen and the block dialog can never
-    // disagree about whether the phone can run anything.
-    fun detect(): ShizukuStage = shizukuStage(ctx)
+    // Starts UNKNOWN. hasLiveSession() is a field, and it stays true over a
+    // socket the phone closed while this screen was away — so the screen opened
+    // on "Ready ✓" and corrected itself two seconds later. A moment of "checking"
+    // is honest; a moment of "Ready" is not.
+    var connected by remember { mutableStateOf<Boolean?>(null) }
+    var waitingForDialog by remember { mutableStateOf(false) }
 
-    var stage by remember { mutableStateOf(detect()) }
-    var requesting by remember { mutableStateOf(false) }
-
-    // Poll the live state (cheap local IPC + a PM lookup) so the guide
-    // auto-advances as the user installs / starts / grants in Shizuku and
-    // returns. Frozen while the consent dialog is up to avoid flicker.
     LaunchedEffect(Unit) {
+        // Landing here usually means the user just did the thing that fixes it.
+        LocalAdbShell.retryNow()
         while (true) {
-            if (!requesting) {
-                stage = detect()
-                // Publish the same reading to the app-wide watch so the chat
-                // glyph / send gate can't lag behind what this screen shows.
-                ShizukuWatch.refresh()
+            connected = LocalAdbShell.check()
+            if (connected == true) {
+                waitingForDialog = false
+                PairingWatcher.stop()
+                PairingNotifier.clear(ctx)
             }
-            delay(1500)
+            delay(2_000)
         }
     }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text(
-            "Let the AI agent on your server read this phone's logs and run shell commands over your SSH connection — the same level as adb shell, no cable, no root. Powered by Shizuku; data only ever goes to your own server.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        when (stage) {
-            ShizukuStage.NotInstalled -> Step(1, "Install Shizuku",
-                "A free, open-source helper that grants adb-shell rights on-device — no PC, no root.") {
-                OutlinedButton(onClick = { openShizukuApp(ctx) }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
-                    Text("Install Shizuku")
-                }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+        if (connected == null) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                Body("Checking the phone…")
             }
+            return@Column
+        }
 
-            ShizukuStage.NotRunning -> Step(2, "Start Shizuku",
-                "Wireless debugging — no PC. (Has to be redone after each reboot.)") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedButton(onClick = { openWirelessDebugging(ctx) }, modifier = Modifier.weight(1f)) {
-                        Text("Wireless debugging")
-                    }
-                    Button(onClick = { openShizukuApp(ctx) }, modifier = Modifier.weight(1f)) {
-                        Text("Open Shizuku")
-                    }
-                }
-                Text(
-                    "1. Tap “Wireless debugging” → turn it on (it lands on that toggle; on some skins, on Developer options — scroll to it).\n" +
-                        "2. In Shizuku: “Start with wireless debugging” → pair with the code.\n" +
-                        "3. Shizuku home → Start → it shows “running”.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
+        if (connected == true) {
+            Step(
+                "Ready ✓",
+                "The agent can read this phone's logs and run shell commands.",
+                icon = Icons.Filled.CheckCircle,
+            ) {
+                Body(
+                    "Ask the agent in a chat to read the log, list the installed apps or run any " +
+                        "shell command — it answers with the screen off too.",
+                )
+                Aside(
+                    "This needs no network of any kind: the connection runs inside the phone and " +
+                        "never leaves it.",
                 )
             }
+            return@Column
+        }
 
-            ShizukuStage.NotGranted -> Step(3, "Allow Conch",
-                "Shizuku is running — grant Conch access. One tap.") {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            requesting = true
-                            if (ShizukuShell.requestPermission()) stage = ShizukuStage.Ready
-                            requesting = false
-                        }
-                    },
-                    enabled = !requesting,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    if (requesting) CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
-                    Text("Enable — grant Conch Shizuku access")
-                }
+        Step("Not connected", "One switch, and a code the first time.") {
+            Body("The button opens Android's Developer options. There:")
+            Instruction(1, "Turn on “Wireless debugging”.")
+            Instruction(
+                2,
+                "If this phone does not recognise Conch yet, tap “Pair device with pairing code”. " +
+                    "Conch sends you a notification with a box for the code — swipe the shade down " +
+                    "over Android's dialog and type the six digits into it.",
+            )
+            Aside(
+                "Leave Android's dialog open while you type — it cancels the pairing the moment it " +
+                    "closes. That is why the box is in a notification instead of on this page.\n\n" +
+                    "No Wi-Fi? Turn on this phone's own hotspot for a moment — Android needs a " +
+                    "local network for wireless debugging, not an internet connection, and the " +
+                    "hotspot is one. Once Conch is connected you can switch the hotspot back off; " +
+                    "the connection stays.\n\n" +
+                    "Android turns the switch off at every restart — its rule, not Conch's. Chats " +
+                    "keep working either way; only reading this phone's logs and running commands " +
+                    "ON it wait for it.",
+            )
+            Button(
+                onClick = {
+                    // ORDER MATTERS: arm the watcher BEFORE leaving, because the
+                    // dialog can be open before we are asked again, and the code
+                    // only exists while it is.
+                    waitingForDialog = true
+                    PairingWatcher.start(ctx)
+                    openWirelessDebugging(ctx)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Open Developer options")
             }
-
-            ShizukuStage.Ready -> Step(null, "Ready ✓",
-                "The agent can now read logs and run shell commands on this phone.",
-                icon = Icons.Filled.CheckCircle) {
-                Text(
-                    "From a chat the agent runs e.g.  conch-bridge shell 'pm list packages'  or  conch-bridge logs --lines 200. Keep Conch in the foreground — polling pauses when it's backgrounded.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
+            if (waitingForDialog) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                    Text(
+                        "Waiting for Android's pairing dialog…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
     }
 }
 
-/** One guide step: a status row ("Step N/3 · title") then its actions. */
+/**
+ * The words on this screen, in the same two weights the rest of Settings uses.
+ *
+ * ⚠ They used to be `outline`/`bodySmall` — the dimmest colour in the theme at
+ * the smallest size, for the one screen whose whole job is to be READ and
+ * followed, in the middle of a task the user has never done before (owner,
+ * 2026-08-29). Instructions are the content here, not a footnote under it.
+ */
+@Composable
+private fun Body(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurface,
+    )
+}
+
+/** A numbered step. The number is a separate column so a wrapped step lines up
+ *  under itself instead of under the digit. */
+@Composable
+private fun Instruction(number: Int, text: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "$number.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(end = 8.dp),
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun Aside(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** A status row, then its actions. */
 @Composable
 private fun Step(
-    step: Int?,
     title: String,
     subtitle: String,
     icon: ImageVector = Icons.Filled.Terminal,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    SettingsRow(
-        icon = icon,
-        title = if (step != null) "Step $step/3 · $title" else title,
-        subtitle = subtitle,
-    )
+    SettingsRow(icon = icon, title = title, subtitle = subtitle)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
 }
 
 /**
- * Open Developer options scrolled-to + highlighting the "Wireless
- * debugging" row, using AOSP's preference-highlight extras
- * (`:settings:fragment_args_key` = the AOSP key `toggle_adb_wireless`).
- * Best-effort: stock/Pixel honours it (scroll + flash); OEM skins
- * (Samsung One UI) usually ignore an unknown key and just open Developer
- * options — still the right screen. Falls back to plain Developer options,
- * then all Settings, if the dev-options action can't resolve at all.
+ * Open Developer options, asking for the "Wireless debugging" row to be scrolled
+ * to and highlighted — and not relying on it.
+ *
+ * ⚠ The highlight is an AOSP convention (`:settings:fragment_args_key` =
+ * `toggle_adb_wireless`) that OEM skins may ignore, and ColorOS does: it lands
+ * on plain Developer options with nothing highlighted (owner, 2026-08-29). The
+ * button therefore says "opens Developer options" and the text beside it NAMES
+ * the row to look for — promising a highlight that never appears is worse than
+ * promising nothing. Falls back to plain Developer options, then all Settings,
+ * if the dev-options action cannot resolve at all.
  */
 private fun openWirelessDebugging(ctx: Context) {
     val key = "toggle_adb_wireless"

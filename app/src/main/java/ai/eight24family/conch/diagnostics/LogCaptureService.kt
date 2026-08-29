@@ -13,15 +13,15 @@ import android.content.Context
  *     see other apps' or the framework's logs (Android only lets a
  *     non-system process read its own log lines since JB).
  *
- *   - [ShizukuLogCapture] — fallback escalation for power users.
- *     If [Shizuku] is installed and the user has granted Conch
- *     access through it, we run `logcat` as the `shell` UID and get
- *     system-wide visibility — same as `adb shell logcat`. No root,
- *     no signature-level permission, no Play-policy risk.
+ *   - [AdbLogCapture] — the whole device. Conch speaks ADB to this
+ *     phone over its own loopback with a key the device was paired
+ *     with, and runs `logcat` at the `shell` UID — system-wide
+ *     visibility, the same as `adb shell logcat` from a desktop. No
+ *     root, no signature permission, and no helper app.
  *
  * The bridge picks the most capable available impl on each call:
  *   1. If a logcat tier is explicitly requested → that one.
- *   2. Else: prefer Shizuku if it's connected & we have permission.
+ *   2. Else: the ADB tier when a shell connection is open.
  *   3. Else: fall back to own-UID.
  *
  * `[CaptureRequest]` is an intentionally narrow API — every option
@@ -33,8 +33,8 @@ interface LogCaptureService {
     /** What this implementation can see. */
     val tier: Tier
 
-    /** Whether `capture` would succeed right now (Shizuku connected,
-     *  permission granted, etc.). For [Tier.OwnUid] always true. */
+    /** Whether `capture` would succeed right now (a shell connection is
+     *  open, etc.). For [Tier.OwnUid] always true. */
     suspend fun isAvailable(): Boolean
 
     /** Run a logcat dump and return it as a UTF-8 String. The
@@ -45,8 +45,8 @@ interface LogCaptureService {
         /** Only Conch's own log lines. Always available. */
         OwnUid,
 
-        /** Whole-device logs via Shizuku-mediated `shell` UID. */
-        Shizuku,
+        /** Whole-device logs, read at the `shell` UID over our own ADB. */
+        Adb,
     }
 
     data class CaptureRequest(
@@ -65,7 +65,7 @@ interface LogCaptureService {
          *  so callers should pass a pre-formatted string. */
         val sinceTime: String? = null,
         /** Override the auto-pick of impl. Used by test harnesses
-         *  and by `conch-bridge logs --tier shizuku` etc. */
+         *  and by `conch-bridge logs --tier adb` etc. */
         val tierOverride: Tier? = null,
     ) {
         enum class Level(val flag: String) {
@@ -93,7 +93,7 @@ interface LogCaptureService {
 class LogCaptureCoordinator(private val context: Context) {
 
     private val ownUid by lazy { OwnUidLogCapture() }
-    private val shizuku by lazy { ShizukuLogCapture(context) }
+    private val privileged by lazy { AdbLogCapture() }
 
     suspend fun capture(
         request: LogCaptureService.CaptureRequest,
@@ -113,11 +113,11 @@ class LogCaptureCoordinator(private val context: Context) {
         request.tierOverride?.let { override ->
             return when (override) {
                 LogCaptureService.Tier.OwnUid -> ownUid
-                LogCaptureService.Tier.Shizuku -> shizuku
+                LogCaptureService.Tier.Adb -> privileged
             }
         }
-        // Auto-pick: Shizuku if available, else own-uid.
-        if (shizuku.isAvailable()) return shizuku
+        // Auto-pick: the whole device when we can see it, else our own lines.
+        if (privileged.isAvailable()) return privileged
         return ownUid
     }
 
@@ -125,7 +125,7 @@ class LogCaptureCoordinator(private val context: Context) {
      *  running an actual capture. Used by the diagnostic UI. */
     suspend fun availableTiers(): Set<LogCaptureService.Tier> {
         val out = mutableSetOf(LogCaptureService.Tier.OwnUid)
-        if (shizuku.isAvailable()) out += LogCaptureService.Tier.Shizuku
+        if (privileged.isAvailable()) out += LogCaptureService.Tier.Adb
         return out
     }
 }

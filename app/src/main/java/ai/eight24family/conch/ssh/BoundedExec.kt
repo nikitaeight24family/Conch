@@ -157,7 +157,7 @@ object BoundedExec {
      * ⛔ SEQUENTIAL IS A DEADLOCK WAITING FOR A CHATTY COMMAND. Reading stdout
      * to EOF and only then stderr means a command that fills the stderr pipe
      * mid-run blocks writing it, never closes stdout, and the stdout read never
-     * returns. `ShizukuShell.exec` already learned this on-device and carries
+     * returns. The on-device shell path already learned this and carries
      * the same comment; the SSH side kept the sequential shape. Two threads,
      * one deadline, and either one hitting the deadline closes the channel and
      * releases both.

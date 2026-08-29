@@ -423,7 +423,7 @@ fun ServerDetailScreen(
                 bridgeBusy -> "working…"
                 !bridgeChecked -> "checking…"
                 installedVersion == null -> "not installed · latest v$avail"
-                installedVersion == avail -> "installed · v$installedVersion · grant Shizuku in Settings → Phone bridge to use it"
+                installedVersion == avail -> "installed · v$installedVersion · pair this phone in Settings → Phone bridge to use it"
                 else -> "v$installedVersion → v$avail · update available"
             }
             Text(

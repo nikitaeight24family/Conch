@@ -197,36 +197,24 @@
             -->
         </activity>
 
+        <!--
+            The pairing code arrives through a notification's direct-reply field,
+            because Android shows that code in a dialog that cancels the pairing
+            the moment it is left. The shade draws over that dialog; our own
+            screen cannot.
+
+            Not exported, and not something a stray tap can trigger: it does
+            nothing without six typed digits, which is exactly the bar the
+            removed PiP receiver failed to clear.
+        -->
+        <receiver
+            android:name=".adb.PairingReplyReceiver"
+            android:exported="false" />
+
         <service
             android:name=".service.SshAiService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-
-        <!--
-            Shizuku discovery provider. Lets the Shizuku Manager app
-            (moe.shizuku.privileged.api) detect that Conch exists
-            without needing to launch us. Required by the Shizuku API
-            even if we never actively call into it; the provider
-            class is part of `dev.rikka.shizuku:provider` and exports
-            no public surface, just a binder for the manager.
-
-            `multiprocess=false` keeps it on the main process so the
-            Shizuku binder is reused with the rest of the app
-            (foreground service, AgentBridge poller).
-        -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-
-        <!--
-            Optional: query the Shizuku Manager package (so
-            `getPackageInfo` works without raising
-            `<queries>`-policy issues on Android 11+).
-        -->
 
         <!--
             Hands the camera app a writable content:// URI for one photo.
@@ -267,11 +255,4 @@
              control that cannot be hit by accident. -->
 
     </application>
-
-    <queries>
-        <!-- Lets us probe whether the Shizuku Manager app is
-             installed without opting into the catch-all
-             QUERY_ALL_PACKAGES permission (which Play frowns at). -->
-        <package android:name="moe.shizuku.privileged.api" />
-    </queries>
 </manifest>

@@ -505,9 +505,22 @@ done | sort -t'	' -k2 -rn | head -500
         // a warn per fragment plus an exception's cost, forever ("JSON input: "
         // with nothing after it, 2026-07-29).
         if (line.isBlank() || !line.trimStart().startsWith("{")) return ""
-        val obj = SilentlyTry.logged("SshAi-ClaudeSpec", "parse line json") { json.parseToJsonElement(line).jsonObject }
+        // ⛔ A TRUNCATED LINE IS THE NORMAL CASE HERE, NOT AN ANOMALY — so it must
+        // cost nothing. The server's listing script CUTS these lines, and this
+        // ran a strict parse on every one, threw, and logged TWO lines per
+        // failure through SilentlyTry. Across a few hundred cached sessions that
+        // is thousands of exceptions and thousands of log writes each time the
+        // list is built: measured as a logcat storm dense enough to push every
+        // other tag out of the buffer within seconds, on the CPU the owner was
+        // watching burn in the background (2026-08-29, 67 %).
+        //
+        // Two changes, both cheap: a line that does not end in '}' was cut by
+        // construction, so it skips the strict parse entirely; and the parse that
+        // remains fails QUIETLY into the scanner written for exactly this case.
+        if (!line.trimEnd().endsWith("}")) return textOfTruncated(line)
+        val obj = runCatching { json.parseToJsonElement(line).jsonObject }.getOrNull()
             ?: return textOfTruncated(line)
-        val msg = SilentlyTry.logged("SshAi-ClaudeSpec", "read message obj") { obj["message"]?.jsonObject }
+        val msg = runCatching { obj["message"]?.jsonObject }.getOrNull()
             ?: return textOfTruncated(line)
         val content = msg["content"] ?: return textOfTruncated(line)
         return when (content) {

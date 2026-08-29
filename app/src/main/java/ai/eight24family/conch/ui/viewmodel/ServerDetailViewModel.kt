@@ -174,9 +174,9 @@ class ServerDetailViewModel(
                 if (skPrimary != null) {
                     // SEAMLESS FIRST: if a device key is enrolled, reconnect
                     // SILENTLY over it — NO physical key tap. A still-valid,
-                    // on-server device key must NEVER re-prompt the physical key.
-                    // Mirrors the picker's refresh path; this connect() was the one
-                    // place that skipped it and always demanded a tap.
+                    // on-server device key must NEVER re-prompt the physical
+                    // key. Mirrors the picker's refresh path; this connect() was
+                    // the one place that skipped it and always demanded a tap.
                     val eph = runCatching {
                         ServiceLocator.sshConnectionPool.userConnectEphemeral(srv)
                     }.getOrNull()

@@ -18,7 +18,7 @@ class MentionTokenTest {
     @Test
     fun `no mention when the token is not at a word boundary`() {
         // user@host, emails — an @ glued to preceding text is not a mention.
-        assertNull(MentionToken.activeQuery("ssh user@example.com"))
+        assertNull(MentionToken.activeQuery("ssh user@203.0.113.10"))
         assertNull(MentionToken.activeQuery("mail me at user@example"))
     }
 

@@ -62,6 +62,9 @@ internal class AgentSessionRunOneShot(
     private val getState: () -> SessionState,
     private val getResumeId: () -> String?,
     private val setResumeId: (String) -> Unit,
+    /** Forget the session we were resuming, because the agent will not take it.
+     *  See the dead-session recovery in the exit handler below. */
+    private val dropResumeId: () -> Unit = {},
     private val cwdSnapshot: () -> String?,
     private val getModelOverride: () -> String?,
     private val getReasoningOverride: () -> String?,
@@ -103,6 +106,8 @@ internal class AgentSessionRunOneShot(
         // Set when a rate-limit failover should re-issue the turn AFTER this
         // one's SSH session closes (see the exit handler + the tail below).
         var failoverContinue: Set<String>? = null
+        /** Set when the agent refused our resume id: re-send this text fresh. */
+        var retryFresh: String? = null
         val t0 = System.currentTimeMillis()
         val client = sshLifecycle.liveClient() ?: run {
             // Was a silent return — caller saw the message in history but no
@@ -348,7 +353,33 @@ internal class AgentSessionRunOneShot(
                         failoverContinue = nextTried
                     }
                 }
-                if (failoverContinue == null) {
+                // ⛔ A SESSION THE AGENT WILL NOT RESUME IS NOT A DEAD CHAT.
+                //
+                // The id comes from the agent itself — we store what `thread/start`
+                // reported — and it can still be refused later: the rollout may not
+                // have been flushed when the app was killed mid-turn, or the CLI
+                // may have moved on from it. What the owner saw was his SECOND
+                // message in a chat he had just started dying with "thread/resume
+                // failed … codex exited with code 1" (2026-08-29), which reads as
+                // the app being broken — and leaves the chat unusable forever,
+                // because every later send resumes the same refused id.
+                //
+                // So: drop the id and send the SAME prompt again as a new session.
+                // One line says what happened; the message is not lost. Cannot
+                // loop — the retry runs with no resume id at all.
+                if (failoverContinue == null && currentResumeId != null && looksLikeDeadSession(tail)) {
+                    android.util.Log.w(tag, "agent refuses to resume $currentResumeId — starting a fresh session")
+                    dropResumeId()
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            UUID.randomUUID().toString(),
+                            "previous session could not be resumed — started a new one",
+                            tone = AgentMessage.EventNote.Tone.WARN,
+                        ),
+                    )
+                    retryFresh = text
+                }
+                if (failoverContinue == null && retryFresh == null) {
                     // **Smart replacement** — known-fatal patterns in the
                     // tail get a human-readable hint instead of the generic
                     // "<cli> exited with code N". Per feedback_auto_fix_errors:
@@ -408,6 +439,27 @@ internal class AgentSessionRunOneShot(
         // open. "continue" nudges the agent to resume the cut-off turn.
         val fc = failoverContinue
         if (fc != null) runOneShotInternal("continue", fc)
+        // Outside try/finally for the same reason as the failover above: never
+        // recurse while the old session is still open.
+        retryFresh?.let { runOneShotInternal(it, triedSlots) }
+    }
+
+    /**
+     * The agent told us the session we asked to resume is not usable.
+     *
+     * Matched on the failure tail only (exit != 0), so an assistant merely
+     * discussing sessions in a successful reply cannot trip it. Covers what the
+     * three CLIs actually print: Codex's app-server error, and the CLIs' own
+     * wording for an id they do not have.
+     */
+    private fun looksLikeDeadSession(tail: String): Boolean {
+        val t = tail.lowercase()
+        return "thread/resume failed" in t ||
+            "thread/resume:" in t ||
+            "no such thread" in t ||
+            "no conversation found with session id" in t ||
+            "session not found" in t ||
+            "failed to resume" in t
     }
 
     /** Known usage/rate-limit signatures across agents (researched 2026-05):
