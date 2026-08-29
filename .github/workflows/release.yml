@@ -85,7 +85,8 @@ jobs:
           ls -lh "sshai-${VERSION}.apk"
 
       - name: Wipe keystore + properties (defense-in-depth)
-        if: steps.signing.outputs.have == 'true'
+        # always(): cleanup must run even when a step above failed. It is the
+        # one step that must NOT be gated on the secrets check.
         if: always()
         run: |
           rm -f release.keystore keystore.properties
