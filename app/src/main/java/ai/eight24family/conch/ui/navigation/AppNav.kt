@@ -41,6 +41,8 @@ object Routes {
      *  servers×agents). The app's start destination + first bottom tab. */
     const val HOME = "home"
     const val SERVERS = "servers"
+    /** The phone's own Linux — a machine, reached from the machines list. */
+    const val LINUX = "linux"
     const val ADD_SERVER = "add_server"
     /** Add ANOTHER user on an existing host: same screen as ADD_SERVER, only
      *  host/port pre-filled (a different SSH user = its own server entry, with
@@ -346,9 +348,13 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 onOpenChatFromSearch = rememberOpenChatFromSearch(),
             )
         }
+        composable(Routes.LINUX) {
+            ai.eight24family.conch.ui.screens.LinuxScreen(onBack = { nav.popBackStack() })
+        }
         composable(Routes.SERVERS) {
             ServersScreen(
                 onAddServer = { nav.navigate(Routes.ADD_SERVER) },
+                onAddLinux = { nav.navigate(Routes.LINUX) },
                 // Tap → the server's management page. No connect here; that
                 // (plus terminal/edit/add-user/delete) lives on the detail page.
                 onOpenServer = { id -> nav.navigate(Routes.serverDetail(id)) },

@@ -206,6 +206,20 @@ private val OFL_1_1 = OssLicense(
 private val UBUNTU_FONT = OssLicense(
     "Ubuntu Font Licence 1.0", "https://ubuntu.com/legal/font-licence", "UbuntuFontLicense-1.0.txt",
 )
+/**
+ * ⚠ THE ONE LICENCE HERE THAT CARRIES AN OBLIGATION BEYOND ATTRIBUTION.
+ *
+ * PRoot ships inside the APK as a binary and is GPL-2.0. Conch does not link
+ * against it — it is launched as a separate process — so the app's own code is
+ * unaffected (mere aggregation), but the binary itself stays under the GPL and
+ * anyone who receives it is owed its source. Hence the URL below points at the
+ * project, not merely at the licence text.
+ */
+private val GPL_2_0 = OssLicense(
+    "GNU General Public License v2.0",
+    "https://github.com/proot-me/proot",
+    "GPL-2.0.txt",
+)
 private val CC0_1_0 = OssLicense(
     "CC0 1.0 Universal (public domain)",
     "https://creativecommons.org/publicdomain/zero/1.0/",
@@ -213,7 +227,7 @@ private val CC0_1_0 = OssLicense(
 )
 
 /** Render order — keeps code libraries first, then bundled fonts. */
-private val licenseOrder = listOf(APACHE_2_0, MIT, BOUNCY_CASTLE, CC0_1_0, OFL_1_1, UBUNTU_FONT)
+private val licenseOrder = listOf(APACHE_2_0, MIT, BOUNCY_CASTLE, GPL_2_0, CC0_1_0, OFL_1_1, UBUNTU_FONT)
 
 private data class OssComponent(
     val name: String,
@@ -248,6 +262,16 @@ private val components = listOf(
     OssComponent("Highlights", "© SnipMe — syntax highlighting, via the markdown renderer", null, APACHE_2_0),
     OssComponent("JSpecify", "© The JSpecify Authors — nullness annotations", null, APACHE_2_0),
     OssComponent("AutoValue annotations", "© Google LLC", null, APACHE_2_0),
+    // ── GNU GPL v2.0 — the Linux environment's runtime ──
+    OssComponent(
+        "PRoot",
+        "© STMicroelectronics and PRoot contributors — the syscall-rewriting runtime " +
+            "that lets a Linux userland run on this phone without root. Shipped as a " +
+            "separate binary and launched as its own process; source at the URL below.",
+        "5.x (Android build)",
+        GPL_2_0,
+    ),
+
     // ── MIT License ──
     OssComponent("SLF4J API", "© QOS.ch Sarl — logging facade, via sshj", null, MIT),
     // ── Bouncy Castle License ──

@@ -189,25 +189,68 @@ class AdbLocalTest {
         session.close()
     }
 
+    /**
+     * The legacy handshake, when the device already trusts this key.
+     *
+     * ⚠ THIS USED TO ASSERT A REFUSAL — the path was called "a dead end that
+     * needs a computer". It is not a dead end, it is the ONLY route that
+     * survives leaving Wi-Fi: Android tears wireless debugging down the moment
+     * the association drops, and this listener keeps serving until the phone
+     * reboots (2026-08-30). Refusing it was the difference between a phone
+     * shell that works all day on mobile data and one that dies on a network
+     * change.
+     */
     @Test
-    fun `a device that answers the legacy handshake is named, not silently retried`() {
-        // That path needs a computer to arm the port, so it is a dead end here
-        // and must say so rather than fail somewhere further down.
+    fun `a trusted key completes the legacy handshake with no dialog`() {
         val clientToDevice = PipedOutputStream()
         val deviceIn = PipedInputStream(clientToDevice, 1 shl 16)
         val deviceToClient = PipedOutputStream()
         val clientIn = PipedInputStream(deviceToClient, 1 shl 16)
 
         pool.submit {
-            AdbProtocol.read(deviceIn)
+            AdbProtocol.read(deviceIn) // our CNXN
+            AdbProtocol.write(deviceToClient, AdbProtocol.Message(AdbProtocol.A_AUTH, 1, 0, ByteArray(20)))
+            val signed = AdbProtocol.read(deviceIn)!!
+            // The client answers a challenge with a SIGNATURE (type 2), never
+            // with the key — offering the key is what raises Android's dialog,
+            // and a device that already knows us must not be asked to show one.
+            check(signed.command == AdbProtocol.A_AUTH && signed.arg0 == 2)
             AdbProtocol.write(
                 deviceToClient,
-                AdbProtocol.Message(AdbProtocol.A_AUTH, 1, 0, ByteArray(20)),
+                AdbProtocol.stringMessage(AdbProtocol.A_CNXN, AdbProtocol.VERSION, 1 shl 20, "device::legacy"),
             )
         }
-        val failure = runCatching { AdbLocal.handshake(clientIn, clientToDevice, clientKey) }
-            .exceptionOrNull()
-        assertTrue("expected a named failure, got $failure", failure is IllegalStateException)
-        assertTrue(failure!!.message!!.contains("legacy"))
+
+        val session = AdbLocal.handshake(clientIn, clientToDevice, clientKey)
+        assertEquals("device::legacy", session.deviceBanner)
+        session.close()
+    }
+
+    /** An unknown key is OFFERED, which is what makes the phone ask its owner. */
+    @Test
+    fun `an untrusted key is offered so the phone can ask`() {
+        val clientToDevice = PipedOutputStream()
+        val deviceIn = PipedInputStream(clientToDevice, 1 shl 16)
+        val deviceToClient = PipedOutputStream()
+        val clientIn = PipedInputStream(deviceToClient, 1 shl 16)
+
+        pool.submit {
+            AdbProtocol.read(deviceIn) // our CNXN
+            AdbProtocol.write(deviceToClient, AdbProtocol.Message(AdbProtocol.A_AUTH, 1, 0, ByteArray(20)))
+            AdbProtocol.read(deviceIn) // the signature, which this device does not know
+            AdbProtocol.write(deviceToClient, AdbProtocol.Message(AdbProtocol.A_AUTH, 1, 0, ByteArray(20)))
+            val offered = AdbProtocol.read(deviceIn)!!
+            check(offered.command == AdbProtocol.A_AUTH && offered.arg0 == 3)
+            // The blob is the base64 key plus a name, NUL-terminated.
+            check(offered.payload.last() == 0.toByte())
+            AdbProtocol.write(
+                deviceToClient,
+                AdbProtocol.stringMessage(AdbProtocol.A_CNXN, AdbProtocol.VERSION, 1 shl 20, "device::allowed"),
+            )
+        }
+
+        val session = AdbLocal.handshake(clientIn, clientToDevice, clientKey)
+        assertEquals("device::allowed", session.deviceBanner)
+        session.close()
     }
 }

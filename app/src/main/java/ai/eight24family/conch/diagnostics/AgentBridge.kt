@@ -178,6 +178,19 @@ class AgentBridge(
         val response = runCatching {
             when (command) {
                 "logs" -> handler.handleLogs(args)
+                // A real Linux distribution on the phone. Gated behind the SAME
+                // switch as "shell", because it IS the shell: proot needs no
+                // privilege, so anything this can do,  could already do.
+                "linux" ->
+                    if (ServiceLocator.preferences.bridgeShellAllowed.first()) {
+                        handler.handleLinux(args)
+                    } else {
+                        BridgeResponse.err(
+                            "linux disabled on this phone — it runs through the same " +
+                                "switch as shell: Conch → Settings → Security → " +
+                                "\"Run shell from server\".",
+                        )
+                    }
                 "ping" -> BridgeResponse.ok("pong")
                 "screenshot" -> handler.handleScreenshot(args)
                 // SEC-1 kill-switch: the bridge is an unauthenticated adb-level
@@ -354,8 +367,12 @@ interface BridgeHandler {
     suspend fun handleAudio(args: JsonObject): BridgeResponse =
         BridgeResponse.err("audio not implemented")
 
-    /** Run an arbitrary shell command at shell UID (adb-shell equivalent)
-     *  at adb-shell level. `args.command` = the command string. */
+    /** Run a command inside the phone's Linux environment. */
+    suspend fun handleLinux(args: JsonObject): BridgeResponse =
+        BridgeResponse.err("linux: not supported on this build")
+
+    /** Run an arbitrary shell command at shell UID (adb-shell equivalent).
+     *  `args.command` = the command string. */
     suspend fun handleShell(args: JsonObject): BridgeResponse =
         BridgeResponse.err("shell not implemented")
 }
@@ -454,6 +471,29 @@ class DefaultBridgeHandler(
             "tier" to JsonPrimitive(res.tier.name),
         )
         return BridgeResponse.ok(res.text, meta)
+    }
+
+    override suspend fun handleLinux(args: JsonObject): BridgeResponse {
+        val command = args["command"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: return BridgeResponse.err("linux: missing 'command'")
+        if (!ai.eight24family.conch.linux.LinuxEnv.isInstalled()) {
+            return BridgeResponse.err(
+                "No Linux environment on this phone yet — install it once in " +
+                    "Conch → Settings → Linux environment. It is a full Alpine userland " +
+                    "with apk, unpacked into the shell's own directory.",
+            )
+        }
+        val r = ai.eight24family.conch.linux.LinuxEnv.run(command)
+            ?: return BridgeResponse.err(
+                "No shell access yet: pair Conch with this phone once in " +
+                    "Settings → Phone bridge, then turn Wireless debugging on.",
+            )
+        val meta = mapOf(
+            "exit" to JsonPrimitive(r.exitCode),
+            "truncated" to JsonPrimitive(r.truncated),
+            "stderr" to JsonPrimitive(r.stderr.take(2000)),
+        )
+        return BridgeResponse.ok(r.stdout, meta)
     }
 
     override suspend fun handleShell(args: JsonObject): BridgeResponse {
