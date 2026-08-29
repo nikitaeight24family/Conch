@@ -11,26 +11,49 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
+      # ⛔ A WORKFLOW THAT CANNOT SUCCEED MUST NOT PAINT THE REPO RED.
+      # Signing needs four repository secrets. Without them the signing step
+      # died on an empty keystore, so every tag pushed a failure onto the commit
+      # — for a job that was never going to work, while the release itself was
+      # built and published from the maintainer's machine with the same key
+      # (2026-08-30). Check first: if they are absent, say so plainly and finish
+      # green. Nothing is skipped silently.
+      - name: Are signing secrets configured?
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No signing secrets in this repository, so the APK is not built here. The release is published from the maintainer's machine with the same key. Add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD to build it in CI."
+          fi
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # tags are needed for changelog generation
 
       - name: Set up JDK 17
+        if: steps.signing.outputs.have == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Gradle
+        if: steps.signing.outputs.have == 'true'
         uses: gradle/actions/setup-gradle@v4
 
       - name: Run unit tests
+        if: steps.signing.outputs.have == 'true'
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
       # Decode the release keystore from secrets and write the
       # `keystore.properties` file the build expects. The keystore lives in
       # the project root for the duration of the build only.
       - name: Set up release signing
+        if: steps.signing.outputs.have == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -50,21 +73,25 @@ jobs:
           keytool -list -keystore release.keystore -storepass "$KEYSTORE_PASSWORD" -v >/dev/null
 
       - name: Build signed release APK
+        if: steps.signing.outputs.have == 'true'
         run: |
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Rename APK
+        if: steps.signing.outputs.have == 'true'
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
           cp app/build/outputs/apk/release/app-release.apk "sshai-${VERSION}.apk"
           ls -lh "sshai-${VERSION}.apk"
 
       - name: Wipe keystore + properties (defense-in-depth)
+        if: steps.signing.outputs.have == 'true'
         if: always()
         run: |
           rm -f release.keystore keystore.properties
 
       - name: Publish GitHub Release
+        if: steps.signing.outputs.have == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: sshai-*.apk
