@@ -12,8 +12,12 @@ import android.net.NetworkCapabilities
  * the hosting provider / ask the admin.
  *
  * Design decisions (post-critique):
- *  - **Does NOT re-probe TCP.** Caller hands in the outcome from
- *    [TcpProbe.probe], we just translate. No 3 s + 3 s double wait.
+ *  - **Opens no connection of its own, and never did.** The caller hands in an
+ *    outcome and this only translates it. That outcome now comes from the
+ *    connection the app was making anyway ([fromConnectFailure]) rather than
+ *    from a pre-flight probe — the probe's connect-and-hang-up was getting the
+ *    owner's phone banned by his own fail2ban. See [TcpProbe] for the whole
+ *    story; the type still lives there, the socket does not.
  *  - **Internet check is a soft hint**, not a hard branch. Public
  *    Wi-Fi without OS-validated internet still routes SSH fine;
  *    captive portals route nothing. We only force [Diagnosis.PhoneOffline]
@@ -102,6 +106,49 @@ object ServerDiagnostics {
             },
         )
 
+        /**
+         * TCP refused (RST) — but this host was answering minutes ago.
+         *
+         * ⚠ The distinction that matters. A ban from fail2ban and friends
+         * REJECTS rather than drops, so it arrives as "connection refused" and
+         * is indistinguishable at the socket from a stopped daemon or a moved
+         * port. The one thing that tells them apart is history: a port does not
+         * move, and a daemon does not stop, in the four minutes since it last
+         * let you in. Sending someone to check their hosting docs in that
+         * situation costs them an hour (owner, 2026-08-29 — he ended up
+         * rebooting his router for a new address, which is a real remedy, just
+         * not one anything told him about).
+         */
+        data class LikelyIpBanned(
+            val host: String,
+            val port: Int,
+            val workedAgoMs: Long,
+        ) : Diagnosis(
+            title = "Refused — but it was answering just now",
+            reasons = buildList {
+                add("$host accepted a connection ${humanAgo(workedAgoMs)} and is now refusing port $port outright.")
+                add(
+                    "**That is what a temporary IP ban looks like.** Tools like fail2ban reject the " +
+                        "connection instead of dropping it, so it reads exactly like a closed port. A burst " +
+                        "of connections or a couple of failed logins is enough to trigger one.",
+                )
+                add(
+                    "**The ban is on your IP, not your account** — so every server on that machine stops " +
+                        "working at the same moment.",
+                )
+                add("**It clears itself.** Bans usually last from ten minutes to an hour; waiting is the fix.")
+                add(
+                    "**A different address works immediately** — switch to mobile data, or reconnect your " +
+                        "router if it picks up a new one.",
+                )
+                add(
+                    "If you can reach the machine another way: `sudo fail2ban-client unban <your ip>` " +
+                        "lifts it now.",
+                )
+                add("Only if none of that fits: SSH really did stop, or was moved to another port.")
+            },
+        )
+
         /** TCP opened and the server sent something — but it's not SSH. */
         data class WrongPort(
             val host: String,
@@ -139,12 +186,73 @@ object ServerDiagnostics {
         port: Int,
         outcome: TcpProbe.Outcome,
         context: Context,
+        hostWorkedAgoMs: Long? = null,
     ): Diagnosis = classifyPure(
         host = host,
         port = port,
         outcome = outcome,
         hasNetwork = hasActiveNetwork(context),
+        hostWorkedAgoMs = hostWorkedAgoMs,
     )
+
+    /**
+     * The same diagnosis, taken from a REAL connection attempt that failed
+     * instead of from a probe.
+     *
+     * ⛔ WHY THERE IS NO PROBE ANY MORE. The pre-flight opened its own socket to
+     * the SSH port and dropped it before authenticating — a textbook preauth
+     * disconnect in the server's log, and the owner's own fail2ban banned his
+     * phone for exactly three of them inside ten minutes, with no failed login
+     * anywhere in the file. Rationing those would still have meant connecting in
+     * order to hang up. The attempt the app was going to make anyway carries the
+     * same information: TCP refusal, timeout, DNS and routing all surface as
+     * exceptions long before any credential is offered — and when it succeeds
+     * there is a live connection at the end of it rather than a closed one.
+     *
+     * Unwraps the cause chain because sshj wraps the socket failure in its own
+     * transport exception; the useful class is underneath.
+     */
+    fun fromConnectFailure(
+        host: String,
+        port: Int,
+        cause: Throwable,
+        context: Context,
+        hostWorkedAgoMs: Long? = null,
+    ): Diagnosis = classify(
+        host = host,
+        port = port,
+        outcome = TcpProbe.Outcome.Failed(connectFailureKind(cause), cause),
+        context = context,
+        hostWorkedAgoMs = hostWorkedAgoMs,
+    )
+
+    /** Walks the cause chain for the socket-level failure sshj wrapped. */
+    fun connectFailureKind(cause: Throwable): TcpProbe.Outcome.Failed.Kind {
+        var t: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (t != null && seen.add(t)) {
+            when (t) {
+                is java.net.UnknownHostException -> return TcpProbe.Outcome.Failed.Kind.DnsFailed
+                is java.net.SocketTimeoutException -> return TcpProbe.Outcome.Failed.Kind.Timeout
+                // These two are siblings under SocketException, not parent and
+                // child, so neither can shadow the other — listed most specific
+                // first anyway, because the next exception type added here might
+                // not be so independent.
+                is java.net.NoRouteToHostException -> return TcpProbe.Outcome.Failed.Kind.NoRoute
+                is java.net.ConnectException -> return TcpProbe.Outcome.Failed.Kind.Refused
+            }
+            t = t.cause
+        }
+        return TcpProbe.Outcome.Failed.Kind.Other
+    }
+
+    /**
+     * How long ago a refusal still counts as "it was working" — beyond this the
+     * ordinary explanations (a stopped daemon, a moved port) are back on equal
+     * footing. Half an hour comfortably covers a default ban, which is usually
+     * ten minutes.
+     */
+    const val RECENTLY_WORKED_MS = 30 * 60 * 1000L
 
     /** Pure-JVM diagnosis tree. No Android dependencies — unit-testable. */
     fun classifyPure(
@@ -152,6 +260,8 @@ object ServerDiagnostics {
         port: Int,
         outcome: TcpProbe.Outcome,
         hasNetwork: Boolean,
+        /** Age of this HOST's last successful connection, or null if never. */
+        hostWorkedAgoMs: Long? = null,
     ): Diagnosis {
         if (!hasNetwork && outcome is TcpProbe.Outcome.Failed) {
             // Truly no link — anything else we'd say is misleading.
@@ -164,7 +274,11 @@ object ServerDiagnostics {
                 TcpProbe.Outcome.Failed.Kind.DnsFailed ->
                     Diagnosis.HostNotFound(host)
                 TcpProbe.Outcome.Failed.Kind.Refused ->
-                    Diagnosis.ServerUpSshDown(host, port, isPrivate)
+                    if (hostWorkedAgoMs != null && hostWorkedAgoMs in 0..RECENTLY_WORKED_MS) {
+                        Diagnosis.LikelyIpBanned(host, port, hostWorkedAgoMs)
+                    } else {
+                        Diagnosis.ServerUpSshDown(host, port, isPrivate)
+                    }
                 TcpProbe.Outcome.Failed.Kind.Timeout,
                 TcpProbe.Outcome.Failed.Kind.NoRoute,
                 TcpProbe.Outcome.Failed.Kind.Other ->
@@ -185,6 +299,16 @@ object ServerDiagnostics {
     }
 
     // ─────────────── helpers (internal for testability) ───────────────
+
+    /** "four minutes ago" and friends — for a sentence, not a log line. */
+    internal fun humanAgo(ms: Long): String {
+        val seconds = ms / 1000
+        return when {
+            seconds < 90 -> "moments ago"
+            seconds < 3600 -> "${seconds / 60} minutes ago"
+            else -> "${seconds / 3600}h ago"
+        }
+    }
 
     /** True when phone has any active default network. Loose check — captive
      *  portals and LAN-only networks return true; only "no link at all" is false. */

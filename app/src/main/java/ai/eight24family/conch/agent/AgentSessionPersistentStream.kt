@@ -531,7 +531,7 @@ internal class AgentSessionPersistentStream(
      *  expired login, a bad flag — explains itself HERE, and nothing read it:
      *  the reader saw stdout EOF, the write path said "disconnected", and the
      *  app silently reconnect-looped over a perfectly healthy transport while
-     *  the chat spun a thinking indicator with zero tokens (the dev server,
+     * the chat spun a thinking indicator with zero tokens (the dev server,
      *  2026-08-17: claude logged out — the LIST preview even showed "Not
      *  logged in · Please run /login" while the open chat showed nothing). */
     private val errTail = ArrayDeque<String>()

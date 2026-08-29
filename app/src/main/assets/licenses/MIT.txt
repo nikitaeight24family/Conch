@@ -1,10 +1,9 @@
 The following components are distributed under the MIT License.
 
-=== Shizuku API (dev.rikka.shizuku) ===
+=== SLF4J API (org.slf4j) ===
 
-MIT License
-
-Copyright (c) 2021 RikkaW
+Copyright (c) 2004-2023 QOS.ch Sarl (Switzerland)
+All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

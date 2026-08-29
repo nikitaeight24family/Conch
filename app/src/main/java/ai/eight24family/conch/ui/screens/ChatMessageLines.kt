@@ -352,6 +352,13 @@ internal fun TerminalLine(
             // Handshake finished without confirming — quiet "couldn't connect" row
             // (no eternal spinner, no raw error dump).
             "bridge_failed" -> BridgeStatusRow("couldn't connect to phone")
+            // The phone cannot run commands and the reason is worth naming. Text
+            // comes from the row itself — see [ChatViewModel.bridgeUnreachable]
+            // — because this used to be a JUMP to the Settings screen instead of
+            // a sentence, which is a bad trade even when the screen is right, and
+            // a farce when it is not (owner, 2026-08-29: he tapped Phone and
+            // landed on a page reading "Ready").
+            "bridge_unreachable" -> BridgeStatusRow(msg.raw)
             else -> {
                 // Skip the per-message session banner Claude emits on every
                 // --print invocation (subtype "init" with model/cwd/version).

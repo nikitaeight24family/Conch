@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
  * The phone-side [AgentBridge] poller stamps [markAlive] on every SUCCESSFUL
  * inbox poll — which proves, right then, that (a) SSH to the server is up and
  * (b) the poller is actually running, i.e. the phone is reachable for bridge
- * requests. When the poller stops (app backgrounded → polling pauses, SSH drops,
+ * requests. When the poller stops (app closed, SSH drops,
  * or the bridge is torn down), no fresh stamp lands and [isAlive] ages out.
  *
  * This is the HONEST signal for the 📱 glyph. The old glyph lit on "wired flag +

@@ -96,7 +96,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.4.7"
+        val baseVersionName = "0.4.8"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -353,6 +353,8 @@ dependencies {
     implementation(libs.sshj)
     implementation(libs.bouncycastle.bcprov)
     implementation(libs.bouncycastle.bcpkix)
+    implementation(libs.bouncycastle.bctls)
+    implementation(libs.eddsa)
 
     // Hardware security key support (FIDO2/CTAP2 over USB + NFC).
     // Used to register `sk-ssh-ed25519` / `sk-ecdsa-sha2-nistp256` keys
@@ -361,12 +363,6 @@ dependencies {
     implementation(libs.yubikit.android)
     implementation(libs.yubikit.fido)
 
-    // Shizuku — optional. Adds the service binder + ContentProvider
-    // that lets users grant ssh.ai shell-level permissions (READ_LOGS,
-    // dumpsys, pm queries) without rooting the device. We probe at
-    // runtime whether the manager app is installed; absence is fine.
-    implementation(libs.shizuku.api)
-    implementation(libs.shizuku.provider)
 
     // CameraX — live viewfinder in the attachment sheet (Telegram-style first cell).
     implementation(libs.androidx.photopicker.compose)

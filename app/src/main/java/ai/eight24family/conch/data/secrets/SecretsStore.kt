@@ -55,6 +55,9 @@ class SecretsStore(
     }
 
     companion object {
+        /** Deliberately unprefixed: there is exactly one, and [getAllKeyIds]
+         *  filters on "keypem:" so it can never mistake this for an SSH key. */
+        private const val ADB_KEY = "adb-identity-pkcs8"
         private const val PREFS_FILE = "encrypted_servers"
         private const val RETRY_DELAY_MS = 150L
 
@@ -118,6 +121,27 @@ class SecretsStore(
         .filter { it.startsWith("keypem:") }
         .map { it.removePrefix("keypem:") }
         .toSet()
+
+    /**
+     * The identity this phone's own ADB access is pinned to, PKCS#8, base64.
+     *
+     * ⚠ Losing it means pairing again — the device stores the matching public
+     * key and recognises nothing else — so it lives with the other credentials
+     * rather than in an ordinary file, and is generated exactly once.
+     */
+    fun saveAdbPrivateKey(pkcs8: ByteArray) {
+        prefs.edit()
+            .putString(ADB_KEY, android.util.Base64.encodeToString(pkcs8, android.util.Base64.NO_WRAP))
+            .apply()
+    }
+
+    fun loadAdbPrivateKey(): ByteArray? = prefs.getString(ADB_KEY, null)
+        ?.let { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }
+
+    /** Forget the identity — the next pairing starts from a new key. */
+    fun deleteAdbPrivateKey() {
+        prefs.edit().remove(ADB_KEY).apply()
+    }
 
     private fun passwordKey(id: String) = "pwd:$id"
     private fun keyPemKey(id: String) = "keypem:$id"

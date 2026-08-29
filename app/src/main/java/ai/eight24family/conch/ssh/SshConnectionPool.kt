@@ -148,7 +148,17 @@ class SshConnectionPool {
                 pool.remove(server.id)
             }
             android.util.Log.d(TAG, "acquire(${server.id}) MISS — opening new SSH (touch needed for SK)")
-            val fresh = openAndAuthenticate(server, secrets, skSigner)
+            rememberHost(server)
+            // EVERY dial passes through here, human or silent — so this is where a
+            // refusal has to be recorded. Recording it only on the silent paths
+            // let a person's own retry discover the ban and then say nothing,
+            // leaving the watchdog to walk into it twenty seconds later.
+            val fresh = try {
+                openAndAuthenticate(server, secrets, skSigner)
+            } catch (t: Throwable) {
+                if (looksRefused(t)) noteDialRefused(server.id)
+                throw t
+            }
             // openAndAuthenticate can only throw AFTER handing us a connected
             // client if auth failed — and a client that never lands in the
             // pool is a LEAKED live socket the server has to reap on its own
@@ -306,6 +316,29 @@ class SshConnectionPool {
      *  and re-probe before letting the user click into chat. */
     private val _connectedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /**
+     * When each HOST last accepted a connection — keyed `host:port`, and never
+     * cleared.
+     *
+     * ⚠ Deliberately by host, not by server, and deliberately durable where
+     * [_connectedAt] is not. A server that starts refusing connections looks
+     * identical to one whose SSH daemon stopped or moved ports — unless you know
+     * it was answering minutes ago, in which case a temporary IP ban is by far
+     * the likelier story. And a ban is by IP: every account on that machine goes
+     * dark together, which is why two entries for one box must share this
+     * record rather than each keep their own (owner, 2026-08-29: fail2ban caught
+     * him mid-install and the app blamed the port).
+     */
+    private val _hostLastSucceeded = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun noteHostSuccess(host: String, port: Int) {
+        _hostLastSucceeded["$host:$port"] = System.currentTimeMillis()
+    }
+
+    /** How long ago this host last accepted a connection, or null if never. */
+    fun hostSucceededAgoMs(host: String, port: Int): Long? =
+        _hostLastSucceeded["$host:$port"]?.let { System.currentTimeMillis() - it }
+
     /** StateFlow mirror of [userHeld]'s size. The foreground service
      *  observes this to keep the process alive for as long as the user
      *  has at least one explicitly-connected server — independent of
@@ -375,6 +408,8 @@ class SshConnectionPool {
         // balance.
         userHeld.add(server.id)
         _connectedAt[server.id] = System.currentTimeMillis()
+        rememberHost(server)
+        noteHostSuccess(server.host, server.port)
         _userHeldCount.value = userHeld.size
         _userHeldIds.value = userHeld.toSet()
         persistUserHeldAsync()
@@ -538,7 +573,74 @@ class SshConnectionPool {
      *  user connects NEVER consult this (they must try NOW), and a success or a
      *  network change clears it. */
     private data class SilentFailStreak(val count: Int, val lastMs: Long)
+
+    /**
+     * Dial-failure streaks, keyed by HOST — not by server.
+     *
+     * ⚠ The jail on the other side counts by IP, so two accounts on one machine
+     * are ONE budget to it and must be one budget here. Keyed per server they
+     * each climbed their own ladder and the box saw double the attempts; the
+     * owner has exactly that setup and got banned on it twice (2026-08-17, and
+     * again 2026-08-29 while this was being written).
+     */
     private val silentFails = ConcurrentHashMap<String, SilentFailStreak>()
+
+    /** serverId → "host:port", learned whenever a Server passes through. */
+    private val sidHost = ConcurrentHashMap<String, String>()
+
+    /**
+     * Hosts that REFUSED us, and the moment they may be silently dialed again.
+     *
+     * A refusal is categorically different from a timeout or a dropped link. It
+     * means something answered and said no — and after a connection that was
+     * working minutes ago, that is a ban far more often than it is a daemon
+     * that stopped. Climbing the ordinary ladder from a twenty-second floor
+     * feeds it: every attempt is another line in the log the jail is reading,
+     * and enough of them promote a ten-minute ban into a recidive one that
+     * lasts a week.
+     *
+     * So a refusal sets a flat, long stop, and — deliberately — a human action
+     * does NOT clear it. Only time does. The person can still dial by hand
+     * (explicit connects never consult this); what stops is the machinery that
+     * would otherwise knock every twenty seconds while nobody is watching.
+     */
+    private val refusedUntil = ConcurrentHashMap<String, Long>()
+
+    /** How long a refusal silences automatic dialing for that host. Chosen to
+     *  outlast a default fail2ban bantime rather than to be gentle. */
+    private val REFUSAL_QUIET_MS = 15 * 60_000L
+
+    private fun hostKeyOf(sid: String): String = sidHost[sid] ?: sid
+
+    private fun rememberHost(server: Server) {
+        sidHost[server.id] = "${server.host}:${server.port}"
+    }
+
+    /**
+     * Does [t] mean "something answered and refused" rather than "nothing
+     * answered"? Walks the cause chain because sshj wraps.
+     */
+    internal fun looksRefused(t: Throwable?): Boolean {
+        var cur = t
+        var depth = 0
+        while (cur != null && depth < 8) {
+            if (cur is java.net.ConnectException) return true
+            if (cur.message?.contains("refused", ignoreCase = true) == true) return true
+            cur = cur.cause
+            depth++
+        }
+        return false
+    }
+
+    private fun noteDialRefused(sid: String) {
+        val until = System.currentTimeMillis() + REFUSAL_QUIET_MS
+        refusedUntil[hostKeyOf(sid)] = until
+        android.util.Log.w(
+            TAG,
+            "dial refused by ${hostKeyOf(sid)} — silencing automatic reconnects for " +
+                "${REFUSAL_QUIET_MS / 60_000} min (a refusal after a working link is usually a ban)",
+        )
+    }
 
     /** User-tunable (Settings → Connection → fail2ban): the backoff FLOOR in ms
      *  and the master AUTO-connect switch. Read via runBlocking on the IO-thread
@@ -559,24 +661,42 @@ class SshConnectionPool {
      *  15 min) has passed. The floor is the user's fail2ban knob. */
     private fun silentCooldownPassed(sid: String): Boolean {
         if (!autoConnectAllowed()) return false
-        val f = silentFails[sid] ?: return true
-        val shift = (f.count - 1).coerceIn(0, 5)
+        val key = hostKeyOf(sid)
+        // A refusal outranks the ladder: while it stands, nothing dials on its own.
+        refusedUntil[key]?.let { until ->
+            if (System.currentTimeMillis() < until) return false
+            refusedUntil.remove(key)
+        }
+        val f = silentFails[key] ?: return true
+        // Escalate FAST. The old ladder started at the floor and doubled, so a
+        // host that was going to ban us saw five or six attempts before the wait
+        // got long — which is precisely the count a default jail trips on. Three
+        // consecutive failures now go straight to the ceiling.
+        val shift = if (f.count >= 3) 5 else (f.count - 1).coerceIn(0, 5)
         val waitMs = (silentFloorMs() shl shift).coerceAtMost(15 * 60_000L)
         return System.currentTimeMillis() - f.lastMs >= waitMs
     }
 
     private fun noteSilentDialResult(sid: String, ok: Boolean) {
+        val key = hostKeyOf(sid)
         if (ok) {
-            silentFails.remove(sid)
+            silentFails.remove(key)
+            refusedUntil.remove(key)
         } else {
-            val cur = silentFails[sid]
-            silentFails[sid] = SilentFailStreak((cur?.count ?: 0) + 1, System.currentTimeMillis())
+            val cur = silentFails[key]
+            silentFails[key] = SilentFailStreak((cur?.count ?: 0) + 1, System.currentTimeMillis())
         }
     }
 
     /** New default network / explicit user action → the world changed; every
      *  server deserves a fresh immediate try. */
     fun resetSilentBackoff() {
+        // ⚠ Deliberately does NOT touch [refusedUntil]. A person tapping retry,
+        // or the radio switching networks, is not evidence that a ban was lifted
+        // — and the old blanket clear is how a single tap put the twenty-second
+        // watchdog straight back to work against a host that had just refused
+        // us. The person's own dial still goes through; only the machinery stays
+        // quiet.
         silentFails.clear()
     }
 
@@ -790,7 +910,9 @@ class SshConnectionPool {
                 val fresh = try {
                     openWithProvider(server, provider)
                 } catch (t: Throwable) {
+                    rememberHost(server)
                     noteSilentDialResult(server.id, ok = false)
+                    if (looksRefused(t)) noteDialRefused(server.id)
                     android.util.Log.w(TAG, "device-key connect failed ${server.id}: ${t.javaClass.simpleName}: ${t.message}")
                     // Auth rejection (Exhausted) = the enrolled line is STALE / wrong
                     // encoding (e.g. minted by an older build). Drop the local key so
@@ -810,6 +932,8 @@ class SshConnectionPool {
         }
         userHeld.add(server.id)
         _connectedAt[server.id] = System.currentTimeMillis()
+        rememberHost(server)
+        noteHostSuccess(server.host, server.port)
         _userHeldCount.value = userHeld.size
         _userHeldIds.value = userHeld.toSet()
         persistUserHeldAsync()

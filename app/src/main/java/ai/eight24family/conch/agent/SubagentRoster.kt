@@ -93,6 +93,16 @@ data class TaskOwnership(
  * pipeline.
  */
 fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
+    // Index of the latest user message = where the current turn begins. Used to
+    // bound the no-snapshot fallback below.
+    val lastUserIdx = messages.indexOfLast { it is AgentMessage.UserText }
+    // Where the PREVIOUS turn began (-1 until two user messages exist).
+    val prevUserIdx = messages.asSequence().withIndex()
+        .filter { it.value is AgentMessage.UserText }
+        .map { it.index }.toList()
+        .let { if (it.size >= 2) it[it.size - 2] else -1 }
+    // task_id → index of the message that first mentioned it.
+    val taskFirstSeenIdx = HashMap<String, Int>()
     val ownToolUseIds = HashSet<String>()
     // task_id → tool_use_id, learned from whichever events carry both.
     val taskTool = HashMap<String, String>()
@@ -102,13 +112,14 @@ fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
     val finishedTasks = HashSet<String>()
     var snapshot: List<AgentMessage.BackgroundTasks.Entry>? = null
 
-    for (m in messages) {
+    for ((mIdx, m) in messages.withIndex()) {
         when (m) {
             is AgentMessage.ToolUse -> ownToolUseIds += m.id
             is AgentMessage.BackgroundTasks -> snapshot = m.tasks
             is AgentMessage.SubagentActivity -> {
                 val tid = m.taskId ?: continue
                 seenTasks += tid
+                taskFirstSeenIdx.putIfAbsent(tid, mIdx)
                 m.parentToolUseId?.let { taskTool[tid] = it }
                 if (m.taskType == "local_agent" || m.taskType == "remote_agent" ||
                     m.subagentType != null
@@ -133,10 +144,24 @@ fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
     // Prefer the CLI's own snapshot for the live count (REPLACE semantics: it IS
     // the set of what is running now). Fall back to started-minus-finished for a
     // stream that has not sent one yet.
+    // ⚠ WITHOUT A SNAPSHOT, AN UNCONFIRMED TASK EXPIRES. The snapshot is
+    // authoritative (it IS the set running now), so wherever one exists nothing can
+    // go stale. The started-minus-finished fallback has no such self-healing: a
+    // completion the app never received — a disconnect, a reinstall, a killed
+    // process — leaves the task "running" forever, and the chat kept saying
+    // «waiting for a background task — resumes on its own» under a turn that had
+    // long since finished (owner, 2026-08-29). A background task DOES legitimately
+    // outlive the turn that launched it, so one turn of age proves nothing; two
+    // does, because by then the CLI has been re-invoked and would have reported it.
+    // Older than that with no snapshot behind it is a record we cannot stand
+    // behind, so it is dropped rather than asserted.
     val running = snapshot
         ?.filter { it.taskType != "local_agent" && it.taskType != "remote_agent" }
         ?.map { it.taskId }
-        ?: seenTasks.filter { it !in finishedTasks && it !in agentTasks }
+        ?: seenTasks.filter {
+            it !in finishedTasks && it !in agentTasks &&
+                (prevUserIdx < 0 || (taskFirstSeenIdx[it] ?: 0) >= prevUserIdx)
+        }
     val agentRunning = running.count { TASK_NOTE_PREFIX + it !in ownNotes }
 
     return TaskOwnership(
@@ -165,13 +190,14 @@ fun foldTaskOwnership(messages: List<AgentMessage>): TaskOwnership {
  *
  * Order is preserved: agents appear in launch order, like the CLI's list.
  *
- * FINISHED AGENTS DO NOT OUTLIVE THEIR TURN. This folds the whole transcript,
- * so every fan-out ever run used to stay on the roster forever — 100+ rows in
- * long sessions. Rule: a DONE agent spawned before the latest user message is
- * history, not a roster row — the transcript already holds its work. Still-
- * running (incl. backgrounded) agents stay regardless of age, and the current
- * turn's fan-out stays fully visible — summaries included — until the next
- * user message starts a new turn.
+ * FINISHED AGENTS DO NOT OUTLIVE THEIR TURN. This folds the whole transcript, so
+ * every fan-out ever run used to stay on the roster forever — 100+ rows in long
+ * sessions. Rule: an agent spawned before the latest user message is history,
+ * not a roster row — the transcript already holds its work — and that now holds
+ * whether or not we ever saw it finish, because a completion event lost to a
+ * disconnect used to leave the row alive forever. The current turn's fan-out
+ * stays fully visible — summaries included — until the next user message starts
+ * a new turn.
  */
 fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     // key -> mutable accumulator, insertion-ordered.
@@ -307,8 +333,34 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
     // The latest user message is the turn boundary: done agents from before it
     // are history (their work is in the transcript), not roster rows.
     val lastUserIdx = messages.indexOfLast { it is AgentMessage.UserText }
+    // Has the CURRENT turn already finished? A user message can arrive while a
+    // fan-out is still running (this app queues sends and echoes them at once), so
+    // "a newer user message exists" is NOT proof that an older agent stopped — but
+    // a turn that has printed its result IS: nothing from an earlier turn can still
+    // be running once the CLI has closed a later one.
+    val lastEndIdx = messages.indexOfLast {
+        it is AgentMessage.Result || it is AgentMessage.TurnEnd
+    }
+    val currentTurnEnded = lastEndIdx > lastUserIdx
     return acc.mapNotNull { (key, a) ->
-        if (a.done && lastUserIdx >= 0 && a.spawnIdx < lastUserIdx) return@mapNotNull null
+        // ⚠ AN AGENT FROM A FINISHED TURN IS NOT ALIVE, EVEN IF WE NEVER SAW IT
+        // FINISH. `done` flips on the agent's ToolResult or a done SubagentActivity
+        // — both of which simply never arrive if the app was disconnected, killed
+        // or reinstalled while the fan-out was running. The old rule ("still-running
+        // agents stay regardless of age") then made those rows immortal: the owner's
+        // chat showed «5 agents · 5 live» under a turn that had already printed its
+        // final summary (2026-08-29). A subagent cannot outlive the turn that
+        // spawned it — the CLI has nothing left to run it in — so a row spawned
+        // before the latest user message is history whether or not its completion
+        // reached us.
+        //
+        // The ONE exception is a genuinely backgrounded agent: those are launched
+        // to outlive their turn ("Async agent launched"), the CLI keeps them, and
+        // they must keep their row until they report done.
+        val fromAnEarlierTurn = lastUserIdx >= 0 && a.spawnIdx < lastUserIdx
+        if (fromAnEarlierTurn && (a.done || (!a.backgrounded && currentTurnEnded))) {
+            return@mapNotNull null
+        }
         SubagentRun(
             key = key,
             type = a.type,

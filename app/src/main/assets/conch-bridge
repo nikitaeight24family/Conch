@@ -15,10 +15,10 @@
 #
 # Usage:
 #   conch-bridge logs [--filter GLOB] [--level V|D|I|W|E] [--lines N] [--since ISO]
-#   conch-bridge logs --tier shizuku             # force system-wide via Shizuku
+#   conch-bridge logs --tier adb                 # force system-wide (whole device)
 #   conch-bridge logs --tier own                 # force own-uid only
-#   conch-bridge shell 'pm list packages'        # run a command at shell uid (Shizuku)
-#   conch-bridge shell 'dumpsys battery'         # adb-shell-equivalent; needs Shizuku granted
+#   conch-bridge shell 'pm list packages'        # run a command at shell uid
+#   conch-bridge shell 'dumpsys battery'         # adb-shell-equivalent
 #   conch-bridge ping                            # connectivity check
 #   conch-bridge screenshot                      # request a screen capture
 #   conch-bridge audio [--seconds N] [--out FILE]  # record the phone mic (N<=300, default 10)
@@ -43,7 +43,7 @@ trap 'rc=$?; echo "conch-bridge: internal error (exit $rc) near line $LINENO —
 
 # Bump whenever this script changes — the app compares installed-vs-bundled on
 # the server page and offers Update.
-CONCH_BRIDGE_VERSION="6"
+CONCH_BRIDGE_VERSION="8"
 
 BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
 TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
@@ -205,8 +205,8 @@ DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
 while [ ! -s "$RES" ]; do
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
     echo "conch-bridge: phone didn't respond in ${TIMEOUT_S}s." >&2
-    echo "  - Make sure Conch is open in the foreground on the phone and connected to this server." >&2
-    echo "  - The phone polls every 2s; if Conch is backgrounded, polling pauses." >&2
+    echo "  - Make sure Conch is running on the phone and connected to this server." >&2
+    echo "  - Conch answers with the screen off too (a little slower), but not while the app is closed." >&2
     rm -f "$REQ"
     exit 2
   fi
@@ -231,7 +231,7 @@ fi
 if [ -n "$DATA_PATH" ]; then
   # SECURITY: the response carries a data_path, but we NEVER trust it as a
   # filesystem path. A compromised phone / MITM on the channel could return
-  # "data_path":"~/.ssh/id_ed25519" (or any user-readable file) and this
+  # "data_path":"~/.ssh/id_ed25519" (or any deploy-readable file) and this
   # branch would cat it to the agent AND delete it — a read+DELETE traversal
   # sink. The data file for THIS request is ALWAYS exactly $OUTBOX/$ID.data
   # (server-chosen id), so read+remove only that and ignore whatever path the

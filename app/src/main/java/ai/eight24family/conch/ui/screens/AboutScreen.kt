@@ -307,6 +307,31 @@ fun AboutScreen(
             }
 
             HorizontalDivider(color = outline.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))
+
+            // Credit for an IDEA, not for code. MIT binds whoever ships the code
+            // itself; The last sentence is the load-bearing one: Conch has read
+            // that project's README, never its source.
+            Section("with thanks to") {
+                Text(
+                    text = buildAnnotatedString {
+                        withStyle(
+                            SpanStyle(color = cyan, textDecoration = TextDecoration.Underline)
+                        ) { append("AndroidHarness") }
+                        withStyle(SpanStyle(color = onSurface)) {
+                            append(" by Sanuu7 (MIT) — for the idea of running a Linux ")
+                            append("environment on the phone itself. None of its code is used here.")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.clickable {
+                        SilentlyTry.fired("SshAi-About", "open AndroidHarness link") {
+                            uriHandler.openUri("https://github.com/Sanuu7/AndroidHarness")
+                        }
+                    },
+                )
+            }
+
+            HorizontalDivider(color = outline.copy(alpha = 0.3f), modifier = Modifier.padding(vertical = 4.dp))
             // Community / source / socials — brand logos only, the link IS the logo.
             SocialLinksRow()
         }

@@ -1,136 +1,66 @@
 package ai.eight24family.conch.ssh
 
-import ai.eight24family.conch.util.SilentlyTry
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.net.InetSocketAddress
-import java.net.Socket
-
 /**
- * Cheap "is the SSH port even open, and does it speak SSH?" check used
- * as a pre-flight before we ask the user to physically tap their
- * security key.
+ * The vocabulary for "why couldn't we reach this server" — and nothing else.
  *
- * Returns a TYPED outcome — [Outcome] is a sealed hierarchy that
- * categorises the failure at the TCP layer (DnsFailed, Refused, Timeout,
- * NoRoute, Other) or returns [Outcome.Ok] with the first ≤16 banner
- * bytes the server sent. Callers that want to surface a structured
- * diagnostic ([ServerDiagnostics]) can do it WITHOUT re-running TCP —
- * they consume the outcome directly. This is the difference between a
- * 7-second double-probe and the ~4-second single-probe.
+ * ⛔ THIS USED TO OPEN A SOCKET. It was a pre-flight: connect to the SSH port,
+ * read sixteen bytes of banner, hang up, and hand [ServerDiagnostics] a typed
+ * outcome so the user learned the host was dead before paying a security-key tap
+ * for it.
  *
- * Worst-case total budget: 3 s TCP connect + 1 s banner read = 4 s.
- * Banner read is best-effort: silence after 1 s = `bannerBytes = null`,
- * not a failure.
+ * That connect-and-hang-up is a preauth disconnect in the server's log, and the
+ * owner's own fail2ban banned his phone over three of them inside ten minutes —
+ * with no failed login anywhere in the file (2026-08-29). Sending our own
+ * identification string first had already been tried; it changed the log line
+ * from "did not receive identification string" to an ordinary preauth
+ * disconnect, and the jail counted those too. Rationing the probe was the next
+ * idea and it was the wrong shape of answer: it still meant connecting in order
+ * to hang up, just less often.
+ *
+ * So the probe is gone. The diagnosis now comes from the connection the app was
+ * going to make anyway — see [ServerDiagnostics.fromConnectFailure]. TCP
+ * refusal, timeouts, DNS and routing all raise long before any credential is
+ * offered, so nothing had to be given up to stop making throwaway connections,
+ * and a successful attempt now ends with a connection that stays up instead of
+ * one that is closed and immediately reopened.
+ *
+ * ⚠ Do not add a socket back to this file. If something needs to know whether a
+ * host is reachable, connect to it for real and keep the connection.
  */
 object TcpProbe {
 
+    /**
+     * What was learned about reaching a host. Produced from a real connection
+     * attempt's outcome, then translated by [ServerDiagnostics].
+     */
     sealed interface Outcome {
-        /** TCP connect succeeded. `bannerBytes` is whatever the server
-         *  sent within 1 s — possibly null (port open but silent),
-         *  possibly an SSH banner ("SSH-2.0-..."), possibly something
-         *  else (HTTP, TLS, etc). The next-stage classifier decides
-         *  what to do with the bytes. */
+        /**
+         * The transport came up. [bannerBytes] carries the first bytes the peer
+         * sent when something read them — an SSH banner, or something that is
+         * plainly not SSH — and is null when nobody looked or the peer stayed
+         * silent. Null therefore means "no evidence", never "silent server".
+         */
         data class Ok(val bannerBytes: ByteArray?) : Outcome
 
-        /** TCP couldn't even establish. [kind] gives the specific
-         *  reason for downstream classification. */
+        /** The transport never came up. [kind] is what the socket layer said. */
         data class Failed(val kind: Kind, val cause: Throwable) : Outcome {
             enum class Kind {
-                /** `UnknownHostException` — DNS / nodename resolution failed. */
+                /** `UnknownHostException` — the name did not resolve. */
                 DnsFailed,
-                /** `SocketTimeoutException` on connect — packets dropped silently. */
+
+                /** `SocketTimeoutException` — packets went nowhere, silently. */
                 Timeout,
-                /** `ConnectException` — TCP RST received, port actively closed. */
+
+                /** `ConnectException` — a reset came back; the port is closed
+                 *  or something is refusing us on purpose. */
                 Refused,
-                /** `NoRouteToHostException` — local routing table can't reach. */
+
+                /** `NoRouteToHostException` — the network cannot get there. */
                 NoRoute,
-                /** Everything else — wrap with the exception's class name. */
+
+                /** Anything else; the exception itself carries the detail. */
                 Other,
             }
         }
-    }
-
-    suspend fun probe(host: String, port: Int, connectTimeoutMs: Int = 3000, bannerTimeoutMs: Int = 1000): Outcome =
-        withContext(Dispatchers.IO) {
-            val tag = "SshAi-TcpProbe"
-            android.util.Log.d(tag, "probe $host:$port (connect=${connectTimeoutMs}ms banner=${bannerTimeoutMs}ms)")
-            val t0 = System.currentTimeMillis()
-            val socket = Socket()
-            try {
-                socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
-                val openMs = System.currentTimeMillis() - t0
-                android.util.Log.d(tag, "  ✓ TCP open in ${openMs}ms")
-                // Send OUR identification string BEFORE reading the banner.
-                // A connect that reads sshd's banner and closes without ever
-                // identifying is logged as "Did not receive identification
-                // string from <IP>" — a line fail2ban's ddos/aggressive modes
-                // BAN on, and this probe was the app's only source of it (the
-                // user's own fail2ban kept banning the phone). With an ident
-                // sent, the close is an ordinary preauth disconnect. RFC 4253
-                // allows the client to send its ident first, so this is safe
-                // against non-SSH ports too (they ignore or reset — both
-                // already-handled outcomes).
-                SilentlyTry.fired(tag, "send probe ident") {
-                    socket.getOutputStream().apply {
-                        write("SSH-2.0-ConchProbe\r\n".toByteArray(Charsets.US_ASCII))
-                        flush()
-                    }
-                }
-                // Banner read — best-effort, capped at 16 bytes / bannerTimeoutMs.
-                val banner: ByteArray? = readBanner(socket, bannerTimeoutMs)
-                android.util.Log.d(
-                    tag,
-                    "  banner=${if (banner == null) "null/silent" else "${banner.size}B (${describeBytes(banner)})"}"
-                )
-                Outcome.Ok(banner)
-            } catch (e: java.net.UnknownHostException) {
-                android.util.Log.w(tag, "  ✗ DNS in ${System.currentTimeMillis() - t0}ms: ${e.message}")
-                Outcome.Failed(Outcome.Failed.Kind.DnsFailed, e)
-            } catch (e: java.net.SocketTimeoutException) {
-                android.util.Log.w(tag, "  ✗ timeout in ${System.currentTimeMillis() - t0}ms")
-                Outcome.Failed(Outcome.Failed.Kind.Timeout, e)
-            } catch (e: java.net.ConnectException) {
-                android.util.Log.w(tag, "  ✗ refused in ${System.currentTimeMillis() - t0}ms: ${e.message}")
-                Outcome.Failed(Outcome.Failed.Kind.Refused, e)
-            } catch (e: java.net.NoRouteToHostException) {
-                android.util.Log.w(tag, "  ✗ no route in ${System.currentTimeMillis() - t0}ms: ${e.message}")
-                Outcome.Failed(Outcome.Failed.Kind.NoRoute, e)
-            } catch (e: Throwable) {
-                android.util.Log.w(tag, "  ✗ ${e.javaClass.simpleName} in ${System.currentTimeMillis() - t0}ms: ${e.message}")
-                Outcome.Failed(Outcome.Failed.Kind.Other, e)
-            } finally {
-                SilentlyTry.fired("SshAi-TcpProbe", "close probe socket") { socket.close() }
-            }
-        }
-
-    private fun readBanner(socket: Socket, timeoutMs: Int): ByteArray? {
-        return try {
-            socket.soTimeout = timeoutMs
-            val input = socket.getInputStream()
-            val buf = ByteArray(16)
-            var read = 0
-            while (read < buf.size) {
-                val n = input.read(buf, read, buf.size - read)
-                if (n <= 0) break
-                read += n
-                // Stop early on newline — SSH banners end in \n; an early
-                // bail keeps the worst case fast.
-                if (buf.copyOf(read).any { it == '\n'.code.toByte() }) break
-            }
-            if (read == 0) null else buf.copyOf(read)
-        } catch (_: java.net.SocketTimeoutException) {
-            null
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    private fun describeBytes(bytes: ByteArray): String {
-        val printable = bytes.takeWhile { it in 0x20.toByte()..0x7E.toByte() || it == '\r'.code.toByte() || it == '\n'.code.toByte() }
-        if (printable.size >= 4) {
-            return printable.toByteArray().decodeToString().trim().take(12)
-        }
-        return bytes.take(4).joinToString(" ") { "%02x".format(it) }
     }
 }

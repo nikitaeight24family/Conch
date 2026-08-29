@@ -206,9 +206,14 @@ private val OFL_1_1 = OssLicense(
 private val UBUNTU_FONT = OssLicense(
     "Ubuntu Font Licence 1.0", "https://ubuntu.com/legal/font-licence", "UbuntuFontLicense-1.0.txt",
 )
+private val CC0_1_0 = OssLicense(
+    "CC0 1.0 Universal (public domain)",
+    "https://creativecommons.org/publicdomain/zero/1.0/",
+    "CC0-1.0.txt",
+)
 
 /** Render order — keeps code libraries first, then bundled fonts. */
-private val licenseOrder = listOf(APACHE_2_0, MIT, BOUNCY_CASTLE, OFL_1_1, UBUNTU_FONT)
+private val licenseOrder = listOf(APACHE_2_0, MIT, BOUNCY_CASTLE, CC0_1_0, OFL_1_1, UBUNTU_FONT)
 
 private data class OssComponent(
     val name: String,
@@ -237,12 +242,24 @@ private val components = listOf(
     OssComponent("Multiplatform Markdown Renderer", "© Mike Penz", "0.27.0", APACHE_2_0),
     OssComponent("sshj", "© sshj contributors (Jeroen van Erp et al.)", "0.39.0", APACHE_2_0),
     OssComponent("YubiKit for Android (android, fido)", "© Yubico AB", "2.7.0", APACHE_2_0),
+    OssComponent("Gson", "© Google LLC", null, APACHE_2_0),
+    OssComponent("Okio", "© Square, Inc.", null, APACHE_2_0),
+    OssComponent("asn-one", "© Jeroen van Erp — ASN.1 parsing, via sshj", null, APACHE_2_0),
+    OssComponent("Highlights", "© SnipMe — syntax highlighting, via the markdown renderer", null, APACHE_2_0),
+    OssComponent("JSpecify", "© The JSpecify Authors — nullness annotations", null, APACHE_2_0),
+    OssComponent("AutoValue annotations", "© Google LLC", null, APACHE_2_0),
     // ── MIT License ──
-    OssComponent("Shizuku API (api, provider)", "© 2021 RikkaW", "13.1.5", MIT),
+    OssComponent("SLF4J API", "© QOS.ch Sarl — logging facade, via sshj", null, MIT),
     // ── Bouncy Castle License ──
     OssComponent(
-        "Bouncy Castle (bcprov-jdk18on, bcpkix-jdk18on)",
+        "Bouncy Castle (bcprov-jdk18on, bcpkix-jdk18on, bctls-jdk18on, bcutil-jdk18on)",
         "© The Legion of the Bouncy Castle Inc.", "1.81", BOUNCY_CASTLE,
+    ),
+    // ── CC0 1.0 (public domain) ──
+    OssComponent(
+        "EdDSA-Java",
+        "© str4d and contributors — Ed25519 group arithmetic, used for ADB pairing",
+        "0.3.0", CC0_1_0,
     ),
     // ── SIL Open Font License 1.1 (bundled coding fonts) ──
     OssComponent("JetBrains Mono", "© The JetBrains Mono Project Authors", null, OFL_1_1),

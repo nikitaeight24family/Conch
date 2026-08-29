@@ -520,7 +520,18 @@ internal fun ServerAgentPanel(
                 // (user, 2026-07-05).
                 val loginNow = vm.loginRequest.collectAsState().value
                 val usageBriefs = vm.usageBrief.collectAsState().value
-                Agent.entries.forEach { agent ->
+                // Three names carry this app; the other seven are a menu the
+                // owner asked to fold away. Ten rows turned the picker into a
+                // list to scroll past on the way to the one agent you
+                // actually use.
+                val primary = listOf(Agent.CLAUDE, Agent.CODEX, Agent.GEMINI)
+                val rest = Agent.entries.filterNot { it in primary }
+                var moreExpanded by rememberSaveable(vm.serverId) { mutableStateOf(false) }
+                val readyInRest = rest.count { a ->
+                    statuses?.get(a)?.let { it.installed && it.loggedIn } == true
+                }
+                val shown = if (moreExpanded) primary + rest else primary
+                shown.forEach { agent ->
                     val s = statuses?.get(agent)
                     // A browse panel with no live transport is not checking
                     // anything and never will by itself — «checking…» there is
@@ -547,6 +558,32 @@ internal fun ServerAgentPanel(
                         onLogin = { vm.startLogin(agent) },
                         onUseApiKey = { vm.switchToApiKey(agent) },
                         onLongClick = { vm.openMethodSheet(agent) },
+                    )
+                }
+                // The fold. Collapsed it names how many more the app can drive
+                // here; if any of them is already installed AND logged in on this
+                // server, it says so — burying a working agent behind a silent
+                // toggle would be the picker lying by omission.
+                if (rest.isNotEmpty()) {
+                    val label = if (moreExpanded) {
+                        "[ less ]"
+                    } else {
+                        "[ more · ${rest.size}" +
+                            (if (readyInRest > 0) " · $readyInRest ready" else "") + " ]"
+                    }
+                    Text(
+                        label,
+                        color = if (readyInRest > 0 && !moreExpanded) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { moreExpanded = !moreExpanded }
+                            .padding(horizontal = 20.dp, vertical = 10.dp),
                     )
                 }
             }

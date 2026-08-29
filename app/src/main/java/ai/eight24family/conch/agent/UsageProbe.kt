@@ -213,6 +213,22 @@ data class UsageReport(
     }
 }
 
+/**
+ * May a usage reading stamped [incomingAt] replace the one stamped [currentAt]?
+ *
+ * A reading with NO stamp was fetched live, just now, by construction — so it
+ * outranks every stamped one and ties with another live one (a later live
+ * reading refines an earlier one). A stamped reading comes from a store that is
+ * trusted up to an hour old, and may only replace something at least as old.
+ *
+ * Without this rule the bar walked backwards every cycle: the refresh ladder
+ * paints from several sources in turn, and the CLI's persisted state landed
+ * between two live readings, so the same window rendered 87 → 86 → 87 → 86 on a
+ * loop.
+ */
+internal fun usageReadingSupersedes(currentAt: Long?, incomingAt: Long?): Boolean =
+    (incomingAt ?: Long.MAX_VALUE) >= (currentAt ?: Long.MAX_VALUE)
+
 /** [UsageReport.barPick] result: the window to draw, plus whether it has to be
  *  NAMED because it is not the working window the bar normally rests on. */
 data class UsageBarPick(val window: UsageWindow, val escalated: Boolean)

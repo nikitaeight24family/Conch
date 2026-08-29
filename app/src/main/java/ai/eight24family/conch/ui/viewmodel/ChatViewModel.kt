@@ -46,6 +46,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Optional remote (CLI-managed) session id to attach via `--resume`. */
     private val initialResumeId: String? = savedStateHandle.get<String>("resume")?.takeIf { it.isNotBlank() }
 
+    /**
+     * Was this chat OPENED on an existing session, or started empty?
+     *
+     * ⚠ Not the same question as "is resumeId null". A brand-new chat is handed
+     * an id the moment the CLI announces one, so by the time the title strip
+     * renders, resumeId is set on a session that has nothing to fetch — and the
+     * strip sat on "// loading…" over an empty new chat. Only a chat opened
+     * FROM the session list has a transcript in flight.
+     */
+    val openedAsResume: Boolean = initialResumeId != null
+
     /** Optional path to the saved session file on the server, used to replay history. */
     private val initialResumePath: String? = savedStateHandle.get<String>("path")?.takeIf { it.isNotBlank() }
 
@@ -584,7 +595,41 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
 
     private val _messagesBySession = MutableStateFlow<Map<String, List<AgentMessage>>>(emptyMap())
-    val messages: StateFlow<List<AgentMessage>> = combine(_localSessionId, _messagesBySession) { id, byId ->
+
+    /**
+     * The phone is being connected RIGHT NOW, before any of it has reached the
+     * transcript.
+     *
+     * ⚠ THIS IS WHY THERE IS NO DIALOG. Connecting takes two round trips — a TLS
+     * handshake to this phone, an SSH probe of the server — and only then do the
+     * instructions queue up and go. A modal over the chat announced all that as
+     * an event; it is not an event, it is a wait. One row, in the place the
+     * answer will appear, replaced in place by "phone connected". Nothing else
+     * moves.
+     */
+    private val _bridgeConnecting = MutableStateFlow(false)
+
+    /**
+     * Why the phone could not be reached, as ONE line for the chat.
+     *
+     * ⛔ THIS REPLACES A SCREEN JUMP. Tapping → Phone used to throw the user out
+     * of his conversation and into Settings whenever a probe came back negative.
+     * A probe can be wrong — mDNS discovery is asynchronous and a cold first look
+     * misses it — so he was teleported away from his chat and greeted by a page
+     * reading "Ready ✓" (owner, 2026-08-29). And even when the probe is right,
+     * being moved is a heavy answer to "try to connect".
+     *
+     * It says what happened, in the chat, where he asked.
+     */
+    private val _bridgeUnreachable = MutableStateFlow<String?>(null)
+
+    /** Raw-list size when the handshake began, so an OLD prompt from an earlier
+     *  handshake in this same chat cannot end this one before it starts. */
+    @Volatile private var bridgeHandshakeFrom: Int = Int.MAX_VALUE
+
+    val messages: StateFlow<List<AgentMessage>> = combine(
+        _localSessionId, _messagesBySession, _bridgeConnecting, _bridgeUnreachable,
+    ) { id, byId, connecting, unreachable ->
         val raw = if (id == null) emptyList() else byId[id] ?: emptyList()
         // Drop Claude Code's internal "No response requested." no-op marker — it's
         // written after an interrupt or a tool-only / no-op turn and is NOT a real
@@ -646,7 +691,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val shown = hideBridgeHandshake(deNoised)
         // Pure reorder of the one header row; nothing else moves.
         val wi = shown.indexOfFirst { it is AgentMessage.System && it.subtype == "welcome" }
-        if (wi > 0) listOf(shown[wi]) + shown.filterIndexed { i, _ -> i != wi } else shown
+        val ordered = if (wi > 0) listOf(shown[wi]) + shown.filterIndexed { i, _ -> i != wi } else shown
+        // Bridges the gap between the tap and the first row the handshake itself
+        // writes. Suppressed the moment that row exists, so the two can never
+        // both be on screen — the row is replaced, never stacked.
+        val tail = ordered.lastOrNull()
+        val alreadyShowing = tail is AgentMessage.System && tail.subtype.startsWith("bridge_")
+        when {
+            connecting && !alreadyShowing ->
+                ordered + AgentMessage.System(id = "bridge-connecting-live", subtype = "bridge_connecting", raw = "")
+            unreachable != null ->
+                ordered + AgentMessage.System(id = "bridge-unreachable", subtype = "bridge_unreachable", raw = unreachable)
+            else -> ordered
+        }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
@@ -789,79 +846,8 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
 
-    /** Phone-bridge plumbing is invisible: the WHOLE handshake turn — the injected
-     * prompt, the `conch-bridge ping` Bash call, the `pong` result, the agent's task
-     * line — is hidden; only a single clean "phone connected" row remains once the
-     * ready token lands. Range filter: drop everything from the (hidden) handshake
-     * prompt up to & including the ready token, replacing the token with the clean
-     * row. While the handshake is still in flight (no token yet), hide it entirely —
-     * nothing shows until the phone confirms. Filters at DISPLAY time, so it holds
-     * across reconnect/reload regardless of stream-vs-file sourcing. */
-    private fun hideBridgeHandshake(msgs: List<AgentMessage>): List<AgentMessage> {
-        if (msgs.isEmpty()) return msgs
-        // ⛔ EVERY handshake, not the first one.
-        //
-        // This used to be `indexOfFirst` + the first ready token after it: ONE
-        // block collapsed, and any later handshake in the same chat was rendered
-        // raw. Seen on the user's screen (2026-08-27): the chat showed a 1.5 KB
-        // wall of English setup instructions as if HE had typed it, twice, in a
-        // session whose first handshake had already been collapsed the day
-        // before. The prompt is plumbing — it is never the user's message.
-        val out = ArrayList<AgentMessage>(msgs.size)
-        var i = 0
-        while (i < msgs.size) {
-            val m = msgs[i]
-            val isPrompt = m is AgentMessage.UserText &&
-                m.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)
-            if (!isPrompt) {
-                out += m
-                i++
-                continue
-            }
-            // Find this handshake's ready token — but never look past the START
-            // of the next handshake, or a failed block would swallow everything
-            // up to the next attempt (a day of conversation, in this session).
-            var tokenIdx = -1
-            var j = i + 1
-            while (j < msgs.size) {
-                val n = msgs[j]
-                if (n is AgentMessage.UserText &&
-                    n.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)
-                ) break
-                if (n is AgentMessage.AssistantText && isBridgeReadyToken(n.text)) {
-                    tokenIdx = j
-                    break
-                }
-                j++
-            }
-            if (tokenIdx < 0) {
-                // No token: the agent connected the phone and just KEPT WORKING,
-                // or the handshake failed. CRITICAL: do NOT hide the rest of the
-                // conversation. Hide only the PROMPT itself; its ping rows and
-                // the agent's plain-language failure stay, and they are the
-                // useful part.
-                //
-                // Which row stands in for the prompt: if the agent has already
-                // said something inside this block the attempt is OVER, so the
-                // quiet "couldn't connect" row is the truth; if it hasn't, the
-                // handshake is still in flight. Both rows already exist — the
-                // prompt must not just silently vanish and leave a spinner with
-                // no cause.
-                val answered = (i + 1 until j).any { msgs[it] is AgentMessage.AssistantText }
-                out += AgentMessage.System(
-                    id = m.id,
-                    subtype = if (answered) "bridge_failed" else "bridge_connecting",
-                    raw = "",
-                )
-                i++
-                continue
-            }
-            // Clean handshake: collapse prompt → ping/pong → token into one row.
-            out += AgentMessage.System(id = msgs[tokenIdx].id, subtype = "bridge_connected", raw = "")
-            i = tokenIdx + 1
-        }
-        return out
-    }
+    private fun hideBridgeHandshake(msgs: List<AgentMessage>): List<AgentMessage> =
+        collapseBridgeHandshake(msgs, BRIDGE_HOWTO_MARKER, BRIDGE_READY_TOKEN)
 
     private fun isBridgeReadyToken(text: String): Boolean {
         val body = text.trim().lines().filter { it.isNotBlank() }
@@ -1077,17 +1063,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         skTouchCoord.markSkOpDone()
     }
 
-    // ──────── Phone bridge (Shizuku) — connect THIS chat's session ────────
+    // ──────── Phone bridge — connect THIS chat's session ────────
     // Paperclip → "Connect phone to server". The PHONE connects to a SESSION,
     // not a server: a wired session shows a small phone glyph in the sessions
     // list. Explicit + per-session — we NEVER write the bridge uninvited.
     //
-    // Flow (Shizuku must be set up on the phone first — else bounce to Settings):
+    // Flow (the phone must be paired first — else bounce to Settings):
     //   • bridge NOT on the server → install flow (Confirm dialog → install).
     //   • bridge already installed → NO dialog: just drop the how-to prompt into
     //     the chat; this session now "has the phone".
     //   • installed but OUTDATED   → same as installed, PLUS a tiny "update
     //     available in Server settings" notice (we never force-update from chat).
+    // The tap's own feedback is NOT here — it is a row in the chat, see
+    // [_bridgeConnecting]. A dialog for it was tried and removed: a wait is not
+    // an event, and the answer belongs where the answer will be.
     enum class BridgeStep { None, NeedSettings, Confirm, Installing, Done, Failed }
     private val _bridgeStep = MutableStateFlow(BridgeStep.None)
     val bridgeStep: StateFlow<BridgeStep> = _bridgeStep.asStateFlow()
@@ -1097,8 +1086,21 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val bridgeLog: StateFlow<String> = _bridgeLog.asStateFlow()
     /** "vX → vY" when the server's bridge is older than the one this app ships;
      *  null otherwise. Drives the tiny "update in Server settings" banner. */
-    private val _bridgeUpdateNotice = MutableStateFlow<String?>(null)
-    val bridgeUpdateNotice: StateFlow<String?> = _bridgeUpdateNotice.asStateFlow()
+    /**
+     * What the bridge-version banner should say — and whether anything is left
+     * for the user to DO about it.
+     *
+     * ⚠ It used to be a bare string that the banner always wrapped in "update it
+     * in Server settings". But the app UPDATES THE BRIDGE ITSELF a few lines
+     * below, so the successful case rendered as "⬆ Bridge update available
+     * (bridge updated v6 → v8) — update it in Server settings": an instruction to
+     * go and do a thing that had already been done (owner, 2026-08-29). The flag
+     * is what keeps the banner's words tied to reality, and the failed case is
+     * the only one that gets a button.
+     */
+    data class BridgeNotice(val text: String, val failed: Boolean)
+    private val _bridgeUpdateNotice = MutableStateFlow<BridgeNotice?>(null)
+    val bridgeUpdateNotice: StateFlow<BridgeNotice?> = _bridgeUpdateNotice.asStateFlow()
     /** Non-null when a send was refused because a staged attachment never
      *  uploaded. Drives the one-line banner above the prompt bar.
      *
@@ -1115,11 +1117,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val bridgeHostWarning: StateFlow<String?> = _bridgeHostWarning.asStateFlow()
 
     /**
-     * Non-null when a send into a PHONE-WIRED chat was refused because Shizuku
-     * cannot execute anything on this phone right now. Drives a blocking dialog
-     * with a jump to Shizuku.
+     * Non-null when a send into a PHONE-WIRED chat was refused because nothing
+     * on this phone can execute a command right now. Drives a blocking dialog
+     * with the one action that fixes it.
      *
-     * ⛔ WHY THE MESSAGE MUST NOT GO TO THE MODEL. When Shizuku dies — ColorOS
+     * ⛔ WHY THE MESSAGE MUST NOT GO TO THE MODEL. When the phone's shell is
+     * gone — the toggle reset by a reboot, the connection dropped — ColorOS
      * kills its service in the background — nothing tells the agent. It has the
      * bridge how-to in its context, believes the phone is attached, and spends
      * the whole turn running `conch-bridge` calls that come back as errors it
@@ -1127,117 +1130,125 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * answers nothing. The user is the only one who can fix it, so the user is
      * who gets told — before the send, not after a wasted turn.
      */
-    private val _shizukuBlock =
-        MutableStateFlow<ai.eight24family.conch.diagnostics.ShizukuStage?>(null)
-    val shizukuBlock: StateFlow<ai.eight24family.conch.diagnostics.ShizukuStage?> =
-        _shizukuBlock.asStateFlow()
+    private val _phoneShellBlock =
+        MutableStateFlow<ai.eight24family.conch.adb.LocalAdbShell.Readiness?>(null)
+    val phoneShellBlock: StateFlow<ai.eight24family.conch.adb.LocalAdbShell.Readiness?> =
+        _phoneShellBlock.asStateFlow()
 
     /** The refused send, held verbatim so "Send anyway" (and a fixed-then-retry)
      *  never costs the user their typed message. */
-    private var shizukuHeldText: String? = null
-    private var shizukuHeldAllowSlash: Boolean = true
+    private var phoneHeldText: String? = null
+    private var phoneHeldAllowSlash: Boolean = true
 
     /**
      * Hand the refused message back so the caller can put it in the composer.
      * Cancel must not be the one path that eats a message — the composer was
      * already cleared when the send was attempted.
      */
-    fun takeHeldShizukuText(): String? {
-        val t = shizukuHeldText
-        shizukuHeldText = null
+    fun takeHeldPhoneText(): String? {
+        val t = phoneHeldText
+        phoneHeldText = null
         return t
     }
 
-    fun dismissShizukuBlock() {
-        _shizukuBlock.value = null
-        shizukuHeldText = null
+    fun dismissPhoneShellBlock() {
+        _phoneShellBlock.value = null
+        phoneHeldText = null
     }
 
     /** The question may have nothing to do with the phone — let it through. */
-    fun sendDespiteShizuku() {
-        val t = shizukuHeldText
-        val slash = shizukuHeldAllowSlash
-        _shizukuBlock.value = null
-        shizukuHeldText = null
-        if (!t.isNullOrBlank()) send(t, allowSlash = slash, ignoreShizuku = true)
+    fun sendDespitePhoneShell() {
+        val t = phoneHeldText
+        val slash = phoneHeldAllowSlash
+        _phoneShellBlock.value = null
+        phoneHeldText = null
+        if (!t.isNullOrBlank()) send(t, allowSlash = slash, ignorePhoneShell = true)
     }
 
     /**
-     * Re-read Shizuku after the user has been to the Shizuku app (returning from
-     * it fires no binder event when they changed nothing) and, if it now works,
-     * deliver the held message. Returns the live stage so the dialog can update
-     * itself instead of guessing.
+     * Ask again — properly this time — and deliver the held message if the
+     * phone can now run commands.
+     *
+     * The send-path gate reads only the cheap "is a session open" flag, because
+     * it must not block on a network probe. This one does the real work: it will
+     * OPEN a connection if wireless debugging has since been armed, which is
+     * exactly the case the user is standing in front of the dialog fixing.
+     * Returns the live state so the dialog updates instead of guessing.
      */
-    fun recheckShizukuAndMaybeSend(): ai.eight24family.conch.diagnostics.ShizukuStage {
-        val stage = ai.eight24family.conch.diagnostics.shizukuStage(
-            ai.eight24family.conch.di.ServiceLocator.appContext,
-        )
-        ai.eight24family.conch.diagnostics.ShizukuWatch.refresh()
-        if (stage.isReady) {
-            val t = shizukuHeldText
-            val slash = shizukuHeldAllowSlash
-            _shizukuBlock.value = null
-            shizukuHeldText = null
-            if (!t.isNullOrBlank()) send(t, allowSlash = slash, ignoreShizuku = true)
+    suspend fun recheckPhoneShellAndMaybeSend(): ai.eight24family.conch.adb.LocalAdbShell.Readiness {
+        val state = ai.eight24family.conch.adb.LocalAdbShell.readiness()
+        if (state == ai.eight24family.conch.adb.LocalAdbShell.Readiness.READY) {
+            val t = phoneHeldText
+            val slash = phoneHeldAllowSlash
+            _phoneShellBlock.value = null
+            phoneHeldText = null
+            if (!t.isNullOrBlank()) send(t, allowSlash = slash, ignorePhoneShell = true)
         } else {
-            _shizukuBlock.value = stage
+            _phoneShellBlock.value = state
         }
-        return stage
+        return state
     }
 
     /**
-     * Would this send be refused because Shizuku can't run anything? Sets the
+     * Would this send be refused because nothing can run on the phone? Sets the
      * block state and HOLDS the text when so — [send] is the single funnel for
      * every path (composer, keyboard action, queue drain, programmatic), so the
      * held copy is the only thing standing between the user and a swallowed
-     * message. It comes back either by itself (Shizuku fixed → auto-delivered),
+     * message. It comes back either by itself (the phone reachable again →
+     * auto-delivered),
      * on "Send anyway", or into the composer on Cancel via
-     * [takeHeldShizukuText].
+     * [takeHeldPhoneText].
      *
-     * Sampled live, not from [ShizukuWatch]: a second-stale value here means a
+     * Read from the held session, never probed here: a network round trip on
+     * the send path would be felt on every message, and a stale value means a
      * message goes to the model about a phone that isn't there. Slash commands
      * are app-local and never touch the phone. `bridgePresence != NONE` is
      * exactly "this chat was wired to a phone" — an unwired chat is none of this
      * gate's business.
      */
-    private fun blockedByShizuku(text: String, allowSlash: Boolean = true): Boolean {
-        if (allowSlash && text.trimStart().startsWith("/")) return false
-        if (bridgePresence.value == ai.eight24family.conch.diagnostics.BridgePresence.NONE) return false
-        val stage = ai.eight24family.conch.diagnostics.shizukuStage(
-            ai.eight24family.conch.di.ServiceLocator.appContext,
-        )
-        if (stage.isReady) return false
-        android.util.Log.w(
-            "SshAi-Send",
-            "refused send into phone-wired chat: shizuku=$stage (message held, user prompted)",
-        )
-        shizukuHeldText = text
-        shizukuHeldAllowSlash = allowSlash
-        _shizukuBlock.value = stage
-        ai.eight24family.conch.diagnostics.ShizukuWatch.refresh()
-        return true
-    }
-
-    /** Ask Shizuku for the grant right here — the NotGranted case is one tap and
-     *  does not need a trip to another app. */
-    fun grantShizukuAndMaybeSend() {
-        viewModelScope.launch {
-            ai.eight24family.conch.diagnostics.ShizukuShell.requestPermission()
-            recheckShizukuAndMaybeSend()
-        }
-    }
+    /**
+     * ⛔ REMOVED, AND IT MUST NOT COME BACK AS A BLOCK.
+     *
+     * This refused to send a message whenever the chat was wired to a phone and
+     * no adb session was open. It was built for a real problem — the agent
+     * believing it has a phone and spending a whole turn failing `conch-bridge`
+     * calls (2026-08-27) — but it fixed that by standing between the owner and
+     * his agent.
+     *
+     * On mobile data it is not even fixable. Android will not run wireless
+     * debugging without a Wi-Fi association: setting `adb_wifi_enabled=1` with
+     * Wi-Fi off is reverted by the framework within milliseconds — measured on
+     * the owner's phone, 2026-08-29, with adbd logging "Waiting for
+     * persist.adb.tls_server.enable=1" right after. So the dialog demanded a
+     * thing that could not be done, on the network he was actually using.
+     *
+     * The agent runs on the SERVER. The phone is an accessory to it, and an
+     * unreachable accessory is not a reason to refuse work. What carries the
+     * truth now: the dim phone glyph, and `conch-bridge`, which answers the
+     * agent honestly when the phone cannot be reached.
+     */
+    private fun blockedByPhoneShell(
+        @Suppress("UNUSED_PARAMETER") text: String,
+        @Suppress("UNUSED_PARAMETER") allowSlash: Boolean = true,
+    ): Boolean = false
     /** 2s heartbeat so [bridgePresence] re-evaluates [BridgeHealth.isAlive] over
      *  time and dims once the bridge poller stops (app backgrounded / SSH down). */
+    // ⛔ NO LIVENESS PROBE HERE. It used to run a command on the held adb session
+    // every two seconds and drop the session when that command did not come back.
+    // An open loopback socket survives Android turning wireless debugging off —
+    // the listener is only needed for a NEW connection — so that probe was the one
+    // thing standing between the owner and a phone that worked all day on mobile
+    // data. It killed connections that were fine, permanently, because nothing
+    // could reopen them (2026-08-29).
     private val bridgeHealthTicker: kotlinx.coroutines.flow.Flow<Unit> =
         kotlinx.coroutines.flow.flow { while (true) { emit(Unit); kotlinx.coroutines.delay(2_000) } }
 
     /** Tri-state 📱 for the chat TITLE strip (NONE/IDLE/LIVE) — same glyph and
-     * logic the session LISTS use, so opening a wired chat shows the phone right
-     * where the list did. Two honest layers (PHONE-GLYPH-SHIZUKU-2): wired → at
-     * least IDLE (dim) and stays even when the phone is offline; LIVE (colored)
-     * only while the channel polls (BridgeHealth) AND Shizuku is granted RIGHT NOW.
-     * `connected` is kept as a recompute trigger so the glyph flips promptly on
-     * connect/disconnect. */
+     * logic the session LISTS use, so opening a wired chat shows the phone right where the
+     * list did. Two honest layers: wired → at least IDLE (dim) and stays even when the phone
+     * is offline; LIVE (colored) only while the channel polls (BridgeHealth) AND a shell
+     * connection is open RIGHT NOW. `connected` is kept as a recompute trigger so the glyph
+     * flips promptly on connect/disconnect. */
     val bridgePresence: StateFlow<ai.eight24family.conch.diagnostics.BridgePresence> = combine(
         connected,
         _resumeId,
@@ -1251,18 +1262,120 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         ai.eight24family.conch.diagnostics.BridgePresence.NONE,
     )
 
-    /** Paperclip → "Connect phone to server". Shizuku-gated, then branches on
-     *  whether the bridge is already on the server (see the section comment). */
+    /**
+     * Note that THIS chat is the one sending the user off to pair, so the
+     * pairing can bring them back here (see PhoneBridgeReturn).
+     *
+     * The route recorded is only the fallback for a back stack that no longer
+     * has this chat in it; normally the return pops back to the live entry and
+     * this exact ViewModel, transcript and all.
+     */
+    fun rememberBridgeReturn() {
+        val agent = _currentAgent.value
+        ai.eight24family.conch.ui.navigation.PhoneBridgeReturn.rememberOrigin(
+            serverId = serverId,
+            route = ai.eight24family.conch.ui.navigation.Routes.chat(
+                serverId = serverId,
+                agent = agent,
+                resumeId = _resumeId.value,
+            ),
+        )
+    }
+
+    /**
+     * Continue a connect that was interrupted by the trip to Settings.
+     *
+     * Guarded on the serverId: a return belongs to the chat that started it, and
+     * every other chat must ignore it — several are alive at once.
+     */
+    fun resumeBridgeConnectIfThisChatAskedFor() {
+        val req = ai.eight24family.conch.ui.navigation.PhoneBridgeReturn.pending.value ?: return
+        // Wait until the nav host has actually put this chat on screen; acting
+        // earlier would connect a chat the user cannot see.
+        if (!req.navigated || req.serverId != serverId) return
+        ai.eight24family.conch.ui.navigation.PhoneBridgeReturn.clear()
+        android.util.Log.i("SshAi-Bridge", "phone paired while this chat was waiting — continuing the connect")
+        connectPhoneToServer()
+    }
+
+    private fun beginBridgeConnecting() {
+        bridgeHandshakeFrom = _localSessionId.value?.let { _messagesBySession.value[it]?.size } ?: 0
+        _bridgeConnecting.value = true
+    }
+
+    private fun endBridgeConnecting() {
+        _bridgeConnecting.value = false
+        bridgeHandshakeFrom = Int.MAX_VALUE
+    }
+
+    /**
+     * Stand the live row down once the handshake has written its own.
+     *
+     * Watches the RAW list, not [messages] — [messages] is computed FROM the
+     * flag, so feeding it back in would be a loop. The index guard is what stops
+     * a prompt from an earlier handshake in this same chat from ending this one.
+     */
+    private fun watchBridgeHandshake() {
+        viewModelScope.launch {
+            combine(_localSessionId, _messagesBySession) { id, byId ->
+                if (id == null) emptyList() else byId[id].orEmpty()
+            }.collect { raw ->
+                if (!_bridgeConnecting.value) return@collect
+                val landed = raw.withIndex().any { (idx, msg) ->
+                    idx >= bridgeHandshakeFrom && msg is AgentMessage.UserText &&
+                        msg.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)
+                }
+                if (landed) endBridgeConnecting()
+            }
+        }
+    }
+
+    // ⛔ STARTED HERE, NOT IN THE INIT AT THE TOP OF THIS CLASS. Kotlin runs
+    // property initialisers and init blocks in DECLARATION order, and
+    // viewModelScope.launch on Main.immediate starts the coroutine synchronously
+    // — so an init block above _messagesBySession collects a field that does not
+    // exist yet and the app dies opening any chat (crash on "new session",
+    // 2026-08-29). This block sits below every flow the watcher touches.
+    init { watchBridgeHandshake() }
+
+    /** Paperclip → "Connect phone to server". Gated on this phone being
+     *  reachable at all, then branches on whether the bridge is already on the
+     *  server (see the section comment). */
     fun connectPhoneToServer() {
         _bridgeLog.value = ""
-        if (!ai.eight24family.conch.diagnostics.ShizukuShell.available()) {
-            _bridgeStep.value = BridgeStep.NeedSettings
-            return
-        }
+        // BEFORE the coroutine, deliberately: the row has to be on screen in the
+        // frame after the tap, not after two round trips.
+        beginBridgeConnecting()
         viewModelScope.launch {
+            // ⚠ KEEP TRYING FOR A FEW SECONDS, do not judge on one probe.
+            // Discovery is mDNS: a cold first look misses, and right after a
+            // pairing adbd has not started advertising its connect service yet —
+            // so a single negative answered "not set up" to a phone that was
+            // seconds away from working (owner, 2026-08-29: paired, came back to
+            // the chat, and nothing happened there at all). The chat is already
+            // showing "connecting phone" while this runs, which is the truth.
+            var reachable = false
+            val deadline = System.currentTimeMillis() + 12_000
+            while (true) {
+                reachable = ai.eight24family.conch.adb.LocalAdbShell.check(userInitiated = true)
+                if (reachable || System.currentTimeMillis() > deadline) break
+                kotlinx.coroutines.delay(1_500)
+            }
+            if (!reachable) {
+                endBridgeConnecting()
+                // Nothing to connect to yet. Settings is where it is fixed, and
+                // being taken there is what the owner wants — removing that jump
+                // was my own idea and it was wrong (2026-08-29). What had to be
+                // fixed was the LIE behind it: readiness() called a paired phone
+                // unpaired whenever a stale mDNS record refused a connection.
+                _bridgeStep.value = BridgeStep.NeedSettings
+                return@launch
+            }
+            _bridgeUnreachable.value = null
             val status = ai.eight24family.conch.diagnostics.BridgeInstaller.status(serverId)
             if (status == null || !status.installed) {
                 // Not installed (or couldn't probe) → confirm + install.
+                endBridgeConnecting()
                 _bridgeHostWarning.value = hostRiskWarning()
                 _bridgeStep.value = BridgeStep.Confirm
                 return@launch
@@ -1288,8 +1401,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     "SshAi-BridgeInstall",
                     "auto-updated bridge on $serverId: v$cur → v$avail ok=${upd.success}",
                 )
-                _bridgeUpdateNotice.value = if (upd.success) "bridge updated v$cur → v$avail"
-                else "bridge is v$cur, this app ships v$avail — update failed"
+                _bridgeUpdateNotice.value = if (upd.success) {
+                    BridgeNotice("Bridge updated on the server — v$cur → v$avail", failed = false)
+                } else {
+                    BridgeNotice("Bridge on the server is v$cur, this app needs v$avail", failed = true)
+                }
             } else {
                 _bridgeUpdateNotice.value = null
             }
@@ -1318,6 +1434,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     fun dismissBridgeUpdateNotice() { _bridgeUpdateNotice.value = null }
 
+    /** True while the banner's own Update button is working. */
+    private val _bridgeUpdateBusy = MutableStateFlow(false)
+    val bridgeUpdateBusy: StateFlow<Boolean> = _bridgeUpdateBusy.asStateFlow()
+
+    /**
+     * Re-run the install from the banner itself.
+     *
+     * Same call the automatic path makes — our own script, idempotent write,
+     * consent already given for this host.
+     */
+    fun retryBridgeUpdate() {
+        if (_bridgeUpdateBusy.value) return
+        viewModelScope.launch {
+            _bridgeUpdateBusy.value = true
+            val avail = ai.eight24family.conch.diagnostics.BridgeInstaller.bundledVersion
+            val r = ai.eight24family.conch.diagnostics.BridgeInstaller.install(serverId)
+            _bridgeUpdateNotice.value = if (r.success) {
+                BridgeNotice("Bridge updated on the server — now v$avail", failed = false)
+            } else {
+                val why = r.log.lines().lastOrNull { it.isNotBlank() } ?: "no output"
+                BridgeNotice("Update failed: $why", failed = true)
+            }
+            _bridgeUpdateBusy.value = false
+        }
+    }
+
     /** Drop the how-to prompt into the chat and mark this session phone-wired. */
     private fun activateBridgeForThisChat() {
         // ⛔ ONCE PER CHAT. The how-to is 1.5 KB of instructions and sending it
@@ -1344,7 +1486,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             )
             _chatNotice.value =
                 "Phone bridge is already set up in this chat. If the agent can't reach the " +
-                    "phone, keep Conch in the foreground — polling pauses when it's backgrounded."
+                    "phone. It answers with the screen off too, just a little slower."
             return
         }
         // The wired flag is set later, when the bridge handshake CONFIRMS (see the
@@ -1370,23 +1512,20 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
-    /** First line of [BRIDGE_HOWTO_PROMPT] — the thing every "is this the
-     *  plumbing prompt?" check matches on. One constant so the filter and the
-     *  re-injection gate can never drift apart. */
-    private val BRIDGE_HOWTO_MARKER = "I've connected my phone to this server"
 
     private val BRIDGE_HOWTO_PROMPT = """
         I've connected my phone to this server. There's a CLI at ~/.local/bin/conch-bridge
         that runs things on my phone over this SSH link (the Conch app polls a request
-        directory ~every 2s and executes via Shizuku at adb-shell level).
+        directory ~every 2s and executes at adb-shell level).
 
         FIRST, run `conch-bridge ping`. Success prints `pong` and exits 0. If it doesn't,
         triage by EXIT CODE — do not assume the phone is dead:
           • exit 0  → connected, proceed.
           • exit 2  → timeout: Conch isn't polling. Ask me to bring the Conch app to the
-            foreground (polling pauses when it's backgrounded), then retry.
-          • exit 3  → phone got the request but reported an error (e.g. Shizuku not
-            granted). Read the `phone reported error:` text on stderr.
+            foreground — it answers with the screen off, but not while the app is
+            fully closed — then retry.
+          • exit 3  → phone got the request but reported an error (e.g. its shell
+            access is not set up). Read the `phone reported error:` text on stderr.
           • any other non-zero, especially exit 1 with little or no output → this is almost
             certainly a bug in the WRAPPER SCRIPT, not the phone. Re-run
             `bash -x ~/.local/bin/conch-bridge ping` to find the failing line.
@@ -1395,7 +1534,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
           • conch-bridge shell '<cmd>' — any adb-shell-level command (e.g. 'pm list packages',
             'dumpsys battery'). stdout → stdout; exit code + stderr come back on the bridge's
             own `[bridge] {...}` stderr line.
-          • conch-bridge logs [--lines N] [--filter GLOB] [--level V|D|I|W|E] [--tier shizuku|own]
+          • conch-bridge logs [--lines N] [--filter GLOB] [--level V|D|I|W|E] [--tier adb|own]
             — recent logcat.
           • conch-bridge screenshot — capture the screen.
           • conch-bridge ping — connectivity check (expect `pong`).
@@ -1411,11 +1550,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         ping does NOT succeed, skip the token and tell me plainly what went wrong.
     """.trimIndent()
 
-    /** The agent replies with ONLY this token once the bridge handshake succeeds
-     *  (see BRIDGE_HOWTO_PROMPT). The app hides the prompt + this reply and shows a
-     *  clean "phone connected" row + the usage-bar phone glyph instead of dumping
-     *  the scary prompt and a long connection answer into the chat. */
-    private val BRIDGE_READY_TOKEN = "CONCH_BRIDGE_READY"
 
     init {
         // Persist the phone-wired flag against THIS chat's resume id (the id the
@@ -1510,7 +1644,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val queuedAt: Long,
     )
     private val _outbox = MutableStateFlow<List<QueuedMessage>>(emptyList())
-    val queuedMessages: StateFlow<List<QueuedMessage>> = _outbox.asStateFlow()
+    /** ⚠ The injected bridge instructions are filtered OUT here. They are 1.5 KB
+     * of English setup text the user never wrote, and watching it sit in the
+     * queue and then slide into the chat is watching the app's bookkeeping. The
+     * transcript hides that same prompt; */
+    val queuedMessages: StateFlow<List<QueuedMessage>> =
+        _outbox.map { list -> list.filterNot { it.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER) } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
      * THE QUEUE IS THE ONLY PLACE AN UNSENT MESSAGE MAY LIVE, AND IT OUTLIVES
@@ -3684,9 +3824,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     fun send(
         text: String,
         allowSlash: Boolean = true,
-        /** Set by [sendDespiteShizuku] / [recheckShizukuAndMaybeSend] so the
+        /** Set by [sendDespitePhoneShell] / [recheckPhoneShellAndMaybeSend] so the
          *  gate below can't re-block the very send it just released. */
-        ignoreShizuku: Boolean = false,
+        ignorePhoneShell: Boolean = false,
     ) {
         // ⛔ EVERY TURN SAYS WHO ASKED FOR IT.
         //
@@ -3701,16 +3841,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             "send: ${text.length}B source=" +
                 (if (text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)) "APP/bridge-howto"
                 else if (text.trimStart().startsWith("/")) "USER/slash" else "USER") +
-                " agent=${_currentAgent.value} resume=${_resumeId.value} ignoreShizuku=$ignoreShizuku",
+                " agent=${_currentAgent.value} resume=${_resumeId.value} ignorePhone=$ignorePhoneShell",
         )
-        // PHONE-WIRED CHAT + DEAD SHIZUKU → the user gets a dialog, the model
-        // gets nothing. See the [shizukuBlock] doc for why this is a hard stop
+        // PHONE-WIRED CHAT + NO SHELL → the user gets a dialog, the model gets
+        // nothing. See the [phoneShellBlock] doc for why this is a hard stop
         // and not a warning row. Sampled LIVE (not from the watch flow): a
         // second-stale value here is a message sent about a phone that isn't
         // there. Slash commands are app-local and never touch the phone, so
         // they pass. `bridgePresence != NONE` is exactly "this chat was wired
         // to a phone" — an unwired chat is none of this gate's business.
-        if (!ignoreShizuku && blockedByShizuku(text, allowSlash)) return
+        if (!ignorePhoneShell && blockedByPhoneShell(text, allowSlash)) return
         claudeBlockLine.value?.let { why ->
             // Blocked run-state (no subscription / trial ended / rate limited /
             // login expired …): the turn would just fail, so refuse and say WHY
@@ -4155,6 +4295,57 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         observed?.takeIf { it.isNotBlank() } ?: picked?.takeIf { it.isNotBlank() }
     }
 
+    /** Which source last painted the usage bar, and what it said. Two sources can
+     * describe the same window and disagree, and the bar was flipping between
+     * them; this names the tier so the disagreement is visible instead of
+     * inferred. */
+    /**
+     * The ONE gate every usage reading passes through — and it refuses to go
+     * backwards in time.
+     *
+     * ⛔ WHY. The bar is painted by a LADDER of sources on every refresh (warm
+     * cache → fast probe → the CLI's own state → live curl), and the middle tier
+     * reads the CLI's persisted usage, which is trusted up to an hour old. So
+     * every cycle repainted the same window three times, and the stale tier
+     * landed in the middle of two fresh ones. Captured on the owner's phone
+     * (2026-08-29), one cycle, repeating every 8 s:
+     *
+     *     bar<-fast       5-hour · all models=87%  fetchedAt=null
+     *     bar<-cli-cache  5-hour · all models=86%  fetchedAt=1787972815324
+     *     bar<-live       5-hour · all models=87%  fetchedAt=null
+     *
+     * which is exactly.
+     *
+     * A live reading carries no stamp (null = fetched just now, by
+     * construction), so it outranks every stamped one; a stamped reading may
+     * only replace an equally-old-or-older stamp. The ladder keeps its point —
+     * a cold bar still fills from whatever answers first — but a number already
+     * on screen is never overwritten by an older one.
+     */
+    private fun publishUsage(rep: ai.eight24family.conch.agent.UsageReport?, tier: String) {
+        val current = _usage.value
+        if (rep != null && current != null &&
+            !ai.eight24family.conch.agent.usageReadingSupersedes(
+                current.fetchedAtEpochMs, rep.fetchedAtEpochMs,
+            )
+        ) {
+            ai.eight24family.conch.util.Logx.d("SshAi-Usage") {
+                "bar<-$tier REJECTED (older: ${rep.fetchedAtEpochMs} < ${current.fetchedAtEpochMs})"
+            }
+            return
+        }
+        _usage.value = rep
+        logUsageSource(tier, rep)
+    }
+
+    private fun logUsageSource(tier: String, rep: ai.eight24family.conch.agent.UsageReport?) {
+        ai.eight24family.conch.util.Logx.d("SshAi-Usage") {
+            val w = rep?.barPick()?.window
+            "bar<-$tier " + (w?.let { "${it.label}=${it.percent}%" } ?: "none") +
+                " fetchedAt=${rep?.fetchedAtEpochMs}"
+        }
+    }
+
     val usageBar: StateFlow<UsageBarState> = combine(
         _usage, costStats, cliLimitState, inForceModel, usageTicker,
     ) { report, cost, cliLimit, inForce, _ ->
@@ -4267,10 +4458,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // the bar is already there on open, not popping in seconds later.
             // AFTER the login check — a dead account's numbers must not even
             // flash.
-            UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) _usage.value = it }
+            UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) publishUsage(it, "warm") }
             // FAST: cheap source paints within a few hundred ms (Codex rollout
             // snapshot with projected resets / Claude's cached value)...
-            UsageProbe.fetch(serverId, agent, fast = true)?.let { _usage.value = it }
+            UsageProbe.fetch(serverId, agent, fast = true)?.let { publishUsage(it, "fast") }
             // Claude with a LIVE control channel: `get_usage` over the running
             // process — the CLI's own numbers, free (no extra ssh channel, no
             // curl, no token handling). Rides the same channel the turns use.
@@ -4283,7 +4474,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         // cache, but the displayed value must match it or the
                         // Fable row flaps for one refresh cycle.
                         val merged = UsageProbe.withPerModelCarryOver(serverId, agent, rep)
-                        _usage.value = merged
+                        publishUsage(merged, "control")
                         UsageProbe.remember(serverId, agent, merged)
                         return@launch
                     }
@@ -4298,7 +4489,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // The live curl below refines to the truly-current numbers.
                 UsageProbe.fetchClaudeCliCache(serverId)?.let { rep ->
                     val merged = UsageProbe.withPerModelCarryOver(serverId, agent, rep)
-                    _usage.value = merged
+                    publishUsage(merged, "cli-cache")
                     UsageProbe.remember(serverId, agent, merged)
                 }
             }
@@ -4306,7 +4497,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // to ~9s so the bar fills the moment the transport is ready; succeeds
             // on the first try in the common case (connection already warm).
             repeat(6) {
-                UsageProbe.fetch(serverId, agent, fast = false)?.let { _usage.value = it; return@launch }
+                UsageProbe.fetch(serverId, agent, fast = false)?.let {
+                    publishUsage(it, "live"); return@launch
+                }
                 kotlinx.coroutines.delay(1500)
             }
             // Every source came back empty. Two different truths hide in that:
@@ -4788,7 +4981,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // instead of leaving it frozen until the next turn.
                     launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(6_000)
-                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { _usage.value = it }
+                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { publishUsage(it, "live") }
                     }
                 }
                 wasWorking = working
@@ -4834,7 +5027,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     }
                     launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(6_000)
-                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { _usage.value = it }
+                        UsageProbe.fetch(serverId, _currentAgent.value, fast = false)?.let { publishUsage(it, "live") }
                     }
                 }
                 wasRemote = remote
@@ -5800,3 +5993,152 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
 // Top-level data classes (ChatModal, MemoryDocs, CostStats, StagedAttachment, UploadStatus)
 // and helper functions (computeCostStats) live in ChatViewModelTypes.kt.
+
+/**
+ * The phone handshake leaves ONE row in the chat. Everything the turn costs
+ * — the injected instructions, the tool call, its output, the usage line,
+ * the ready token and both turn markers — is plumbing, and plumbing is not
+ * conversation.
+ *
+ * ⚠ READ THE REAL TRANSCRIPT BEFORE CHANGING THIS. Two attempts failed by
+ * assuming an order the agent does not use. Measured, from the owner's own
+ * session file (01a04caa…, 2026-08-29):
+ *
+ *     custom_tool_call → custom_tool_call_output → token_count
+ *       → agent_message "CONCH_BRIDGE_READY" → task_complete
+ *
+ * The usage line lands BEFORE the confirmation, so treating "tokens · …" as
+ * the end of the turn cut the block short and left everything after it on
+ * screen. Only `task_complete` — "turn complete" — ends a turn. And the
+ * prompt itself can arrive LATE, after the rows it caused, so the block also
+ * has to grow BACKWARDS over what is already emitted.
+ *
+ * Two hard stops keep it off real conversation, which it must never eat (it
+ * erased a whole chat once, 2026-06-27): the turn's own end, and any real
+ * user message. Everything between them belongs to the handshake.
+ */
+/**
+ * First line of the injected bridge prompt — what every "is this the plumbing
+ * prompt?" check matches on. One constant, so the filter, the queue and the
+ * re-injection gate can never drift apart.
+ *
+ * ⛔ `const` AT FILE SCOPE, NOT A FIELD ON THE VIEWMODEL, and it must stay that
+ * way. As a private val it was declared BELOW `messages`, whose initialiser
+ * runs at construction and reads it — so it was null there. That went unnoticed
+ * while the read happened inside the class (the list is empty at construction,
+ * and the code returned before touching it); the moment the filter moved out to
+ * a function with a non-null parameter, Kotlin's null check fired first and
+ * EVERY chat crashed on open (twice in one day, 2026-08-29). A compile-time
+ * constant has no initialisation order to get wrong.
+ */
+internal const val BRIDGE_HOWTO_MARKER = "I've connected my phone to this server"
+
+/** The agent replies with ONLY this token once the handshake succeeds. The app
+ *  hides the prompt and this reply behind one clean "phone connected" row. */
+internal const val BRIDGE_READY_TOKEN = "CONCH_BRIDGE_READY"
+
+/**
+ * The phone handshake leaves ONE row in the chat.
+ *
+ * ⛔ IT WORKS ON WHOLE TURNS, and every earlier attempt failed because it did
+ * not. Scanning outwards from the injected prompt kept hitting rows that end a
+ * scan but are not conversation, so the machinery around the prompt stayed on
+ * screen. Here is the ACTUAL sequence, read from the owner's own session file
+ * (01a04cf8…, 2026-08-29) — the prompt is at 6, and note what surrounds it:
+ *
+ *     1 task_started                      ← "turn started", BEFORE the prompt
+ *     2 message developer                 ← "context · developer"
+ *     3 message user <recommended_plugins> ← a USER row that is not his
+ *     6 message user  "I've connected my phone…"   ← the marker
+ *     7 user_message  (the same thing again)
+ *     9 custom_tool_call → 10 output → 11 token_count
+ *    13 agent_message CONCH_BRIDGE_READY  → 14 the same again
+ *    16 task_complete
+ *
+ * A turn, in other words, with the prompt buried in the middle of it. So the
+ * unit is the TURN: split the list on the markers every agent emits, and a turn
+ * that contains the injected prompt or the ready token is plumbing from end to
+ * end.
+ *
+ * ⚠ REAL CONVERSATION IS STILL CARRIED OUT OF IT. Anything the user actually
+ * wrote, or the agent actually said, survives even inside a collapsed turn — it
+ * cannot be right to lose a message because it landed in the same turn as the
+ * handshake, and this filter erased a whole chat once (2026-06-27).
+ */
+internal fun collapseBridgeHandshake(
+    msgs: List<AgentMessage>,
+    marker: String,
+    readyToken: String,
+): List<AgentMessage> {
+    if (msgs.isEmpty()) return msgs
+    val out = ArrayList<AgentMessage>(msgs.size)
+    var i = 0
+    while (i < msgs.size) {
+        if (!startsATurn(msgs[i])) {
+            out += msgs[i]
+            i++
+            continue
+        }
+        // Take the whole turn: from this marker to its end, or to the row before
+        // the next turn starts, whichever comes first.
+        var j = i + 1
+        while (j < msgs.size && !endsATurn(msgs[j]) && !startsATurn(msgs[j])) j++
+        if (j < msgs.size && endsATurn(msgs[j])) j++ // the end marker belongs to it
+        val turn = msgs.subList(i, j)
+
+        val hasPrompt = turn.any { it is AgentMessage.UserText && it.text.trimStart().startsWith(marker) }
+        val hasToken = turn.any { isReadyTokenMsg(it, readyToken) }
+        if (!hasPrompt && !hasToken) {
+            out += turn
+            i = j
+            continue
+        }
+        out += AgentMessage.System(
+            id = turn.first().id,
+            subtype = when {
+                hasToken -> "bridge_connected"
+                // The turn finished and never confirmed — say so rather than
+                // spinning forever.
+                j < msgs.size || endsATurn(turn.last()) -> "bridge_failed"
+                else -> "bridge_connecting"
+            },
+            raw = "",
+        )
+        // Carry out anything that was genuinely said. Injected context blocks
+        // are not: agents wrap those in <tags> and they are nobody's message.
+        out += turn.filter { m ->
+            when (m) {
+                is AgentMessage.UserText ->
+                    !m.text.trimStart().startsWith(marker) && !m.text.trimStart().startsWith("<")
+                is AgentMessage.AssistantText -> !isReadyToken(m.text, readyToken)
+                else -> false
+            }
+        }
+        i = j
+    }
+    return out
+}
+
+/** The opening marker of a turn, however this agent words it. */
+private fun startsATurn(m: AgentMessage): Boolean =
+    m is AgentMessage.EventNote && m.label.startsWith("turn started")
+
+/** ⚠ ONLY `task_complete` ends a turn. The usage note ("tokens · …") is emitted
+ *  mid-turn, BEFORE the final message — measured; treating it as the end cut the
+ *  block short and left the rest of the turn on screen. */
+private fun endsATurn(m: AgentMessage): Boolean = when (m) {
+    is AgentMessage.TurnEnd -> true
+    is AgentMessage.EventNote -> m.label.startsWith("turn complete")
+    else -> false
+}
+
+private fun isReadyTokenMsg(m: AgentMessage, readyToken: String): Boolean =
+    m is AgentMessage.AssistantText && isReadyToken(m.text, readyToken)
+
+/** The confirmation, however the agent wrapped it: quotes, backticks and blank
+ *  lines around it are formatting, not content. */
+internal fun isReadyToken(text: String, readyToken: String): Boolean {
+    val body = text.trim().lines().filter { it.isNotBlank() }
+        .joinToString("\n").trim().trim('`', '"', ' ')
+    return body == readyToken
+}

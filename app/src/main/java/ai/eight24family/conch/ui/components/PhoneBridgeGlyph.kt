@@ -15,8 +15,8 @@ import ai.eight24family.conch.diagnostics.BridgePresence
  * The single 📱 glyph used EVERYWHERE — home list, per-server list, and the chat
  * title strip — so the surfaces can never disagree (PHONE-GLYPH-CONSISTENT-1).
  *
- * • [BridgePresence.LIVE] → COLORED (primary): bridge reachable + Shizuku live.
- * • [BridgePresence.IDLE] → DIM: was wired but offline now. •
+ * • [BridgePresence.LIVE] → COLORED (primary): bridge reachable + a shell
+ * connection open. • [BridgePresence.IDLE] → DIM: was wired but offline now. •
  * [BridgePresence.NONE] → nothing emitted (no node, no padding).
  */
 @Composable

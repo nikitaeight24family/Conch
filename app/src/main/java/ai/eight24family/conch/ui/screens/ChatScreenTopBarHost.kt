@@ -116,6 +116,12 @@ internal fun ChatTopBarHost(
         // fallback to a clear terminal state once the fetch returns empty.
         ?: when {
             resumeId == null -> "// new chat"
+            // ⚠ AN ID IS NOT A TRANSCRIPT. A new chat is handed a session id the
+            // moment the CLI announces one, so this fell straight through to "//
+            // loading…" and sat there over an empty new session with nothing
+            // being loaded at all. Only a chat opened FROM the session list is
+            // waiting on anything.
+            !vm.openedAsResume -> "// new chat"
             loadCameBackEmpty -> "// session unavailable"
             else -> "// loading…"
         }

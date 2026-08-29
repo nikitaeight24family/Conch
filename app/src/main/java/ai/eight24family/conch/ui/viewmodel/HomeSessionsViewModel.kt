@@ -453,11 +453,14 @@ class HomeSessionsViewModel : ViewModel() {
         val list = servers.value.ifEmpty { repo.observeServers().first() }
         val out = ArrayList<HomeSessionRow>()
         val usable = HashMap<String, Set<Agent>>()
-        // Privileged-capability layer for the 📱 glyph, sampled once per reload: is
-        // Shizuku's binder alive AND granted RIGHT NOW. The channel layer
+        // Privileged-capability layer for the 📱 glyph, sampled once per reload:
+        // is a shell connection open RIGHT NOW. The channel layer
         // (BridgeHealth heartbeat) is checked per-server below. Both must be live,
-        // else the glyph over-claims.
-        val shizukuOk = ai.eight24family.conch.diagnostics.ShizukuShell.available()
+        // else the glyph over-claims (channel polling fine, but no shell connection
+        // ⇒ `conch-bridge shell` returns nothing — the glyph must be dark).
+        // Sampled ONCE for the whole list: the answer cannot change between two
+        // rows of the same frame.
+        val shellOk = ai.eight24family.conch.adb.LocalAdbShell.hasLiveSession()
         for (s in list) {
             // Agents on THIS server that are installed AND logged-in — the only
             // ones a chat can be opened with. Read from the status cache (filled
@@ -550,7 +553,7 @@ class HomeSessionsViewModel : ViewModel() {
                     out += HomeSessionRow(
                         s.id, s.name, s.username, s.host, s.port, rowSess, working, unread, lastActiveMs, lastMsg,
                         phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
-                            "${s.id}:${sess.id}" in phoneBridge, s.id, shizukuOk),
+                            "${s.id}:${sess.id}" in phoneBridge, s.id, shellOk),
                         draftText = draftsByChat[sess.id],
                         codeBlocked = agentBlocked,
                         codeBadge = if (agentBlocked) agentState?.badge else null,
@@ -618,7 +621,7 @@ class HomeSessionsViewModel : ViewModel() {
                 server.id, server.name, server.username, server.host, server.port,
                 remote, working, 0, lastActiveMs, lastMsg?.takeIf { it != firstUser },
                 phoneGlyph = ai.eight24family.conch.diagnostics.bridgePresenceOf(
-                    "${info.serverId}:$id" in phoneBridge, info.serverId, shizukuOk),
+                    "${info.serverId}:$id" in phoneBridge, info.serverId, shellOk),
                 draftText = draftsByChat[id],
             )
             seen += key

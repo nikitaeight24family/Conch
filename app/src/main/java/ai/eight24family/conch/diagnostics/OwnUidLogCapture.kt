@@ -77,7 +77,7 @@ class OwnUidLogCapture : LogCaptureService {
         } else {
             // logcat doesn't natively glob; we approximate by
             // adding the literal tag and silencing everything else.
-            // For a real glob the caller can use ShizukuLogCapture
+            // For a real glob the caller can use AdbLogCapture
             // which can grep post-hoc. (Worth revisiting when we
             // surface the bridge to AI agents.)
             args += "*:S"

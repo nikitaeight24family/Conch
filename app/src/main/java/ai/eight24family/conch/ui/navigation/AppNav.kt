@@ -238,6 +238,25 @@ object Routes {
  */
 @Composable
 fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
+    // → BACK TO THE CHAT THAT STARTED THE PAIRING.
+    //
+    // Popping is deliberate, not navigating: the chat is still sitting under
+    // Settings in this stack, with its ViewModel, its transcript and its scroll
+    // position. Pushing a second copy would look like the right screen and be a
+    // different one. `navigate` is only for a stack that no longer has it — the
+    // process was killed while the user was away in Developer options.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        PhoneBridgeReturn.pending.collect { req ->
+            if (req == null || req.navigated) return@collect
+            val alreadyThere = nav.currentDestination?.route == Routes.CHAT
+            if (!alreadyThere && !nav.popBackStack(Routes.CHAT, false)) {
+                ai.eight24family.conch.util.SilentlyTry.fired("SshAi-AppNav", "return to the pairing chat") {
+                    nav.navigate(req.route)
+                }
+            }
+            PhoneBridgeReturn.markNavigated()
+        }
+    }
     NavHost(
         navController = nav,
         startDestination = Routes.HOME,

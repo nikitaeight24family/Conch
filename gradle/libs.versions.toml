@@ -92,12 +92,11 @@ markdown = "0.27.0"
 
 sshj = "0.39.0"
 bouncycastle = "1.81"
+# Ed25519 group arithmetic for our own ADB pairing (SPAKE2). CC0-1.0: public
+# domain, no obligations, no runtime dependencies. We use ONLY its math — the
+# SPAKE2 protocol on top of it is ours.
+eddsa = "0.3.0"
 yubikit = "2.7.0"
-# Shizuku: optional shell-uid bridge for Tier-2 features (system-wide
-# logcat, dumpsys, pm queries) without root. ssh.ai detects whether
-# Shizuku is installed at runtime; the dependency is harmless when
-# it isn't (no permissions are claimed, no service starts).
-shizuku = "13.1.5"
 
 junit = "4.13.2"
 junitExt = "1.2.1"
@@ -156,6 +155,11 @@ markdown-renderer-m3 = { group = "com.mikepenz", name = "multiplatform-markdown-
 sshj = { group = "com.hierynomus", name = "sshj", version.ref = "sshj" }
 bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastle" }
+# Pure-Java TLS. Needed because ADB pairing binds the exchange to the TLS
+# connection through RFC 5705 exported keying material, which the platform
+# socket API does not expose at all.
+bouncycastle-bctls = { group = "org.bouncycastle", name = "bctls-jdk18on", version.ref = "bouncycastle" }
+eddsa = { group = "net.i2p.crypto", name = "eddsa", version.ref = "eddsa" }
 
 # Yubico's official Android SDK. We use the FIDO module (CTAP2 / WebAuthn) over
 # both transports — `android` provides USB host + NFC reader-mode plumbing and
@@ -166,12 +170,6 @@ bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", ver
 yubikit-android = { group = "com.yubico.yubikit", name = "android", version.ref = "yubikit" }
 yubikit-fido = { group = "com.yubico.yubikit", name = "fido", version.ref = "yubikit" }
 
-# Shizuku-API + Provider. `api` is the Java-side wrapper around the
-# Shizuku binder service; `provider` is a tiny ContentProvider helper
-# that lets the Shizuku Manager app discover us and grant permission
-# without a manual intent dance.
-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitExt" }
