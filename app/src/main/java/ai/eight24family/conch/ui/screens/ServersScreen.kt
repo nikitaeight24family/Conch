@@ -55,6 +55,8 @@ import ai.eight24family.conch.ui.viewmodel.ServersViewModel
 @Composable
 fun ServersScreen(
     onAddServer: () -> Unit,
+    /** The phone itself, as a machine you can add. */
+    onAddLinux: () -> Unit = {},
     onOpenServer: (String) -> Unit,
     /** Tap on a search-result row → that exact chat at the matched message. */
     onOpenChatFromSearch: (sessionId: String, msgId: String, ordinal: Int, query: String, charOffset: Int) -> Unit = { _, _, _, _, _ -> },
@@ -78,11 +80,34 @@ fun ServersScreen(
         onPickHit = onOpenChatFromSearch,
         floatingActionButton = {
             val cyan = MaterialTheme.colorScheme.primary
+            // ⚠ TWO BUTTONS, AND LINUX IS ONE OF THEM. The phone's own Linux is a
+            // MACHINE, not a preference: it belongs beside the button that adds
+            // the other kind, not buried in Settings where it read as an option
+            // about the app (owner, 2026-08-30). It sits on the left because
+            // "add server" is the habitual one and must not move.
+            androidx.compose.foundation.layout.Row(
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 72.dp),
+            ) {
+            Surface(
+                onClick = onAddLinux,
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.background,
+                contentColor = cyan,
+                border = BorderStroke(1.dp, cyan),
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+            ) {
+                Text(
+                    "[ + linux ]",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
             Surface(
                 onClick = onAddServer,
-                // Lift above the floating glass tab bar so "+ add server" isn't
-                // hidden behind it.
-                modifier = Modifier.padding(bottom = 72.dp),
                 shape = RectangleShape,
                 color = MaterialTheme.colorScheme.background,
                 contentColor = cyan,
@@ -96,6 +121,7 @@ fun ServersScreen(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
+            }
             }
         }
     ) { padding ->
