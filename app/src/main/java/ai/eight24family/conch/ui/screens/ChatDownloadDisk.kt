@@ -265,6 +265,13 @@ internal fun DownloadDisk(path: String, vm: ChatViewModel) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
+            // ⚠ TOUCH AREA, NOT LAYOUT SIZE. The visible disk is ~22×20dp inside an
+            // `em`-sized inline placeholder, so growing the box would break the
+            // baseline alignment this whole file exists to keep. This expands only
+            // what the finger has to hit, to the 48dp minimum — and it matters
+            // because this is the ONLY way to retry a failed download, so a miss
+            // costs the user the exact action they came for (audit, 2026-08-30).
+            .minimumInteractiveComponentSize()
             .clickable(enabled = state !is ChatViewModel.DownloadStatus.Downloading) {
                 // Discrete Tap on the disk icon. Mirrors the
                 // physical feel of pressing a real button —

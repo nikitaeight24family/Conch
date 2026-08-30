@@ -62,9 +62,21 @@ object LinuxEnv {
             "/bin/sh -c '$q'"
     }
 
-    /** Is a usable environment already unpacked here? */
+    /**
+     * Is a usable environment already unpacked here?
+     *
+     * ⛔ DO NOT TEST A PATH THAT ONLY RESOLVES INSIDE THE ROOTFS. This asked for
+     * `rootfs/bin/sh`, which in every busybox image is a symlink to the ABSOLUTE
+     * path `/bin/busybox` — correct inside the environment, dangling when
+     * followed from Android, where that path does not exist. So a perfectly good
+     * install answered "not installed": the button came back with no error,
+     * because there had been no error (owner, 2026-08-30).
+     *
+     * `os-release` is a real file, is present in every distribution image, and
+     * says nothing about symlink targets.
+     */
     suspend fun isInstalled(): Boolean {
-        val r = LocalAdbShell.exec("[ -x $ROOT/proot ] && [ -x $ROOTFS/bin/sh ] && echo yes")
+        val r = LocalAdbShell.exec("[ -x $ROOT/proot ] && [ -s $ROOTFS/etc/os-release ] && echo yes")
         return r?.stdout?.trim() == "yes"
     }
 
@@ -96,11 +108,10 @@ object LinuxEnv {
      * own files directory is not one of them (SELinux keeps the shell out), so
      * callers stage through shared storage.
      *
-     * ⛔ NOTHING HERE REACHES THE NETWORK. Conch opens no connection except to
-     * the servers its owner adds, and that claim is load-bearing in the store
-     * listing, the landing page, the About screen and the privacy policy. The
-     * artifacts arrive over the SSH connection to the owner's own server, which
-     * is the one route that keeps it true.
+     * ⛔ NOTHING HERE REACHES THE NETWORK. The runtime and the userland ship
+     * inside the app, so installing opens no connection at all — which is what
+     * lets this work for someone with no server and no computer, and keeps the
+     * "contacts nothing but the servers you add" claim literally true.
      */
     suspend fun install(prootPath: String, rootfsArchive: String, onStep: (String) -> Unit): String? {
         onStep("preparing")

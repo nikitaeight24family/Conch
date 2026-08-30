@@ -31,6 +31,11 @@ import androidx.compose.foundation.border
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.filled.Cable
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -325,6 +330,20 @@ fun ServerDetailScreen(
 
             SectionDivider()
 
+            // ── // tunnel ──
+            //
+            // ⚠ THE COPY MUST NOT PROMISE RELIABILITY. A tunnel over the same SSH
+            // connection cannot make that connection steadier — it adds load to
+            // the one link everything already depends on. What it buys is REACH:
+            // the server's own localhost, which is where the dev server, the
+            // database and the admin page live, and which a phone otherwise
+            // cannot see at all.
+            SectionLabel("// tunnel")
+            VpnRow(serverId = s.id, connected = connected)
+            TunnelSection(serverId = s.id, connected = connected)
+
+            SectionDivider()
+
             // ── // appearance ──
             SectionLabel("// appearance")
             ServerColorRow(
@@ -601,6 +620,180 @@ private fun ServerColorRow(
     )
 }
 
+/**
+ * Sending this phone's traffic out through the server.
+ *
+ * Android asks for its own consent the first time — [VpnService.prepare]
+ * returns an Intent when it has not been granted — and that dialog is the right
+ * gate for a capability this broad, so it is never worked around.
+ *
+ * The switch reads the SERVICE's own state, not a local flag: Android can take
+ * the tunnel away at any moment (the user revokes it in system settings,
+ * another VPN takes over), and a switch that kept claiming "on" through that
+ * would be lying about where traffic is going — the worst thing this screen
+ * could be wrong about.
+ */
+@Composable
+private fun VpnRow(serverId: String, connected: Boolean) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val routed by ai.eight24family.conch.vpn.ConchVpnService.routedServerId.collectAsState()
+    val on = routed == serverId
+
+    val consent = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) startVpn(ctx, serverId)
+    }
+
+    ActionRow(
+        icon = if (on) Icons.Filled.CheckCircle else Icons.Filled.VpnKey,
+        title = if (on) "Traffic goes out through this server" else "Route traffic through this server",
+        subtitle = when {
+            !ai.eight24family.conch.vpn.ConchVpnService.supported ->
+                "needs Android 10 or newer"
+            on -> "browsers and apps that use the system proxy — not every app"
+            else -> "your address becomes the server's, for apps that use the system proxy"
+        },
+        trailing = {
+            androidx.compose.material3.Switch(
+                checked = on,
+                enabled = connected && ai.eight24family.conch.vpn.ConchVpnService.supported,
+                onCheckedChange = { want ->
+                    if (want) {
+                        val prepare = android.net.VpnService.prepare(ctx)
+                        if (prepare != null) consent.launch(prepare) else startVpn(ctx, serverId)
+                    } else {
+                        ctx.startService(
+                            android.content.Intent(ctx, ai.eight24family.conch.vpn.ConchVpnService::class.java)
+                                .setAction(ai.eight24family.conch.vpn.ConchVpnService.ACTION_STOP),
+                        )
+                    }
+                },
+            )
+        },
+        onClick = {},
+    )
+    if (on) {
+        Text(
+            "⚠ Not every app is covered: this hands apps a proxy, and an app that ignores the " +
+                "system proxy keeps using the phone's own connection. Browsers are covered.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+    }
+}
+
+private fun startVpn(ctx: android.content.Context, serverId: String) {
+    ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Vpn", "start vpn service") {
+        ctx.startService(
+            android.content.Intent(ctx, ai.eight24family.conch.vpn.ConchVpnService::class.java)
+                .setAction(ai.eight24family.conch.vpn.ConchVpnService.ACTION_START)
+                .putExtra(ai.eight24family.conch.vpn.ConchVpnService.EXTRA_SERVER_ID, serverId),
+        )
+    }
+}
+
+/**
+ * Reaching the server's own ports from this phone.
+ *
+ * One row per port, each a switch. Open one and the address becomes tappable:
+ * `http://127.0.0.1:3000` in any browser is the server's own :3000, carried on
+ * the SSH connection that is already open — no second login, and for a
+ * security-key server no second touch.
+ */
+@Composable
+private fun TunnelSection(serverId: String, connected: Boolean) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val live = remember { mutableStateMapOf<Int, ai.eight24family.conch.ssh.SshTunnel.LocalForward>() }
+    var problem by remember { mutableStateOf<String?>(null) }
+
+    // A tunnel cannot outlive the screen silently: leaving a listener bound
+    // after the user walked away would hold the port and look like a bug the
+    // next time they open it.
+    DisposableEffect(Unit) {
+        onDispose { live.values.forEach { it.stop() }; live.clear() }
+    }
+
+    if (!connected) {
+        Text(
+            "Connect to this server to open a tunnel.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        return
+    }
+
+    for (spec in ai.eight24family.conch.ssh.COMMON_FORWARDS) {
+        val on = live.containsKey(spec.localPort)
+        ActionRow(
+            icon = if (on) Icons.Filled.CheckCircle else Icons.Filled.Cable,
+            title = if (on) spec.localUrl() else "Port ${spec.remotePort}",
+            // ⚠ DESCRIBE THE GESTURE THAT EXISTS. This said "long-press the switch
+            // to close", and no long-press handler exists anywhere on this screen
+            // — so following the instruction did nothing, while an ordinary tap on
+            // the switch closed the tunnel the caption had just called "view"
+            // (audit, 2026-08-30).
+            subtitle = if (on) "open — tap the address to view, switch off to close"
+            else "reach the server's own :${spec.remotePort} from this phone",
+            onClick = {
+                if (on) {
+                    ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Tunnel", "open forwarded url") {
+                        ctx.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(spec.localUrl()),
+                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    }
+                } else {
+                    val f = ai.eight24family.conch.ssh.SshTunnel.LocalForward(
+                        serverId, spec.localPort, spec.remoteHost, spec.remotePort,
+                    )
+                    val err = f.start()
+                    if (err == null) { live[spec.localPort] = f; problem = null } else problem = err
+                }
+            },
+            trailing = {
+                androidx.compose.material3.Switch(
+                    checked = on,
+                    onCheckedChange = { want ->
+                        if (want) {
+                            val f = ai.eight24family.conch.ssh.SshTunnel.LocalForward(
+                                serverId, spec.localPort, spec.remoteHost, spec.remotePort,
+                            )
+                            val err = f.start()
+                            if (err == null) { live[spec.localPort] = f; problem = null } else problem = err
+                        } else {
+                            live.remove(spec.localPort)?.stop()
+                        }
+                    },
+                )
+            },
+        )
+    }
+    problem?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+    }
+    Text(
+        "⚠ This is not a VPN: it does not change this phone's IP address and it does not " +
+            "route anything else. One port of the server becomes one address on this phone, " +
+            "and nothing more.\n\n" +
+            "Bound to loopback, so nothing on the local network can reach it — but every app " +
+            "installed on this phone can, for as long as the switch is on. Turn it off when you " +
+            "are done. It does not make the connection steadier either — it rides the same one.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    )
+}
+
 @Composable
 private fun SectionLabel(text: String) {
     Text(
@@ -627,6 +820,9 @@ private fun ActionRow(
     title: String,
     subtitle: String?,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    /** Optional control on the right. When present it REPLACES the chevron:
+     *  a row that carries a switch is not also a navigation. */
+    trailing: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val dim = MaterialTheme.colorScheme.outline
@@ -645,7 +841,7 @@ private fun ActionRow(
                 Text(subtitle, color = dim, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Text("›", color = dim, style = MaterialTheme.typography.bodyLarge)
+        if (trailing != null) trailing() else Text("›", color = dim, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

@@ -35,6 +35,9 @@ internal class AgentPickerViewModelApiKey(
     /** Fired after a key is written. SUSPEND — captures the account and awaits
      *  the run-state probe (same fast, no-post-spinner path as OAuth). */
     private val onLoginSuccess: suspend (Agent) -> Unit = {},
+    /** Where a failed write is reported. Silence used to be the only outcome
+     *  for both ways this can fail — see [submitApiKey]. */
+    private val errorMut: MutableStateFlow<String?>? = null,
 ) {
 
     /**
@@ -97,30 +100,69 @@ internal class AgentPickerViewModelApiKey(
         if (key.isBlank()) return
         scope.launch(Dispatchers.IO) {
             val tag = "SshAi-AgentPicker"
-            val pooled = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@launch
+            val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            if (pooled == null) {
+                // ⛔ NOT SILENCE. This used to `return@launch` here: the dialog
+                // stayed open, no message appeared, and pressing the button did
+                // visibly nothing (audit, 2026-08-30).
+                errorMut?.value = "Not connected to this server — connect and try again."
+                return@launch
+            }
             val envVar = envVarFor(agent)
-            // Single-quote the key, escaping any internal single quotes
-            // so a key with `'` doesn't break the shell expression.
-            val safeKey = key.trim().replace("'", "'\\''")
-            val cmd = """
-                touch ~/.profile
-                # Remove any prior export of this var so we don't stack
-                # duplicate lines on each call.
-                sed -i.bak "/^export $envVar=/d" ~/.profile 2>/dev/null || true
-                echo "export $envVar='$safeKey'" >> ~/.profile
+
+            // ⛔ THE KEY NEVER TOUCHES THE COMMAND LINE. It used to be pasted
+            // into the script that was handed to `sess.exec`, and sshd runs that
+            // as `$SHELL -c '<the whole string>'` — so for as long as the command
+            // lived, the key sat in /proc/<pid>/cmdline, readable by `ps aux` for
+            // every user and every monitoring agent on the host. It arrives on
+            // STDIN instead, the way AgentBridge already passes data.
+            //
+            // And no `sed -i.bak`: that does not edit in place, it RENAMES the
+            // original to ~/.profile.bak and writes a cleaned copy — leaving the
+            // previous key in a file nothing ever deletes. The rewrite goes
+            // through a 0600 temp file instead.
+            val script = """
+                set -e
+                touch "${'$'}HOME/.profile"
+                chmod 600 "${'$'}HOME/.profile" 2>/dev/null || true
+                tmp=${'$'}(mktemp) || exit 1
+                grep -v "^[[:space:]]*export[[:space:]]\\+$envVar=" "${'$'}HOME/.profile" > "${'$'}tmp" || true
+                cat >> "${'$'}tmp"
+                mv "${'$'}tmp" "${'$'}HOME/.profile"
+                chmod 600 "${'$'}HOME/.profile" 2>/dev/null || true
+                rm -f "${'$'}HOME/.profile.bak"
+                echo CONCH_KEY_OK
             """.trimIndent()
-            SilentlyTry.fired("SshAi-AgentPicker", "write api key to ~/.profile") {
+
+            val exportLine = "export $envVar='" + key.trim().replace("'", "'\\''") + "'\n"
+
+            val ok = SilentlyTry.loggedOrElse(tag, "write api key to ~/.profile", false) {
                 pooled.startSession().use { sess ->
                     val proc = sess.exec(
-                        ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(cmd)),
+                        ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(script)),
                     )
-                    proc.join(10, java.util.concurrent.TimeUnit.SECONDS)
-                    android.util.Log.d(tag, "submitApiKey($agent) exit=${proc.exitStatus}")
+                    proc.outputStream.use { it.write(exportLine.toByteArray()); it.flush() }
+                    val out = proc.inputStream.readBytes().toString(Charsets.UTF_8)
+                    proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
+                    val status = proc.exitStatus ?: -1
+                    android.util.Log.d(tag, "submitApiKey($agent) exit=$status")
+                    status == 0 && out.contains("CONCH_KEY_OK")
                 }
             }
+
+            if (ok != true) {
+                // ⛔ AND NO FALSE SUCCESS. The old path closed the dialog and
+                // announced a login even when the write had failed — a full disk,
+                // a read-only ${'$'}HOME, wrong permissions all reported as "logged in".
+                errorMut?.value =
+                    "Could not save the key on the server. ~/.profile was not changed."
+                return@launch
+            }
+
             apiKeyEntryMut.value = null
             refresh(false)
             onLoginSuccess(agent)
         }
     }
+
 }

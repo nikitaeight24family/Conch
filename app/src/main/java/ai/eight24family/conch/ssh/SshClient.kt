@@ -21,6 +21,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.UnknownHostException
 import java.security.PublicKey
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 sealed interface ConnectResult {
@@ -160,11 +161,14 @@ open class SshClient {
         val client = newClient(connectTimeoutSec = tSec, socketTimeoutSec = tSec).apply {
             timeout = TimeUnit.SECONDS.toMillis(60).toInt()
         }
-        client.addHostKeyVerifier(TofuHostKeyVerifier(server.knownHostKey))
+        val hostKeyVerifier = TofuHostKeyVerifier(server.knownHostKey)
+        client.addHostKeyVerifier(hostKeyVerifier)
 
         try {
             client.connect(server.host, server.port)
             authenticate(client, server, secrets, skSigner)
+            // AFTER auth, never before: see the verifier's own note.
+            pinAfterAuth(server, hostKeyVerifier)
 
             val session = client.startSession()
             // Same no-bash fallback as the pooled path (RemoteEnv.portable):
@@ -273,6 +277,41 @@ internal fun pickKeyProvider(pem: String, passphrase: String?): FileKeyProvider 
         provider.init(pem, null, PasswordUtils.createOneOff(passphrase.toCharArray()))
     }
     return provider
+}
+
+/**
+ * ⛔ TRUST ON FIRST USE THAT NEVER RECORDS THE FIRST USE IS TRUST ON EVERY USE.
+ *
+ * This verifier returned true for ANY key whenever `expectedFingerprint` was
+ * null, and nothing here ever wrote one down. That state is reachable in one
+ * tap — "Forget" on the server page nulls the fingerprint — and after it every
+ * non-pooled `execute()` (background probes, stats, discovery) silently
+ * accepted whoever answered, forever, because there was no code left that could
+ * record a new one (audit, 2026-08-30).
+ *
+ * The pool got this right and said why. Here the same rule now applies:
+ * [pinAfterAuth] is called once authentication has SUCCEEDED — pinning before
+ * that would record the fingerprint of whoever happened to answer, which is the
+ * attack this is supposed to stop.
+ */
+/**
+ * Record the fingerprint the first time, so the second time can be checked.
+ *
+ * Same shape as the pool's `pinHostKeyIfUnset`, and deliberately the same
+ * rules: only when nothing is pinned yet, only after authentication, and
+ * failure to write is not a reason to fail the connection.
+ */
+private fun pinAfterAuth(server: Server, verifier: TofuHostKeyVerifier) {
+    if (server.knownHostKey != null) return
+    val fp = verifier.seenFingerprint ?: return
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        SilentlyTry.fired("SshAi-SshClient", "pin host key") {
+            ai.eight24family.conch.di.ServiceLocator.serverRepository
+                .updateKnownHostKey(server.id, fp)
+            android.util.Log.i("SshAi-SshClient", "pinned host key for ${server.name}: $fp")
+        }
+    }
 }
 
 private class TofuHostKeyVerifier(private val expectedFingerprint: String?) : HostKeyVerifier {

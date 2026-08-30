@@ -157,6 +157,19 @@
             MULTIPLE_TASK / NEW_DOCUMENT flags from OEM launchers and shortcuts
             inert.
         -->
+        <!-- Routing this phone's traffic out through the user's own server.
+             BIND_VPN_SERVICE is required by the platform and is what makes
+             Android show its own consent dialog before anything is routed —
+             which is the right gate for a capability this broad. -->
+        <service
+            android:name=".vpn.ConchVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

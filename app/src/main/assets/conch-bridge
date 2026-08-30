@@ -47,6 +47,24 @@ CONCH_BRIDGE_VERSION="8"
 
 BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
 TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
+# A recording cannot finish before it finishes. `audio --seconds N` documents N
+# up to 300, but the fixed 30 s deadline meant anything past ~25 s was reported
+# as "phone didn't respond" while the phone was still recording — and the reply
+# then landed in an outbox nobody was reading. The deadline follows the request.
+case " $* " in
+  *" audio "*)
+    _secs=30
+    _next=0
+    for _a in "$@"; do
+      [ "$_next" = 1 ] && { _secs=$_a; break; }
+      [ "$_a" = "--seconds" ] && _next=1
+    done
+    case "$_secs" in
+      ''|*[!0-9]*) _secs=30 ;;
+    esac
+    TIMEOUT_S=$(( _secs + 20 ))
+    ;;
+esac
 INBOX="$BRIDGE_DIR/inbox"
 OUTBOX="$BRIDGE_DIR/outbox"
 

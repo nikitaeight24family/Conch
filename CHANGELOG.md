@@ -11,6 +11,68 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.5.0] — 2026-08-30
+
+### Added
+- **Reach the server's own ports from the phone.** A dev server on the server's
+  `localhost:3000`, a database, an admin page bound to `127.0.0.1` — none of it
+  is reachable from a phone, and reaching for a laptop to look at it is the
+  moment this app exists to remove. A switch per port, and the address becomes
+  `http://127.0.0.1:3000` in any browser. It rides the SSH connection that is
+  already open: no second login, and on a security-key server no second touch.
+  Nothing is installed on the server — port forwarding is part of the SSH
+  protocol itself.
+- **Route the phone's traffic out through the server.** Your address becomes the
+  server's, and a café network sees one SSH connection and nothing else. It is
+  built on the door Android opens for a VPN to hand apps a proxy, so no packet
+  is ever captured or parsed — which is also its limit, stated everywhere it
+  could mislead: apps that honour the system proxy are covered (browsers are),
+  and an app that ignores it keeps using the phone's own connection.
+
+### Changed
+- **Neither of those makes the connection steadier**, and the app says so where
+  you would look. A tunnel over the same SSH link adds load to the one thing
+  everything already depends on.
+
+### Fixed
+An audit of 0.4.9 read the source line by line; all fifteen findings are closed.
+The ones worth naming:
+
+- **"Log out" left the token in a file beside the one it cleaned.** `sed -i.bak`
+  does not edit in place — it renames the original and writes a cleaned copy —
+  so the last step of a real log-out made a readable copy of the key it had just
+  erased. Switching accounts did the same. Every such site now removes the
+  backup it creates.
+- **An API key travelled on the command line.** The remote shell runs the whole
+  command as one string, so for as long as it lived the key was visible to `ps`
+  for every user on that machine. It goes over stdin now, and `~/.profile` is
+  no longer left world-readable.
+- **A second SSH path accepted any host key and remembered none.** After one tap
+  on "Forget", every background probe trusted whoever answered — permanently,
+  because nothing could record a new fingerprint. It now pins after a successful
+  login, like the main path.
+- **A long microphone capture was left on the server, readable by everyone.**
+  Both the permission change and the cleanup lived on a branch that request can
+  never reach. Permissions are set by whoever writes the file, and unclaimed
+  replies are swept.
+- **One recording froze the whole phone bridge** for as long as it ran: requests
+  were handled one at a time, so logs, ping and shell all timed out while the
+  microphone was busy.
+- **A one-second network blink deleted a valid request** without answering it,
+  and it could never be retried.
+- **The API-key dialog failed in silence** with no connection, and reported a
+  successful login even when the write had failed.
+- **`screenshot` was promised in four places and implemented in none** — to the
+  agent, to you in Settings, in the server CLI and in the store declaration. It
+  works now.
+- **A switched-off tunnel could keep carrying traffic.** The tracking of open
+  connections only ever grew, and past a limit it dropped the oldest — which is
+  the long-lived one — without closing it.
+- **The download icon in a message had a touch target a third of the minimum**,
+  and it is the only way to retry a failed download.
+
+---
+
 ## [0.4.9] — 2026-08-30
 
 ### Added

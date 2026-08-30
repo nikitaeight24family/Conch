@@ -12,6 +12,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -54,6 +56,7 @@ class AgentBridge(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pollJob: Job? = null
     private val seenIds = LinkedHashSet<String>()
+    private var ticksSinceSweep = 0
 
     fun start() {
         if (pollJob?.isActive == true) return
@@ -95,6 +98,13 @@ class AgentBridge(
                 }
                 runCatching { tick() }
                     .onFailure { android.util.Log.w(tag, "tick failed: ${it.message}") }
+                // Once a minute is plenty for a janitor whose job is to remove
+                // files that are already ten minutes old.
+                if (++ticksSinceSweep >= 30) {
+                    ticksSinceSweep = 0
+                    runCatching { sweepStaleOutbox() }
+                        .onFailure { android.util.Log.w(tag, "sweep failed: ${it.message}") }
+                }
                 val dataSaver = SilentlyTry.loggedOrElse("SshAi-AgentBridge", "read data saver pref", false) {
                     ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
                 }
@@ -145,16 +155,49 @@ class AgentBridge(
             if (seenIds.size > 256) {
                 val it = seenIds.iterator(); it.next(); it.remove()
             }
-            handleOne(file)
+            // ⛔ NOT AWAITED IN THE LOOP. handleAudio sleeps for the requested
+            // recording length — up to five minutes — and awaiting it here stopped
+            // the poller dead: for that whole time no request was read and no
+            // response written, so ping, logs and shell each died on the CLI's
+            // 30 s deadline. To the agent the phone looked dead, and it would go
+            // ask the user to open an app that was already open (audit,
+            // 2026-08-30).
+            //
+            // The semaphore is what keeps this from becoming the opposite
+            // problem: a burst of requests opening a channel each.
+            scope.launch {
+                inFlight.withPermit {
+                    runCatching { handleOne(file) }
+                        .onFailure { android.util.Log.w(tag, "handleOne($file) failed: ${it.message}") }
+                }
+            }
         }
     }
+
+    /** How many requests may be in flight at once. Above this they queue: the
+     *  point of not awaiting in the loop is that a SLOW request cannot block a
+     *  fast one, not that the phone should open unlimited channels. */
+    private val inFlight = Semaphore(3)
 
     private suspend fun handleOne(filename: String) {
         android.util.Log.d(tag, "handling $filename")
         // Filename already validated against REQ_FILENAME_REGEX in tick(); single-quote anyway as defense-in-depth.
-        val raw = execOnServer(
-            "cat \$HOME/.conch-bridge/inbox/'$filename'"
-        ).orEmpty()
+        val raw = execOnServer("cat \$HOME/.conch-bridge/inbox/'$filename'")
+        // ⛔ "COULD NOT READ IT" IS NOT "IT IS NOT JSON". This used to
+        // `.orEmpty()` the failure, so a transport that blinked between tick()
+        // and here produced an empty string, failed to parse, and the perfectly
+        // valid request was DELETED with no response written — while its name
+        // stayed in seenIds, so it could never be picked up again. The agent sat
+        // out its 30 s and concluded Conch was not polling, having just had its
+        // request eaten (audit, 2026-08-30).
+        //
+        // Forget the name instead and leave the file alone: the next tick reads
+        // it again.
+        if (raw == null) {
+            android.util.Log.w(tag, "  $filename: could not be read (transport) — retrying next tick")
+            seenIds.remove(filename)
+            return
+        }
         val req = SilentlyTry.logged("SshAi-AgentBridge", "parse bridge request json") { JSON.parseToJsonElement(raw).jsonObject }
         if (req == null) {
             android.util.Log.w(tag, "  $filename: not JSON, deleting")
@@ -275,12 +318,42 @@ class AgentBridge(
         // Order matters: the DATA blob is written+renamed BEFORE res.json, so
         // by the time the poller sees res.json's `data_path` the data file is
         // already complete — no partial-payload read either.
+        // ⛔ 0600 IS SET HERE, BEFORE THE RENAME, and not by the CLI on the other
+        // side. It used to be the CLI's job, on its SUCCESS branch — the branch a
+        // long recording never reaches, because it is still recording when the
+        // CLI's 30 s deadline expires. So a microphone capture of the room landed
+        // in the outbox at the shell's umask, usually world-readable, and stayed
+        // there: the only cleanup was on that same unreachable branch (audit,
+        // 2026-08-30). Whoever writes the file owns its permissions.
         if (!inline && resp.text != null) {
-            execOnServerWithStdin("cat > $dataPart && mv -f $dataPart $dataFinal", resp.text.toByteArray(Charsets.UTF_8))
+            execOnServerWithStdin(
+                "cat > $dataPart && chmod 600 $dataPart && mv -f $dataPart $dataFinal",
+                resp.text.toByteArray(Charsets.UTF_8),
+            )
         } else if (resp.binary != null) {
-            execOnServerWithStdin("cat > $dataPart && mv -f $dataPart $dataFinal", resp.binary)
+            execOnServerWithStdin(
+                "cat > $dataPart && chmod 600 $dataPart && mv -f $dataPart $dataFinal",
+                resp.binary,
+            )
         }
-        execOnServerWithStdin("cat > $resPart && mv -f $resPart $resFinal", resJson.toByteArray(Charsets.UTF_8))
+        execOnServerWithStdin(
+            "cat > $resPart && chmod 600 $resPart && mv -f $resPart $resFinal",
+            resJson.toByteArray(Charsets.UTF_8),
+        )
+    }
+
+    /**
+     * Sweep answers nobody came back for.
+     *
+     * The CLI deletes what it reads. What it never reads — a reply that arrived
+     * after its deadline, most often a long recording — stayed in the outbox
+     * forever. Ten minutes is far past any request the CLI will still be waiting
+     * on, so anything older is certainly unclaimed.
+     */
+    private suspend fun sweepStaleOutbox() {
+        execOnServer(
+            "find \$HOME/.conch-bridge/outbox -type f -mmin +10 -delete 2>/dev/null; echo swept",
+        )
     }
 
     /** Fresh channel on the pooled client, exec, return stdout. */
@@ -416,6 +489,52 @@ class DefaultBridgeHandler(
      * The phone-side switch is checked by the DISPATCHER, not here, so this stays
      * a plain capability and the policy lives in one place.
      */
+    /**
+     * A picture of the screen, through the shell the bridge already holds.
+     *
+     * ⛔ IT WAS PROMISED IN FOUR PLACES AND IMPLEMENTED IN NONE — the agent's own
+     * prompt, the security setting ("bridge can still read logs & take
+     * screenshots"), the server CLI, and the Play permission declaration — while
+     * the interface default answered "not implemented yet" to every caller. An
+     * agent told it could look at the screen tried, honestly, and got an error;
+     * and the setting described a security trade-off that did not exist (audit,
+     * 2026-08-30).
+     *
+     * `screencap -p` needs exactly the privilege the bridge already has. It is
+     * piped through `base64` because the shell channel returns TEXT: raw PNG
+     * bytes decoded as a string come back corrupted, which would have been a
+     * subtler failure than the honest error it replaces. The ~33 % that costs is
+     * paid once, over loopback.
+     */
+    override suspend fun handleScreenshot(args: JsonObject): BridgeResponse {
+        val r = ai.eight24family.conch.adb.LocalAdbShell.exec(
+            "screencap -p | base64 2>/dev/null",
+            limit = 24 * 1024 * 1024,
+        ) ?: return BridgeResponse.err(
+            "No shell access yet: pair Conch with this phone once in " +
+                "Settings → Phone bridge, then turn Wireless debugging on.",
+        )
+        val encoded = r.stdout.filterNot { it.isWhitespace() }
+        if (encoded.isEmpty()) {
+            return BridgeResponse.err(
+                "screencap produced nothing (exit ${r.exitCode}): ${r.stderr.trim().take(200)}",
+            )
+        }
+        val bytes = SilentlyTry.logged("SshAi-AgentBridge", "decode screenshot") {
+            android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
+        } ?: return BridgeResponse.err("screenshot came back unreadable")
+        // A PNG starts with the eight-byte signature. Checking it turns "the
+        // pipeline silently produced something else" into a stated failure.
+        val png = bytes.size > 8 && bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte()
+        if (!png) return BridgeResponse.err("screencap did not return a PNG (${bytes.size} bytes)")
+        val meta = mapOf(
+            "bytes" to JsonPrimitive(bytes.size),
+            "format" to JsonPrimitive("image/png"),
+            "truncated" to JsonPrimitive(r.truncated),
+        )
+        return BridgeResponse.ok(bytes, meta)
+    }
+
     override suspend fun handleAudio(args: JsonObject): BridgeResponse {
         val seconds = args["seconds"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 10
         if (!AudioRecorder.micGranted(appContext)) {
