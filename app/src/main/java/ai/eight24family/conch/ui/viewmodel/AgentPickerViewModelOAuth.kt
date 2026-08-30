@@ -679,7 +679,13 @@ internal class AgentPickerViewModelOAuth(
                         SilentlyTry.fired(tag, "scrub stale claude env token after /login") {
                             pooled.startSession().use { s ->
                                 val scrub = "for f in ~/.profile ~/.bashrc ~/.bash_profile; do " +
-                                    "[ -f \"\$f\" ] && sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+CLAUDE_CODE_OAUTH_TOKEN=/d\" \"\$f\" 2>/dev/null; done; echo OK"
+                                    // ⛔ REMOVE THE BACKUP sed LEAVES BEHIND. `sed -i.bak` does not
+                                    // edit in place: it renames the original to <file>.bak and writes
+                                    // a cleaned copy — so scrubbing a token out of ~/.profile created
+                                    // ~/.profile.bak with the token still in it, world-readable at the
+                                    // original's permissions, and nothing ever deleted it (audit,
+                                    // 2026-08-30).
+                                    "[ -f \"\$f\" ] && { sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+CLAUDE_CODE_OAUTH_TOKEN=/d\" \"\$f\" 2>/dev/null; rm -f \"\$f.bak\"; }; done; echo OK"
                                 val p = s.exec(ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(scrub)))
                                 p.join(10, java.util.concurrent.TimeUnit.SECONDS)
                             }

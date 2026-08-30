@@ -731,6 +731,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         startOAuthLogin = { agent -> oauthCoord.startOAuthLogin(agent) },
         shellEscape = ::shellEscape,
         onLoginSuccess = ::onLoginSuccess,
+        errorMut = _error,
     )
 
     init {

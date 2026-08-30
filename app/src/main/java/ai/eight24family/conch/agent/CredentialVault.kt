@@ -251,14 +251,14 @@ class CredentialVault(
                     "[ -f \"$dir/cred\" ] || [ -f \"$dir/credenv\" ] || { echo NOSLOT; exit 0; }; " +
                         "M=\$(sed -nE 's/^method=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
                         "if [ \"\$M\" = api ]; then " +
-                        "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; " +
+                        "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; rm -f \$HOME/.profile.bak; " +
                         "  cat \"$dir/cred\" >> \$HOME/.profile; " +
                         "else " +
                         // Make live state EXACTLY the slot's content, across BOTH
                         // mechanisms — a leftover env token would shadow the file
                         // for the CLI, silently keeping the previous account active.
                         (oauthEnvVar?.let {
-                            "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; " +
+                            "  touch \$HOME/.profile; sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; rm -f \$HOME/.profile.bak; " +
                                 "  [ -f \"$dir/credenv\" ] && cat \"$dir/credenv\" >> \$HOME/.profile; "
                         } ?: "") +
                         "  if [ -f \"$dir/cred\" ]; then mkdir -p \"\$(dirname \"$liveCred\")\" && cp \"$dir/cred\" \"$liveCred\"; else rm -f \"$liveCred\"; fi; " +
@@ -271,6 +271,14 @@ class CredentialVault(
 
     /** Remove a saved account. When [clearLiveIfActive], also wipe the live
      *  credential (real log-out): the OAuth file, or the profile export line. */
+    // ⛔ EVERY `sed -i.bak` HERE IS FOLLOWED BY `rm -f $HOME/.profile.bak`, and
+    // must stay that way. `sed -i.bak` does not edit in place: it RENAMES the
+    // original and writes a cleaned copy, so the line this code exists to erase
+    // survives in ~/.profile.bak — at the original file's permissions, usually
+    // world-readable, deleted by nothing. The comment above says "real log-out =
+    // wipe EVERY live mechanism"; without the rm, the last line of that log-out
+    // made a copy of the token instead (audit, 2026-08-30). The same applies on
+    // every account SWITCH, so the discarded key was always one file away.
     suspend fun remove(slotId: String, clearLiveIfActive: Boolean): Boolean {
         val safeId = slotId.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val dir = "$slotsDir/$safeId"
@@ -305,9 +313,9 @@ class CredentialVault(
                     "pkill -f -- '[c]laude --output-format stream-json' 2>/dev/null; "
             else ""
             "M=\$(sed -nE 's/^method=//p' \"$dir/meta\" 2>/dev/null | head -1); " +
-                "if [ \"\$M\" = api ]; then sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; " +
+                "if [ \"\$M\" = api ]; then sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$envVar=/d\" \$HOME/.profile 2>/dev/null; rm -f \$HOME/.profile.bak; " +
                 "else rm -f \"$liveCred\"; " +
-                (oauthEnvVar?.let { "sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; " } ?: "") +
+                (oauthEnvVar?.let { "sed -i.bak \"/^[[:space:]]*export[[:space:]]\\+$it=/d\" \$HOME/.profile 2>/dev/null; rm -f \$HOME/.profile.bak; " } ?: "") +
                 claudeResidue +
                 "fi; "
         } else ""

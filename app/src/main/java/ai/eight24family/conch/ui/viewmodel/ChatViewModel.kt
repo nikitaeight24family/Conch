@@ -1539,7 +1539,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
           • conch-bridge screenshot — capture the screen.
           • conch-bridge ping — connectivity check (expect `pong`).
 
-        The phone must stay in the foreground for the bridge to respond (~2s poll).
+        Poll interval is 2 s while Conch is on screen, 10 s while it is pocketed.
         Use the bridge whenever you need to inspect or act on my phone.
 
         HANDSHAKE — do this FIRST and exactly: run `conch-bridge ping`. If it prints
