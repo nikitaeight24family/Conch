@@ -1,0 +1,175 @@
+{
+  "v": 2,
+  "capacityFraction": 0.62,
+  "driversUrl": "https://github.com/K11MCH1/AdrenoToolsDrivers/releases",
+  "bw": [
+    { "match": ["sm8", "tensor g5", "mt6991", "mt6993", "s5e9955"], "gbps": 20 },
+    { "match": ["sm7", "tensor", "s5e9", "mt69"], "gbps": 12 },
+    { "match": ["sm6", "mt68"], "gbps": 8 }
+  ],
+  "defaultGbps": 6,
+  "models": [
+    {
+      "id": "gemma3-270m", "family": "gemma", "cat": "tiny", "quant": "Q4_0",
+      "file": "gemma-3-270m-it-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_0.gguf",
+      "bytes": 241574944, "brandOrg": "google", "hfRepo": "unsloth/gemma-3-270m-it-GGUF",
+      "kvPerTok": 8192, "agent": false, "tier": "expected",
+      "blurb": "google's smallest — runs on anything",
+      "desc": "Google Gemma 3 at 270M — the tiniest here, for basic chat and quick text on any device. Not a tool-using agent."
+    },
+    {
+      "id": "qwen3_5-0_8b", "builtin": true, "family": "qwen", "cat": "tiny", "quant": "Q4_0",
+      "brandOrg": "Qwen", "hfRepo": "unsloth/Qwen3.5-0.8B-GGUF",
+      "agent": false, "tier": "expected",
+      "desc": "Qwen3.5 at 0.8B — instant, light, answer-first with a vision add-on. Too small to reliably drive shell tools, so it is a chat model here, not an agent."
+    },
+    {
+      "id": "gemma3-1b", "family": "gemma", "cat": "tiny", "quant": "Q4_0",
+      "file": "gemma-3-1b-it-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
+      "bytes": 721918496, "brandOrg": "google", "hfRepo": "unsloth/gemma-3-1b-it-GGUF",
+      "kvPerTok": 26624, "agent": false, "tier": "expected",
+      "blurb": "google's 1B — light, capable chat",
+      "desc": "Google Gemma 3 at 1B: a strong little chat model. Text-only at this size; not tuned for agent tool use."
+    },
+    {
+      "id": "llama3_2-1b", "family": "llama", "cat": "tiny", "quant": "Q4_0",
+      "file": "Llama-3.2-1B-Instruct-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf",
+      "bytes": 773025824, "brandOrg": "meta-llama", "hfRepo": "unsloth/Llama-3.2-1B-Instruct-GGUF",
+      "kvPerTok": 32768, "agent": false, "tier": "expected",
+      "blurb": "meta's smallest — quick chat",
+      "desc": "Meta's Llama 3.2 at 1B — quick general chat. Tool use is unreliable at this size, so it is a chat model here."
+    },
+
+    {
+      "id": "qwen3_5-2b", "builtin": true, "family": "qwen", "cat": "everyday", "quant": "Q4_0",
+      "brandOrg": "Qwen", "hfRepo": "unsloth/Qwen3.5-2B-GGUF",
+      "agent": true, "tier": "expected",
+      "desc": "Qwen3.5 2B — the everyday agent pick: real function calling and a vision add-on. Same tool template as the 4B; capable, if lighter."
+    },
+    {
+      "id": "lfm2-2_6b", "family": "liquid", "cat": "everyday", "quant": "Q4_0",
+      "file": "LFM2-2.6B-Q4_0.gguf",
+      "url": "https://huggingface.co/LiquidAI/LFM2-2.6B-GGUF/resolve/main/LFM2-2.6B-Q4_0.gguf",
+      "bytes": 1483108576, "brandOrg": "LiquidAI", "hfRepo": "LiquidAI/LFM2-2.6B-GGUF",
+      "kvPerTok": 24576, "agent": false, "tier": "expected",
+      "blurb": "liquid's lean on-device chat",
+      "desc": "Liquid AI's LFM2 — a hybrid architecture built for phones, very light on memory for long chats. A chat model here; its larger sibling did not drive tools reliably."
+    },
+    {
+      "id": "smollm3-3b", "family": "smol", "cat": "everyday", "quant": "Q4_K_M",
+      "file": "SmolLM3-Q4_K_M.gguf",
+      "url": "https://huggingface.co/ggml-org/SmolLM3-3B-GGUF/resolve/main/SmolLM3-Q4_K_M.gguf",
+      "bytes": 1915305312, "brandOrg": "HuggingFaceTB", "hfRepo": "ggml-org/SmolLM3-3B-GGUF",
+      "kvPerTok": 73728, "agent": true, "tier": "expected",
+      "blurb": "hugging face's open 3B, tool use",
+      "desc": "Hugging Face's fully-open SmolLM3: tool calling in the template plus optional reasoning. Capable agent for its size; untested on this app yet."
+    },
+    {
+      "id": "llama3_2-3b", "family": "llama", "cat": "everyday", "quant": "Q4_0",
+      "file": "Llama-3.2-3B-Instruct-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_0.gguf",
+      "bytes": 1921909184, "brandOrg": "meta-llama", "hfRepo": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+      "kvPerTok": 114688, "agent": true, "tier": "expected",
+      "blurb": "meta's 3B — solid tool use",
+      "desc": "Meta's Llama 3.2 at 3B — a genuine tool-use agent for its size (~67% on the BFCL function-calling benchmark). Untested on this app yet."
+    },
+
+    {
+      "id": "qwen3_5-4b", "builtin": true, "family": "qwen", "cat": "strong", "quant": "Q4_0",
+      "brandOrg": "Qwen", "hfRepo": "unsloth/Qwen3.5-4B-GGUF",
+      "agent": true, "tier": "verified",
+      "desc": "Qwen3.5 4B — the one PROVEN on this app: it ran real shell commands through Codex. Strongest verified local agent here, with a vision add-on and GPU offload."
+    },
+    {
+      "id": "qwen3-4b-2507", "family": "qwen", "cat": "strong", "quant": "Q4_0",
+      "file": "Qwen3-4B-Instruct-2507-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_0.gguf",
+      "bytes": 2375773280, "brandOrg": "Qwen", "hfRepo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+      "kvPerTok": 114688, "agent": true, "tier": "expected",
+      "blurb": "qwen3 4B instruct — strong agent",
+      "desc": "Qwen3 4B Instruct (2507): a strong, answer-first tool-caller in the same lineage as the verified 4B. Untested on this app yet."
+    },
+    {
+      "id": "gemma3-4b", "family": "gemma", "cat": "strong", "quant": "Q4_0",
+      "file": "gemma-3-4b-it-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_0.gguf",
+      "bytes": 2370065536, "brandOrg": "google", "hfRepo": "unsloth/gemma-3-4b-it-GGUF",
+      "kvPerTok": 139264, "agent": false, "tier": "expected",
+      "visionFile": "mmproj-F16.gguf",
+      "visionUrl": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/mmproj-F16.gguf",
+      "visionBytes": 851251328,
+      "blurb": "google's flagship small — sees images",
+      "desc": "Google Gemma 3 at 4B — an excellent chat model that SEES images (vision add-on included). Its agent tool template needs work with Codex, so it ships as a chat + vision model for now."
+    },
+    {
+      "id": "phi4-mini", "family": "phi", "cat": "strong", "quant": "Q4_K_M",
+      "file": "Phi-4-mini-instruct-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf",
+      "bytes": 2491874272, "brandOrg": "microsoft", "hfRepo": "unsloth/Phi-4-mini-instruct-GGUF",
+      "kvPerTok": 131072, "agent": false, "tier": "expected",
+      "blurb": "microsoft's dense reasoner",
+      "desc": "Microsoft's Phi-4 mini (3.8B): strong reasoning for its size. Its template declares tools, but it chatted instead of running commands when tested here — so it is a chat model until that is fixed."
+    },
+    {
+      "id": "granite4-h-tiny", "family": "granite", "cat": "strong", "quant": "Q4_0",
+      "file": "granite-4.0-h-tiny-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/granite-4.0-h-tiny-GGUF/resolve/main/granite-4.0-h-tiny-Q4_0.gguf",
+      "bytes": 4010615968, "brandOrg": "ibm-granite", "hfRepo": "unsloth/granite-4.0-h-tiny-GGUF",
+      "kvPerTok": 16384, "activeBytes": 850000000, "agent": true, "tier": "expected",
+      "blurb": "ibm's hybrid MoE, tool-tuned",
+      "desc": "IBM Granite 4.0 hybrid Mamba MoE: 7B of weights, ~1B active per token, explicitly tuned for tool/function calling. Fast for its knowledge; untested on this app yet."
+    },
+    {
+      "id": "llama3_1-8b", "family": "llama", "cat": "strong", "quant": "Q4_0",
+      "file": "Llama-3.1-8B-Instruct-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_0.gguf",
+      "bytes": 4675896704, "brandOrg": "meta-llama", "hfRepo": "unsloth/Llama-3.1-8B-Instruct-GGUF",
+      "kvPerTok": 131072, "agent": true, "tier": "expected",
+      "blurb": "meta's 8B — top tool accuracy",
+      "desc": "Meta's Llama 3.1 8B — one of the most reliable open tool-callers (~89% function-calling accuracy). Wants a roomy phone; untested on this app yet."
+    },
+    {
+      "id": "lfm2-8b-a1b", "family": "liquid", "cat": "strong", "quant": "Q4_0",
+      "file": "LFM2-8B-A1B-Q4_0.gguf",
+      "url": "https://huggingface.co/LiquidAI/LFM2-8B-A1B-GGUF/resolve/main/LFM2-8B-A1B-Q4_0.gguf",
+      "bytes": 4733893312, "brandOrg": "LiquidAI", "hfRepo": "LiquidAI/LFM2-8B-A1B-GGUF",
+      "kvPerTok": 24576, "activeBytes": 1200000000, "agent": false, "tier": "expected",
+      "blurb": "8B knowledge at ~1.5B speed (MoE)",
+      "desc": "Liquid's on-device MoE: 8B total, ~1.5B active per token. Chatted instead of running commands when tested here, so it ships as a chat model."
+    },
+
+    {
+      "id": "gemma3-12b", "family": "gemma", "cat": "frontier", "quant": "Q4_K_M",
+      "file": "gemma-3-12b-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf",
+      "bytes": 7300574976, "brandOrg": "google", "hfRepo": "ggml-org/gemma-3-12b-it-GGUF",
+      "kvPerTok": 393216, "agent": false, "tier": "expected",
+      "visionFile": "mmproj-model-f16.gguf",
+      "visionUrl": "https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/resolve/main/mmproj-model-f16.gguf",
+      "visionBytes": 854200224,
+      "blurb": "google's 12B — big chat that sees",
+      "desc": "Google Gemma 3 at 12B — a big, capable chat + vision model for high-RAM devices. A chat/vision model here, not an agent."
+    },
+    {
+      "id": "gpt-oss-20b", "family": "openai", "cat": "frontier", "quant": "Q4_0",
+      "file": "gpt-oss-20b-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-Q4_0.gguf",
+      "bytes": 11501495488, "brandOrg": "openai", "hfRepo": "unsloth/gpt-oss-20b-GGUF",
+      "kvPerTok": 32768, "activeBytes": 2800000000, "agent": true, "tier": "expected",
+      "blurb": "openai's open MoE — native tools",
+      "desc": "OpenAI's open-weight 20B MoE (3.6B active), with native tool use in the harmony format Codex speaks. The real thing on-device — if it has ~24G of RAM. Untested on this app yet."
+    },
+    {
+      "id": "qwen3-coder-30b-a3b", "family": "qwen", "cat": "frontier", "quant": "Q4_0",
+      "file": "Qwen3-Coder-30B-A3B-Instruct-Q4_0.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_0.gguf",
+      "bytes": 17379990688, "brandOrg": "Qwen", "hfRepo": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "kvPerTok": 98304, "activeBytes": 2700000000, "agent": true, "tier": "expected",
+      "blurb": "the coder MoE — beyond today's devices",
+      "desc": "The most-pulled coding GGUF on Hugging Face — a 30B MoE (3.3B active) built for agentic coding. No current device carries the ~19G it needs; here for the day one does."
+    }
+  ]
+}
