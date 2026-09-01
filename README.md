@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml"><img src="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
-  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.5.2-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
+  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.6.0-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
   <a href="https://play.google.com/store/apps/details?id=ai.eight24family.conch"><img src="https://img.shields.io/badge/Google%20Play-live-a78bfa?style=flat-square&logo=google-play&logoColor=white&labelColor=0b0b0f" alt="Google Play" /></a>
   <img src="https://img.shields.io/badge/telemetry-none-f39c6b?style=flat-square&labelColor=0b0b0f" alt="no telemetry" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial-7b7b8a?style=flat-square&labelColor=0b0b0f" alt="licence" /></a>
@@ -103,7 +103,7 @@ Crush runs every tool unprompted in headless mode and Continue picks its toolset
 up front, and both state that on the shield rather than showing an approval
 prompt that will never appear.
 
-### Local models — on the device itself *(new in 0.5)*
+### Local models — on the device itself *(new in 0.5 · real agents out of the box in 0.6)*
 A built-in **model store that knows your device.** It reads your RAM, chip and
 GPU and shows what will actually run — with a computed *fits / tight* verdict, a
 bandwidth-based speed estimate that self-calibrates from real measurements on
@@ -111,13 +111,17 @@ your hardware, and real Hugging Face download counts — plus **live search acro
 all of Hugging Face**. One tap downloads a model into the app's own storage and
 runs it **entirely offline** through llama.cpp (the engine ships inside the APK —
 Play forbids downloading executable code, so only model *data* is ever fetched).
-A downloaded model becomes a real **Codex** model: the agent's tools, sessions
-and sandbox — only the brain is local. **GPU offload** via OpenCL where the
-device supports it, a one-tap **RAM reclaim** (and automatic reclaim when a model
-needs room to launch), vision add-ons for multimodal families, and download that
-resumes itself on Wi-Fi. Models proven to drive the shell wear an **agent**
-badge; the rest are honestly marked chat-only. Everything the store learns about
-your device stays on the device.
+A downloaded model **drives the agent out of the box** — the real Codex tools,
+sessions and sandbox, only the brain is local. Whatever you pull, the app gives
+it the chat template it needs and routes it to the CLI that fits, so it runs
+shell commands, reads files and inspects the device with **no per-model setup**.
+Each model wears **its own brand** across the app, with a home filter chip per
+model you've chatted with. **GPU offload** via OpenCL where the device supports
+it, a one-tap **RAM reclaim** (and automatic reclaim when a model needs room to
+launch), vision add-ons for multimodal families, and download that resumes itself
+on Wi-Fi. Models proven to drive the shell wear an **agent** badge; the rest are
+honestly marked chat-only. Everything the store learns about your device stays on
+the device.
 
 ### Sessions that survive
 Chats are the CLI's own session files on your disk, so you can resume days
