@@ -70,7 +70,7 @@ internal data class ClaudeInitState(
     )
 
     companion object {
-        private const val TAG = "SshAi-Control"
+        private const val TAG = "Conch-Control"
 
         private fun JsonObject.str(key: String): String? =
             this[key]?.jsonPrimitive?.contentOrNull

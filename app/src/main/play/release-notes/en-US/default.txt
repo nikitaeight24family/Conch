@@ -1,4 +1,3 @@
-What's new
-• Five more agents — ten in all. Qwen Code, Cursor, opencode, Crush and Continue join Claude, Codex, Gemini, Grok and Copilot, each with its own parser, sessions, model picker and logo.
-• The session list opens instantly again — it no longer waits on reading every cached chat, and opening a chat no longer re-scans it.
-• The phone bridge keeps answering with the screen off, and limit warnings show the real percentage.
+• Local models now work as real agents, out of the box. Download any model and it drives the agent — running shell commands, reading files, inspecting your device — on the chat template that fits it. No setup: the app routes each model to the CLI that suits it.
+• Each local model shows its own brand across the app, with a sessions filter chip per model.
+• Steadier after a restart: no ghost "working" spinner, no false unread on finished local chats.

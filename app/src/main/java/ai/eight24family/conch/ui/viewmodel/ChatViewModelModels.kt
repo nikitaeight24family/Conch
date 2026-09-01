@@ -53,6 +53,9 @@ internal class ChatViewModelModels(
     private val messages: StateFlow<List<AgentMessage>>,
     initialSessionModel: String?,
     initialSessionReasoning: String?,
+    /** The server this chat runs on. Every "what does the CLI default to"
+     *  question is answered FOR THIS BOX — see [AppPreferences.defaultModelForAgent]. */
+    private val serverId: String,
 ) {
     companion object {
         /** Sentinel: no explicit model pick has been made in this chat yet. */
@@ -327,7 +330,7 @@ internal class ChatViewModelModels(
             // in the topbar, so it has to be here at frame zero rather than
             // after a ~2s probe (or never, if nothing re-probes this run).
             if (_defaultModel.value.isNullOrBlank()) {
-                ServiceLocator.preferences.defaultModelForAgent(agentNow.name).first()
+                ServiceLocator.preferences.defaultModelForAgent(agentNow.name, serverId).first()
                     ?.let { _defaultModel.value = it }
             }
             // Registry provenance survives restarts — without the hydrate the
@@ -336,19 +339,17 @@ internal class ChatViewModelModels(
                 .takeIf { it.isNotEmpty() }
                 ?.let { _registryKeys.value = _registryKeys.value + it }
             // Re-arm the spec-level default so the FIRST chat of a cold start
-            // launches on the model its own chip advertises. These globals only
-            // exist in-process; without this the launch resolution starts blind
-            // and guesses from catalog order.
+            // launches on the model its own chip advertises. The spec's record
+            // only exists in-process; without this the launch resolution starts
+            // blind and guesses from catalog order. Seeded UNDER THIS SERVER —
+            // a cached default from another box must never answer for this one.
             if (agentNow == Agent.CLAUDE) {
-                if (ai.eight24family.conch.agent.claude.claudeDefaultModel == null) {
-                    _defaultModel.value?.let {
-                        ai.eight24family.conch.agent.claude.claudeDefaultModel = it
-                    }
-                }
-                if (ai.eight24family.conch.agent.claude.claudeDefaultModelKey == null) {
-                    ServiceLocator.preferences.defaultModelWireKeyForAgent(agentNow.name).first()
-                        ?.let { ai.eight24family.conch.agent.claude.claudeDefaultModelKey = it }
-                }
+                ai.eight24family.conch.agent.claude.seedClaudeDefault(
+                    serverId,
+                    label = _defaultModel.value,
+                    wireKey = ServiceLocator.preferences
+                        .defaultModelWireKeyForAgent(agentNow.name, serverId).first(),
+                )
             }
             // Reasoning catalog: same cold-start treatment as the labels.
             // Spec-encoded blob (agent-agnostic here) — without it the
@@ -371,22 +372,37 @@ internal class ChatViewModelModels(
      * default-reasoning so the topbar's sub-labels mirror what the CLI actually runs.
      */
     suspend fun probeAvailableModels(session: AgentSession, force: Boolean = false) {
-        val tag = "SshAi-Models"
+        val tag = "Conch-Models"
         val agentNow = currentAgent.value
         val spec = AgentSpecRegistry[agentNow]
-        val exec = AgentExec { cmd -> session.execOnLive(cmd) }
-        // [force] = the user tapped the model selector. Availability can
-        // change WHILE connected (Fable 5 export-control suspension hit
-        // mid-session), and a week-old connection would never re-probe on
-        // the freshness gate. A tap means "show me what's available NOW",
-        // so bypass the gate and re-run the live probe (the dropdown shows
-        // the cached list instantly and refreshes when this lands). Guarded
-        // against overlap by [_modelsProbing] at the call site. Startup
-        // warm-up (GlobalPrefetcher → ModelCatalogPrefetcher) may have
-        // probed this (server, agent) minutes ago — opening a chat must NOT
-        // re-run the heavy PTY probe every time. Serve the warmed caches
-        // and fall through to the cheap default probes below.
-        if (!force && ai.eight24family.conch.data.ModelCatalogPrefetcher.isFresh(session.server.id, agentNow)) {
+        // The probe must say WHICH box answered: what the CLI defaults to is a
+        // property of that server's settings.json, and a spec with nowhere to
+        // file it ends up serving the last server's answer to every chat.
+        val exec = object : AgentExec {
+            override val serverId: String = session.server.id
+            override suspend fun exec(command: String): String? = session.execOnLive(command)
+        }
+        // [force] = the user tapped the model selector. Availability can change
+        // WHILE connected (Fable 5 export-control suspension hit mid-session),
+        // and a week-old connection would never re-probe on the freshness gate.
+        // A tap means "show me what's available NOW", so bypass the gate and
+        // re-run the live probe (the dropdown shows the cached list instantly
+        // and refreshes when this lands). Guarded against overlap by
+        // [_modelsProbing] at the call site. Startup warm-up (GlobalPrefetcher →
+        // ModelCatalogPrefetcher) may have probed this (server, agent) minutes
+        // ago — opening a chat must NOT re-run the heavy PTY probe every time.
+        // Serve the warmed caches and fall through to the cheap default probes
+        // below. ⛔ FRESHNESS IS ABOUT THE CATALOG, NOT ABOUT THIS SERVER'S
+        // DEFAULT. The default (what THIS box starts on with no `--model`) is
+        // per-server, and skipping the probe on a server we have never asked
+        // leaves the chip with nothing — or, before the per-server split, with
+        // another server's answer. We are already connected: asking costs one
+        // exec, so ask rather than show a guess.
+        val knowsThisServersDefault = agentNow != Agent.CLAUDE ||
+            ai.eight24family.conch.agent.claude.claudeDefaultModelFor(session.server.id) != null
+        if (!force && knowsThisServersDefault &&
+            ai.eight24family.conch.data.ModelCatalogPrefetcher.isFresh(session.server.id, agentNow)
+        ) {
             android.util.Log.d(tag, "catalog fresh for ${spec.agent}@${session.server.id} — skipping heavy probe")
             if (_availableModels.value.isEmpty()) {
                 val saved = ServiceLocator.preferences.modelLabelsForAgent(agentNow.name).first()
@@ -488,7 +504,8 @@ internal class ChatViewModelModels(
         // paint the real default at frame zero.
         if (!defaultModelValue.isNullOrBlank()) {
             runCatching {
-                ServiceLocator.preferences.setDefaultModelForAgent(agentNow.name, defaultModelValue)
+                ServiceLocator.preferences
+                    .setDefaultModelForAgent(agentNow.name, session.server.id, defaultModelValue)
             }.onFailure { android.util.Log.w(tag, "persist default model failed", it) }
         }
         val defaultReasoningValue = runCatching { spec.probeDefaultReasoning(exec) }
@@ -537,25 +554,30 @@ internal class ChatViewModelModels(
                 }
             }
         }
-        ai.eight24family.conch.agent.claude.claudeDefaultModel?.let { def ->
+        ai.eight24family.conch.agent.claude.claudeDefaultModelFor(serverId)?.let { def ->
             _defaultModel.value = def
             scope.launch {
-                runCatching { ServiceLocator.preferences.setDefaultModelForAgent(agentName, def) }
+                runCatching {
+                    ServiceLocator.preferences.setDefaultModelForAgent(agentName, serverId, def)
+                }
             }
         }
         // PERSIST THE WIRE KEY TOO. The launch resolution reads the key, not
         // the label, and it had nothing to read on a cold start — so it fell
         // through to "first catalog entry" and sent `--model sonnet` under an
         // "Opus 5 1M" chip (2026-08-02, caught on device).
-        ai.eight24family.conch.agent.claude.claudeDefaultModelKey?.let { k ->
+        ai.eight24family.conch.agent.claude.claudeDefaultModelKeyFor(serverId)?.let { k ->
             scope.launch {
-                runCatching { ServiceLocator.preferences.setDefaultModelWireKeyForAgent(agentName, k) }
+                runCatching {
+                    ServiceLocator.preferences
+                        .setDefaultModelWireKeyForAgent(agentName, serverId, k)
+                }
             }
         }
         // A handshake IS a probe — keep the sweep from re-spawning a CLI.
         ai.eight24family.conch.data.ModelCatalogPrefetcher.markProbed(serverId, Agent.CLAUDE)
         android.util.Log.d(
-            "SshAi-Models",
+            "Conch-Models",
             "adopted init catalog: ${map.keys} default=${_defaultModel.value}",
         )
     }
@@ -642,12 +664,16 @@ internal class ChatViewModelModels(
         // exactly the "be ready for agent updates" failure). A brand-new chat
         // now opens on the last model this agent really used, and it re-learns
         // itself the moment a new family ships.
+        // …AS THIS SERVER'S DEFAULT, not the app's. The value is what one box's
+        // CLI ran; filing it globally is what let one server's model become the
+        // label every other server's new chat wore (2026-08-30).
         if (real != null) {
             scope.launch {
                 val agentNow = currentAgent.value
                 runCatching {
-                    ServiceLocator.preferences.setDefaultModelForAgent(agentNow.name, real)
-                }.onFailure { android.util.Log.w("SshAi-Models", "persist last model failed", it) }
+                    ServiceLocator.preferences
+                        .setDefaultModelForAgent(agentNow.name, serverId, real)
+                }.onFailure { android.util.Log.w("Conch-Models", "persist last model failed", it) }
             }
         }
     }

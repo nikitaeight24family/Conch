@@ -53,6 +53,24 @@ class BridgeHandshakeCollapseTest {
     }
 
     @Test
+    fun `a live-marker turn collapses to connected with the ack hidden`() {
+        // The post-self-test prompt: the channel was proven by a real ping
+        // BEFORE this turn was sent, so no token is expected and the agent's
+        // one-line acknowledgement stays hidden, as the prompt promises.
+        val msgs = listOf(
+            note("turn started"),
+            user("Phone bridge is live on this server — the app just proved it…"),
+            assistant("Got it - I'll use conch-bridge when I need the phone."),
+            note("turn complete · 2s"),
+        )
+
+        val out = collapseBridgeHandshake(msgs, marker, token)
+
+        assertEquals(listOf("bridge_connected"), subtypes(out))
+        assertEquals("one row and nothing else", 1, out.size)
+    }
+
+    @Test
     fun `the turn after it is untouched`() {
         val his = user("turn off developer options")
         val answer = assistant("Done.")

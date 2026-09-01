@@ -82,7 +82,7 @@ class SearchIndexer(
                     var indexed = dao.allSessionStates().associateBy { it.sessionId }
                     val metaRows = dao.countAllMeta()
                     android.util.Log.i(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "reconcile start: cacheIds=${cacheIds.size} indexed=${indexed.size} ftsMeta=$metaRows"
                     )
 
@@ -99,7 +99,7 @@ class SearchIndexer(
                     // again.
                     if (indexed.isNotEmpty() && metaRows == 0L) {
                         android.util.Log.w(
-                            "SshAi-Indexer",
+                            "Conch-Indexer",
                             "PHANTOM INDEX: ${indexed.size} session_state rows but 0 FTS rows " +
                                 "— wiping state + rebuilding all from cache"
                         )
@@ -141,7 +141,7 @@ class SearchIndexer(
                         }
                     }
                     android.util.Log.i(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "reconcile toIndex=${toIndex.size} sessions"
                     )
                     _progress.value = Progress(done = 0, total = toIndex.size, running = true)
@@ -155,19 +155,19 @@ class SearchIndexer(
                             indexSessionInternal(sid)
                         } catch (t: Throwable) {
                             android.util.Log.w(
-                                "SshAi-Indexer",
+                                "Conch-Indexer",
                                 "index sid=${sid.take(8)} failed — skipped: ${t.javaClass.simpleName} ${t.message}"
                             )
                         }
                         _progress.value = Progress(done = i + 1, total = toIndex.size, running = true)
                     }
                     android.util.Log.i(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "reconcile done: processed ${toIndex.size} sessions; " +
                             "fts meta rows now = ${dao.countAllMeta()}"
                     )
                 } catch (t: Throwable) {
-                    android.util.Log.e("SshAi-Indexer", "reconcile failed", t)
+                    android.util.Log.e("Conch-Indexer", "reconcile failed", t)
                 } finally {
                     _progress.value = _progress.value.copy(running = false)
                 }
@@ -183,7 +183,7 @@ class SearchIndexer(
                 indexSessionInternal(sessionId)
             } catch (t: Throwable) {
                 android.util.Log.w(
-                    "SshAi-Indexer",
+                    "Conch-Indexer",
                     "index sid=${sessionId.take(8)} failed — skipped: ${t.javaClass.simpleName} ${t.message}"
                 )
             }
@@ -243,7 +243,7 @@ class SearchIndexer(
                             )
                         )
                         android.util.Log.d(
-                            "SshAi-Indexer",
+                            "Conch-Indexer",
                             "backfilled owner sid=${sid.take(8)} → server=${owner.serverId.take(8)}",
                         )
                     }
@@ -284,13 +284,13 @@ class SearchIndexer(
                     // re-stamps it the moment its server is listed (durable
                     // sidecar / fresh SessionsCache).
                     android.util.Log.d(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "orphan-at-index sid=${sid.take(8)} agent=${ownerAgent ?: "?"} — awaiting its server's next listing"
                     )
                 }
                 if (ownerAgent == null) {
                     android.util.Log.d(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "skip sid=${sid.take(8)} — agent unresolved (cache miss + no JSONL markers)"
                     )
                     return@withContext
@@ -300,7 +300,7 @@ class SearchIndexer(
 
                 val parsed = parseWithAgent(buffer, ownerAgent) ?: run {
                     android.util.Log.w(
-                        "SshAi-Indexer",
+                        "Conch-Indexer",
                         "parse failed for sid=${sid.take(8)} owner=$ownerAgent bytes=$bytesLen"
                     )
                     dao.upsertSessionState(
@@ -394,7 +394,7 @@ class SearchIndexer(
 
     private suspend fun resolveOwner(sid: String): ResolvedOwner? {
         val locator = ai.eight24family.conch.di.ServiceLocator
-        val servers = SilentlyTry.logged("SshAi-Indexer", "observe servers for owner") {
+        val servers = SilentlyTry.logged("Conch-Indexer", "observe servers for owner") {
             locator.serverRepository.observeServers().first()
         } ?: emptyList()
         val sessionsCache = locator.sessionsCache
@@ -415,13 +415,13 @@ class SearchIndexer(
         // for sessions SessionsCache had also forgotten, the tap was a no-op.
         locator.historyCache.owner(sid)?.let { o ->
             android.util.Log.d(
-                "SshAi-Indexer",
+                "Conch-Indexer",
                 "owner via SIDECAR sid=${sid.take(8)} server=${o.serverId.take(8)} agent=${o.agent}"
             )
             return ResolvedOwner(o.serverId, o.agent, o.path, o.lastActiveAt.takeIf { it > 0L })
         }
         android.util.Log.d(
-            "SshAi-Indexer",
+            "Conch-Indexer",
             "owner UNRESOLVED sid=${sid.take(8)} — no SessionsCache match, no sidecar (true orphan)"
         )
         return null

@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-class SshAiService : Service() {
+class ConchService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var observerJob: Job? = null
@@ -56,8 +56,8 @@ class SshAiService : Service() {
         // typically already show > 0. Posting (0, 0) here was producing
         // a brief flash of "Conch · Ready" that the user saw and
         // (rightly) called meaningless.
-        val initActive = SilentlyTry.loggedOrElse("SshAi-Service", "read initial active count", 0) { ServiceLocator.agentSessions.activeCount.value }
-        val initIds = SilentlyTry.loggedOrElse("SshAi-Service", "read initial user-held ids", emptySet()) { ServiceLocator.sshConnectionPool.userHeldIds.value }
+        val initActive = SilentlyTry.loggedOrElse("Conch-Service", "read initial active count", 0) { ServiceLocator.agentSessions.activeCount.value }
+        val initIds = SilentlyTry.loggedOrElse("Conch-Service", "read initial user-held ids", emptySet()) { ServiceLocator.sshConnectionPool.userHeldIds.value }
         val initHeld = initIds.size
         lastActive = initActive
         lastHeld = initHeld
@@ -68,7 +68,7 @@ class SshAiService : Service() {
         // generic count summary if we somehow got here with empty ids.
         val initialNotif = if (initIds.isNotEmpty()) {
             val firstId = initIds.sorted().first()
-            val name = SilentlyTry.logged("SshAi-Service", "resolve initial server name") {
+            val name = SilentlyTry.logged("Conch-Service", "resolve initial server name") {
                 val repo = ServiceLocator.serverRepository
                 kotlinx.coroutines.runBlocking { repo.getById(firstId)?.name }
             } ?: "server"
@@ -81,7 +81,7 @@ class SshAiService : Service() {
         // dropped it before onCreate ran), self-stop immediately rather
         // than sitting on a "Disconnected" notification.
         if (initActive == 0 && initHeld == 0) {
-            Log.d("SshAiService", "onCreate with no active/held — stopping immediately")
+            Log.d("ConchService", "onCreate with no active/held — stopping immediately")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -90,7 +90,7 @@ class SshAiService : Service() {
         // of the foreground service — the moment all chats close
         // and the user-intent ref is dropped, the service stops
         // and the bridge with it. CLAUDE.md §11.5 has the protocol.
-        SilentlyTry.fired("SshAi-Service", "start bridge manager") { ServiceLocator.bridgeManager.start() }
+        SilentlyTry.fired("Conch-Service", "start bridge manager") { ServiceLocator.bridgeManager.start() }
         // Self-healing reconnect watchdog. An idle SSH drop (no network-change,
         // no app-foreground event) used to leave a held server transport-down
         // with no recovery except a manual server re-login — the ONLY thing that
@@ -103,7 +103,7 @@ class SshAiService : Service() {
             reconnectWatchdogJob = scope.launch {
                 while (isActive) {
                     delay(20_000L)
-                    SilentlyTry.fired("SshAi-Service", "watchdog reconnect held-but-down") {
+                    SilentlyTry.fired("Conch-Service", "watchdog reconnect held-but-down") {
                         ServiceLocator.sshConnectionPool.reconnectHeldButDownSilently()
                     }
                 }
@@ -126,7 +126,7 @@ class SshAiService : Service() {
                     lastActive = active
                     lastHeld = ids.size
                     if (active == 0 && ids.isEmpty()) {
-                        Log.d("SshAiService", "active=0 held=0 — stopping self")
+                        Log.d("ConchService", "active=0 held=0 — stopping self")
                         // Pull the notification BEFORE stopSelf so the
                         // user never sees the "Disconnected" placeholder
                         // briefly — stopSelf takes a few hundred ms to
@@ -151,7 +151,7 @@ class SshAiService : Service() {
         repostJob = scope.launch {
             while (isActive) {
                 delay(20_000)
-                SilentlyTry.fired("SshAi-Service", "repaint+repost notification tick") {
+                SilentlyTry.fired("Conch-Service", "repaint+repost notification tick") {
                     // Repaint each tick so a transport that died silently
                     // (keepalive timeout with no network event) flips its
                     // row to "reconnect" within 20 s. We DELIBERATELY no
@@ -165,7 +165,7 @@ class SshAiService : Service() {
                     lastActive = active
                     lastHeld = ids.size
                     if (active == 0 && ids.isEmpty()) {
-                        Log.d("SshAiService", "tick: both counts zero — stopping self")
+                        Log.d("ConchService", "tick: both counts zero — stopping self")
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                         return@fired
@@ -191,7 +191,7 @@ class SshAiService : Service() {
             override fun onLost(network: Network) { scheduleNetworkReconnect("lost") }
         }
         networkCallback = cb
-        SilentlyTry.fired("SshAi-Service", "register default network callback") {
+        SilentlyTry.fired("Conch-Service", "register default network callback") {
             cm.registerDefaultNetworkCallback(cb)
         }
     }
@@ -203,8 +203,8 @@ class SshAiService : Service() {
         netReconnectJob?.cancel()
         netReconnectJob = scope.launch {
             delay(2_000)
-            Log.d("SshAiService", "network change ($reason) — reconciling held connections")
-            SilentlyTry.fired("SshAi-Service", "reconnect held on network change") {
+            Log.d("ConchService", "network change ($reason) — reconciling held connections")
+            SilentlyTry.fired("Conch-Service", "reconnect held on network change") {
                 ServiceLocator.sshConnectionPool.reconnectHeldOnNetworkChange()
             }
             val ids = ServiceLocator.sshConnectionPool.userHeldIds.value
@@ -222,9 +222,9 @@ class SshAiService : Service() {
         // updates it on normal lifecycle, so we don't get a flash of "0
         // active" before the notif disappears.
         if (intent?.action == ACTION_END_ALL) {
-            Log.d("SshAiService", "ACTION_END_ALL received from notification")
+            Log.d("ConchService", "ACTION_END_ALL received from notification")
             scope.launch {
-                SilentlyTry.fired("SshAi-Service", "ACTION_END_ALL disconnect+close") {
+                SilentlyTry.fired("Conch-Service", "ACTION_END_ALL disconnect+close") {
                     val pool = ServiceLocator.sshConnectionPool
                     pool.userHeldIds().toList().forEach { pool.userDisconnect(it) }
                     ServiceLocator.agentSessions.closeAll()
@@ -238,10 +238,10 @@ class SshAiService : Service() {
         // updates the remaining notifications.
         if (intent?.action == ACTION_END_ONE) {
             val sid = intent.getStringExtra(EXTRA_SERVER_ID)
-            Log.d("SshAiService", "ACTION_END_ONE received for serverId=$sid")
+            Log.d("ConchService", "ACTION_END_ONE received for serverId=$sid")
             if (!sid.isNullOrBlank()) {
                 scope.launch {
-                    SilentlyTry.fired("SshAi-Service", "ACTION_END_ONE disconnect+close") {
+                    SilentlyTry.fired("Conch-Service", "ACTION_END_ONE disconnect+close") {
                         ServiceLocator.sshConnectionPool.userDisconnect(sid)
                         ServiceLocator.agentSessions.closeAllForServer(sid)
                         // Manually pull the per-server notification —
@@ -261,8 +261,8 @@ class SshAiService : Service() {
         // reappear immediately. Idempotent: if the connection is genuinely gone
         // (0/0) we stop rather than flash a stale row.
         if (intent?.action == ACTION_REPOST) {
-            Log.d("SshAiService", "ACTION_REPOST — notification dismissed, re-posting now")
-            SilentlyTry.fired("SshAi-Service", "repost on dismiss") {
+            Log.d("ConchService", "ACTION_REPOST — notification dismissed, re-posting now")
+            SilentlyTry.fired("Conch-Service", "repost on dismiss") {
                 val active = ServiceLocator.agentSessions.activeCount.value
                 val ids = ServiceLocator.sshConnectionPool.userHeldIds.value
                 if (active == 0 && ids.isEmpty()) {
@@ -304,15 +304,15 @@ class SshAiService : Service() {
         handleFgsTimeout("onTimeout($startId, type=$fgsType)")
 
     private fun handleFgsTimeout(reason: String) {
-        Log.w("SshAiService", "$reason — dataSync background budget exhausted; stopping gracefully")
+        Log.w("ConchService", "$reason — dataSync background budget exhausted; stopping gracefully")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
-        SilentlyTry.fired("SshAi-Service", "stop bridge manager") { ServiceLocator.bridgeManager.stop() }
+        SilentlyTry.fired("Conch-Service", "stop bridge manager") { ServiceLocator.bridgeManager.stop() }
         networkCallback?.let { cb ->
-            SilentlyTry.fired("SshAi-Service", "unregister network callback") {
+            SilentlyTry.fired("Conch-Service", "unregister network callback") {
                 (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)?.unregisterNetworkCallback(cb)
             }
         }
@@ -339,7 +339,7 @@ class SshAiService : Service() {
             }
         } catch (e: SecurityException) {
             Log.w(
-                "SshAiService",
+                "ConchService",
                 "startForeground denied (likely POST_NOTIFICATIONS revoked); stopping self",
                 e,
             )
@@ -353,7 +353,7 @@ class SshAiService : Service() {
             // 2026-06-10). Stop quietly; MainActivity.onStart() re-arms
             // the service when the user returns (foreground resets the
             // budget).
-            Log.w("SshAiService", "startForeground not allowed (FGS budget/state); stopping self", e)
+            Log.w("ConchService", "startForeground not allowed (FGS budget/state); stopping self", e)
             stopSelf()
         }
     }
@@ -369,7 +369,7 @@ class SshAiService : Service() {
         PendingIntent.getService(
             this,
             REPOST_REQUEST_CODE,
-            Intent(this, SshAiService::class.java).setAction(ACTION_REPOST),
+            Intent(this, ConchService::class.java).setAction(ACTION_REPOST),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
@@ -386,7 +386,7 @@ class SshAiService : Service() {
         // observer in onCreate then sees 0/0 and self-stops, taking the
         // notification with it. Service-targeted PendingIntent (not
         // broadcast) so we don't need a separate BroadcastReceiver.
-        val endIntent = Intent(this, SshAiService::class.java).apply {
+        val endIntent = Intent(this, ConchService::class.java).apply {
             action = ACTION_END_ALL
         }
         val endPending = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -501,7 +501,7 @@ class SshAiService : Service() {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         // Resolve names synchronously — repo's suspend API wrapped in
         // runBlocking. Lookups are local DB hits (~milliseconds).
-        val names: Map<String, String> = SilentlyTry.loggedOrElse("SshAi-Service", "resolve server names", ids.associateWith { "server" }) {
+        val names: Map<String, String> = SilentlyTry.loggedOrElse("Conch-Service", "resolve server names", ids.associateWith { "server" }) {
             val repo = ServiceLocator.serverRepository
             kotlinx.coroutines.runBlocking {
                 ids.associateWith { id -> repo.getById(id)?.name ?: "server" }
@@ -535,7 +535,7 @@ class SshAiService : Service() {
         val pool = ServiceLocator.sshConnectionPool
         // Re-issuing startForeground updates the foreground notif
         // in-place; the system doesn't post a new tray row.
-        SilentlyTry.fired("SshAi-Service", "startForeground update") {
+        SilentlyTry.fired("Conch-Service", "startForeground update") {
             startForegroundCompat(
                 buildServerNotification(foregroundId, foregroundName, live = pool.peek(foregroundId) != null)
             )
@@ -572,7 +572,7 @@ class SshAiService : Service() {
         // for two different servers would share one PendingIntent and
         // tapping either would disconnect whichever serverId was set
         // most recently (Android PendingIntent equality ignores extras).
-        val endIntent = Intent(this, SshAiService::class.java)
+        val endIntent = Intent(this, ConchService::class.java)
             .setAction(ACTION_END_ONE)
             .putExtra(EXTRA_SERVER_ID, serverId)
         val endPending = PendingIntent.getService(
@@ -611,7 +611,7 @@ class SshAiService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "sshai_session"
+        const val CHANNEL_ID = "conch_session"
         private const val NOTIF_ID = 1001
         /** Per-server notifications occupy ids in `1100 + hash%5000`
          *  range — well clear of the foreground 1001 and the SK touch
@@ -649,7 +649,7 @@ class SshAiService : Service() {
         }
 
         fun start(context: Context) {
-            val intent = Intent(context, SshAiService::class.java)
+            val intent = Intent(context, ConchService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -658,7 +658,7 @@ class SshAiService : Service() {
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, SshAiService::class.java))
+            context.stopService(Intent(context, ConchService::class.java))
         }
     }
 }

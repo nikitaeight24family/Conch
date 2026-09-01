@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Custom collapsed notification layout for SshAiService. Android's
+    Custom collapsed notification layout for ConchService. Android's
     default notification template hides action buttons (the "End"
     chip we add via NotificationCompat.Action) until the user expands
     the notification — on Samsung One UI especially, the user has to

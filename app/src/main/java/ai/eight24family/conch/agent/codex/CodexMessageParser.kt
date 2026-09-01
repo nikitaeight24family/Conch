@@ -105,7 +105,7 @@ object CodexMessageParser {
         return ai.eight24family.conch.util.Tracing.section(
             ai.eight24family.conch.util.Tracing.Names.PARSER_SLOW_PATH
         ) {
-        val obj = SilentlyTry.logged("SshAi-CodexParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
+        val obj = SilentlyTry.logged("Conch-CodexParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
             ?: return@section listOf(AgentMessage.Raw(uuid(), trimmed))
 
         when (val type = obj["type"]?.jsonPrimitive?.contentOrNull) {
@@ -169,7 +169,7 @@ object CodexMessageParser {
     private fun parseTurnCompleted(obj: JsonObject): List<AgentMessage> {
         // Per-turn usage line — same «tokens · in X · out Y» shape the
         // Claude result branch emits, so all three agents read alike.
-        val usage = SilentlyTry.logged("SshAi-CodexParse", "read usage obj") { obj["usage"]?.jsonObject }
+        val usage = SilentlyTry.logged("Conch-CodexParse", "read usage obj") { obj["usage"]?.jsonObject }
         val input = usage?.string("input_tokens")?.toLongOrNull()
         val output = usage?.string("output_tokens")?.toLongOrNull()
         val cached = usage?.string("cached_input_tokens")?.toLongOrNull()
@@ -191,7 +191,7 @@ object CodexMessageParser {
         turnTag: String = "",
         rawLine: String = "",
     ): List<AgentMessage> {
-        val item = SilentlyTry.logged("SshAi-CodexParse", "read item obj") { obj["item"]?.jsonObject } ?: return emptyList()
+        val item = SilentlyTry.logged("Conch-CodexParse", "read item obj") { obj["item"]?.jsonObject } ?: return emptyList()
         // Codex always supplies item.id in practice; the fallback is
         // content-addressed (instead of UUID) so the rare malformed
         // line still re-parses to the same id. Tool/error branches
@@ -249,7 +249,7 @@ object CodexMessageParser {
                 }
             }
             "file_change" -> {
-                val changes = SilentlyTry.logged("SshAi-CodexParse", "read changes array") { item["changes"]?.jsonArray }
+                val changes = SilentlyTry.logged("Conch-CodexParse", "read changes array") { item["changes"]?.jsonArray }
                 val count = changes?.size ?: 0
                 val first = changes?.firstOrNull()?.jsonObject
                 val path = first?.string("path")?.substringAfterLast('/')
@@ -258,7 +258,7 @@ object CodexMessageParser {
                 val label = listOfNotNull(kind, path).joinToString(" ").ifBlank { "files" }
                 // Full change list in the expandable detail.
                 val all = changes?.mapNotNull { c ->
-                    SilentlyTry.logged("SshAi-CodexParse", "read change row") {
+                    SilentlyTry.logged("Conch-CodexParse", "read change row") {
                         val o = c.jsonObject
                         listOfNotNull(o.string("kind"), o.string("path")).joinToString(" ")
                     }
@@ -291,13 +291,13 @@ object CodexMessageParser {
                 else listOf(note("web search · $query", id = "codexevt-web-$turnTag$itemId"))
             }
             "todo_list" -> {
-                val items = SilentlyTry.logged("SshAi-CodexParse", "read todo items array") { item["items"]?.jsonArray }
+                val items = SilentlyTry.logged("Conch-CodexParse", "read todo items array") { item["items"]?.jsonArray }
                 val total = items?.size ?: 0
-                val done = items?.count { SilentlyTry.loggedOrElse("SshAi-CodexParse", "check todo completed", false) { it.jsonObject.string("completed") == "true" } } ?: 0
+                val done = items?.count { SilentlyTry.loggedOrElse("Conch-CodexParse", "check todo completed", false) { it.jsonObject.string("completed") == "true" } } ?: 0
                 if (total == 0) emptyList()
                 else {
                     val list = items?.mapNotNull { t ->
-                        SilentlyTry.logged("SshAi-CodexParse", "read todo row") {
+                        SilentlyTry.logged("Conch-CodexParse", "read todo row") {
                             val o = t.jsonObject
                             val mark = if (o.string("completed") == "true") "✓" else "·"
                             o.string("text")?.let { "$mark $it" }
@@ -321,7 +321,7 @@ object CodexMessageParser {
     // ────────── OLD SCHEMA (pre-0.125) ──────────
 
     private fun parseSessionMeta(obj: JsonObject, raw: String): List<AgentMessage> {
-        val payload = SilentlyTry.logged("SshAi-CodexParse", "read session meta payload") { obj["payload"]?.jsonObject } ?: return emptyList()
+        val payload = SilentlyTry.logged("Conch-CodexParse", "read session meta payload") { obj["payload"]?.jsonObject } ?: return emptyList()
         return listOf(
             AgentMessage.System(
                 id = stableId(raw, "sys"),
@@ -341,7 +341,7 @@ object CodexMessageParser {
     }
 
     private fun parseResponseItem(obj: JsonObject, rawLine: String): List<AgentMessage> {
-        val payload = SilentlyTry.logged("SshAi-CodexParse", "read response_item payload") { obj["payload"]?.jsonObject } ?: return emptyList()
+        val payload = SilentlyTry.logged("Conch-CodexParse", "read response_item payload") { obj["payload"]?.jsonObject } ?: return emptyList()
         return when (payload.string("type")) {
             "message" -> parseOldMessage(payload, rawLine)
             "function_call" -> {
@@ -363,7 +363,7 @@ object CodexMessageParser {
                 )
             }
             "reasoning" -> {
-                val summary = SilentlyTry.logged("SshAi-CodexParse", "build reasoning summary") {
+                val summary = SilentlyTry.logged("Conch-CodexParse", "build reasoning summary") {
                     payload["summary"]?.jsonArray
                         ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                         ?.joinToString(" ")
@@ -408,7 +408,7 @@ object CodexMessageParser {
     }
 
     private fun parseEventMsg(obj: JsonObject): List<AgentMessage> {
-        val payload = SilentlyTry.logged("SshAi-CodexParse", "read event_msg payload") { obj["payload"]?.jsonObject } ?: return emptyList()
+        val payload = SilentlyTry.logged("Conch-CodexParse", "read event_msg payload") { obj["payload"]?.jsonObject } ?: return emptyList()
         return when (val ptype = payload.string("type")) {
             "agent_message", "user_message" -> emptyList()   // duplicates response_item.message
             // Token-by-token / chunked delta streams — bookkeeping only,
@@ -461,7 +461,7 @@ object CodexMessageParser {
             }
             "patch_apply_end" -> {
                 val success = payload.string("success") == "true"
-                val files = SilentlyTry.logged("SshAi-CodexParse", "read patch_apply files") {
+                val files = SilentlyTry.logged("Conch-CodexParse", "read patch_apply files") {
                     payload["changes"]?.jsonObject?.keys?.toList().orEmpty()
                 } ?: emptyList()
                 val name = files.firstOrNull()?.substringAfterLast('/') ?: "file"
@@ -499,7 +499,7 @@ object CodexMessageParser {
     private fun extractText(content: JsonElement): String = when (content) {
         is JsonPrimitive -> content.contentOrNull.orEmpty()
         is JsonArray -> content.mapNotNull { block ->
-            SilentlyTry.logged("SshAi-CodexParse", "extract content block text") {
+            SilentlyTry.logged("Conch-CodexParse", "extract content block text") {
                 val o = block.jsonObject
                 o.string("text") ?: o.string("content")
             }
@@ -510,7 +510,7 @@ object CodexMessageParser {
     private fun extractOutputText(elem: JsonElement): String = when (elem) {
         is JsonPrimitive -> elem.contentOrNull.orEmpty()
         is JsonArray -> elem.mapNotNull { b ->
-            SilentlyTry.logged("SshAi-CodexParse", "extract output text block") { b.jsonObject.string("text") }
+            SilentlyTry.logged("Conch-CodexParse", "extract output text block") { b.jsonObject.string("text") }
         }.joinToString("\n")
         is JsonObject -> elem["output"]?.let { extractOutputText(it) }
             ?: elem.string("text")
@@ -520,7 +520,7 @@ object CodexMessageParser {
 
     private fun formatCommand(elem: JsonElement?): String? {
         if (elem == null) return null
-        val arr = SilentlyTry.logged("SshAi-CodexParse", "cast to JsonArray") { elem.jsonArray } ?: return elem.toString()
+        val arr = SilentlyTry.logged("Conch-CodexParse", "cast to JsonArray") { elem.jsonArray } ?: return elem.toString()
         val parts = arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
         return when {
             parts.size >= 3 && parts[0].endsWith("bash") && (parts[1] == "-lc" || parts[1] == "-c") -> parts[2]
@@ -529,7 +529,7 @@ object CodexMessageParser {
     }
 
     private fun JsonObject.string(key: String): String? =
-        SilentlyTry.logged("SshAi-CodexParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
+        SilentlyTry.logged("Conch-CodexParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
     /** EventNote factory — the visible replacement for the old suppressed
      *  `simpleEvent` raw lines. Mirrors ClaudeMessageParser.note.
@@ -632,7 +632,7 @@ object CodexMessageParser {
         } catch (_: Throwable) {
             return null
         } finally {
-            SilentlyTry.fired("SshAi-CodexParse", "close reader") { reader.close() }
+            SilentlyTry.fired("Conch-CodexParse", "close reader") { reader.close() }
         }
     }
 }

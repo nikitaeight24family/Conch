@@ -59,7 +59,7 @@ object GeminiMessageParser {
             // (feedback_auto_fix_errors.md): show only what the user
             // can act on; everything else goes to Log.d.
             if (isLikelyNoise(trimmed)) {
-                android.util.Log.d("SshAi-Gemini", "noise (suppressed): ${trimmed.take(200)}")
+                android.util.Log.d("Conch-Gemini", "noise (suppressed): ${trimmed.take(200)}")
                 return emptyList()
             }
             return listOf(AgentMessage.Raw(uuid(), trimmed))
@@ -77,7 +77,7 @@ object GeminiMessageParser {
         return ai.eight24family.conch.util.Tracing.section(
             ai.eight24family.conch.util.Tracing.Names.PARSER_SLOW_PATH
         ) {
-        val obj = SilentlyTry.logged("SshAi-GeminiParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
+        val obj = SilentlyTry.logged("Conch-GeminiParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
             ?: return@section listOf(AgentMessage.Raw(uuid(), trimmed))
 
         // ── Saved session-FILE shape — DISTINCT from the live stream. Gemini
@@ -175,7 +175,7 @@ object GeminiMessageParser {
                 // would spray rows on every history re-hydration.
                 val t = obj.string("type")
                 if (t.isNullOrBlank() || obj["timestamp"] == null) {
-                    android.util.Log.d("SshAi-GeminiParse", "non-live unknown type=$t (suppressed): ${trimmed.take(200)}")
+                    android.util.Log.d("Conch-GeminiParse", "non-live unknown type=$t (suppressed): ${trimmed.take(200)}")
                     emptyList()
                 } else listOf(note(genericLabel(t, obj), detail = genericDetail(obj)))
             }
@@ -184,7 +184,7 @@ object GeminiMessageParser {
     }
 
     private fun JsonObject.string(key: String): String? =
-        SilentlyTry.logged("SshAi-GeminiParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
+        SilentlyTry.logged("Conch-GeminiParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
     /**
      * Token usage from the `result` event's `stats` block:
@@ -194,12 +194,12 @@ object GeminiMessageParser {
      * → null → no note, never a crash.
      */
     private fun statsNote(obj: JsonObject): AgentMessage? {
-        val models = SilentlyTry.logged("SshAi-GeminiParse", "read stats.models") {
+        val models = SilentlyTry.logged("Conch-GeminiParse", "read stats.models") {
             obj["stats"]?.jsonObject?.get("models")?.jsonObject
         } ?: return null
         var prompt = 0L; var candidates = 0L; var cached = 0L; var thoughts = 0L
         for ((_, m) in models.entries) {
-            val tok = SilentlyTry.logged("SshAi-GeminiParse", "read model tokens") {
+            val tok = SilentlyTry.logged("Conch-GeminiParse", "read model tokens") {
                 (m as? JsonObject)?.get("tokens")?.jsonObject
             } ?: continue
             fun n(key: String): Long =
@@ -334,7 +334,7 @@ object GeminiMessageParser {
         } catch (_: Throwable) {
             return null
         } finally {
-            SilentlyTry.fired("SshAi-GeminiParse", "close reader") { reader.close() }
+            SilentlyTry.fired("Conch-GeminiParse", "close reader") { reader.close() }
         }
     }
 

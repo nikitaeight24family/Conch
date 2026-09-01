@@ -66,6 +66,11 @@ object OpencodeSpec : AgentCliSpec {
     /** `--agent plan` is a real primary agent (read-only planning). */
     override val supportsPlanMode = true
 
+    /** Drives the phone's local model via opencode's built-in `openai` provider
+     *  aimed at the loopback llama-server (OPENAI_BASE_URL). See
+     *  [buildExecCommand]. */
+    override val supportsLocalModel = true
+
     /** opencode's own marks: the gear it prefixes every tool call with, and
      *  the block glyphs of its wordmark. Not anyone else's sparkle. */
     override val spinnerGlyphs: List<String> = listOf("⚙", "█", "▄", "▀")
@@ -90,7 +95,19 @@ object OpencodeSpec : AgentCliSpec {
 
     override fun buildExecCommand(input: ExecInput): String {
         val escapedText = shellEscape(input.text)
-        val modelArg = input.model?.takeIf { it.isNotBlank() }
+        // A `local:<id>` model routes to the phone's own llama-server. opencode
+        // reaches it through its built-in `openai` provider pointed at the
+        // loopback endpoint (OPENAI_BASE_URL); the id rides as `openai/<id>`.
+        val localId = input.model
+            ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+        val localEnv = if (localId != null) {
+            "OPENAI_BASE_URL=" +
+                shellEscape(ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL + "/v1") +
+                " OPENAI_API_KEY=local "
+        } else ""
+        val modelRef = if (localId != null) "openai/$localId" else input.model
+        val modelArg = modelRef?.takeIf { it.isNotBlank() }
             ?.let { " -m ${shellEscape(it)}" } ?: ""
         // PLAN is an AGENT here, not a permission mode: `build` (default) can
         // edit, `plan` is read-only. SAFE keeps the default ruleset, which in
@@ -117,7 +134,8 @@ object OpencodeSpec : AgentCliSpec {
         // "data":{"ref":"err_…"}}), and the real cause ("Model not found:
         // anthropic/claude-sonnet-5. Did you mean: …") appears ONLY in the log
         // line carrying the same ref.
-        return "printf '%s' $escapedText | OPENCODE_DISABLE_AUTOUPDATE=1 opencode run" +
+        return "printf '%s' $escapedText | " + localEnv +
+            "OPENCODE_DISABLE_AUTOUPDATE=1 opencode run" +
             " --format json --print-logs --log-level ERROR" +
             dirArg + resumeArg + modelArg + approvalArg + " 2>&1"
     }
@@ -290,16 +308,24 @@ esac
 }
 
 private object OpencodeTopbarUi : AgentTopbarUi {
-    /** `provider/model` is what `-m` takes, so it is shown as-is; the free
-     *  tier's default is only claimed once the session reports it. */
+    /** A local model shows its real name; otherwise `provider/model` (what `-m`
+     *  takes) is shown as-is, the default only claimed once the session reports it. */
     override fun displayLabel(state: TopbarModelState): String? =
-        state.selectedModel?.takeIf { it.isNotBlank() }
+        ai.eight24family.conch.agent.spec.LocalTopbar.localDisplayLabel(state)
+            ?: state.selectedModel?.takeIf { it.isNotBlank() }
             ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
             ?: state.observedModel?.takeIf { it.isNotBlank() }
 
+    override fun reasoningLabel(state: TopbarModelState): String? =
+        ai.eight24family.conch.agent.spec.LocalTopbar.localReasoningLabel(state)
+
+    // On the phone's own row the picker always opens (local models / an
+    // explanation), even before any endpoint model list is probed.
     override fun isMenuEnabled(state: TopbarModelState): Boolean =
-        !state.modelsProbing && state.availableModels.isNotEmpty()
+        ai.eight24family.conch.agent.spec.LocalTopbar.isPhoneRow(state) ||
+            (!state.modelsProbing && state.availableModels.isNotEmpty())
 
     override fun menuItems(state: TopbarModelState): List<ModelMenuItem> =
-        state.availableModels.map { (slug, label) -> ModelMenuItem(display = label, storedValue = slug) }
+        ai.eight24family.conch.agent.spec.LocalTopbar.localModelItems(state) +
+            state.availableModels.map { (slug, label) -> ModelMenuItem(display = label, storedValue = slug) }
 }

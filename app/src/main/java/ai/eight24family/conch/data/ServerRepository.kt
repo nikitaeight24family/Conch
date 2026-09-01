@@ -106,12 +106,12 @@ class ServerRepository(
     suspend fun attachKey(serverId: String, keyId: String) {
         val current = dao.getById(serverId)?.toDomain() ?: return
         if (keyId in current.sshKeyIds) {
-            android.util.Log.d("SshAi-Pool", "  attachKey($serverId,$keyId): already attached, no-op")
+            android.util.Log.d("Conch-Pool", "  attachKey($serverId,$keyId): already attached, no-op")
             return
         }
         val updated = current.copy(sshKeyIds = current.sshKeyIds + keyId)
         dao.upsert(ServerEntity.fromDomain(updated))
-        android.util.Log.d("SshAi-Pool", "  attachKey($serverId,$keyId): saved → sshKeyIds=${updated.sshKeyIds.size}")
+        android.util.Log.d("Conch-Pool", "  attachKey($serverId,$keyId): saved → sshKeyIds=${updated.sshKeyIds.size}")
     }
 
     suspend fun detachKey(serverId: String, keyId: String) {
@@ -132,6 +132,14 @@ class ServerRepository(
     suspend fun updateColorHex(id: String, colorHex: String?) {
         val current = dao.getById(id) ?: return
         dao.upsert(current.copy(colorHex = colorHex))
+    }
+
+    /** Rename only — same single-field discipline as [updateColorHex]. The
+     *  phone's own row renames through THIS, never the full edit form (its
+     *  host/port/key are the environment's, not the user's to change). */
+    suspend fun rename(id: String, name: String) {
+        val current = dao.getById(id) ?: return
+        dao.upsert(current.copy(name = name))
     }
 
     suspend fun delete(id: String) {

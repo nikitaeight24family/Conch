@@ -133,8 +133,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
-import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.LocalConchHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
@@ -261,6 +261,8 @@ internal fun TerminalTopBar(
     sessionInitialReasoning: String?,
     observedReasoning: String?,
     modelMenuOpen: Boolean,
+    /** Phone row only: gates the cloud catalog in the picker. */
+    phoneCloudLoggedIn: Boolean = true,
     onToggleModelMenu: () -> Unit,
     onSelectModel: (String?) -> Unit,
     onSelectModelAndReasoning: (model: String?, effort: String?) -> Unit,
@@ -324,6 +326,11 @@ internal fun TerminalTopBar(
     val topbarUi = spec.topbarUi
     val topbarState = TopbarModelState(
         agentDisplayName = spec.displayName,
+        // The chip may fall back to "what this CLI starts on by default", and
+        // that is a per-server fact — without the id the spec would have to
+        // guess from a process-wide slot, which is how an Opus chip ended up on
+        // a chat whose server runs Sonnet (2026-08-30).
+        serverId = serverId,
         selectedModel = selectedModel,
         sessionInitialModel = sessionInitialModel,
         observedModel = observedModel,
@@ -334,6 +341,7 @@ internal fun TerminalTopBar(
         observationNewerThanPick = observationNewerThanPick,
         reasoningPickIsNewer = reasoningPickIsNewer,
         modelsProbing = modelsProbing,
+        phoneCloudLoggedIn = phoneCloudLoggedIn,
         selectedReasoning = selectedReasoning,
         reasoningCatalog = reasoningCatalog,
         defaultReasoning = defaultReasoning,
@@ -365,14 +373,14 @@ internal fun TerminalTopBar(
             // requesting focus — without this, requestFocus on a freshly
             // expanded TextField is sometimes dropped on the floor.
             kotlinx.coroutines.delay(40)
-            SilentlyTry.fired("SshAi-ChatTopBar", "request search focus (open)") { searchFieldFocus.requestFocus() }
+            SilentlyTry.fired("Conch-ChatTopBar", "request search focus (open)") { searchFieldFocus.requestFocus() }
             // Explicitly poke the IME up. requestFocus on a freshly
             // composed TextField sometimes only sets focus state without
             // raising the soft keyboard (esp. when the field appears
             // mid-animation). Android will keep the soft keyboard hidden
             // anyway if a physical keyboard is attached — that's the
             // platform's behaviour, not something we override.
-            SilentlyTry.fired("SshAi-ChatTopBar", "show soft keyboard") { keyboardController?.show() }
+            SilentlyTry.fired("Conch-ChatTopBar", "show soft keyboard") { keyboardController?.show() }
         }
     }
     // Focus-loss → close. Tapping anywhere outside the field (chat
@@ -442,13 +450,28 @@ internal fun TerminalTopBar(
                                     .clickable(enabled = enableMenu) { onToggleModelMenu() }
                                     .padding(top = 2.dp, bottom = 2.dp),
                             ) {
-                                // Line 1: agent brand icon + model name + chevron.
+                                // Line 1: brand icon + model name + chevron. A
+                                // LOCAL model wears its own mark, not the CLI's —
+                                // the chat is Codex-driven but it is not "Codex"
+                                // to the user (owner, 2026-09-01).
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    // The brand mark dies with the model: a deleted
+                                    // model reads "no model" and must not keep wearing
+                                    // Qwen's face (owner, 2026-09-01).
+                                    val localBrand = (selectedModel ?: sessionInitialModel)
+                                        ?.takeIf {
+                                            it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                                        }
+                                        ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                                        ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+                                        ?.takeIf { ai.eight24family.conch.linux.LocalLlm.isReady(it) }
+                                        ?.iconRes
                                     androidx.compose.material3.Icon(
                                         painter = androidx.compose.ui.res.painterResource(
-                                            ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].iconRes,
+                                            localBrand
+                                                ?: ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].iconRes,
                                         ),
-                                        contentDescription = agent.cliCommand,
+                                        contentDescription = if (localBrand != null) "local model" else agent.cliCommand,
                                         tint = androidx.compose.ui.graphics.Color.Unspecified,
                                         modifier = Modifier.size(12.dp).padding(end = 4.dp),
                                     )
@@ -548,12 +571,36 @@ internal fun TerminalTopBar(
                         // than emptying itself, but presenting a cache as a
                         // fresh read is what made this look like a hardcoded
                         // list. One dim line, the fact and the reason, no advice.
-                        if (modelsStale) {
+                        // An all-local list is read off this phone's own disk —
+                        // there is no server-side /model behind it to have
+                        // failed, so the staleness line would be a lie here.
+                        val allLocal = menuItems.isNotEmpty() && menuItems.all {
+                            it.storedValue?.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) == true
+                        }
+                        if (modelsStale && !allLocal && menuItems.isNotEmpty()) {
                             Text(
                                 text = "cached list — could not read /model on this server",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                        // Nothing to offer must SAY WHY and WHERE — an empty
+                        // dropdown under a live chip read as a broken picker
+                        // (owner, 2026-09-01).
+                        if (menuItems.isEmpty()) {
+                            val phoneRow = serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+                            Text(
+                                text = when {
+                                    phoneRow && !phoneCloudLoggedIn ->
+                                        "no models downloaded — get one in the model store\n" +
+                                            "(Local Models → store); cloud models need Codex sign-in"
+                                    phoneRow -> "no models downloaded — get one in the model store (Local Models → store)"
+                                    else -> "no models known yet for this server"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                             )
                         }
                         menuItems.forEach { item ->
@@ -577,6 +624,15 @@ internal fun TerminalTopBar(
                                 enabled = true,
                                 text = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        item.iconRes?.let { res ->
+                                            androidx.compose.foundation.Image(
+                                                painter = androidx.compose.ui.res.painterResource(res),
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .padding(end = 8.dp)
+                                                    .size(18.dp),
+                                            )
+                                        }
                                         Text(
                                             item.display,
                                             modifier = Modifier.weight(1f),
@@ -835,7 +891,7 @@ internal fun TerminalTopBar(
             // to the same animation-key so crossing the loupe↔loupe
             // boundary is silent; only the loupe↔× transition gets the
             // scale+fade choreography.
-            val haptic = LocalSshAiHaptics.current
+            val haptic = LocalConchHaptics.current
             val iconVariant = when {
                 !searchActive -> 0
                 searchQuery.isEmpty() -> 1
@@ -852,7 +908,7 @@ internal fun TerminalTopBar(
             ) { variant ->
                 val isCross = variant == 2
                 IconButton(onClick = {
-                    haptic.perform(if (isCross) SshAiHaptic.Tick else SshAiHaptic.Tap)
+                    haptic.perform(if (isCross) ConchHaptic.Tick else ConchHaptic.Tap)
                     when (variant) {
                         0 -> onOpenSearch()
                         1 -> onCloseSearch()
@@ -865,7 +921,7 @@ internal fun TerminalTopBar(
                             pendingClose.job?.cancel()
                             pendingClose.job = null
                             onSearchQueryChange("")
-                            SilentlyTry.fired("SshAi-ChatTopBar", "request search focus (clear)") { searchFieldFocus.requestFocus() }
+                            SilentlyTry.fired("Conch-ChatTopBar", "request search focus (clear)") { searchFieldFocus.requestFocus() }
                         }
                     }
                 }) {

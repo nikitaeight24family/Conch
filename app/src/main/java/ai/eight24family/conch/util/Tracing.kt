@@ -20,7 +20,7 @@ import android.os.Trace
  * a tracer is recording. Safe to leave on in release builds.
  *
  * **Section names.** ATrace caps section names at 127 bytes. Keep
- * them ASCII, prefer `SshAi.<Subsystem>.<Op>` for grep-ability in
+ * them ASCII, prefer `Conch.<Subsystem>.<Op>` for grep-ability in
  * Perfetto JSON exports. The prefix makes it cheap to filter
  * everything Conch-related against the kernel/framework noise.
  *
@@ -54,15 +54,15 @@ object Tracing {
      *  consistent across modules and b) renaming one updates every
      *  caller via the IDE. */
     object Names {
-        const val PARSER_FAST_PATH = "SshAi.Parser.parseFast"
-        const val PARSER_SLOW_PATH = "SshAi.Parser.parseTree"
-        const val HISTORY_CACHE_LOAD = "SshAi.HistoryCache.load"
-        const val HISTORY_CACHE_MERGE = "SshAi.HistoryCache.mergeServer"
-        const val FTS_SEARCH = "SshAi.Search.fts"
-        const val FTS_EXPAND_HITS = "SshAi.Search.expandRowToHits"
-        const val FLUSH_STREAMING = "SshAi.Session.flushStreamingBuffer"
-        const val APPLY_TO_HISTORY = "SshAi.Session.applyToHistory"
-        const val INDEX_SESSION = "SshAi.Indexer.indexSession"
-        const val RECONCILE_SCAN = "SshAi.Indexer.reconcileScan"
+        const val PARSER_FAST_PATH = "Conch.Parser.parseFast"
+        const val PARSER_SLOW_PATH = "Conch.Parser.parseTree"
+        const val HISTORY_CACHE_LOAD = "Conch.HistoryCache.load"
+        const val HISTORY_CACHE_MERGE = "Conch.HistoryCache.mergeServer"
+        const val FTS_SEARCH = "Conch.Search.fts"
+        const val FTS_EXPAND_HITS = "Conch.Search.expandRowToHits"
+        const val FLUSH_STREAMING = "Conch.Session.flushStreamingBuffer"
+        const val APPLY_TO_HISTORY = "Conch.Session.applyToHistory"
+        const val INDEX_SESSION = "Conch.Indexer.indexSession"
+        const val RECONCILE_SCAN = "Conch.Indexer.reconcileScan"
     }
 }

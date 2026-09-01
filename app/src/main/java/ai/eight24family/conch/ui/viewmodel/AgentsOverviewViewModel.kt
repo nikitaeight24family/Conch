@@ -70,7 +70,7 @@ class AgentsOverviewViewModel : ViewModel() {
 
     private suspend fun reload() {
         // Sort by host then user so multiple users on the same machine
-        // (user@x, user@example.com) cluster together, each with its own agents.
+        // (alice@host, bob@host) cluster together, each with its own agents.
         val servers = repo.observeServers().first()
             .sortedWith(compareBy({ it.host.lowercase() }, { it.port }, { it.username.lowercase() }))
         _entries.value = servers.map { s -> Entry(server = s, connected = pool.peek(s.id) != null) }

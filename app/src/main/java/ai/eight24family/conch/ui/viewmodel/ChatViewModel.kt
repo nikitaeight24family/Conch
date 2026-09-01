@@ -41,7 +41,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     /** Agent chosen on the picker screen — overrides any stale value on the Server record. */
     private val initialAgent: Agent? = savedStateHandle.get<String>("agent")
-        ?.let { SilentlyTry.logged("SshAi-Chat", "parse initial agent") { Agent.valueOf(it) } }
+        ?.let { SilentlyTry.logged("Conch-Chat", "parse initial agent") { Agent.valueOf(it) } }
 
     /** Optional remote (CLI-managed) session id to attach via `--resume`. */
     private val initialResumeId: String? = savedStateHandle.get<String>("resume")?.takeIf { it.isNotBlank() }
@@ -116,7 +116,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val initialMatchCharOffset: Int = (savedStateHandle.get<String>("off")?.toIntOrNull() ?: -1)
         .also {
             android.util.Log.d(
-                "SshAi-Hl",
+                "Conch-Hl",
                 "VM init: q='${savedStateHandle.get<String>("q")}' mid='${savedStateHandle.get<String>("mid")}' ord=${savedStateHandle.get<String>("ord")} off=$it"
             )
         }
@@ -242,7 +242,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         !connectInFlightSilent
                     ) {
                         android.util.Log.d(
-                            "SshAi-Chat",
+                            "Conch-Chat",
                             "offline-upgrade watcher: network back — retrying silent connect",
                         )
                         beginSearchOpenedConnect(silent = true)
@@ -263,7 +263,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // it came up via another surface and we do it here.
                     if (searchConnCoord.get() == ChatViewModelSearchConn.State.Connecting) continue
                     android.util.Log.i(
-                        "SshAi-Chat",
+                        "Conch-Chat",
                         "offline-upgrade watcher: pool live — upgrading read-only chat to live mirror",
                     )
                     // Same call shape as beginSearchOpenedConnect's success path
@@ -317,7 +317,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     val silentUp = ai.eight24family.conch.ssh.EphemeralSshKey.exists(serverId) &&
                         ServiceLocator.sshConnectionPool.userConnectEphemeral(server) != null
                     if (silentUp) {
-                        android.util.Log.d("SshAi-Chat", "search/open connect: silent device-key reconnect, no tap")
+                        android.util.Log.d("Conch-Chat", "search/open connect: silent device-key reconnect, no tap")
                     } else if (silent) {
                         // On-OPEN auto-connect must never force a FIDO touch (key on
                         // send/tap, not on open). The device key didn't bring it up,
@@ -379,7 +379,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // was noise.
                 searchConnCoord.set(ChatViewModelSearchConn.State.Idle)
                 android.util.Log.w(
-                    "SshAi-Chat",
+                    "Conch-Chat",
                     "search-opened auto-connect ended: ${t.javaClass.simpleName}: ${t.message?.take(160)}"
                 )
             } finally {
@@ -393,7 +393,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     escalateAfterSilent = false
                     if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
                         android.util.Log.d(
-                            "SshAi-Chat",
+                            "Conch-Chat",
                             "silent connect gave up but a send is waiting — escalating to a real connect",
                         )
                         beginSearchOpenedConnect(silent = false)
@@ -454,6 +454,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ServiceLocator.agentStatusCache.observeStatuses(serverId),
             limitExpiryTick,
         ) { agent, statuses, _ ->
+            // A local-model harness (Codex / Qwen Code / opencode) on the phone's
+            // own row drives the LOCAL model through a loopback endpoint — no cloud
+            // account is involved at any point, so every account-shaped block (not
+            // logged in, limits, plan states) is about a login this flow never
+            // uses. The picker there leads with local models, so the whole banner
+            // family is off.
+            if (ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].supportsLocalModel &&
+                serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+            ) {
+                return@combine null
+            }
             val st = statuses[agent]
             // NOT LOGGED IN is the hardest block there is — harder than a rate
             // limit — yet it used to pass this sieve untouched (only claudeState
@@ -572,7 +583,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     ?.firstOrNull { it is AgentMessage.UserText } as? AgentMessage.UserText)
                     ?.text?.replace('\n', ' ')?.replace('\r', ' ')?.trim()?.take(200)
                     .orEmpty()
-                SilentlyTry.fired("SshAi-SessCache", "upsert created session") {
+                SilentlyTry.fired("Conch-SessCache", "upsert created session") {
                     ServiceLocator.sessionsCache.upsert(
                         serverId, agent,
                         RemoteSession(
@@ -779,7 +790,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             taskNamesRid = rid
             taskNamesMem.clear()
             taskNamesMem.putAll(
-                SilentlyTry.loggedOrElse("SshAi-Chat", "load task names", emptyMap()) {
+                SilentlyTry.loggedOrElse("Conch-Chat", "load task names", emptyMap()) {
                     ServiceLocator.historyCache.taskNames(rid)
                 },
             )
@@ -794,7 +805,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (learned) {
             val snapshot = HashMap(taskNamesMem)
             viewModelScope.launch(Dispatchers.IO) {
-                SilentlyTry.fired("SshAi-Chat", "persist task names") {
+                SilentlyTry.fired("Conch-Chat", "persist task names") {
                     ServiceLocator.historyCache.recordTaskNames(rid, snapshot)
                 }
             }
@@ -1110,6 +1121,73 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  was an error row in the transcript that named no file and blamed SSH. */
     private val _attachmentNotice = MutableStateFlow<String?>(null)
     val attachmentNotice: StateFlow<String?> = _attachmentNotice.asStateFlow()
+
+    /** Whether the PHONE's codex has its own cloud sign-in — gates the cloud
+     *  catalog in the picker (a model that cannot run must not be offered;
+     *  owner, 2026-09-01). true for ordinary servers, probed for the phone on
+     *  chat open and on every picker open (a login can happen in between). */
+    private val _phoneCloudLoggedIn = MutableStateFlow(true)
+    val phoneCloudLoggedIn: StateFlow<Boolean> = _phoneCloudLoggedIn.asStateFlow()
+
+    fun refreshPhoneCloudAuth() {
+        if (serverId != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@launch
+            val present = SilentlyTry.loggedOrElse("Conch-Models", "probe phone codex auth", false) {
+                val sess = client.startSession()
+                try {
+                    val cmd = sess.exec("test -f \$HOME/.codex/auth.json && echo YES")
+                    val out = cmd.inputStream.bufferedReader().readText()
+                    cmd.join(10, java.util.concurrent.TimeUnit.SECONDS)
+                    "YES" in out
+                } finally {
+                    SilentlyTry.fired("Conch-Models", "close auth probe") { sess.close() }
+                }
+            }
+            _phoneCloudLoggedIn.value = present
+        }
+    }
+
+    /** GOOD news strip — green, a check, gone by itself in 3 s. The red
+     * a finished download parked there read as a standing alarm. */
+    private val _attachmentSuccess = MutableStateFlow<String?>(null)
+    val attachmentSuccess: StateFlow<String?> = _attachmentSuccess.asStateFlow()
+    private var attachmentSuccessClear: kotlinx.coroutines.Job? = null
+
+    private fun flashAttachmentSuccess(text: String) {
+        _attachmentSuccess.value = text
+        attachmentSuccessClear?.cancel()
+        attachmentSuccessClear = viewModelScope.launch {
+            kotlinx.coroutines.delay(3_000)
+            _attachmentSuccess.value = null
+        }
+    }
+
+    /** A photo was sent to a local model whose vision pack isn't here AND the
+     *  network is metered — the pack must not spend mobile data silently, so
+     *  the chat asks with the exact size. null = no question pending. */
+    private val _pendingVisionDownload =
+        MutableStateFlow<ai.eight24family.conch.linux.LocalLlm.Model?>(null)
+    val pendingVisionDownload: StateFlow<ai.eight24family.conch.linux.LocalLlm.Model?> =
+        _pendingVisionDownload.asStateFlow()
+
+    fun confirmVisionDownload() {
+        val m = _pendingVisionDownload.value ?: return
+        _pendingVisionDownload.value = null
+        // The in-chat progress bar carries the feedback from here.
+        ai.eight24family.conch.linux.LocalLlm.startDownload(m)
+    }
+
+    fun cancelVisionDownload() {
+        _pendingVisionDownload.value = null
+        pendingVisionText = null
+    }
+
+    /** The message text held while the vision pack downloads — resent by the
+     *  app itself when the pack lands (the staged attachment never left). */
+    @Volatile private var pendingVisionText: String? = null
+
+
     /** SEC-1: non-null when installing the bridge onto a higher-risk host (root@
      *  / shared box). Surfaced as a red caution line in the install dialog so the
      *  user knows code-exec on that host = adb-level control of this phone. */
@@ -1294,7 +1372,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // earlier would connect a chat the user cannot see.
         if (!req.navigated || req.serverId != serverId) return
         ai.eight24family.conch.ui.navigation.PhoneBridgeReturn.clear()
-        android.util.Log.i("SshAi-Bridge", "phone paired while this chat was waiting — continuing the connect")
+        android.util.Log.i("Conch-Bridge", "phone paired while this chat was waiting — continuing the connect")
         connectPhoneToServer()
     }
 
@@ -1323,7 +1401,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 if (!_bridgeConnecting.value) return@collect
                 val landed = raw.withIndex().any { (idx, msg) ->
                     idx >= bridgeHandshakeFrom && msg is AgentMessage.UserText &&
-                        msg.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)
+                        (
+                            msg.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER) ||
+                                msg.text.trimStart().startsWith(BRIDGE_LIVE_MARKER)
+                            )
                 }
                 if (landed) endBridgeConnecting()
             }
@@ -1398,7 +1479,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // stay off until the user flips them.
                 val upd = ai.eight24family.conch.diagnostics.BridgeInstaller.install(serverId)
                 android.util.Log.i(
-                    "SshAi-BridgeInstall",
+                    "Conch-BridgeInstall",
                     "auto-updated bridge on $serverId: v$cur → v$avail ok=${upd.success}",
                 )
                 _bridgeUpdateNotice.value = if (upd.success) {
@@ -1460,39 +1541,60 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
-    /** Drop the how-to prompt into the chat and mark this session phone-wired. */
+    /** Prove the bridge path ourselves, then tell the agent about it.
+     *
+     * The tap used to send a how-to and wait for the AGENT to run
+     * `conch-bridge ping` and echo a magic token — so a disobedient model, a
+     * broken CLI or a sleeping poller all collapsed into one blank «couldn't
+     * connect to phone». Now [BridgeSelfTest] proves (and where possible
+     * REPAIRS) every leg with no LLM in the loop; only a proven channel is
+     * announced to the agent, and nothing waits on its reply. */
     private fun activateBridgeForThisChat() {
-        // ⛔ ONCE PER CHAT. The how-to is 1.5 KB of instructions and sending it
-        // costs a FULL TURN — a whole context pass on a resumed session.
-        // MEASURED in the user's rollout (2026-08-27, codex thread 01a03e35):
-        // the app injected it twice into a session that already had it from the
-        // day before, 46 446 + 50 062 input tokens — 45% of everything that
-        // session spent that day — and both turns answered the same "phone not
-        // responding, exit 2". The agent already had the instructions in its
-        // context; what it needed was for the phone to answer, which no amount
-        // of re-explaining fixes.
-        // Read the RAW per-session list, not the display flow: the display
-        // filter is exactly what COLLAPSES the how-to away, so asking it would
-        // be asking the one view that can no longer see the thing we're looking
-        // for. The raw UserText is the durable fact ("this chat was sent the
-        // how-to"), and it survives reload because it comes back from the
-        // session file.
-        val already = _messagesBySession.value[_localSessionId.value]
-            ?.any { it is AgentMessage.UserText && it.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER) } == true
-        if (already) {
-            android.util.Log.i(
-                "SshAi-Bridge",
-                "how-to already in this chat — not spending another turn on it",
-            )
-            _chatNotice.value =
-                "Phone bridge is already set up in this chat. If the agent can't reach the " +
-                    "phone. It answers with the screen off too, just a little slower."
-            return
+        viewModelScope.launch {
+            // The "connecting phone…" row is already on screen (beginBridgeConnecting
+            // ran on the tap) — the self-test happens behind it.
+            when (val v = ai.eight24family.conch.diagnostics.BridgeSelfTest.run(serverId)) {
+                is ai.eight24family.conch.diagnostics.BridgeSelfTest.Verdict.Failed -> {
+                    android.util.Log.w("Conch-Bridge", "self-test failed: ${v.reason}")
+                    endBridgeConnecting()
+                    // The chat row that says WHY — same channel that replaced the
+                    // Settings jump (see _bridgeUnreachable).
+                    _bridgeUnreachable.value = v.reason
+                }
+                ai.eight24family.conch.diagnostics.BridgeSelfTest.Verdict.Ok -> {
+                    _bridgeUnreachable.value = null
+                    // ⛔ ONCE PER CHAT. The how-to costs a FULL TURN — a whole
+                    // context pass on a resumed session. MEASURED (2026-08-27,
+                    // codex thread 01a03e35): injected twice into a session that
+                    // already had it, 46 446 + 50 062 input tokens — 45% of that
+                    // day. Read the RAW list, not the display flow: the display
+                    // filter is exactly what collapses the how-to away.
+                    val already = _messagesBySession.value[_localSessionId.value]
+                        ?.any {
+                            it is AgentMessage.UserText &&
+                                (
+                                    it.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER) ||
+                                        it.text.trimStart().startsWith(BRIDGE_LIVE_MARKER)
+                                    )
+                        } == true
+                    if (already) {
+                        android.util.Log.i(
+                            "Conch-Bridge",
+                            "how-to already in this chat — channel re-proven, not spending another turn",
+                        )
+                        endBridgeConnecting()
+                        // The channel just answered a real ping — the flag may
+                        // light immediately even though no new turn is spent.
+                        _resumeId.value?.let {
+                            ServiceLocator.preferences.setPhoneBridgeSession(serverId, it, true)
+                        }
+                        _chatNotice.value = "phone connected — the agent in this chat can use it"
+                        return@launch
+                    }
+                    send(BRIDGE_HOWTO_PROMPT)
+                }
+            }
         }
-        // The wired flag is set later, when the bridge handshake CONFIRMS (see the
-        // bridge_connected collector) — not here on the tap, so neither the home
-        // 📱 nor the in-chat glyph lights before the server actually answered.
-        send(BRIDGE_HOWTO_PROMPT)
     }
 
     /** Confirmed: install conch-bridge on THIS chat's server, surface the
@@ -1514,21 +1616,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
 
     private val BRIDGE_HOWTO_PROMPT = """
-        I've connected my phone to this server. There's a CLI at ~/.local/bin/conch-bridge
-        that runs things on my phone over this SSH link (the Conch app polls a request
-        directory ~every 2s and executes at adb-shell level).
-
-        FIRST, run `conch-bridge ping`. Success prints `pong` and exits 0. If it doesn't,
-        triage by EXIT CODE — do not assume the phone is dead:
-          • exit 0  → connected, proceed.
-          • exit 2  → timeout: Conch isn't polling. Ask me to bring the Conch app to the
-            foreground — it answers with the screen off, but not while the app is
-            fully closed — then retry.
-          • exit 3  → phone got the request but reported an error (e.g. its shell
-            access is not set up). Read the `phone reported error:` text on stderr.
-          • any other non-zero, especially exit 1 with little or no output → this is almost
-            certainly a bug in the WRAPPER SCRIPT, not the phone. Re-run
-            `bash -x ~/.local/bin/conch-bridge ping` to find the failing line.
+        Phone bridge is live on this server — the app just proved it end-to-end with a
+        real ping, so no handshake is needed from you. There's a CLI at
+        ~/.local/bin/conch-bridge that runs things on my phone over this SSH link (the
+        Conch app polls a request directory ~every 2s and executes at adb-shell level).
 
         Commands:
           • conch-bridge shell '<cmd>' — any adb-shell-level command (e.g. 'pm list packages',
@@ -1539,15 +1630,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
           • conch-bridge screenshot — capture the screen.
           • conch-bridge ping — connectivity check (expect `pong`).
 
-        Poll interval is 2 s while Conch is on screen, 10 s while it is pocketed.
-        Use the bridge whenever you need to inspect or act on my phone.
+        If a command fails later, triage by EXIT CODE — do not assume the phone is dead:
+          • exit 2  → timeout: Conch isn't polling right now. Ask me to bring the Conch
+            app to the foreground (it answers with the screen off, but not fully closed),
+            then retry.
+          • exit 3  → phone got the request but reported an error — read the
+            `phone reported error:` text on stderr.
+          • other non-zero with little output → likely the wrapper script itself; re-run
+            `bash -x ~/.local/bin/conch-bridge ping` to find the failing line.
 
-        HANDSHAKE — do this FIRST and exactly: run `conch-bridge ping`. If it prints
-        `pong`, reply with ONLY this token on its own line and NOTHING else:
-        CONCH_BRIDGE_READY
-        The app hides this whole setup exchange and shows a small phone indicator
-        instead, so don't write anything else in that reply — just the token. If
-        ping does NOT succeed, skip the token and tell me plainly what went wrong.
+        Poll interval is 2 s while Conch is on screen, 10 s while it is pocketed.
+        Use the bridge whenever you need to inspect or act on my phone. Reply with a
+        one-line acknowledgement — this message is hidden behind a phone indicator in
+        the app, so keep it short.
     """.trimIndent()
 
 
@@ -1689,7 +1784,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val key = draftChatId() ?: return@collect
                 val prev = lastQueueKey
                 lastQueueKey = key
-                SilentlyTry.fired("SshAi-Chat", "persist unsent queue") {
+                SilentlyTry.fired("Conch-Chat", "persist unsent queue") {
                     if (prev != null && prev != key) {
                         ServiceLocator.preferences.setUnsentQueue(prev, emptyList())
                     }
@@ -1724,7 +1819,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }.orEmpty()
         if (parked.isEmpty()) return
         android.util.Log.i(
-            "SshAi-Send",
+            "Conch-Send",
             "restoring ${parked.size} unsent message(s) parked for chat ${key.take(8)}",
         )
         _outbox.update { cur ->
@@ -1782,7 +1877,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         draftSaveJob = viewModelScope.launch {
             kotlinx.coroutines.delay(350)
             val id = draftChatId() ?: return@launch
-            SilentlyTry.fired("SshAi-Chat", "save input draft") {
+            SilentlyTry.fired("Conch-Chat", "save input draft") {
                 ServiceLocator.preferences.setInputDraft(id, text)
             }
         }
@@ -1793,7 +1888,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         draftSaveJob?.cancel()
         viewModelScope.launch {
             val id = draftChatId() ?: return@launch
-            SilentlyTry.fired("SshAi-Chat", "clear input draft") {
+            SilentlyTry.fired("Conch-Chat", "clear input draft") {
                 ServiceLocator.preferences.setInputDraft(id, "")
             }
         }
@@ -1833,7 +1928,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     )
                 ) {
                     android.util.Log.i(
-                        "SshAi-Turn",
+                        "Conch-Turn",
                         "network back — draining ${_outbox.value.size} queued message(s)",
                     )
                     drainOutbox(s)
@@ -1855,7 +1950,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         removed?.let { row ->
             // The row may carry a crash-insurance draft — the user just
             // cancelled this text, so it must not resurrect in a composer later.
-            SilentlyTry.fired("SshAi-Chat", "remove cancelled row draft") {
+            SilentlyTry.fired("Conch-Chat", "remove cancelled row draft") {
                 ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
             }
             row.displayText.takeIf { it.isNotBlank() }?.let {
@@ -1896,7 +1991,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // will hand them to a session that can actually take them.
         if (!s.canAcceptSend()) {
             android.util.Log.w(
-                "SshAi-Turn",
+                "Conch-Turn",
                 "drain refused: session can't accept a send (dead scope) — " +
                     "${_outbox.value.size} queued message(s) stay in the queue",
             )
@@ -1911,7 +2006,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // Delivered — drop the crash-insurance drafts these rows carried, or
         // the next "+ new session" would offer already-sent text in the composer.
         for (row in claimed) {
-            SilentlyTry.fired("SshAi-Chat", "remove drained row draft") {
+            SilentlyTry.fired("Conch-Chat", "remove drained row draft") {
                 ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
             }
         }
@@ -2033,7 +2128,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         viewModelScope.launch {
             val rid = _resumeId.filterNotNull().first()
             val persisted = SilentlyTry.loggedOrElse(
-                "SshAi-Chat", "read stop orders", emptySet<String>(),
+                "Conch-Chat", "read stop orders", emptySet<String>(),
             ) { ServiceLocator.preferences.stopOrders.first() }.orEmpty()
             if (rid in persisted) _stopOrdered.value = true
             // The single writer. Armed only AFTER the persisted set has been
@@ -2042,7 +2137,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // race the read it depends on.
             launch(Dispatchers.IO) {
                 for ((id, ordered) in stopOrderWrites) {
-                    SilentlyTry.fired("SshAi-Chat", "persist stop order") {
+                    SilentlyTry.fired("Conch-Chat", "persist stop order") {
                         ServiceLocator.preferences.setStopOrder(id, ordered)
                     }
                 }
@@ -2061,7 +2156,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val out = withContext(Dispatchers.IO) { execPooledText(client, killer.killScript(rid)) }
                 when (killer.parseOutcome(out)) {
                     is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Killed -> {
-                        android.util.Log.i("SshAi-Chat", "deferred stop landed on ${rid.take(8)}")
+                        android.util.Log.i("Conch-Chat", "deferred stop landed on ${rid.take(8)}")
                         tailPollCoord.setRemoteFileOpen(false)
                         clearStopOrder()
                     }
@@ -2248,6 +2343,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             messages = messages,
             initialSessionModel = initialSessionModel,
             initialSessionReasoning = initialSessionReasoning,
+            serverId = serverId,
         )
     }
 
@@ -2284,7 +2380,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // launch-params restart on the next turn.
                 launch(Dispatchers.IO) {
                     if (sess.applyApprovalLive(mode)) {
-                        android.util.Log.i("SshAi-Turn", "approval '$mode' applied live")
+                        android.util.Log.i("Conch-Turn", "approval '$mode' applied live")
                     }
                 }
             }
@@ -2436,6 +2532,93 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     val defaultModel: StateFlow<String?> get() = modelsCoord.defaultModel
     val defaultReasoning: StateFlow<String?> get() = modelsCoord.defaultReasoning
     val sessionInitialModel: StateFlow<String?> get() = modelsCoord.sessionInitialModel
+
+    // ⛔ DECLARED BELOW modelsCoord ON PURPOSE. This property is stateIn(
+    // Eagerly) and its combine() touches modelsCoord — as a declaration above
+    // the `modelsCoord by lazy` FIELD it ran before the Lazy delegate object
+    // itself existed, and every chat open crashed in the constructor
+    // (NPE on kotlin.Lazy.getValue, 2026-09-01). Same class of bug as the
+    // watchBridgeHandshake init note.
+    /** Live download of THIS chat's local model — (label, fraction 0..1),
+     * null when nothing streams. Weights and the vision pack both surface:
+     * the notice that started a pack promised progress, and a bare sentence
+     * with gigabytes moving behind it read as a hang. */
+    val localModelDownload: StateFlow<Pair<String, Float>?> = run {
+        if (serverId != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+            MutableStateFlow<Pair<String, Float>?>(null)
+        } else {
+            // Download speed from emission deltas (progress ticks ~every MB),
+            // lightly smoothed so the number reads steady, not jittery.
+            var spdBytes = -1L
+            var spdAtMs = 0L
+            var spdEma = 0.0
+            combine(
+                ai.eight24family.conch.linux.LocalLlm.progress,
+                modelsCoord.selectedModel,
+                modelsCoord.sessionInitialModel,
+            ) { prog, sel, initial ->
+                val m = (sel ?: initial)
+                    ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+                    ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                    ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+                    ?: return@combine null
+                val v = prog[m.id] ?: run {
+                    spdBytes = -1L; spdEma = 0.0
+                    return@combine null
+                }
+                val now = System.currentTimeMillis()
+                if (spdBytes in 0 until v && now > spdAtMs) {
+                    val inst = (v - spdBytes) * 1000.0 / (now - spdAtMs)
+                    spdEma = if (spdEma <= 0.0) inst else 0.65 * spdEma + 0.35 * inst
+                }
+                spdBytes = v; spdAtMs = now
+                val speed = if (spdEma > 0.0) {
+                    " · ${String.format(java.util.Locale.US, "%.1f", spdEma / 1_048_576.0)} MB/s"
+                } else ""
+                if (m.mmprojUrl != null && v >= m.bytes) {
+                    val frac = ((v - m.bytes).toFloat() / m.mmprojBytes).coerceIn(0f, 1f)
+                    "vision pack · ${ai.eight24family.conch.linux.PhoneResources.gb(v - m.bytes)} of " +
+                        "${ai.eight24family.conch.linux.PhoneResources.gb(m.mmprojBytes)} GB$speed" to frac
+                } else {
+                    val frac = (v.toFloat() / m.bytes).coerceIn(0f, 1f)
+                    "${m.label} · ${ai.eight24family.conch.linux.PhoneResources.gb(v)} of " +
+                        "${ai.eight24family.conch.linux.PhoneResources.gb(m.bytes)} GB$speed" to frac
+                }
+            }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+        }
+    }
+
+    init {
+        // The moment THIS chat's vision pack lands, swap the "downloading…"
+        // notice for the go-ahead — the user was told to resend when it does.
+        if (serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+            viewModelScope.launch {
+                var wasStreaming: ai.eight24family.conch.linux.LocalLlm.Model? = null
+                localModelDownload.collect { cur ->
+                    val sel = (modelsCoord.selectedModel.value ?: modelsCoord.sessionInitialModel.value)
+                        ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                        ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+                    if (cur != null) {
+                        wasStreaming = sel
+                    } else {
+                        val m = wasStreaming
+                        wasStreaming = null
+                        if (m != null && ai.eight24family.conch.linux.LocalLlm.hasVision(m)) {
+                            flashAttachmentSuccess("${m.label} can see now")
+                            // The user already sent it once — finishing the job
+                            // is the app's problem, not theirs (owner,
+                            // 2026-09-01). The attachment is still staged; the
+                            // held text goes through the ordinary send.
+                            pendingVisionText?.let { held ->
+                                pendingVisionText = null
+                                send(held)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     val sessionInitialReasoning: StateFlow<String?> get() = modelsCoord.sessionInitialReasoning
 
     init {
@@ -2581,7 +2764,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val pickedAgent = initialAgent ?: s?.agent ?: recordedAgent ?: Agent.CLAUDE
             if (s == null) {
                 android.util.Log.w(
-                    "SshAi-Chat",
+                    "Conch-Chat",
                     "no server row for $serverId — opening read-only on agent=$pickedAgent " +
                         "(recorded=${recordedAgent != null})",
                 )
@@ -2612,7 +2795,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // thread id, so any pending UserText either already drained into
                 // `s.send()` or is about to. Leaving a draft around would resurrect
                 // those texts on the next "+ new session" tap.
-                SilentlyTry.fired("SshAi-Chat", "clear drafts after resumeId arrived") {
+                SilentlyTry.fired("Conch-Chat", "clear drafts after resumeId arrived") {
                     ServiceLocator.historyCache.clearDrafts(serverId, _currentAgent.value)
                 }
                 // PIN THE MODEL THIS CHAT WAS BORN WITH.
@@ -2633,7 +2816,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // Writing the born-with model here makes the chat's model a FACT
                 // instead of a re-derivation: from now on `claudePick` answers for
                 // it and nothing but an explicit pick can move it.
-                SilentlyTry.fired("SshAi-Models", "pin born-with model") {
+                SilentlyTry.fired("Conch-Models", "pin born-with model") {
                     val prefs = ServiceLocator.preferences
                     if (prefs.selectedModelForChat(rid).first().isNullOrBlank()) {
                         // What it was ACTUALLY born on — not only what we asked
@@ -2651,7 +2834,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         if (born != null) {
                             prefs.setSelectedModelForChat(rid, born)
                             android.util.Log.i(
-                                "SshAi-Models",
+                                "Conch-Models",
                                 "new chat $rid pinned to its launch model '$born'",
                             )
                         }
@@ -2677,7 +2860,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     if (redeliver.isNotEmpty()) {
                         pendingRedelivery.value = emptyList()
                         android.util.Log.d(
-                            "SshAi-Send",
+                            "Conch-Send",
                             "re-delivering ${redeliver.size} prompt(s) dropped on a dead transport",
                         )
                         // The optimistic bubble for an OFFLINE-first-send lives ONLY in
@@ -2774,7 +2957,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     continue
                 }
                 val sessionFile = sessionPathMap[sid] ?: _resumeId.value?.let {
-                    SilentlyTry.logged("SshAi-Chat", "owner path for wf poll") {
+                    SilentlyTry.logged("Conch-Chat", "owner path for wf poll") {
                         ServiceLocator.historyCache.owner(it)?.path
                     }
                 }
@@ -2824,7 +3007,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val now = System.currentTimeMillis()
             if (now - lastRescueMs < 15_000L) return
             lastRescueMs = now
-            android.util.Log.d("SshAi-Chat", "stuck session but pool is live ($reason) — clearing + draining")
+            android.util.Log.d("Conch-Chat", "stuck session but pool is live ($reason) — clearing + draining")
             // Transport-level recovery only: the session has NOT said Running,
             // so the ladder's attempt counter must keep counting. Claiming
             // Running here reset the backoff to attempt=1 every cycle.
@@ -2909,7 +3092,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val leaving = _localSessionId.value
             val leavingAgent = leaving?.let { sessionAgentMap[it] } ?: _currentAgent.value
             if (leaving != null) {
-                SilentlyTry.fired("SshAi-Chat", "close abandoned brand-new session") {
+                SilentlyTry.fired("Conch-Chat", "close abandoned brand-new session") {
                     sessionsManager.closeIfBrandNew(serverId, leavingAgent, leaving)
                 }
             }
@@ -2951,7 +3134,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // open. Same number, same log line — just after the chat is on screen,
             // on IO.
             viewModelScope.launch(Dispatchers.IO) {
-                ai.eight24family.conch.util.Logx.d("SshAi-HistCache") {
+                ai.eight24family.conch.util.Logx.d("Conch-HistCache") {
                     val (total, uniq, bytes) = ServiceLocator.historyCache.duplicationStats(resumeIdParam)
                     "dup-stats sid=${resumeIdParam.take(8)} lines=$total unique=$uniq " +
                         "dupes=${total - uniq} bytes=$bytes"
@@ -2998,7 +3181,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // this hydrate parse runs on the MAIN thread. If parseMs is high on
                     // a big session, that's the "loaded slowly" jank → move off Main.
                     // (Dormant unless -PverboseLogs; enable to measure a slow open.)
-                    ai.eight24family.conch.util.Logx.d("SshAi-Chat") {
+                    ai.eight24family.conch.util.Logx.d("Conch-Chat") {
                         "hydrate sid=${resumeIdParam.take(8)} windowed=${win.windowed} dropped=${win.droppedBytes}B " +
                             "msgs=${parsed.size} parseMs=$parseMs (full ${cachedBytesLen}B)"
                     }
@@ -3045,7 +3228,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ServiceLocator.sshConnectionPool.peek(serverId) == null
         if (offlineReadOnly) {
             android.util.Log.d(
-                "SshAi-Chat",
+                "Conch-Chat",
                 "read-only open: cache hydrated ${cachedParsed.size} msgs, skipping AgentSession bootstrap (connect deferred to first send)"
             )
             // Instant seamless connect on OPEN, not just on first send: if this
@@ -3169,7 +3352,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // only once they are OFFERED (composer subscribed) is the store
             // cleared.
             if (existingAlive == null && resumeIdParam == null) {
-                val drafts = SilentlyTry.logged("SshAi-Chat", "load drafts on chat start") {
+                val drafts = SilentlyTry.logged("Conch-Chat", "load drafts on chat start") {
                     ServiceLocator.historyCache.loadDrafts(serverId, agent)
                 }.orEmpty()
                 if (drafts.isNotEmpty()) {
@@ -3183,10 +3366,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         if (!subscribed) return@launch
                         _returnedText.emit(drafts.joinToString("\n\n"))
                         android.util.Log.i(
-                            "SshAi-Chat",
+                            "Conch-Chat",
                             "restored ${drafts.size} undelivered draft(s) into the composer (never auto-sent)",
                         )
-                        SilentlyTry.fired("SshAi-Chat", "clear drafts after composer restore") {
+                        SilentlyTry.fired("Conch-Chat", "clear drafts after composer restore") {
                             ServiceLocator.historyCache.clearDrafts(serverId, agent)
                         }
                     }
@@ -3257,14 +3440,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // 2026-07-29, with `selected_model_chat_8ce28eb6…=opus` sitting in
             // DataStore the whole time). Await the stored value.
             val storedPick = _resumeId.value?.let { rid ->
-                SilentlyTry.logged("SshAi-Models", "read stored model pick") {
+                SilentlyTry.logged("Conch-Models", "read stored model pick") {
                     ServiceLocator.preferences.selectedModelForChat(rid).first()
                 }
             }?.takeIf { it.isNotBlank() }
             val claudePick = (selectedModel.value ?: storedPick)?.takeIf { it.isNotBlank() }
             if (claudePick != null && (modelsCoord.availableModels.value[claudePick] ?: claudePick) in unavail) {
                 android.util.Log.i(
-                    "SshAi-Models",
+                    "Conch-Models",
                     "explicit pick '$claudePick' is flagged unavailable — honouring it anyway",
                 )
             }
@@ -3325,7 +3508,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
             if (isClaude) {
                 android.util.Log.i(
-                    "SshAi-Models",
+                    "Conch-Models",
                     "launch model resolve: pick=$claudePick existingChat=$isExistingChat " +
                         "pickBeatsSession=$pickBeatsSession " +
                         "catalog=${claudeModels.keys} → ${s.modelOverride ?: "<none — session keeps its own>"}",
@@ -3346,7 +3529,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
             if (isClaude) {
                 android.util.Log.i(
-                    "SshAi-Models",
+                    "Conch-Models",
                     "launch effort resolve: pick=$effortPick observed=$observedEffort " +
                         "pickNewer=${modelsCoord.reasoningPickIsNewer.value} → " +
                         "${s.reasoningEffortOverride ?: "<none — session keeps its own>"}",
@@ -3406,7 +3589,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             ?.trim()?.toLongOrNull()
                         if (serverAheadOfCache(serverSize, base, cachedLen)) {
                             android.util.Log.d(
-                                "SshAi-Chat",
+                                "Conch-Chat",
                                 "cache stale on open (server=$serverSize base=$base cached=$cachedLen) — " +
                                     "refreshing display tail so the in-flight prompt shows with the answer",
                             )
@@ -3436,7 +3619,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     val raw: String? = if (pooled != null) {
                         discovery.fetchSessionContent(resumeFilePath) { cmd ->
                             withContext(Dispatchers.IO) {
-                                SilentlyTry.logged("SshAi-Chat", "fetch session content for chat") {
+                                SilentlyTry.logged("Conch-Chat", "fetch session content for chat") {
                                     val sess = pooled.startSession()
                                     try {
                                         val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -3449,7 +3632,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                         )
                                         proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                                         String(out.toByteArray(), Charsets.UTF_8)
-                                    } finally { SilentlyTry.fired("SshAi-Chat", "close fetch session") { sess.close() } }
+                                    } finally { SilentlyTry.fired("Conch-Chat", "close fetch session") { sess.close() } }
                                 }
                             }
                         }
@@ -3625,9 +3808,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 // phantom-row guard below belongs to the LIST row
                                 // only — putting it around this too emptied a live
                                 // conversation on screen (2026-08-04).
+                                // A resume-announced id is not a file yet: keep
+                                // the owner (navigation must survive) but with a
+                                // ZERO timestamp — a fresh one made the phantom
+                                // sort to the top wearing a 90 s "working" ring.
                                 ServiceLocator.historyCache.recordOwner(
                                     rid, serverId, agent,
-                                    sessionPathMap[localId], nowSec,
+                                    sessionPathMap[localId],
+                                    if (initialResumeId == null) nowSec else 0L,
                                 )
                                 // Only a chat that started WITHOUT a session may
                                 // mint a list row: on a resume the CLI announces a
@@ -3655,7 +3843,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             // Durable twin (bytes of the mirrored body) — this
                             // is what survives an app restart and clears the
                             // home badge + done-✓ when the user views the chat.
-                            SilentlyTry.fired("SshAi-Chat", "stamp seen watermark") {
+                            SilentlyTry.fired("Conch-Chat", "stamp seen watermark") {
                                 ServiceLocator.historyCache.markSeenBytes(
                                     rid, ServiceLocator.historyCache.size(rid),
                                 )
@@ -3694,7 +3882,16 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
             // Tail-poll the remote JSONL: catch up since the snapshot, then
             // listen for external growth (e.g. the user typed on their PC).
-            if (resumeIdParam != null && resumeFilePath != null) {
+            //
+            // ⛔ NOT FOR THE PHONE'S OWN LOCAL MODEL. That chat is driven by
+            // the live app-server stream (AgentSessionCodexAppServer), which
+            // is the single source of truth — there is no "other machine"
+            // editing the rollout. Running the poller too made codex's JSONL
+            // re-emit the SAME answer (a second identical bubble) and render
+            // its turn/item bookkeeping as chat rows — (owner, 2026-09-01).
+            if (serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+                // live stream only; no mirror
+            } else if (resumeIdParam != null && resumeFilePath != null) {
                 // The poller speaks REMOTE offsets; a tail-first cache's local
                 // length maps to remote only after adding its base origin
                 // (0 for complete mirrors, so this is byte-identical for them).
@@ -3726,18 +3923,18 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     var tries = 0
                     while (path == null && tries < 60) {
                         if (_localSessionId.value != localId) return@launch
-                        path = SilentlyTry.logged("SshAi-Chat", "resolve owner path for late poller") {
+                        path = SilentlyTry.logged("Conch-Chat", "resolve owner path for late poller") {
                             ServiceLocator.historyCache.owner(sid)?.path
                         }
                         if (path == null) { tries++; kotlinx.coroutines.delay(5_000) }
                     }
                     val p = path ?: run {
-                        android.util.Log.w("SshAi-Chat", "late poller: no path for ${sid.take(8)} after ${tries}×5s — mirror stays stream-only")
+                        android.util.Log.w("Conch-Chat", "late poller: no path for ${sid.take(8)} after ${tries}×5s — mirror stays stream-only")
                         return@launch
                     }
                     sessionPathMap[localId] = p
                     if (pollerJobs[localId] == null && _localSessionId.value == localId) {
-                        android.util.Log.d("SshAi-Chat", "late poller armed for ${sid.take(8)} at $p")
+                        android.util.Log.d("Conch-Chat", "late poller armed for ${sid.take(8)} at $p")
                         pollerJobs[localId] = viewModelScope.launch(Dispatchers.IO) {
                             tailPollCoord.tailPoll(
                                 s, agent, sid, p,
@@ -3770,7 +3967,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // nothing to ride; skip and let the next connect refresh us
         // (beginSearchOpenedConnect re-calls refreshSessions on success).
         val pooled = ServiceLocator.sshConnectionPool.peek(serverId) ?: run {
-            android.util.Log.d("SshAi-Chat", "refreshSessions: pool offline, skipping discovery.list")
+            android.util.Log.d("Conch-Chat", "refreshSessions: pool offline, skipping discovery.list")
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -3779,7 +3976,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 var execFailed = false
                 val list = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Chat", "fetch sessions list (pooled)") {
+                        ai.eight24family.conch.util.SilentlyTry.logged("Conch-Chat", "fetch sessions list (pooled)") {
                             val sess = pooled.startSession()
                             try {
                                 val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -3793,7 +3990,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                                 String(out.toByteArray(), Charsets.UTF_8)
                             } finally {
-                                ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Chat", "close list session") { sess.close() }
+                                ai.eight24family.conch.util.SilentlyTry.fired("Conch-Chat", "close list session") { sess.close() }
                             }
                         }.also { if (it == null) execFailed = true }
                     }
@@ -3802,11 +3999,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // the clobber that rendered "No sessions yet" on a populated
                 // server. Keep whatever the cache / prior refresh showed.
                 if (execFailed) {
-                    android.util.Log.w("SshAi-Chat", "refreshSessions: pooled exec failed — keeping current list")
+                    android.util.Log.w("Conch-Chat", "refreshSessions: pooled exec failed — keeping current list")
                     return@launch
                 }
                 _remoteSessions.value = list
-                ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Chat", "record durable owners (chat refresh)") {
+                ai.eight24family.conch.util.SilentlyTry.fired("Conch-Chat", "record durable owners (chat refresh)") {
                     ServiceLocator.historyCache.recordOwners(server.id, agent, list)
                 }
             } finally {
@@ -3837,7 +4034,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // cost 96 508 input tokens that day. A turn is the most expensive thing
         // this app does; it does not get to be anonymous.
         android.util.Log.i(
-            "SshAi-TurnLife",
+            "Conch-TurnLife",
             "send: ${text.length}B source=" +
                 (if (text.trimStart().startsWith(BRIDGE_HOWTO_MARKER)) "APP/bridge-howto"
                 else if (text.trimStart().startsWith("/")) "USER/slash" else "USER") +
@@ -3874,7 +4071,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // NOTHING on screen said so. Park it in the visible queue instead;
             // the drain fires as soon as a session reaches Running, and the row
             // carries a ✕ if they'd rather take it back.
-            android.util.Log.w("SshAi-Send", "no session slot yet — parking the message in the queue")
+            android.util.Log.w("Conch-Send", "no session slot yet — parking the message in the queue")
             val t = text.trim()
             if (t.isNotEmpty()) parkInOutbox(t, t)
             return
@@ -3907,12 +4104,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // it.
                 parkInOutbox(t, t)
                 if (_resumeId.value == null) {
-                    SilentlyTry.fired("SshAi-Chat", "append draft on offline first-send") {
+                    SilentlyTry.fired("Conch-Chat", "append draft on offline first-send") {
                         ServiceLocator.historyCache.appendDraft(serverId, _currentAgent.value, t)
                     }
                 }
             }
-            android.util.Log.d("SshAi-Send", "offline open — connecting on first send (message shown optimistically)")
+            android.util.Log.d("Conch-Send", "offline open — connecting on first send (message shown optimistically)")
             beginSearchOpenedConnect()
             return
         }
@@ -3958,6 +4155,33 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // list in finalText, which is kept for the bubble's inline preview (audit
         // 2026-06-14). Non-image files stay prose-only (the agent reads them).
         val imagePaths = ready.filter { it.first.isImage }.map { it.second }
+
+        // A photo for a local model that has no vision pack yet would die on
+        // the engine as a raw 500 and codex would retry it into the ground
+        // (owner's GPU-box photo, 2026-09-01). Start the pack download NOW,
+        // keep the attachment staged, and say what's happening — same refuse-
+        // don't-lose contract as a failed upload above.
+        if (imagePaths.isNotEmpty() && serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+            val local = (modelsCoord.selectedModel.value
+                ?: activeSessions[sid]?.modelOverride)
+                ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+                ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+            if (local != null && local.mmprojUrl != null && !ai.eight24family.conch.linux.LocalLlm.hasVision(local)) {
+                // The pack fetches ITSELF the moment an image task appears —
+                // no button anywhere (owner, 2026-09-01). Wi-Fi: silently.
+                // Mobile data: a consent dialog with the exact size.
+                pendingVisionText = trimmed
+                if (ai.eight24family.conch.util.NetGuard.isMetered(ServiceLocator.appContext)) {
+                    _pendingVisionDownload.value = local
+                    return
+                }
+                // The progress bar (localModelDownload) IS the feedback —
+                // a red banner over a healthy download read as an alarm.
+                ai.eight24family.conch.linux.LocalLlm.startDownload(local)
+                return
+            }
+        }
 
         // Show the user's own images INSTANTLY from the bytes we already have
         // (just uploaded) — pre-decode into the inline-image cache so the chat
@@ -4085,7 +4309,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // back in the COMPOSER of the next "+ new session" — never
             // auto-sent (2026-08-17). Drained/cancelled rows clean it up.
             if (_resumeId.value == null) {
-                SilentlyTry.fired("SshAi-Chat", "append draft on queued send") {
+                SilentlyTry.fired("Conch-Chat", "append draft on queued send") {
                     ServiceLocator.historyCache.appendDraft(
                         serverId, _currentAgent.value, finalText
                     )
@@ -4122,10 +4346,29 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // launch-params restart on the next turn (the old path).
                 viewModelScope.launch(Dispatchers.IO) {
                     if (sess.applyModelLive(trimmed)) {
-                        android.util.Log.i("SshAi-Models", "model '$trimmed' applied live via set_model")
+                        android.util.Log.i("Conch-Models", "model '$trimmed' applied live via set_model")
                     }
                 }
             }
+            restartLocalEngineForPick(trimmed, modelsCoord.selectedReasoning.value)
+        }
+    }
+
+    /** A LOCAL model pick applies NOW, not on the next send: the engine swaps
+     * weights immediately, so the switch is visible (loading → serving) the
+     * moment it's made — waiting for the next message read as a dead picker.
+     * */
+    private fun restartLocalEngineForPick(model: String?, effort: String?) {
+        if (serverId != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return
+        val m = model?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+            ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+            ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            ai.eight24family.conch.linux.LocalLlmEngine.start(
+                m,
+                thinking = effort == ai.eight24family.conch.linux.LocalLlm.EFFORT_THINKING,
+            )
         }
     }
 
@@ -4214,10 +4457,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // xhigh/ultracode still take the restart path on the next turn.
                 viewModelScope.launch(Dispatchers.IO) {
                     if (sess.applyReasoningLive(trimmed)) {
-                        android.util.Log.i("SshAi-Models", "effort '$trimmed' applied live")
+                        android.util.Log.i("Conch-Models", "effort '$trimmed' applied live")
                     }
                 }
             }
+            // Local thinking switch is engine launch state — apply it NOW,
+            // same as a model pick.
+            restartLocalEngineForPick(
+                modelsCoord.selectedModel.value
+                    ?: _localSessionId.value?.let { activeSessions[it]?.modelOverride },
+                trimmed,
+            )
         }
     }
 
@@ -4329,7 +4579,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 current.fetchedAtEpochMs, rep.fetchedAtEpochMs,
             )
         ) {
-            ai.eight24family.conch.util.Logx.d("SshAi-Usage") {
+            ai.eight24family.conch.util.Logx.d("Conch-Usage") {
                 "bar<-$tier REJECTED (older: ${rep.fetchedAtEpochMs} < ${current.fetchedAtEpochMs})"
             }
             return
@@ -4339,7 +4589,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     private fun logUsageSource(tier: String, rep: ai.eight24family.conch.agent.UsageReport?) {
-        ai.eight24family.conch.util.Logx.d("SshAi-Usage") {
+        ai.eight24family.conch.util.Logx.d("Conch-Usage") {
             val w = rep?.barPick()?.window
             "bar<-$tier " + (w?.let { "${it.label}=${it.percent}%" } ?: "none") +
                 " fetchedAt=${rep?.fetchedAtEpochMs}"
@@ -4594,9 +4844,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             val sess = _localSessionId.value?.let { activeSessions[it] } ?: return@launch
             if (sess.renameSession(trimmed)) {
                 _renamedTitle.value = trimmed
-                android.util.Log.i("SshAi-Turn", "session renamed to '$trimmed'")
+                android.util.Log.i("Conch-Turn", "session renamed to '$trimmed'")
             } else {
-                android.util.Log.w("SshAi-Turn", "rename_session failed (channel down or refused)")
+                android.util.Log.w("Conch-Turn", "rename_session failed (channel down or refused)")
             }
         }
     }
@@ -4950,14 +5200,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // it is newer than what the session last reported.
                 if (modelsCoord.observationNewerThanPick.value) {
                     android.util.Log.i(
-                        "SshAi-Models",
+                        "Conch-Models",
                         "stale pick '$chosen' NOT applied — the session's own model stands",
                     )
                     return@collect
                 }
                 if (sess.modelOverride != chosen) {
                     android.util.Log.i(
-                        "SshAi-Models",
+                        "Conch-Models",
                         "explicit pick '$chosen' re-applied (was '${sess.modelOverride}')",
                     )
                     sess.modelOverride = chosen
@@ -5076,7 +5326,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 if (++idleTicks < QUEUE_RELEASE_IDLE_TICKS) continue
                 idleTicks = 0
                 android.util.Log.i(
-                    "SshAi-Chat",
+                    "Conch-Chat",
                     "idle with ${_outbox.value.size} queued message(s) — releasing the queue",
                 )
                 drainOutbox(sess)
@@ -5346,7 +5596,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             ),
         )
         val tailRaw = withContext(Dispatchers.IO) {
-            SilentlyTry.logged("SshAi-Chat", "fetch session tail for fast paint") {
+            SilentlyTry.logged("Conch-Chat", "fetch session tail for fast paint") {
                 val sess = tailClient.startSession()
                 try {
                     val proc = sess.exec(tailCmd)
@@ -5359,7 +5609,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     )
                     proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
                     out.toByteArray()
-                } finally { SilentlyTry.fired("SshAi-Chat", "close tail session") { sess.close() } }
+                } finally { SilentlyTry.fired("Conch-Chat", "close tail session") { sess.close() } }
             }
         }
         if (tailRaw == null || tailRaw.isEmpty()) return
@@ -5384,7 +5634,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  path can't use execOnLive (there may be NO AgentSession at all for a
      *  mirrored turn), so it rides the pool client directly. */
     private fun execPooledText(client: net.schmizz.sshj.SSHClient, script: String): String? =
-        SilentlyTry.logged("SshAi-Chat", "stop-path pooled exec") {
+        SilentlyTry.logged("Conch-Chat", "stop-path pooled exec") {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(
@@ -5396,7 +5646,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 text
             } finally {
-                SilentlyTry.fired("SshAi-Chat", "close stop session") { sess.close() }
+                SilentlyTry.fired("Conch-Chat", "close stop session") { sess.close() }
             }
         }
 
@@ -5407,7 +5657,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *
      * Save target picked at runtime by API level:
      *  - Android 10+: MediaStore Downloads (no permission required, file
-     *    appears in `Files → Downloads → sshai/` on every phone).
+     *    appears in `Files → Downloads → conch/` on every phone).
      *  - Older: app-private Downloads dir (visible in Files but only the
      *    app can manage it). Avoids the WRITE_EXTERNAL_STORAGE prompt.
      *
@@ -5526,7 +5776,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // a second, and the session's own `initialize` remains the final word.
         viewModelScope.launch {
             val s = _localSessionId.value?.let { activeSessions[it] } ?: return@launch
-            SilentlyTry.fired("SshAi-Models", "refresh default model for new session") {
+            SilentlyTry.fired("Conch-Models", "refresh default model for new session") {
                 modelsCoord.probeAvailableModels(s, force = true)
             }
         }
@@ -5561,7 +5811,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // chat never reached Running, so the user's parked message had no edge
         // to leave on (2026-08-16). MIN_AGE keeps anything born after the
         // failure; a genuinely poisoned transport is older than that.
-        SilentlyTry.fired("SshAi-Chat", "evict poisoned transport on retry") {
+        SilentlyTry.fired("Conch-Chat", "evict poisoned transport on retry") {
             ServiceLocator.sshConnectionPool.evictPoisoned(
                 serverId,
                 "turn failed disconnected while pooled client looked alive",
@@ -5730,7 +5980,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             s?.history?.value?.size?.let { historySize ->
                 ai.eight24family.conch.agent.SessionSeenTracker.markSeen(rid, historySize)
             }
-            SilentlyTry.fired("SshAi-Chat", "stamp seen watermark on exit") {
+            SilentlyTry.fired("Conch-Chat", "stamp seen watermark on exit") {
                 ServiceLocator.historyCache.markSeenBytes(
                     rid, ServiceLocator.historyCache.size(rid),
                 )
@@ -5751,7 +6001,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
         for (b in bodies) {
             if (b.isBlank()) continue
-            SilentlyTry.fired("SshAi-Chat", "persist queued send on exit") {
+            SilentlyTry.fired("Conch-Chat", "persist queued send on exit") {
                 ServiceLocator.historyCache.appendDraft(serverId, agent, b)
             }
         }
@@ -5765,7 +6015,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // still in flight is exempt (see closeIfBrandNew); the foreground service
         // is there to let it finish.
         if (sid != null) {
-            SilentlyTry.fired("SshAi-Chat", "close brand-new session on exit") {
+            SilentlyTry.fired("Conch-Chat", "close brand-new session on exit") {
                 sessionsManager.closeIfBrandNew(serverId, agent, sid)
             }
         }
@@ -6033,6 +6283,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
  */
 internal const val BRIDGE_HOWTO_MARKER = "I've connected my phone to this server"
 
+/** First line of the CURRENT bridge prompt — sent only after [BridgeSelfTest]
+ *  proved the channel itself, so a turn carrying it collapses straight to
+ *  "phone connected": no token, no verdict staked on the agent's obedience.
+ *  [BRIDGE_HOWTO_MARKER] and [BRIDGE_READY_TOKEN] stay for sessions recorded
+ *  before 2026-09-01. */
+internal const val BRIDGE_LIVE_MARKER = "Phone bridge is live on this server"
+
 /** The agent replies with ONLY this token once the handshake succeeds. The app
  *  hides the prompt and this reply behind one clean "phone connected" row. */
 internal const val BRIDGE_READY_TOKEN = "CONCH_BRIDGE_READY"
@@ -6087,8 +6344,12 @@ internal fun collapseBridgeHandshake(
         val turn = msgs.subList(i, j)
 
         val hasPrompt = turn.any { it is AgentMessage.UserText && it.text.trimStart().startsWith(marker) }
+        // The post-self-test prompt: the channel was already PROVEN by a real
+        // ping before this turn was sent, so its mere presence collapses to
+        // "connected" — no token to wait for, nothing staked on the agent.
+        val hasLive = turn.any { it is AgentMessage.UserText && it.text.trimStart().startsWith(BRIDGE_LIVE_MARKER) }
         val hasToken = turn.any { isReadyTokenMsg(it, readyToken) }
-        if (!hasPrompt && !hasToken) {
+        if (!hasPrompt && !hasLive && !hasToken) {
             out += turn
             i = j
             continue
@@ -6096,7 +6357,7 @@ internal fun collapseBridgeHandshake(
         out += AgentMessage.System(
             id = turn.first().id,
             subtype = when {
-                hasToken -> "bridge_connected"
+                hasToken || hasLive -> "bridge_connected"
                 // The turn finished and never confirmed — say so rather than
                 // spinning forever.
                 j < msgs.size || endsATurn(turn.last()) -> "bridge_failed"
@@ -6109,8 +6370,14 @@ internal fun collapseBridgeHandshake(
         out += turn.filter { m ->
             when (m) {
                 is AgentMessage.UserText ->
-                    !m.text.trimStart().startsWith(marker) && !m.text.trimStart().startsWith("<")
-                is AgentMessage.AssistantText -> !isReadyToken(m.text, readyToken)
+                    !m.text.trimStart().startsWith(marker) &&
+                        !m.text.trimStart().startsWith(BRIDGE_LIVE_MARKER) &&
+                        !m.text.trimStart().startsWith("<")
+                // The live prompt ASKS for a one-line acknowledgement and
+                // promises it stays hidden — honoring that here. Legacy turns
+                // keep carrying real replies out (only the token is plumbing).
+                is AgentMessage.AssistantText ->
+                    if (hasLive) false else !isReadyToken(m.text, readyToken)
                 else -> false
             }
         }

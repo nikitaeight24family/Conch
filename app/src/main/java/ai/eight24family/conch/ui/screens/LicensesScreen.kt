@@ -148,7 +148,7 @@ fun LicensesScreen(onBack: () -> Unit) {
                             modifier = Modifier
                                 .padding(top = 2.dp)
                                 .clickable {
-                                    SilentlyTry.fired("SshAi-Licenses", "open license url") {
+                                    SilentlyTry.fired("Conch-Licenses", "open license url") {
                                         uriHandler.openUri(license.url)
                                     }
                                 },

@@ -35,3 +35,6 @@ Gradleuser-home/
 # Python bytecode from the tools/ helpers (mirror scrub, ELF checks).
 __pycache__/
 *.pyc
+
+# Native engine (llama.cpp) ships in the APK/Release, not the source mirror.
+app/src/main/jniLibs/

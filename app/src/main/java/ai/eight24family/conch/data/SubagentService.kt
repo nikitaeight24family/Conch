@@ -136,7 +136,7 @@ class SubagentService(
         // Defensive against ServiceLocator not being initialized — happens
         // in unit tests that construct this class directly. Production
         // always has it set up by Application.onCreate.
-        val mgr = SilentlyTry.logged("SshAi-Subagent", "resolve agent sessions") { ServiceLocator.agentSessions } ?: return null
+        val mgr = SilentlyTry.logged("Conch-Subagent", "resolve agent sessions") { ServiceLocator.agentSessions } ?: return null
         return chatId?.let { mgr.get(serverId, agent, it) }
             ?: mgr.findAnyAlive(serverId, agent)
     }

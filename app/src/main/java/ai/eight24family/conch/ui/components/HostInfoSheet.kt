@@ -93,7 +93,7 @@ fun HostInfoSheet(
             probing = true
             withContext(Dispatchers.IO) {
                 probe.probe { cmd ->
-                    SilentlyTry.logged("SshAi-HostInfo", "exec host info probe") {
+                    SilentlyTry.logged("Conch-HostInfo", "exec host info probe") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(cmd)
@@ -106,7 +106,7 @@ fun HostInfoSheet(
                             )
                             proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
-                        } finally { SilentlyTry.fired("SshAi-HostInfo", "close host info session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-HostInfo", "close host info session") { sess.close() } }
                     }
                 }.onSuccess { stats = it }
             }
@@ -288,27 +288,5 @@ private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.outline,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(top = 1.dp).weight(0.5f, fill = true),
-        )
-        Text(
-            value,
-            color = MaterialTheme.colorScheme.onSurface,
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = true),
-        )
-    }
-}
+// InfoRow now comes from Sections.kt in this package — one grammar for every
+// `//` page, one place for it to change.

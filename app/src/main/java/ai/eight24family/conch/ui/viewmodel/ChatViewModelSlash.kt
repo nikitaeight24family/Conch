@@ -201,7 +201,7 @@ internal class ChatViewModelSlash(
             // repo cannot hang the turn. The shell stays as the fallback for a
             // chat that is not on a persistent Claude stream.
             val out = (
-                ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Slash", "worker diff") {
+                ai.eight24family.conch.util.SilentlyTry.logged("Conch-Slash", "worker diff") {
                     s.workspaceDiffText()
                 }?.takeIf { it.isNotBlank() }
                     ?: s.execOnLive("bash -lc " + shQuote(gitCmd)).orEmpty()
@@ -292,7 +292,7 @@ internal class ChatViewModelSlash(
     ) {
         val s = sessionAccess() ?: return
         scope.launch {
-            val text = ai.eight24family.conch.util.SilentlyTry.logged("SshAi-Slash", "control ask $label") {
+            val text = ai.eight24family.conch.util.SilentlyTry.logged("Conch-Slash", "control ask $label") {
                 ask(s)
             }
             if (text.isNullOrBlank()) { notice(emptyText); return@launch }

@@ -10,10 +10,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.res.painterResource
+import ai.eight24family.conch.ui.window.handCursor
 import androidx.compose.foundation.background
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -80,6 +83,10 @@ fun AgentPickerScreen(
     autoLoginAgent: Agent? = null,
     onBack: () -> Unit,
     onPickAgent: (Agent) -> Unit,
+    /** A downloaded LOCAL model row was tapped (phone's row only) → open a
+     *  Codex chat with `local:<modelId>` as the session model. */
+    onPickLocalModel: (modelId: String) -> Unit = {},
+    onOpenLocalModels: () -> Unit = {},
     /** Open the Keychain in "discover credentials" mode and auto-attach
      *  every imported key to [serverId]. Surfaced from the touch dialog
      *  on a Wrong-Key error: user taps "Find on this key" → keychain
@@ -253,14 +260,14 @@ fun AgentPickerScreen(
         // to STARTED); firing onBack() then would pop Keychain off.
         val lifecycleState = lifecycleOwner.lifecycle.currentState
         if (!lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
-            android.util.Log.d("SshAi-AgentPicker", "watchdog skipped — screen no longer resumed (state=$lifecycleState)")
+            android.util.Log.d("Conch-AgentPicker", "watchdog skipped — screen no longer resumed (state=$lifecycleState)")
             return@LaunchedEffect
         }
         if (!authConfirmed && skTouch == null && vm.error.value == null
             && !vm.probing.value
             && ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(serverId) == null
         ) {
-            android.util.Log.d("SshAi-AgentPicker", "no active session and no in-flight touch — popping to servers")
+            android.util.Log.d("Conch-AgentPicker", "no active session and no in-flight touch — popping to servers")
             onBack()
         }
     }
@@ -328,7 +335,7 @@ fun AgentPickerScreen(
         // Default circular arc indicator is suppressed; we render our
         // own "⟳ refreshing…" status bar below the topbar instead —
         // gives a clearer affordance than a floating circle.
-        val refreshHaptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+        val refreshHaptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
         androidx.compose.material3.pulltorefresh.PullToRefreshBox(
             // `isRefreshing` only flips for user-triggered gestures so
             // PullToRefreshBox doesn't act as if it's busy during
@@ -341,7 +348,7 @@ fun AgentPickerScreen(
                 // it the user sometimes can't tell if their gesture
                 // registered (the "refreshing…" bar is subtle).
                 refreshHaptic.perform(
-                    ai.eight24family.conch.ui.haptic.SshAiHaptic.GestureEnd
+                    ai.eight24family.conch.ui.haptic.ConchHaptic.GestureEnd
                 )
                 vm.refresh(userTriggered = true)
             },
@@ -358,6 +365,8 @@ fun AgentPickerScreen(
               // Picker is a full screen — a stranded touch (90s, no signer) pops
               // back to the server list. (In the overview this is a no-op.)
               onSkTouchTimeout = { onBack() },
+              onPickLocalModel = onPickLocalModel,
+              onOpenLocalModels = onOpenLocalModels,
               modifier = Modifier.fillMaxSize(),
           )
         }
@@ -411,6 +420,12 @@ internal fun ServerAgentPanel(
     onOpenKeychainForDiscover: (String) -> Unit,
     onOpenKeychainForRegister: (String) -> Unit,
     onSkTouchTimeout: () -> Unit = {},
+    /** A downloaded LOCAL model row was tapped (phone's row only) → open a
+     *  Codex chat with `local:<modelId>` as the session model. */
+    onPickLocalModel: (modelId: String) -> Unit = {},
+    /** The Local Models agent-row was tapped (phone's row only) → open the
+     *  dedicated local-models screen. */
+    onOpenLocalModels: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val statuses by vm.statuses.collectAsState()
@@ -531,6 +546,10 @@ internal fun ServerAgentPanel(
                     statuses?.get(a)?.let { it.installed && it.loggedIn } == true
                 }
                 val shown = if (moreExpanded) primary + rest else primary
+                // Opens its own dedicated screen.
+                if (serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+                    LocalModelsAgentRow(onOpen = onOpenLocalModels)
+                }
                 shown.forEach { agent ->
                     val s = statuses?.get(agent)
                     // A browse panel with no live transport is not checking
@@ -586,6 +605,7 @@ internal fun ServerAgentPanel(
                             .padding(horizontal = 20.dp, vertical = 10.dp),
                     )
                 }
+
             }
         }
     }
@@ -951,6 +971,72 @@ private fun AccountNameDialog(
         }
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
+}
+
+/** The Local Models entry — worn like an agent row, LAST in the list, with
+ *  its own mark and its own screen behind it. The status line carries the
+ *  living facts: how many brains are downloaded and what the engine serves. */
+@Composable
+private fun LocalModelsAgentRow(onOpen: () -> Unit) {
+    val revision by ai.eight24family.conch.linux.LocalLlm.revision.collectAsState()
+    val engine by ai.eight24family.conch.linux.LocalLlmEngine.state.collectAsState()
+    val readyCount = androidx.compose.runtime.remember(revision) {
+        ai.eight24family.conch.linux.LocalLlm.CATALOG.count { ai.eight24family.conch.linux.LocalLlm.isReady(it) }
+    }
+    val statusLine = buildString {
+        append(
+            when (readyCount) {
+                0 -> "no models downloaded yet"
+                1 -> "1 model ready"
+                else -> "$readyCount models ready"
+            },
+        )
+        (engine as? ai.eight24family.conch.linux.LocalLlmEngine.State.Up)?.let { up ->
+            val label = ai.eight24family.conch.linux.LocalLlm.byId(up.modelId)?.label ?: up.modelId
+            append(" · serving ").append(label)
+            if (up.gpu) append(" · gpu")
+        }
+    }
+    // Worn EXACTLY like an agent row — same paddings, icon box and type as
+    // [AgentRow], so the panel scans as one column.
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .handCursor()
+            .clickable { onOpen() }
+            .padding(vertical = 10.dp, horizontal = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Image(
+                painter = painterResource(ai.eight24family.conch.R.drawable.ic_local_models),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(18.dp)
+                    .padding(end = 4.dp),
+            )
+            Text(
+                "Local Models",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f, fill = true),
+            )
+            Text(
+                "[ open ]",
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            )
+        }
+        Text(
+            "  $statusLine",
+            color = MaterialTheme.colorScheme.outline,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
 }
 
 @Composable
@@ -1341,6 +1427,7 @@ private fun DiagnosisCard(
     diagnosis: ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis,
     onRetry: () -> Unit,
 ) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val errorColor = MaterialTheme.colorScheme.error
     val onSurface = MaterialTheme.colorScheme.onSurface
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1376,6 +1463,26 @@ private fun DiagnosisCard(
             }
         }
         Spacer(modifier = Modifier.padding(top = 4.dp))
+        // ⛔ WHERE THE APP CAN FIX IT, THE CARD OFFERS THE FIX — not a paragraph
+        // about it. This is the phone's own shell: the flow that arms it already
+        // exists (Settings → Phone bridge opens Android's Developer options and
+        // watches for the pairing dialog), so the card starts that same flow
+        // rather than sending the owner off to find it (2026-08-31).
+        if (diagnosis.action == ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Action.PHONE_BRIDGE) {
+            OutlinedButton(
+                onClick = {
+                    // ORDER MATTERS, same as on the bridge screen: arm the
+                    // watcher BEFORE leaving, because Android's dialog can be
+                    // open before we are asked again, and the code only exists
+                    // while it is.
+                    ai.eight24family.conch.adb.PairingWatcher.start(ctx)
+                    openWirelessDebugging(ctx)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("[ set it up ]", style = MaterialTheme.typography.labelLarge)
+            }
+        }
         OutlinedButton(
             onClick = onRetry,
             modifier = Modifier.fillMaxWidth(),
@@ -1478,13 +1585,13 @@ private fun LoginDialog(
         }
         val code = found ?: run {
             android.util.Log.d(
-                "SshAi-AgentPicker",
+                "Conch-AgentPicker",
                 "clipboard auto-grab found nothing in ${CLIP_GRAB_TRIES} tries — manual paste still works",
             )
             return@LaunchedEffect
         }
         android.util.Log.d(
-            "SshAi-AgentPicker",
+            "Conch-AgentPicker",
             "LoginDialog clipboard auto-grab — took ${code.length}B of a clip, callbackMode=${request.callbackMode}",
         )
         pasted = ""
@@ -1594,7 +1701,7 @@ private fun LoginDialog(
                         // params; showing them in the dialog was ugly and
                         // the user never reads them anyway.
                         OutlinedButton(
-                            onClick = { SilentlyTry.fired("SshAi-AgentPicker", "open OAuth url in browser") { uriHandler.openUri(request.url) } },
+                            onClick = { SilentlyTry.fired("Conch-AgentPicker", "open OAuth url in browser") { uriHandler.openUri(request.url) } },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("[ open in browser ]", style = MaterialTheme.typography.labelLarge)
@@ -1713,7 +1820,7 @@ private fun LoginDialog(
                     OutlinedButton(
                         onClick = {
                             android.util.Log.d(
-                                "SshAi-AgentPicker",
+                                "Conch-AgentPicker",
                                 "LoginDialog submit tapped — codeLen=${pasted.trim().length} callbackMode=${request.callbackMode}",
                             )
                             onSubmitCode(pasted, true)

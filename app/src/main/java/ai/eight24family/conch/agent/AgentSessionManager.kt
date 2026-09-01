@@ -2,7 +2,7 @@ package ai.eight24family.conch.agent
 
 import android.content.Context
 import ai.eight24family.conch.data.ServerRepository
-import ai.eight24family.conch.service.SshAiService
+import ai.eight24family.conch.service.ConchService
 import ai.eight24family.conch.ssh.SshClient
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -65,7 +65,7 @@ class AgentSessionManager(
         if (skSigner != null) session.skSigner = skSigner
         sessions[key] = session
         updateCount()
-        SshAiService.start(appContext)
+        ConchService.start(appContext)
         // WARNING: A SESSION THAT FAILED TO START MUST NOT STAY IN THE MAP.
         //
         // `start()`'s own catch calls `close()`, so on a failure (agent binary
@@ -86,7 +86,7 @@ class AgentSessionManager(
             sessions.remove(key, session)
             updateCount()
             android.util.Log.w(
-                "SshAi-AgentMgr",
+                "Conch-AgentMgr",
                 "start() failed on $serverId/${agent.name} - dropped from the manager: " +
                     "${started.exceptionOrNull()?.message}",
             )
@@ -100,7 +100,7 @@ class AgentSessionManager(
     fun close(serverId: String, agent: Agent, chatSessionId: String) {
         sessions.remove(key(serverId, agent, chatSessionId))?.close()
         updateCount()
-        // Don't force-stop the service here. SshAiService's own observer
+        // Don't force-stop the service here. ConchService's own observer
         // watches both activeCount AND pool.userHeldCount and stops only
         // when BOTH are zero — closing an AgentSession shouldn't drop a
         // user-intent SSH ref.
@@ -110,7 +110,7 @@ class AgentSessionManager(
         val s = sessions.remove(key(serverId, agent, chatSessionId)) ?: return
         s.terminate()
         updateCount()
-        // Don't force-stop the service here. SshAiService's own observer
+        // Don't force-stop the service here. ConchService's own observer
         // watches both activeCount AND pool.userHeldCount and stops only
         // when BOTH are zero — closing an AgentSession shouldn't drop a
         // user-intent SSH ref.
@@ -132,7 +132,7 @@ class AgentSessionManager(
         val toClose = sessions.keys.filter { it.startsWith(prefix) }
         toClose.forEach { sessions.remove(it)?.close() }
         updateCount()
-        // Don't force-stop the service here. SshAiService's own observer
+        // Don't force-stop the service here. ConchService's own observer
         // watches both activeCount AND pool.userHeldCount and stops only
         // when BOTH are zero — closing an AgentSession shouldn't drop a
         // user-intent SSH ref.
@@ -153,7 +153,7 @@ class AgentSessionManager(
         _active.value = sessions.keys.mapNotNull { k ->
             val parts = k.split(":", limit = 3)
             if (parts.size != 3) return@mapNotNull null
-            val agent = SilentlyTry.logged("SshAi-AgentMgr", "parse agent from key") { Agent.valueOf(parts[1]) } ?: return@mapNotNull null
+            val agent = SilentlyTry.logged("Conch-AgentMgr", "parse agent from key") { Agent.valueOf(parts[1]) } ?: return@mapNotNull null
             ActiveSessionInfo(key = k, serverId = parts[0], agent = agent, chatSessionId = parts[2])
         }
     }
@@ -164,7 +164,7 @@ class AgentSessionManager(
     fun closeByKey(key: String) {
         sessions.remove(key)?.close()
         updateCount()
-        // Don't force-stop the service here. SshAiService's own observer
+        // Don't force-stop the service here. ConchService's own observer
         // watches both activeCount AND pool.userHeldCount and stops only
         // when BOTH are zero — closing an AgentSession shouldn't drop a
         // user-intent SSH ref.
@@ -323,7 +323,7 @@ class AgentSessionManager(
         for (k in stale) sessions.remove(k)?.close()
         if (stale.isNotEmpty()) {
             android.util.Log.d(
-                "SshAi-AgentMgr",
+                "Conch-AgentMgr",
                 "reaped ${stale.size} stale session(s) for resume=${resumeId.take(8)}",
             )
             updateCount()
@@ -408,7 +408,7 @@ class AgentSessionManager(
         if (s.state.value == SessionState.Working || s.drainerBusy) return false
         sessions.remove(k)?.close()
         android.util.Log.d(
-            "SshAi-AgentMgr",
+            "Conch-AgentMgr",
             "closed unreachable brand-new session on $serverId/${agent.name}",
         )
         updateCount()

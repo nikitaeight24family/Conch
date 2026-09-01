@@ -144,17 +144,51 @@ class SshConnectionPool {
             }
             if (existing != null) {
                 android.util.Log.d(TAG, "acquire(${server.id}): cached client is dead, rebuilding")
-                SilentlyTry.fired("SshAi-Pool", "disconnect dead cached client") { existing.client.disconnect() }
+                SilentlyTry.fired("Conch-Pool", "disconnect dead cached client") { existing.client.disconnect() }
                 pool.remove(server.id)
             }
             android.util.Log.d(TAG, "acquire(${server.id}) MISS — opening new SSH (touch needed for SK)")
-            rememberHost(server)
+            // ⛔ THE PHONE'S OWN LINUX ANSWERS ON LOOPBACK, AND ITS DAEMON IS NOT
+            // A SERVICE ANDROID KEEPS RUNNING: it goes with every reboot. Bring
+            // it up HERE, where every dial passes, so that nothing above the
+            // transport has to know this machine is different from a server.
+            //
+            // The first version did it from the screen instead, and that is
+            // exactly how it broke: the page navigated onward, the pool dialled
+            // 127.0.0.1:8022 before the daemon was listening, got ECONNREFUSED —
+            // and then SILENCED reconnects for fifteen minutes, because a
+            // refusal after a working link is normally a ban. The login screen
+            // sat there spinning forever.
+            var dial = server
+            if (server.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+                val up = kotlinx.coroutines.runBlocking {
+                    ai.eight24family.conch.linux.LinuxSsh.ensureUp()
+                }
+                // ⛔ SAY WHY, RATHER THAN DIAL A PORT THAT CANNOT ANSWER. Dialling
+                // anyway produced "can't reach the server — check the address,
+                // port, and that SSH is running", advice about a machine that is
+                // in the owner's hand and whose endpoint WE are responsible for
+                // starting.
+                if (up == null) {
+                    throw ai.eight24family.conch.linux.LinuxSsh.NotReachable(
+                        ai.eight24family.conch.linux.LinuxSsh.state.value.detail
+                            ?: "the phone's Linux is not reachable right now",
+                    )
+                }
+                // ⛔ DIAL WITH THE ROW ensureUp RETURNS, not the caller's
+                // snapshot. It may have just re-pinned the row to the
+                // environment's actual host key (daemon swap, rebuilt rootfs);
+                // the snapshot's stale pin would refuse the very daemon
+                // ensureUp brought up — as a man-in-the-middle warning.
+                dial = up
+            }
+            rememberHost(dial)
             // EVERY dial passes through here, human or silent — so this is where a
             // refusal has to be recorded. Recording it only on the silent paths
             // let a person's own retry discover the ban and then say nothing,
             // leaving the watchdog to walk into it twenty seconds later.
             val fresh = try {
-                openAndAuthenticate(server, secrets, skSigner)
+                openAndAuthenticate(dial, secrets, skSigner)
             } catch (t: Throwable) {
                 if (looksRefused(t)) noteDialRefused(server.id)
                 throw t
@@ -417,8 +451,8 @@ class SshConnectionPool {
         // Kick the foreground service. Idempotent — multiple userConnects
         // for different servers each call start(), the OS dedups so we
         // get exactly one notification.
-        SilentlyTry.fired("SshAi-Pool", "start SshAiService") {
-            ai.eight24family.conch.service.SshAiService.start(
+        SilentlyTry.fired("Conch-Pool", "start ConchService") {
+            ai.eight24family.conch.service.ConchService.start(
                 ai.eight24family.conch.di.ServiceLocator.appContext
             )
         }
@@ -436,7 +470,7 @@ class SshConnectionPool {
     private fun persistUserHeldAsync() {
         val snapshot = userHeld.toSet()
         GlobalScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Pool", "persist user-held server ids") {
+            SilentlyTry.fired("Conch-Pool", "persist user-held server ids") {
                 ai.eight24family.conch.di.ServiceLocator.preferences
                     .setUserHeldServerIds(snapshot)
             }
@@ -495,8 +529,8 @@ class SshConnectionPool {
      * ("I connected this server"), and dropping a server out of it the moment
      * its socket dies is what used to make a network blip look like the user
      * had disconnected - the reconnect ladder then had nothing to work on and
-     * `SshAiService` stopped keeping the process alive. Intent outlives the
-     * socket, deliberately (see the note in SshAiService).
+     * `ConchService` stopped keeping the process alive. Intent outlives the
+     * socket, deliberately (see the note in ConchService).
      *
      * It stayed here as an escape hatch, and its existence was quietly load
      * bearing in the wrong way: the chat's connection dot read `userHeldIds`
@@ -519,7 +553,7 @@ class SshConnectionPool {
                     val entry = pool[id]
                     if (entry != null && !entry.client.isConnected) {
                         pool.remove(id)
-                        SilentlyTry.fired("SshAi-Pool", "disconnect on prune") { entry.client.disconnect() }
+                        SilentlyTry.fired("Conch-Pool", "disconnect on prune") { entry.client.disconnect() }
                     }
                 }
             }
@@ -937,8 +971,8 @@ class SshConnectionPool {
         _userHeldCount.value = userHeld.size
         _userHeldIds.value = userHeld.toSet()
         persistUserHeldAsync()
-        SilentlyTry.fired("SshAi-Pool", "start SshAiService (eph)") {
-            ai.eight24family.conch.service.SshAiService.start(
+        SilentlyTry.fired("Conch-Pool", "start ConchService (eph)") {
+            ai.eight24family.conch.service.ConchService.start(
                 ai.eight24family.conch.di.ServiceLocator.appContext
             )
         }
@@ -994,7 +1028,7 @@ class SshConnectionPool {
             // live socket (nobody held a reference) — the server had to reap it
             // at LoginGraceTime, logging the preauth-timeout lines fail2ban
             // counts. Close our half properly.
-            SilentlyTry.fired("SshAi-Pool", "disconnect after failed device-key auth") { client.disconnect() }
+            SilentlyTry.fired("Conch-Pool", "disconnect after failed device-key auth") { client.disconnect() }
             throw t
         }
         pinHostKeyIfUnset(server, hostKeyVerifier)
@@ -1034,13 +1068,13 @@ class SshConnectionPool {
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     private fun maybeEnrollEphemeralAsync(server: Server, force: Boolean = false) {
         GlobalScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Pool", "enroll device key") {
+            SilentlyTry.fired("Conch-Pool", "enroll device key") {
                 // [force] = the user just toggled seamless ON for this server, so
                 // skip the (possibly not-yet-propagated) per-server check and mint
                 // now. The auto path (force=false, on every FIDO connect) still
                 // honours the per-server opt-in.
                 if (!force && !seamlessEnabledFor(server.id)) {
-                    android.util.Log.d("SshAi-Pool", "enroll SKIPPED: seamless OFF for server ${server.id}")
+                    android.util.Log.d("Conch-Pool", "enroll SKIPPED: seamless OFF for server ${server.id}")
                     return@fired
                 }
                 // Mint the device key ONLY when there's a live, authenticated
@@ -1054,17 +1088,17 @@ class SshConnectionPool {
                 // written is never born.
                 val client = peek(server.id) ?: run {
                     android.util.Log.d(
-                        "SshAi-Pool",
+                        "Conch-Pool",
                         "enroll DEFERRED: no live connection for ${server.id} — mint+write on next touch-connect",
                     )
                     return@fired
                 }
-                android.util.Log.d("SshAi-Pool", "enroll: seamless ON + connected, minting+writing device key for ${server.id}")
+                android.util.Log.d("Conch-Pool", "enroll: seamless ON + connected, minting+writing device key for ${server.id}")
                 if (!EphemeralSshKey.ensure(server.id)) return@fired
                 val keyPart = EphemeralSshKey.keyPart(server.id) ?: return@fired
                 val days = seamlessDaysFor(server.id)
                 val esc = ai.eight24family.conch.agent.shellEscape(keyPart)
-                val markerEsc = ai.eight24family.conch.agent.shellEscape(EphemeralSshKey.markerComment(server.id))
+                val markerEsc = ai.eight24family.conch.agent.shellEscape(EphemeralSshKey.markerMatch(server.id))
                 val inner =
                     "umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; " +
                     "f=~/.ssh/authorized_keys; [ -f \"\$f\" ] || { : > \"\$f\"; chmod 600 \"\$f\"; }; " +
@@ -1100,7 +1134,7 @@ class SshConnectionPool {
             proc.inputStream.readBytes()
             proc.join(20, TimeUnit.SECONDS)
         } finally {
-            SilentlyTry.fired("SshAi-Pool", "close pool cmd session") { sess.close() }
+            SilentlyTry.fired("Conch-Pool", "close pool cmd session") { sess.close() }
         }
     }
 
@@ -1109,7 +1143,7 @@ class SshConnectionPool {
      *  line (the user's FIDO line never carries that comment), so it can never
      *  clobber other keys. */
     private fun stripDeviceKeyLine(client: SSHClient, serverId: String) {
-        val markerEsc = ai.eight24family.conch.agent.shellEscape(EphemeralSshKey.markerComment(serverId))
+        val markerEsc = ai.eight24family.conch.agent.shellEscape(EphemeralSshKey.markerMatch(serverId))
         val inner =
             "f=~/.ssh/authorized_keys; [ -f \"\$f\" ] || exit 0; " +
             "tmp=\$(mktemp \"\${f}.XXXXXX\" 2>/dev/null || true); " +
@@ -1142,20 +1176,20 @@ class SshConnectionPool {
     private fun stripAndForgetDeviceKeyAsync(serverId: String) {
         if (!EphemeralSshKey.exists(serverId)) return
         GlobalScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Pool", "revoke device key $serverId") {
+            SilentlyTry.fired("Conch-Pool", "revoke device key $serverId") {
                 val server = ai.eight24family.conch.di.ServiceLocator.serverRepository.getById(serverId)
                 val existing = peek(serverId)
                 val client = existing ?: server?.let { srv ->
                     runCatching { EphemeralSshKey.keyProvider(serverId)?.let { openWithProvider(srv, it) } }.getOrNull()
                 }
                 if (client != null) {
-                    SilentlyTry.fired("SshAi-Pool", "strip device key line $serverId") {
+                    SilentlyTry.fired("Conch-Pool", "strip device key line $serverId") {
                         stripDeviceKeyLine(client, serverId)
                     }
                     // Close a TRANSIENT connection we opened just for the strip;
                     // never disconnect one the user is actively holding (existing).
                     if (client !== existing) {
-                        SilentlyTry.fired("SshAi-Pool", "close transient revoke conn") { client.disconnect() }
+                        SilentlyTry.fired("Conch-Pool", "close transient revoke conn") { client.disconnect() }
                     }
                 } else {
                     android.util.Log.w(TAG, "revoke $serverId: unreachable — server line expires via expiry-time")
@@ -1270,7 +1304,7 @@ class SshConnectionPool {
                             TAG,
                             "  SK auth: tokenCredsReady timed out after 90s — releasing serverLock"
                         )
-                        SilentlyTry.fired("SshAi-Pool", "disconnect after sk timeout") { client.disconnect() }
+                        SilentlyTry.fired("Conch-Pool", "disconnect after sk timeout") { client.disconnect() }
                         error("security key dialog never reported credentials — re-tap to retry")
                     }
                     val matchedCredId = sharedHolder.matchedCredId
@@ -1326,7 +1360,7 @@ class SshConnectionPool {
             // error(); disconnect() is idempotent, so covering every other
             // throw here (auth rejection, signer errors, interrupted waits)
             // is safe and closes the previously-leaked socket.
-            SilentlyTry.fired("SshAi-Pool", "disconnect after failed auth") { client.disconnect() }
+            SilentlyTry.fired("Conch-Pool", "disconnect after failed auth") { client.disconnect() }
             throw t
         }
         // Auth succeeded — NOW the host key is worth remembering. Until this
@@ -1423,7 +1457,7 @@ class SshConnectionPool {
     internal enum class HostKeyVerdict { FIRST_USE, MATCH, MISMATCH }
 
     companion object {
-        private const val TAG = "SshAi-Pool"
+        private const val TAG = "Conch-Pool"
 
         /** How old a pooled transport must be before a "a turn failed
          *  disconnected a moment ago" caller is allowed to evict it. Anything

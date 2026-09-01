@@ -20,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
  *   - `pool.peek(serverId) != null` → bridge running.
  *   - Pool drops the client → bridge stopped within ~3s.
  *
- * The manager itself is a singleton owned by [ai.eight24family.conch.service.SshAiService]
+ * The manager itself is a singleton owned by [ai.eight24family.conch.service.ConchService]
  * (the foreground service), which means the bridges only run while
  * the user has at least one chat open OR has explicitly tap-to-
  * connected on the home screen. Closing all chats and disconnecting
@@ -32,7 +32,7 @@ class BridgeManager(
     private val handler: BridgeHandler,
 ) {
 
-    private val tag = "SshAi-BridgeMgr"
+    private val tag = "Conch-BridgeMgr"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bridges = ConcurrentHashMap<String, AgentBridge>()
     private var watchJob: Job? = null
@@ -53,9 +53,20 @@ class BridgeManager(
         android.util.Log.d(tag, "stop — tearing down ${bridges.size} bridge(s)")
         watchJob?.cancel()
         watchJob = null
-        bridges.values.forEach { SilentlyTry.fired("SshAi-BridgeMgr", "stop bridge in stopAll") { it.stop() } }
+        bridges.values.forEach { SilentlyTry.fired("Conch-BridgeMgr", "stop bridge in stopAll") { it.stop() } }
         bridges.clear()
         scope.cancel()
+    }
+
+    /** Start a bridge for [serverId] RIGHT NOW if a transport is live and none
+     *  runs yet — the self-test handshake must not wait out the reconcile tick. */
+    fun ensure(serverId: String) {
+        if (bridges.containsKey(serverId)) return
+        if (ServiceLocator.sshConnectionPool.peek(serverId) == null) return
+        android.util.Log.d(tag, "ensure: starting bridge for $serverId")
+        val b = AgentBridge(serverId = serverId, handler = handler)
+        bridges[serverId] = b
+        b.start()
     }
 
     /**
@@ -80,7 +91,7 @@ class BridgeManager(
         for (id in toStop) {
             bridges.remove(id)?.let {
                 android.util.Log.d(tag, "stopping bridge for $id (no live transport)")
-                SilentlyTry.fired("SshAi-BridgeMgr", "stop dead bridge") { it.stop() }
+                SilentlyTry.fired("Conch-BridgeMgr", "stop dead bridge") { it.stop() }
             }
         }
 

@@ -315,7 +315,7 @@ fi
             default = Regex("Default model:\\s*(\\S+)").find(raw)?.groupValues?.getOrNull(1)
         }
         if (out.isNotEmpty()) grokDefaultModel = default ?: out.keys.first()
-        android.util.Log.d("SshAi-Models", "grok models probe: ${out.keys} default=$grokDefaultModel")
+        android.util.Log.d("Conch-Models", "grok models probe: ${out.keys} default=$grokDefaultModel")
         return out
     }
 
@@ -460,7 +460,10 @@ internal fun grokLabelFromId(value: String): String {
 }
 
 /** The `*` row of the last `grok models` probe — what a fresh chat starts on.
- *  Volatile spec-level stash, same pattern as [claudeDefaultModel]. */
+ *  Volatile spec-level stash, same pattern Claude's default used to be — see
+ *  `claudeDefaultModelFor`, which is now keyed by server because a CLI default
+ *  is a fact about one box. Grok's stash has the same latent flaw; it has not
+ *  bitten because the model list is not per-server there. */
 @Volatile
 internal var grokDefaultModel: String? = null
 

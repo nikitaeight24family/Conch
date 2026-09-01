@@ -328,7 +328,7 @@ fi
                 fi
             fi
         """.trimIndent()
-        val json = SilentlyTry.logged("SshAi-GeminiSpec", "exec gemini models probe") { exec.exec("bash -lc " + shellEscapeForGemini(probeCmd)) }
+        val json = SilentlyTry.logged("Conch-GeminiSpec", "exec gemini models probe") { exec.exec("bash -lc " + shellEscapeForGemini(probeCmd)) }
             ?.takeIf { it.contains("\"models\"") }
             ?: return fallback
 
@@ -457,7 +457,7 @@ fi
         val startIdx = recs.indexOfLast { it[0] == "user" }
         val turnStartMs = if (inFlight && startIdx >= 0)
             recs[startIdx].getOrNull(1)?.takeIf { it.isNotBlank() }?.let { ts ->
-                SilentlyTry.logged("SshAi-GeminiSpec", "parse turn-start ts") {
+                SilentlyTry.logged("Conch-GeminiSpec", "parse turn-start ts") {
                     java.time.Instant.parse(ts).toEpochMilli()
                 }
             } else null

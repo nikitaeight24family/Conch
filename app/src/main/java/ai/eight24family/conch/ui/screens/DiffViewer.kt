@@ -36,7 +36,7 @@ private val AddedFg = Color(0xFF54D67E)
 
 @Composable
 fun EditDiffViewer(toolName: String, inputJson: String) {
-    val parsed = remember(inputJson) { SilentlyTry.logged("SshAi-DiffViewer", "parse edit input") { parseEditInput(inputJson) } }
+    val parsed = remember(inputJson) { SilentlyTry.logged("Conch-DiffViewer", "parse edit input") { parseEditInput(inputJson) } }
     if (parsed == null) {
         Text(
             inputJson,
@@ -101,7 +101,7 @@ private fun diffLine(marker: String, content: String, markerColor: Color): Annot
 
 @Composable
 fun WriteFileViewer(inputJson: String) {
-    val parsed = remember(inputJson) { SilentlyTry.logged("SshAi-DiffViewer", "parse write input") { parseWriteInput(inputJson) } }
+    val parsed = remember(inputJson) { SilentlyTry.logged("Conch-DiffViewer", "parse write input") { parseWriteInput(inputJson) } }
     if (parsed == null) {
         Text(
             inputJson,

@@ -58,7 +58,7 @@ open class SshClient {
             // Read from Settings → Connection. Wrapped in runCatching because
             // tests construct SshClient without booting ServiceLocator —
             // missing prefs falls back to the legacy 15 s default.
-            val tSec = SilentlyTry.logged("SshAi-SshClient", "read connect timeout pref") {
+            val tSec = SilentlyTry.logged("Conch-SshClient", "read connect timeout pref") {
                 ai.eight24family.conch.di.ServiceLocator.preferences
                     .sshConnectTimeoutSec.first()
                     .takeIf { it > 0 }?.coerceIn(5, 60)
@@ -71,14 +71,14 @@ open class SshClient {
                 client.connect(server.host, server.port)
                 authenticate(client, server, secrets)
                 val fp = verifier.seenFingerprint ?: server.knownHostKey ?: ""
-                SilentlyTry.fired("SshAi-SshClient", "disconnect after test") { client.disconnect() }
+                SilentlyTry.fired("Conch-SshClient", "disconnect after test") { client.disconnect() }
                 if (server.knownHostKey == null) {
                     ConnectResult.UnknownHost(fp, verifier.seenKeyType ?: "")
                 } else {
                     ConnectResult.Success(fp)
                 }
             } catch (e: Exception) {
-                SilentlyTry.fired("SshAi-SshClient", "disconnect after test failure") { client.disconnect() }
+                SilentlyTry.fired("Conch-SshClient", "disconnect after test failure") { client.disconnect() }
                 if (verifier.mismatch) {
                     ConnectResult.HostKeyMismatch(
                         expected = server.knownHostKey ?: "",
@@ -145,7 +145,7 @@ open class SshClient {
                     }
                 } finally {
                     // Close the CHANNEL only — the pooled client lives on.
-                    SilentlyTry.fired("SshAi-SshClient", "close pooled exec channel") { session.close() }
+                    SilentlyTry.fired("Conch-SshClient", "close pooled exec channel") { session.close() }
                 }
             }
         }
@@ -153,7 +153,7 @@ open class SshClient {
         // test-seam reason as testConnection above. Socket timeout is
         // then overridden to 60s below because one-shot exec needs a
         // longer read window.
-        val tSec = SilentlyTry.logged("SshAi-SshClient", "read exec timeout pref") {
+        val tSec = SilentlyTry.logged("Conch-SshClient", "read exec timeout pref") {
             ai.eight24family.conch.di.ServiceLocator.preferences
                 .sshConnectTimeoutSec.first()
                 .takeIf { it > 0 }?.coerceIn(5, 60)
@@ -201,7 +201,7 @@ open class SshClient {
             }
             Result.success(combined)
         } catch (e: Exception) {
-            SilentlyTry.fired("SshAi-SshClient", "disconnect after exec failure") { client.disconnect() }
+            SilentlyTry.fired("Conch-SshClient", "disconnect after exec failure") { client.disconnect() }
             Result.failure(e)
         }
     }
@@ -306,10 +306,10 @@ private fun pinAfterAuth(server: Server, verifier: TofuHostKeyVerifier) {
     val fp = verifier.seenFingerprint ?: return
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        SilentlyTry.fired("SshAi-SshClient", "pin host key") {
+        SilentlyTry.fired("Conch-SshClient", "pin host key") {
             ai.eight24family.conch.di.ServiceLocator.serverRepository
                 .updateKnownHostKey(server.id, fp)
-            android.util.Log.i("SshAi-SshClient", "pinned host key for ${server.name}: $fp")
+            android.util.Log.i("Conch-SshClient", "pinned host key for ${server.name}: $fp")
         }
     }
 }

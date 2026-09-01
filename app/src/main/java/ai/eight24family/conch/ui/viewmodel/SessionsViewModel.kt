@@ -46,7 +46,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * recording ownership, so weak-preview sessions were cached + indexed but
      * never owned. Idempotent. */
     private fun ownAll(raw: List<RemoteSession>) {
-        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "record durable owners (full listing)") {
+        ai.eight24family.conch.util.SilentlyTry.fired("Conch-Sessions", "record durable owners (full listing)") {
             historyCache.recordOwners(serverId, agent, raw)
         }
         // The server just told us exactly which sessions exist FOR THIS AGENT.
@@ -67,7 +67,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 val prefix = "$serverId:"
                 val confirmed = _deletedIds.value.mapNotNull { id ->
                     if (id in present) return@mapNotNull null
-                    val owner = SilentlyTry.logged("SshAi-Sessions", "owner for tombstone prune") {
+                    val owner = SilentlyTry.logged("Conch-Sessions", "owner for tombstone prune") {
                         historyCache.owner(id)
                     }
                     if (owner?.agent != agent) return@mapNotNull null
@@ -126,11 +126,11 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         if (tomb.isEmpty()) return
         val stragglers = raw.filter { it.id in tomb }
         if (stragglers.isEmpty()) return
-        android.util.Log.d("SshAi-Sessions", "reconcile: ${stragglers.size} tombstoned session(s) still on server — deleting")
+        android.util.Log.d("Conch-Sessions", "reconcile: ${stragglers.size} tombstoned session(s) still on server — deleting")
         for (s in stragglers) {
             val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent].deleteSessionCommand(s.id, s.path)
             val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner)
-            SilentlyTry.fired("SshAi-Sessions", "reconcile delete ${s.id.take(8)}") { exec(cmd) }
+            SilentlyTry.fired("Conch-Sessions", "reconcile delete ${s.id.take(8)}") { exec(cmd) }
         }
     }
 
@@ -141,21 +141,21 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private fun scheduleReconcile(raw: List<RemoteSession>, exec: suspend (cmd: String) -> String?) {
         if (_deletedIds.value.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Sessions", "reconcile tombstones") { reconcileTombstones(raw, exec) }
+            SilentlyTry.fired("Conch-Sessions", "reconcile tombstones") { reconcileTombstones(raw, exec) }
         }
     }
 
     /** A reconcile-exec over a pooled SSHClient (fresh channel per command). */
     private fun pooledReconcileExec(client: net.schmizz.sshj.SSHClient): suspend (cmd: String) -> String? = { cmd ->
         withContext(Dispatchers.IO) {
-            SilentlyTry.logged("SshAi-Sessions", "reconcile via pooled client") {
+            SilentlyTry.logged("Conch-Sessions", "reconcile via pooled client") {
                 val sess = client.startSession()
                 try {
                     val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                     proc.inputStream.readBytes()
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                     ""
-                } finally { SilentlyTry.fired("SshAi-Sessions", "close reconcile session") { sess.close() } }
+                } finally { SilentlyTry.fired("Conch-Sessions", "close reconcile session") { sess.close() } }
             }
         }
     }
@@ -263,7 +263,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     suspend fun runDiscoveryWithSigner(
         signer: ai.eight24family.conch.ssh.securitykey.SkSigner,
     ) {
-        val tag = "SshAi-SK-Disc"
+        val tag = "Conch-SK-Disc"
         android.util.Log.d(tag, "runDiscoveryWithSigner: enter")
         val server = _server.value ?: repo.getById(serverId).also { _server.value = it } ?: return
         val secrets = repo.getSecrets(serverId)
@@ -287,7 +287,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // per command, no extra handshake.
             val raw = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                 withContext(Dispatchers.IO) {
-                    SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (pool)") {
+                    SilentlyTry.logged("Conch-Sessions", "fetch sessions list (pool)") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -300,7 +300,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             )
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
-                        } finally { SilentlyTry.fired("SshAi-Sessions", "close list-pool session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-Sessions", "close list-pool session") { sess.close() } }
                     }
                 }
             }
@@ -359,7 +359,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         secrets: ServerSecrets,
         client: net.schmizz.sshj.SSHClient,
     ): Boolean {
-        val tag = "SshAi-SK-Disc"
+        val tag = "Conch-SK-Disc"
         // Don't toggle `_refreshing` here — that flag drives the
         // pull-to-refresh spinner, which is overkill for an
         // automatic discovery run when the user hasn't even pulled
@@ -369,7 +369,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             var execFailed = false
             val raw = discovery.list(agent, key = "$serverId:${agent.name}") { cmd ->
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    SilentlyTry.logged("SshAi-Sessions", "fetch sessions list (fresh)") {
+                    SilentlyTry.logged("Conch-Sessions", "fetch sessions list (fresh)") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -382,7 +382,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             )
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
-                        } finally { SilentlyTry.fired("SshAi-Sessions", "close list-fresh session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-Sessions", "close list-fresh session") { sess.close() } }
                     }.also { if (it == null) execFailed = true }
                 }
             }
@@ -408,7 +408,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private suspend fun runDiscoveryViaAliveSession(
         alive: ai.eight24family.conch.agent.AgentSession,
     ): Boolean {
-        val tag = "SshAi-SK-Disc"
+        val tag = "Conch-SK-Disc"
         android.util.Log.d(tag, "runDiscoveryViaAliveSession: enter (reuse persistent SSH)")
         // Same as runDiscoveryViaPooledClient: don't toggle
         // `_refreshing` here. Top-level `refresh()` already does it
@@ -530,7 +530,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // touch.
                 val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
                 if (pooled != null) {
-                    android.util.Log.d("SshAi-Sessions", "init: pool live — refreshing discovery + kicking prefetch")
+                    android.util.Log.d("Conch-Sessions", "init: pool live — refreshing discovery + kicking prefetch")
                     softRefresh()
                 }
                 return@launch
@@ -631,14 +631,14 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             // Persist the tombstone so re-entry / app restart / a not-yet-landed
             // server `rm` can't bring it back; pruned once the server confirms.
-            SilentlyTry.fired("SshAi-Sessions", "persist delete tombstone") {
+            SilentlyTry.fired("Conch-Sessions", "persist delete tombstone") {
                 ServiceLocator.preferences.setDeletedSession(serverId, session.id, true)
             }
             // Persist the removal so an offline re-open doesn't show it again.
-            SilentlyTry.fired("SshAi-Sessions", "persist session removal to cache") {
+            SilentlyTry.fired("Conch-Sessions", "persist session removal to cache") {
                 cache.save(serverId, agent, _sessions.value)
             }
-            SilentlyTry.fired("SshAi-Sessions", "forget cached session body") {
+            SilentlyTry.fired("Conch-Sessions", "forget cached session body") {
                 historyCache.forget(session.id)
             }
             // Server-side delete rides the pooled client. If none is live (deleting
@@ -654,23 +654,23 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             }
             if (pooled == null) {
-                android.util.Log.w("SshAi-Sessions", "deleteSession ${session.id.take(8)}: no transport — kept tombstoned, rm will ride next connect")
+                android.util.Log.w("Conch-Sessions", "deleteSession ${session.id.take(8)}: no transport — kept tombstoned, rm will ride next connect")
                 return@launch
             }
             val inner = ai.eight24family.conch.agent.spec.AgentSpecRegistry[agent]
                 .deleteSessionCommand(session.id, session.path)
             val cmd = "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner)
-            SilentlyTry.fired("SshAi-Sessions", "delete session on server") {
+            SilentlyTry.fired("Conch-Sessions", "delete session on server") {
                 val sess = pooled.startSession()
                 try {
                     val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
                     proc.inputStream.readBytes()
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 } finally {
-                    SilentlyTry.fired("SshAi-Sessions", "close delete session") { sess.close() }
+                    SilentlyTry.fired("Conch-Sessions", "close delete session") { sess.close() }
                 }
             }
-            android.util.Log.d("SshAi-Sessions", "deleteSession ${session.id.take(8)}: server file(s) removed")
+            android.util.Log.d("Conch-Sessions", "deleteSession ${session.id.take(8)}: server file(s) removed")
         }
     }
 
@@ -748,7 +748,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         resultUri = uri; displayLocation = "Download/conch/$basename"
                     }
                     is ai.eight24family.conch.agent.AgentSession.DownloadOutcome.Failed -> {
-                        SilentlyTry.fired("SshAi-Sessions", "delete failed mediastore") { resolver.delete(uri, null, null) }
+                        SilentlyTry.fired("Conch-Sessions", "delete failed mediastore") { resolver.delete(uri, null, null) }
                         _downloads.update { it + (key to ChatViewModel.DownloadStatus.Failed(outcome.reason)) }
                         return@launch
                     }
@@ -767,7 +767,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         resultUri = android.net.Uri.fromFile(target); displayLocation = target.absolutePath
                     }
                     is ai.eight24family.conch.agent.AgentSession.DownloadOutcome.Failed -> {
-                        SilentlyTry.fired("SshAi-Sessions", "delete failed target") { target.delete() }
+                        SilentlyTry.fired("Conch-Sessions", "delete failed target") { target.delete() }
                         _downloads.update { it + (key to ChatViewModel.DownloadStatus.Failed(outcome.reason)) }
                         return@launch
                     }
@@ -775,11 +775,11 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
             val u = resultUri ?: return@launch
             val sizeBytes = if (u.scheme == "file") {
-                SilentlyTry.loggedOrElse("SshAi-Sessions", "file size", -1L) {
+                SilentlyTry.loggedOrElse("Conch-Sessions", "file size", -1L) {
                     java.io.File(u.path ?: return@loggedOrElse -1L).length()
                 }
             } else {
-                SilentlyTry.loggedOrElse("SshAi-Sessions", "content uri size", -1L) {
+                SilentlyTry.loggedOrElse("Conch-Sessions", "content uri size", -1L) {
                     ctx.contentResolver.query(u, null, null, null, null)?.use { c ->
                         val i = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
                         if (c.moveToFirst() && i >= 0) c.getLong(i) else -1L
@@ -822,7 +822,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         onProgress: (Long, Long) -> Unit,
     ): ai.eight24family.conch.agent.AgentSession.DownloadOutcome = withContext(Dispatchers.IO) {
         val esc = "'" + remotePath.replace("'", "'\\''") + "'"
-        val total: Long = SilentlyTry.loggedOrElse("SshAi-Sessions", "stat for download", -1L) {
+        val total: Long = SilentlyTry.loggedOrElse("Conch-Sessions", "stat for download", -1L) {
             val s = pooled.startSession()
             try {
                 val p = s.exec("stat -c %s -- $esc 2>/dev/null || stat -f %z -- $esc 2>/dev/null || wc -c < $esc 2>/dev/null")
@@ -834,7 +834,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
  )
                 p.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 String(o.toByteArray(), Charsets.UTF_8).trim().lines().firstNotNullOfOrNull { it.trim().toLongOrNull() } ?: -1L
-            } finally { SilentlyTry.fired("SshAi-Sessions", "close stat session") { s.close() } }
+            } finally { SilentlyTry.fired("Conch-Sessions", "close stat session") { s.close() } }
         }
         onProgress(0, total)
         var s: net.schmizz.sshj.connection.channel.direct.Session? = null
@@ -853,7 +853,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         } catch (t: Throwable) {
             ai.eight24family.conch.agent.AgentSession.DownloadOutcome.Failed(t.message ?: t.javaClass.simpleName)
         } finally {
-            SilentlyTry.fired("SshAi-Sessions", "close cat session") { s?.close() }
+            SilentlyTry.fired("Conch-Sessions", "close cat session") { s?.close() }
         }
     }
 
@@ -877,7 +877,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  re-entry to slip newly-created server-side sessions in unobtrusively. */
     fun softRefresh() {
         viewModelScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Sessions", "background runListAndPersist") { runListAndPersist(visible = false) }
+            SilentlyTry.fired("Conch-Sessions", "background runListAndPersist") { runListAndPersist(visible = false) }
         }
     }
 
@@ -890,7 +890,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // listing.
         if (ServiceLocator.sshConnectionPool.peek(serverId) != null) {
             viewModelScope.launch(Dispatchers.IO) {
-                SilentlyTry.fired("SshAi-Sessions", "prefetch usage") {
+                SilentlyTry.fired("Conch-Sessions", "prefetch usage") {
                     // Fast first (rollout snapshot caches in ~0.3s → the bar is
                     // warm the instant a chat opens), then live to refine.
                     ai.eight24family.conch.agent.UsageProbe.fetch(serverId, agent, fast = true)
@@ -920,22 +920,22 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // have a live SSH and discovery rides it for free.
             val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             if (pooled != null) {
-                android.util.Log.d("SshAi-Sessions", "discovery via pooled SSH — no touch")
+                android.util.Log.d("Conch-Sessions", "discovery via pooled SSH — no touch")
                 val ok = runDiscoveryViaPooledClient(server, secrets, pooled)
                 if (ok) return
-                android.util.Log.d("SshAi-Sessions", "  pool discovery failed — falling through")
+                android.util.Log.d("Conch-Sessions", "  pool discovery failed — falling through")
             }
             val alive = ServiceLocator.agentSessions.findAnyAlive(serverId, agent)
             if (alive != null) {
                 android.util.Log.d(
-                    "SshAi-Sessions",
+                    "Conch-Sessions",
                     "reusing alive AgentSession's SSH for SK discovery — no touch"
                 )
                 val ok = runDiscoveryViaAliveSession(alive)
                 if (ok) return
                 // Reuse failed (channel dead, signer dead, etc). Fall
                 // through to the touch flow so the user has a way out.
-                android.util.Log.d("SshAi-Sessions", "  reuse failed — falling back to touch flow")
+                android.util.Log.d("Conch-Sessions", "  reuse failed — falling back to touch flow")
             }
             if (!visible) {
                 _lastSyncedAt.value = System.currentTimeMillis()
@@ -969,7 +969,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // client live already, so the common case is just a fresh channel open.
         var pooled = ServiceLocator.sshConnectionPool.peek(serverId)
         if (pooled == null) {
-            pooled = SilentlyTry.logged("SshAi-Sessions", "userConnect non-SK for listing") {
+            pooled = SilentlyTry.logged("Conch-Sessions", "userConnect non-SK for listing") {
                 withContext(Dispatchers.IO) {
                     ServiceLocator.sshConnectionPool.userConnect(server, secrets, null)
                 }
@@ -1020,7 +1020,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
         if (dataSaver) {
             _prefetchProgress.value = null
-            android.util.Log.d("SshAi-SessionsVM", "prefetch skipped: data saver on")
+            android.util.Log.d("Conch-SessionsVM", "prefetch skipped: data saver on")
             return
         }
 
@@ -1048,7 +1048,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val pooledClient: net.schmizz.sshj.SSHClient? =
             ServiceLocator.sshConnectionPool.peek(serverId)
         if (pooledClient == null) {
-            android.util.Log.d("SshAi-Prefetch", "skipped for $serverId (no live pool client)")
+            android.util.Log.d("Conch-Prefetch", "skipped for $serverId (no live pool client)")
             return
         }
 
@@ -1056,7 +1056,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val candidates = window.filter { historyCache.size(it.id) == 0L }
         if (candidates.isEmpty()) return  // ring already shows total/total = green ✓
         prefetchJob = viewModelScope.launch(Dispatchers.IO) {
-            val tag = "SshAi-Prefetch"
+            val tag = "Conch-Prefetch"
             val viaPool = if (pooledClient != null) " (via pooled SSH)" else ""
             android.util.Log.d(tag, "begin: ${candidates.size} session(s) to prefetch (already $alreadyCached cached)$viaPool")
             // Counter starts at alreadyCached so the ring's `done`
@@ -1082,7 +1082,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // ring. Over the cap → cache the display TAIL only (the
                     // .base sidecar tells the open path the head is missing;
                     // "load all" fetches it on demand).
-                    val remoteBytes = SilentlyTry.loggedOrElse<Long?>("SshAi-Sessions", "stat prefetch size", null) {
+                    val remoteBytes = SilentlyTry.loggedOrElse<Long?>("Conch-Sessions", "stat prefetch size", null) {
                         val sess = client.startSession()
                         try {
                             val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
@@ -1092,14 +1092,14 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             val txt = p.inputStream.bufferedReader().readText().trim()
                             p.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             txt.toLongOrNull()
-                        } finally { SilentlyTry.fired("SshAi-Sessions", "close stat session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-Sessions", "close stat session") { sess.close() } }
                     }
                     if (remoteBytes != null &&
                         remoteBytes > ai.eight24family.conch.data.GlobalPrefetcher.PREFETCH_BODY_MAX_BYTES
                     ) {
                         val start = (remoteBytes - ai.eight24family.conch.data.GlobalPrefetcher.TAIL_PRELOAD_BYTES)
                             .coerceAtLeast(0L)
-                        val slab = SilentlyTry.loggedOrElse<ByteArray?>("SshAi-Sessions", "fetch tail slab", null) {
+                        val slab = SilentlyTry.loggedOrElse<ByteArray?>("Conch-Sessions", "fetch tail slab", null) {
                             val sess = client.startSession()
                             try {
                                 val q = ai.eight24family.conch.agent.shellEscapeRemotePath(s.path)
@@ -1113,7 +1113,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 )
                                 p.join(60, java.util.concurrent.TimeUnit.SECONDS)
                                 out.toByteArray()
-                            } finally { SilentlyTry.fired("SshAi-Sessions", "close tail session") { sess.close() } }
+                            } finally { SilentlyTry.fired("Conch-Sessions", "close tail session") { sess.close() } }
                         }
                         val (aligned, dropped) = ai.eight24family.conch.data.GlobalPrefetcher
                             .dropLeadingPartialLine(slab ?: ByteArray(0), isFileStart = start == 0L)
@@ -1128,7 +1128,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         continue
                     }
                     val raw = discovery.fetchSessionContent(s.path) { cmd ->
-                        SilentlyTry.logged("SshAi-Sessions", "fetch session content for prefetch") {
+                        SilentlyTry.logged("Conch-Sessions", "fetch session content for prefetch") {
                             val sess = client.startSession()
                             try {
                                 val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -1141,7 +1141,7 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 )
                                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                                 String(out.toByteArray(), Charsets.UTF_8)
-                            } finally { SilentlyTry.fired("SshAi-Sessions", "close prefetch session") { sess.close() } }
+                            } finally { SilentlyTry.fired("Conch-Sessions", "close prefetch session") { sess.close() } }
                         }
                     }
                     if (raw.isNullOrBlank()) {

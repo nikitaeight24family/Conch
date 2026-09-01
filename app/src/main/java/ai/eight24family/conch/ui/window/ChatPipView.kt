@@ -226,7 +226,7 @@ fun ChatPipView(vm: ChatViewModel, modifier: Modifier = Modifier) {
                 // full chat keeps that, and restoring it HERE is what made the
                 // window show old replies).
                 LaunchedEffect(tail.size) {
-                    SilentlyTry.fired("SshAi-PipView", "follow pip tail") {
+                    SilentlyTry.fired("Conch-PipView", "follow pip tail") {
                         listState.animateScrollToItem((tail.size - 1).coerceAtLeast(0))
                     }
                 }

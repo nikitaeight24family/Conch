@@ -104,11 +104,11 @@ object ChatIndexer {
                     )
                 )
                 val sessions = withContext(Dispatchers.IO) {
-                    SilentlyTry.loggedOrElse("SshAi-Indexer", "list sessions for indexer", emptyList<ai.eight24family.conch.agent.RemoteSession>()) {
+                    SilentlyTry.loggedOrElse("Conch-Indexer", "list sessions for indexer", emptyList<ai.eight24family.conch.agent.RemoteSession>()) {
                         if (pooled != null) {
                             // Ride the pooled client — no fresh handshake.
                             discovery.list(agent, key = "${server.id}:${agent.name}") { cmd ->
-                                SilentlyTry.logged("SshAi-Indexer", "exec list on pooled") {
+                                SilentlyTry.logged("Conch-Indexer", "exec list on pooled") {
                                     val sess = pooled.startSession()
                                     try {
                                         // Raw pooled transport — the no-bash rewrite
@@ -123,7 +123,7 @@ object ChatIndexer {
                                         )
                                         proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                                         String(out.toByteArray(), Charsets.UTF_8)
-                                    } finally { SilentlyTry.fired("SshAi-Indexer", "close list-exec session") { sess.close() } }
+                                    } finally { SilentlyTry.fired("Conch-Indexer", "close list-exec session") { sess.close() } }
                                 }
                             }
                         } else {
@@ -153,10 +153,10 @@ object ChatIndexer {
                         )
                     )
                     val body = withContext(Dispatchers.IO) {
-                        SilentlyTry.logged("SshAi-Indexer", "fetch session content for indexer") {
+                        SilentlyTry.logged("Conch-Indexer", "fetch session content for indexer") {
                             if (pooled != null) {
                                 discovery.fetchSessionContent(rs.path) { cmd ->
-                                    SilentlyTry.logged("SshAi-Indexer", "exec fetch on pooled") {
+                                    SilentlyTry.logged("Conch-Indexer", "exec fetch on pooled") {
                                         val sess = pooled.startSession()
                                         try {
                                             val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -169,7 +169,7 @@ object ChatIndexer {
                                             )
                                             proc.join(120, java.util.concurrent.TimeUnit.SECONDS)
                                             String(out.toByteArray(), Charsets.UTF_8)
-                                        } finally { SilentlyTry.fired("SshAi-Indexer", "close fetch-exec session") { sess.close() } }
+                                        } finally { SilentlyTry.fired("Conch-Indexer", "close fetch-exec session") { sess.close() } }
                                     }
                                 }
                             } else {

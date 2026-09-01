@@ -50,12 +50,12 @@ import ai.eight24family.conch.ui.viewmodel.ServersViewModel
  * add-user / delete live). No connect-on-tap, no long-press menu, no status
  * bottom-sheet — all of that moved onto the detail page so the list stays a
  * dead-simple "pick a server to manage". Rows are sorted by host so a machine's
- * users (user@x, user@example.com) sit together.
+ * users (alice@host, bob@host) sit together.
  */
 @Composable
 fun ServersScreen(
     onAddServer: () -> Unit,
-    /** The phone itself, as a machine you can add. */
+    /** The phone itself — opened from its own row in the list, never added. */
     onAddLinux: () -> Unit = {},
     onOpenServer: (String) -> Unit,
     /** Tap on a search-result row → that exact chat at the matched message. */
@@ -80,32 +80,17 @@ fun ServersScreen(
         onPickHit = onOpenChatFromSearch,
         floatingActionButton = {
             val cyan = MaterialTheme.colorScheme.primary
-            // ⚠ TWO BUTTONS, AND LINUX IS ONE OF THEM. The phone's own Linux is a
-            // MACHINE, not a preference: it belongs beside the button that adds
-            // the other kind, not buried in Settings where it read as an option
-            // about the app (owner, 2026-08-30). It sits on the left because
-            // "add server" is the habitual one and must not move.
+            // ⚠ THE `[ + linux ]` BUTTON IS GONE, AND ITS JOB MOVED UP INTO THE
+            // LIST. A button that adds a thing there can only ever be one of is a
+            // door to a room you are already standing in: the phone is not
+            // something you acquire, it is the machine in your hand, so it is
+            // always ON the list — as [LocalMachineRow], first row, saying what
+            // it actually is right now. Installing is what tapping that row leads
+            // to, once, and after that the row is a machine like the others.
             androidx.compose.foundation.layout.Row(
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                 modifier = Modifier.padding(bottom = 72.dp),
             ) {
-            Surface(
-                onClick = onAddLinux,
-                shape = RectangleShape,
-                color = MaterialTheme.colorScheme.background,
-                contentColor = cyan,
-                border = BorderStroke(1.dp, cyan),
-                tonalElevation = 0.dp,
-                shadowElevation = 0.dp,
-            ) {
-                Text(
-                    "[ + linux ]",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                )
-            }
             Surface(
                 onClick = onAddServer,
                 shape = RectangleShape,
@@ -126,19 +111,30 @@ fun ServersScreen(
         }
     ) { padding ->
         ai.eight24family.conch.ui.window.WideContentColumn {
-        if (servers.isEmpty()) {
-            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                BatteryWhitelistBanner()
-                EmptyState(modifier = Modifier.fillMaxSize().padding(24.dp))
+        // ⛔ ONE LIST, ALWAYS — the empty case is an ITEM IN IT, not a different
+        // screen. The old shape swapped the whole body out when `servers` was
+        // empty, which would have hidden the local machine from precisely the
+        // person this feature exists for: someone with no server and no computer,
+        // whose list is empty on purpose and who nonetheless owns a machine
+        // (owner, 2026-08-30). The one row he has must be there on first launch.
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            // Bottom inset clears the floating glass bar overlaying this tab.
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            item { BatteryWhitelistBanner() }
+            // ⛔ ONLY UNTIL IT IS A MACHINE. Once the environment is installed it
+            // has an ordinary row in the list below, and drawing this one too
+            // would put the same phone on the list twice — one of them behaving
+            // like a server and one not, which is the difference that must not
+            // exist (owner, 2026-08-31).
+            if (servers.none { it.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID }) {
+                item { LocalMachineRow(onClick = onAddLinux) }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                // Bottom inset clears the floating glass bar overlaying this tab.
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                item { BatteryWhitelistBanner() }
+            if (servers.isEmpty()) {
+                item { EmptyState(modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 24.dp)) }
+            } else {
                 val sorted = servers.sortedWith(
                     compareBy({ it.host.lowercase() }, { it.port }, { it.username.lowercase() })
                 )
@@ -154,6 +150,72 @@ fun ServersScreen(
             }
         }
         }
+    }
+}
+
+/**
+ * **This phone, as one of the machines.**
+ *
+ * It carries the same three parts as a [ServerRow] — name, subtitle, live dot —
+ * because it is the same kind of thing and lying about that would be the only
+ * reason to draw it differently. What the subtitle says is the one place the
+ * three states must not be blurred:
+ *
+ * | state | subtitle | dot |
+ * |---|---|---|
+ * | installed | what the distribution calls itself, and its size | ● live |
+ * | not installed | an offer to set it up | ○ |
+ * | shell out of reach | says so, and does NOT offer to install | ○ |
+ *
+ * The last row is why [LinuxEnv.Presence] exists. An install that is merely
+ * unreachable is still an install; inviting the owner to make a second one on
+ * top of it is how you lose the first.
+ */
+@Composable
+private fun LocalMachineRow(onClick: () -> Unit) {
+    val cyan = MaterialTheme.colorScheme.primary
+    val dim = MaterialTheme.colorScheme.outline
+    val fg = MaterialTheme.colorScheme.onSurface
+
+    val snap by ai.eight24family.conch.linux.LinuxEnv.snapshot.collectAsState()
+    // Re-asked every time the tab is entered, because arming the bridge or
+    // installing from the Linux page both happen elsewhere. The snapshot means
+    // the row paints the previous answer while this runs, so nothing flickers.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        ai.eight24family.conch.linux.LinuxEnv.refresh()
+    }
+
+    val installed = snap.presence == ai.eight24family.conch.linux.LinuxEnv.Presence.INSTALLED
+    val subtitle = ai.eight24family.conch.linux.LinuxEnv.subtitle(snap)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .handCursor()
+            .clickable { onClick() }
+            .semantics(mergeDescendants = true) {
+                stateDescription = if (installed) "installed" else "not installed"
+            }
+            .padding(vertical = 8.dp, horizontal = 4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("❯ ", color = cyan, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "this device",
+                color = fg,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f, fill = true)
+            )
+            ai.eight24family.conch.ui.components.ConnectionDot(connected = installed)
+            Text("›", color = dim, style = MaterialTheme.typography.bodyLarge)
+        }
+        Text(
+            "  $subtitle",
+            color = dim,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 2.dp)
+        )
     }
 }
 

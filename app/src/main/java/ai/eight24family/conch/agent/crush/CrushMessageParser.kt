@@ -159,5 +159,5 @@ object CrushMessageParser {
     private fun k(n: Long): String =
         if (n >= 1000) "${"%.1f".format(java.util.Locale.US, n / 1000.0)}k" else n.toString()
 
-    private const val TAG = "SshAi-CrushParse"
+    private const val TAG = "Conch-CrushParse"
 }

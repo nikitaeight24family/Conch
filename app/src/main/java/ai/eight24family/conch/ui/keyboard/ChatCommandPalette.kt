@@ -135,7 +135,7 @@ fun ChatCommandPalette(
                 sessionsHeader + filteredSessions.size + commandsHeader +
                     (selectedIndex - filteredSessions.size)
             }
-            SilentlyTry.fired("SshAi-Palette", "scroll to selected item") { listState.animateScrollToItem(lazyIndex.coerceAtLeast(0)) }
+            SilentlyTry.fired("Conch-Palette", "scroll to selected item") { listState.animateScrollToItem(lazyIndex.coerceAtLeast(0)) }
         }
 
         /** Invokes the active row's callback. Hoisted so both Enter and a

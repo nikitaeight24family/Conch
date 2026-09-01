@@ -39,7 +39,25 @@ import java.io.File
  */
 object LinuxInstaller {
 
+    /**
+     * What the bundled runtime IS, so an environment installed by an older
+     * Conch can be brought up to it.
+     *
+     * ⛔ AN ALREADY-INSTALLED ENVIRONMENT KEEPS ITS OLD `proot` FOREVER
+     * OTHERWISE. [LinuxEnv.install] only ever runs on a fresh install, so the
+     * runtime that shipped with the version that first set the environment up
+     * is the one it keeps — and the runtime is exactly the piece that decides
+     * whether node, npm and every agent CLI work at all (proot 5.1.0 does not
+     * translate `statx`, so node's every path lookup failed against Android's
+     * real root: "ENOENT: lstat '/usr'", measured on the owner's phone
+     * 2026-08-31). Bump this string whenever the asset changes.
+     */
+    const val RUNTIME_VERSION = "proot-84a5bdf8-statx"
+
     private const val ASSET_PROOT = "linux/proot"
+    /** PRoot's injected bootstrap ELF — see [LinuxEnv.LOADER] for why it is a
+     *  separate file rather than baked into the binary. */
+    private const val ASSET_LOADER = "linux/loader"
     /**
      * ⛔ THE EXTENSION IS DELIBERATELY NOT .tar.gz, AND MUST NOT BECOME ONE.
      * The build system unpacks a `.gz` asset and drops the extension — the
@@ -64,20 +82,67 @@ object LinuxInstaller {
         onStep("unpacking from the app")
         val handoff = File(ServiceLocator.appContext.getExternalFilesDir(null), "linux").apply { mkdirs() }
         val prootFile = File(handoff, "proot")
+        val loaderFile = File(handoff, "loader")
         val rootfsFile = File(handoff, "rootfs.tar.gz")
-        val copied = SilentlyTry.logged("SshAi-Linux", "copy bundled pieces out") {
+        val copied = SilentlyTry.logged("Conch-Linux", "copy bundled pieces out") {
             copyAsset(ASSET_PROOT, prootFile)
+            copyAsset(ASSET_LOADER, loaderFile)
             copyAsset(ASSET_ROOTFS, rootfsFile)
             true
         }
         if (copied != true) return@withContext "Could not unpack the bundled Linux from the app."
 
-        val err = LinuxEnv.install(prootFile.absolutePath, rootfsFile.absolutePath, onStep)
+        val err = LinuxEnv.install(
+            prootPath = prootFile.absolutePath,
+            loaderPath = loaderFile.absolutePath,
+            rootfsArchive = rootfsFile.absolutePath,
+            onStep = onStep,
+        )
         // 4.7 MB of duplicate once the shell has its own copies.
-        SilentlyTry.fired("SshAi-Linux", "clear hand-off copies") {
-            prootFile.delete(); rootfsFile.delete()
+        SilentlyTry.fired("Conch-Linux", "clear hand-off copies") {
+            prootFile.delete(); loaderFile.delete(); rootfsFile.delete()
         }
         err
+    }
+
+    /**
+     * Put the CURRENT runtime in place, on an environment that already exists.
+     *
+     * Cheap and idempotent: one marker file read per call, and it does nothing
+     * at all once the versions agree. Returns true when it actually replaced
+     * the binary — the caller may want to say so, since anything running under
+     * the old one has just been stopped.
+     */
+    suspend fun ensureRuntimeCurrent(): Boolean = withContext(Dispatchers.IO) {
+        if (LinuxEnv.presence() != LinuxEnv.Presence.INSTALLED) return@withContext false
+        val current = LocalAdbShell.exec("cat ${LinuxEnv.ROOT}/.runtime 2>/dev/null")
+            ?.stdout?.trim()
+            ?: return@withContext false
+        if (current == RUNTIME_VERSION) return@withContext false
+        android.util.Log.i("Conch-Linux", "runtime is '$current', replacing with $RUNTIME_VERSION")
+        val handoff = File(ServiceLocator.appContext.getExternalFilesDir(null), "linux").apply { mkdirs() }
+        val prootFile = File(handoff, "proot")
+        val loaderFile = File(handoff, "loader")
+        val copied = SilentlyTry.logged("Conch-Linux", "copy bundled runtime out") {
+            copyAsset(ASSET_PROOT, prootFile)
+            copyAsset(ASSET_LOADER, loaderFile)
+            true
+        }
+        if (copied != true) return@withContext false
+        // Whatever is running was started by the OLD binary; it has to go before
+        // the file under it changes.
+        LocalAdbShell.exec("pkill -f ${LinuxEnv.ROOT}/proot")
+        val ok = LocalAdbShell.exec(
+            "mkdir -p ${LinuxEnv.LOADER.substringBeforeLast('/')} && " +
+                "cp '${prootFile.absolutePath}' ${LinuxEnv.ROOT}/proot && " +
+                "cp '${loaderFile.absolutePath}' ${LinuxEnv.LOADER} && " +
+                "chmod 755 ${LinuxEnv.ROOT}/proot ${LinuxEnv.LOADER} && " +
+                "printf %s $RUNTIME_VERSION > ${LinuxEnv.ROOT}/.runtime && echo ok",
+        )?.stdout?.contains("ok") == true
+        SilentlyTry.fired("Conch-Linux", "clear hand-off copies") {
+            prootFile.delete(); loaderFile.delete()
+        }
+        ok
     }
 
     private fun copyAsset(name: String, dest: File) {

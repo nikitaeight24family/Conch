@@ -47,6 +47,17 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 object ClaudeSpec : AgentCliSpec {
 
+    /**
+     * `stdbuf -oL` only where the host HAS it. It is GNU coreutils, and a
+     * BusyBox userland answered `stdbuf: command not found` — which did not
+     * degrade the streaming, it killed the whole turn (the phone's Linux was
+     * the first to hit it, 2026-08-31). The remote shell resolves this at exec
+     * time, so one command works on every host: degraded streaming beats a
+     * dead send. No quotes inside on purpose — the string must survive any
+     * wrapping the exec path applies.
+     */
+    private const val STDBUF = "\$(command -v stdbuf >/dev/null 2>&1 && echo stdbuf -oL)"
+
     override val agent = Agent.CLAUDE
     override val displayName = "Claude Code"
     override val cliCommand = "claude"
@@ -183,7 +194,7 @@ object ClaudeSpec : AgentCliSpec {
         // fire because nothing passed the flag that emits them. A user with a
         // Stop-hook or a formatter now sees it run instead of an unexplained pause.
         val extraStreamEnv = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1 "
-        return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}${extraStreamEnv}stdbuf -oL claude" +
+        return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}${extraStreamEnv}$STDBUF claude" +
             " --output-format stream-json --input-format stream-json" +
             " --include-partial-messages --verbose --include-hook-events" +
             permissionToolArg +
@@ -248,7 +259,7 @@ object ClaudeSpec : AgentCliSpec {
         // `--verbose` is REQUIRED alongside `stream-json` — without it Claude
         // emits only the final `result` event (silent JSONL), a common
         // gotcha that costs hours of "why isn't streaming working".
-        return "printf '%s' $escapedText | ${sandboxEnv}${thinkingEnv}stdbuf -oL claude --print " +
+        return "printf '%s' $escapedText | ${sandboxEnv}${thinkingEnv}$STDBUF claude --print " +
             "--output-format stream-json --include-partial-messages --verbose" +
             "$approvalArg$resume$modelArg$sessionIdArg$effortArg 2>&1"
     }
@@ -587,7 +598,7 @@ done | sort -t'	' -k2 -rn | head -500
 
     private fun firstTextFromBlocks(arr: JsonArray): String {
         for (block in arr) {
-            val o = SilentlyTry.logged("SshAi-ClaudeSpec", "cast block to JsonObject") { block.jsonObject } ?: continue
+            val o = SilentlyTry.logged("Conch-ClaudeSpec", "cast block to JsonObject") { block.jsonObject } ?: continue
             val text = o["text"]?.jsonPrimitive?.contentOrNull
                 ?: o["content"]?.jsonPrimitive?.contentOrNull
             if (!text.isNullOrBlank()) return text
@@ -793,7 +804,8 @@ esac
      * id of the initialize response's "default" row, published by
      * [adoptInitState]. Costs no extra round-trip.
      */
-    override suspend fun probeDefaultModel(exec: AgentExec): String? = claudeDefaultModel
+    override suspend fun probeDefaultModel(exec: AgentExec): String? =
+        claudeDefaultModelFor(exec.serverId)
 
     /**
      * Model catalog straight from the CLI's OWN registry: launch a headless
@@ -813,7 +825,7 @@ esac
      * invariant: a probe must never litter `claude --resume`.
      */
     override suspend fun probeAvailableModels(exec: AgentExec): Map<String, String> {
-        val tag = "SshAi-Models"
+        val tag = "Conch-Models"
         val initJson =
             "{\"type\":\"control_request\",\"request_id\":\"cat-probe\"," +
                 "\"request\":{\"subtype\":\"initialize\"}}"
@@ -843,7 +855,7 @@ esac
         }
         val st = ClaudeInitState.parse(payload)
         android.util.Log.d(tag, "initialize probe: models=${st.models.map { it.value }}")
-        adoptInitState(st)
+        adoptInitState(st, exec.serverId)
         return ClaudeInitState.toPickerMap(st)
     }
 
@@ -853,10 +865,13 @@ esac
      * set, and the effort ladder. Called from BOTH sources — the live
      * persistent channel's handshake and [probeAvailableModels].
      */
-    internal fun adoptInitState(st: ClaudeInitState) {
+    internal fun adoptInitState(st: ClaudeInitState, serverId: String?) {
         val (label, key) = ClaudeInitState.defaultModel(st)
-        if (label != null) claudeDefaultModel = label
-        if (key != null) claudeDefaultModelKey = key
+        // Filed under the server that answered — see [claudeDefaultByServer].
+        // A handshake with no attributable server still feeds the catalog and
+        // the effort ladder below (those ARE app-wide), it just does not get to
+        // say what "the default" is anywhere.
+        setClaudeDefault(serverId, label, key)
         claudeUnavailableLabels = ClaudeInitState.unavailableLabels(st)
         val levels = ClaudeInitState.effortLevels(st)
         if (levels.isNotEmpty()) {
@@ -1159,7 +1174,7 @@ done
         // the working timer and the per-turn token counter at the command.
         val startIdx = recs.indexOfLast { it[0] == "user" && it[2] != "true" && it[1] != "true" }
         val turnStartMs = if (startIdx >= 0) recs[startIdx][6].takeIf { it.isNotBlank() }?.let { ts ->
-            SilentlyTry.logged("SshAi-ClaudeSpec", "parse turn-start ts") {
+            SilentlyTry.logged("Conch-ClaudeSpec", "parse turn-start ts") {
                 java.time.Instant.parse(ts).toEpochMilli()
             }
         } else null
@@ -1218,22 +1233,58 @@ internal var claudeUnavailableLabels: Set<String> = emptySet()
  * ABSTRACTION — a picker row literally called "Default", which told the user
  * nothing. The picker still lists only concrete models. What we show here is
  * the resolved model NAME; the word "Default" appears nowhere.
- */
-@Volatile
-internal var claudeDefaultModel: String? = null
-
-/**
- * The MENU KEY of that same row (e.g. `opus`) — what actually goes on the wire
- * as `--model`.
  *
- * Published next to the label so the topbar and the command line read ONE
- * value. Resolving the label back to a key by string match was fragile: an
- * exact compare misses when the row resolves to "Opus 5 with 1M context" while
- * the picker entry reads "Opus 5 1M", and it silently degraded to the first map
- * entry — which is `sonnet`.
+ * There is no such thing as "the app's default model": the value is read out of
+ * that box's own `~/.claude/settings.json`, so a laptop-facing box on `opus`
+ * and a work box on `sonnet` are both right. This used to be ONE process-wide
+ * slot, last writer wins — so a new chat on server B advertised the model
+ * server A had answered with, while the launch (which passes no `--model` on a
+ * fresh chat, by design) let B's CLI start on B's own default. Chip said Opus
+ * 5, CLI ran Sonnet 5, and nothing on screen admitted it until the first
+ * `system.init` landed.
+ *
+ * The pair (label, wire key) moves together — the topbar reads the label, the
+ * command line reads the key, and they must never come from different servers.
  */
-@Volatile
-internal var claudeDefaultModelKey: String? = null
+private val claudeDefaultByServer = java.util.concurrent.ConcurrentHashMap<String, ModelDefault>()
+
+/** The CLI default on one server: what to SHOW and what to SEND. */
+internal data class ModelDefault(val label: String?, val wireKey: String?)
+
+/** What [serverId]'s CLI starts on with no `--model`, or null if it never said. */
+internal fun claudeDefaultModelFor(serverId: String?): String? =
+    serverId?.let { claudeDefaultByServer[it]?.label }
+
+/** The wire key of that same default — what actually goes out as `--model`.
+ *
+ *  Kept beside the label because resolving one back to the other by string
+ *  match was fragile: an exact compare misses when the row resolves to "Opus 5
+ *  with 1M context" while the picker entry reads "Opus 5 1M", and it silently
+ *  degraded to the first map entry — which is `sonnet`. */
+internal fun claudeDefaultModelKeyFor(serverId: String?): String? =
+    serverId?.let { claudeDefaultByServer[it]?.wireKey }
+
+/** Record what a server's CLI just TOLD us (initialize handshake or probe).
+ *  Authoritative: a live answer replaces an older one, field by field. */
+internal fun setClaudeDefault(serverId: String?, label: String?, wireKey: String?) {
+    if (serverId.isNullOrBlank()) return
+    if (label == null && wireKey == null) return
+    claudeDefaultByServer.compute(serverId) { _, prev ->
+        ModelDefault(label = label ?: prev?.label, wireKey = wireKey ?: prev?.wireKey)
+    }
+}
+
+/** Warm a server's default from the persisted cache at cold start — fills
+ *  blanks only. A cache must never overwrite what this run's live handshake
+ *  has already established for that server. */
+internal fun seedClaudeDefault(serverId: String?, label: String?, wireKey: String?) {
+    if (serverId.isNullOrBlank()) return
+    if (label == null && wireKey == null) return
+    claudeDefaultByServer.compute(serverId) { _, prev ->
+        if (prev == null) ModelDefault(label, wireKey)
+        else ModelDefault(prev.label ?: label, prev.wireKey ?: wireKey)
+    }
+}
 
 /** Prose for levels the slider doesn't annotate inline. DESCRIPTIONS
  *  only — the level LIST itself always comes from the server. */
@@ -1387,14 +1438,17 @@ private object ClaudeTopbarUi : AgentTopbarUi {
             // choose. This is NOT the invention TOPBAR-MODEL-NEVER-INVENTED-1
             // forbids — that was pulling availableModels' arbitrary first entry
             // out of thin air. This is a PROBED fact about the CLI's own default.
+            //
+            // ⛔ AND IT MUST BE *THIS SERVER'S* DEFAULT. The state's own field is
+            // fed per-chat by the coordinator, which now reads the per-server
+            // record; the spec-level fallback below asks by server id for the
+            // same reason. A default learned from another box is not a fact about
+            // this one — showing it is exactly the Opus-chip/Sonnet-run lie.
             ?: usable(state.defaultModel)
-            // Claude exposes no `defaultModel` — that field is Codex's
-            // config.toml notion — and `availableModels` deliberately carries no
-            // "default" key either. The resolved default is published separately
-            // from the initialize handshake as [claudeDefaultModel]: a concrete model
-            // name, which is the honest answer to "what starts when we pass no
-            // --model".
-            ?: usable(claudeDefaultModel)
+            // The resolved default is published from the initialize handshake:
+            // a concrete model name, which is the honest answer to "what starts
+            // when we pass no --model" — on the server this chat is open on.
+            ?: usable(claudeDefaultModelFor(state.serverId))
             ?: return null
         return resolve(state, pick)
     }

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cleartext is allowed for EXACTLY ONE host: this phone's own loopback,
+    where the local inference engine serves its OpenAI-compatible API
+    (LocalLlmEngine, 127.0.0.1:8317). Without this, the app's own health
+    check throws "Cleartext HTTP traffic not permitted", times out after
+    90 s and KILLS a perfectly healthy engine - measured on the owner's
+    phone 2026-08-31: `listening on http://127.0.0.1:8317` at +4.5 s,
+    "cleaning up before exit" at +90 s, by our own hand.
+
+    Everything else keeps the platform default: no cleartext anywhere.
+    Traffic to 127.0.0.1 never leaves the device by definition, so this
+    weakens nothing the "no network but your servers" promise covers.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

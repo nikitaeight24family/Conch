@@ -182,7 +182,7 @@ internal class ChatViewModelTailPoll(
         _remoteFileOpen.value = s.state.value is SessionState.Working
         if (preSize != null && preSize < lastOffset) {
             android.util.Log.w(
-                "SshAi-Tail",
+                "Conch-Tail",
                 "compact detected sid=${sessionId.take(8)} cachedOffset=$lastOffset serverSize=$preSize — merging cache (NOT touching live history)",
             )
             if (preSize > BIG_FILE_STREAM_BYTES) {
@@ -194,7 +194,7 @@ internal class ChatViewModelTailPoll(
                 lastOffset = written ?: preSize
                 tailBase = 0L // full re-adopt; saveFromStream cleared the sidecar
                 android.util.Log.i(
-                    "SshAi-Tail",
+                    "Conch-Tail",
                     "compact STREAMED sid=${sessionId.take(8)} bytes=$written newOffset=$lastOffset",
                 )
             } else {
@@ -212,7 +212,7 @@ internal class ChatViewModelTailPoll(
                 if (repairedOpen != null && repairedOpen == preSize) {
                     lastOffset = preSize
                     android.util.Log.i(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "shrink open sid=${sessionId.take(8)} — repaired locally, no transfer",
                     )
                 } else {
@@ -235,7 +235,7 @@ internal class ChatViewModelTailPoll(
                     lastOffset = safeFull.size.toLong()
                     tailBase = 0L
                     android.util.Log.i(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "shrink open sid=${sessionId.take(8)} — benign rewrite, re-adopted server verbatim (${serverFull.size}B)",
                     )
                 } else {
@@ -244,7 +244,7 @@ internal class ChatViewModelTailPoll(
                     lastOffset = preSize.toLong()
                     tailBase = 0L
                     android.util.Log.i(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "compact merged sid=${sessionId.take(8)} mergedBytes=${merged?.size ?: -1} newOffset=$lastOffset",
                     )
                 }
@@ -273,12 +273,12 @@ internal class ChatViewModelTailPoll(
                 lastOffset = written
                 streamedOk = true
                 android.util.Log.i(
-                    "SshAi-Tail",
+                    "Conch-Tail",
                     "catch-up STREAMED sid=${sessionId.take(8)} bytes=$written history=${s.history.value.size}",
                 )
             } else {
                 android.util.Log.w(
-                    "SshAi-Tail",
+                    "Conch-Tail",
                     "catch-up STREAM FAILED sid=${sessionId.take(8)} written=$written — " +
                         "falling back to the plain fetch so the chat still paints",
                 )
@@ -287,7 +287,7 @@ internal class ChatViewModelTailPoll(
         if (!streamedOk) {
         val tailBytes = fetchTail(s, path, lastOffset) ?: ByteArray(0)
         android.util.Log.i(
-            "SshAi-Tail",
+            "Conch-Tail",
             "catch-up sid=${sessionId.take(8)} lastOffset=$lastOffset tailBytes=${tailBytes.size} state=${s.state.value::class.simpleName}",
         )
         if (tailBytes.isNotEmpty()) {
@@ -305,14 +305,14 @@ internal class ChatViewModelTailPoll(
                 }
                 lastOffset += safe.size.toLong()
                 android.util.Log.i(
-                    "SshAi-Tail",
+                    "Conch-Tail",
                     "catch-up parsed=${parsed.size} added=$added newOffset=$lastOffset history=${s.history.value.size}",
                 )
             }
         } else if (tailBytes.isEmpty() && lastOffset > 0) {
             val serverSize = statSizeAndAgentAlive(s, agent, path, sessionId).size
             android.util.Log.w(
-                "SshAi-Tail",
+                "Conch-Tail",
                 "catch-up EMPTY sid=${sessionId.take(8)} lastOffset=$lastOffset serverSize=$serverSize " +
                     (if (serverSize != null && serverSize > lastOffset)
                         "STALE: server has ${serverSize - lastOffset}B unread (fetchTail failed?)"
@@ -362,7 +362,7 @@ internal class ChatViewModelTailPoll(
         // pre-probe, minus the round trip.
         val preSig = spec.inferTurnState(recWindow.toList(), preFrozenMs)
         android.util.Log.i(
-            "SshAi-Tail",
+            "Conch-Tail",
             "turn-state window seeded sid=${sessionId.take(8)} agent=$agent records=${recWindow.size} " +
                 "inFlight=${preSig.inFlight} complete=${preSig.turnComplete}",
         )
@@ -506,7 +506,7 @@ internal class ChatViewModelTailPoll(
                 val repaired = if (tailBase == 0L) cache.rewriteEntrypointTags(sessionId) else null
                 if (repaired != null && repaired == size) {
                     android.util.Log.i(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — repaired locally, no transfer",
                     )
                     lastOffset = size
@@ -529,7 +529,7 @@ internal class ChatViewModelTailPoll(
                         tailBase = 0L
                         reseedWindow()
                         android.util.Log.i(
-                            "SshAi-Tail",
+                            "Conch-Tail",
                             "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — STREAMED (${written}B)",
                         )
                         idleTicks = 0
@@ -539,7 +539,7 @@ internal class ChatViewModelTailPoll(
                         continue
                     }
                     android.util.Log.w(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "shrink mid-poll sid=${sessionId.take(8)} stream failed — falling back to in-memory fetch",
                     )
                 }
@@ -548,7 +548,7 @@ internal class ChatViewModelTailPoll(
                     (tailBase > 0L || cache.serverContainsAllLocal(sessionId, serverFull))
                 ) {
                     android.util.Log.i(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — benign rewrite, re-adopting server verbatim",
                     )
                     // Same complete-line contract as the open path.
@@ -558,7 +558,7 @@ internal class ChatViewModelTailPoll(
                     tailBase = 0L
                 } else {
                     android.util.Log.w(
-                        "SshAi-Tail",
+                        "Conch-Tail",
                         "compact mid-poll sid=${sessionId.take(8)} cachedOffset=$lastOffset serverSize=$size — real compaction, merging keep-local",
                     )
                     val merged = cache.mergeServer(sessionId, serverFull)
@@ -638,7 +638,7 @@ internal class ChatViewModelTailPoll(
             val inFlight = heartbeatInFlight(probe.inFlight, stat.frozenForMs, stat.writerAlive)
             val turnStart = probe.turnStartMs
             val thinking = probe.thinking
-            ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
+            ai.eight24family.conch.util.Logx.d("Conch-Tail") {
                 "turn sid=${sessionId.take(8)} agent=$agent recs=${recWindow.size} " +
                     "inFlight=$inFlight complete=${probe.turnComplete} thinking=$thinking " +
                     "tokens=${probe.tokens} frozenMs=${stat.frozenForMs} size=$size"
@@ -688,7 +688,7 @@ internal class ChatViewModelTailPoll(
             )
             if (liveStuck) {
                 android.util.Log.w(
-                    "SshAi-Tail",
+                    "Conch-Tail",
                     "live turn stuck: file done + ${stuckSinceMs}ms " +
                         "(frozen=${probe.frozenForMs ?: "n/a"}, growth=$sawGrowthThisTurn) " +
                         "but state=Working — reconciling",
@@ -1003,7 +1003,7 @@ internal class ChatViewModelTailPoll(
         // a live process is a substring test against the session path. That makes
         // the verdict SPECIFIC to this session: another chat's `claude` running
         // elsewhere must not keep this spinner alive. Prints
-        // SSHAI_WRITER=1/0/? — `?` when the box has no pgrep or no /proc, which
+        // CONCH_WRITER=1/0/? — `?` when the box has no pgrep or no /proc, which
         // reads as "unknown" and leaves the old mtime rule in charge.
         val binPattern = when (agent) {
             Agent.CLAUDE -> "claude"
@@ -1035,10 +1035,10 @@ internal class ChatViewModelTailPoll(
             "C=\$(readlink /proc/\$pid/cwd 2>/dev/null); [ -n \"\$C\" ] || continue; " +
             "M=\$(printf '%s' \"\$C\" | tr '/' '-'); " +
             "case $q in */projects/\"\$M\"/*) W=1; break;; esac; " +
-            "done; echo SSHAI_WRITER=\$W; " +
-            "else echo 'SSHAI_WRITER=?'; fi"
+            "done; echo CONCH_WRITER=\$W; " +
+            "else echo 'CONCH_WRITER=?'; fi"
         val inner = "if [ -r $q ]; then stat -c %s,%Y $q 2>/dev/null || " +
-            "stat -f %z,%m $q 2>/dev/null; else echo SSHAI_NOFILE; fi; date +%s; " +
+            "stat -f %z,%m $q 2>/dev/null; else echo CONCH_NOFILE; fi; date +%s; " +
             liveness + "; echo ---;"
         val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return PollProbe(size = null)
         val statPart = out.substringBefore("---")
@@ -1047,15 +1047,15 @@ internal class ChatViewModelTailPoll(
         // so it can never be mistaken for a stat result again — belt and braces
         // next to the sentinel, since a BSD/BusyBox host could still surprise us.
         val statFields = statLines.firstOrNull()
-            ?.takeIf { it != "SSHAI_NOFILE" }
+            ?.takeIf { it != "CONCH_NOFILE" }
             ?.split(',')
             ?.takeIf { it.size == 2 && it[0].trim().toLongOrNull() != null && it[1].trim().toLongOrNull() != null }
         val size = statFields?.getOrNull(0)?.trim()?.toLongOrNull()
         val mtimeSec = statFields?.getOrNull(1)?.trim()?.toLongOrNull()
         val mtimeMs = mtimeSec?.let { it * 1000 }
         val serverNowSec = statLines.getOrNull(1)?.trim()?.toLongOrNull()
-        val writerAlive = statLines.firstOrNull { it.startsWith("SSHAI_WRITER=") }
-            ?.removePrefix("SSHAI_WRITER=")?.trim()
+        val writerAlive = statLines.firstOrNull { it.startsWith("CONCH_WRITER=") }
+            ?.removePrefix("CONCH_WRITER=")?.trim()
             ?.let { if (it == "1") true else if (it == "0") false else null }
         // Both ends are the server's own clock → skew-proof, and still correct on
         // open (real frozen time, not "since the app noticed").
@@ -1093,7 +1093,7 @@ internal class ChatViewModelTailPoll(
             gunzipBase64(gz)?.let { plain ->
                 // Account every transfer so the next traffic question is answered
                 // with numbers, not an estimate. Debug-only (R8 strips Logx.d).
-                ai.eight24family.conch.util.Logx.d("SshAi-Tail") {
+                ai.eight24family.conch.util.Logx.d("Conch-Tail") {
                     "fetch offset=$fromOffset wire=${gz.length}B inflated=${plain.size}B " +
                         "ratio=${plain.size / gz.length.coerceAtLeast(1)}x"
                 }
@@ -1106,7 +1106,7 @@ internal class ChatViewModelTailPoll(
 
     /** base64 → gzip → bytes. Null when the payload isn't what we asked for. */
     private fun gunzipBase64(b64: String): ByteArray? =
-        SilentlyTry.loggedOrElse("SshAi-Tail", "gunzip base64 tail", null) {
+        SilentlyTry.loggedOrElse("Conch-Tail", "gunzip base64 tail", null) {
             val raw = android.util.Base64.decode(b64.trim(), android.util.Base64.DEFAULT)
             java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(raw)).use { it.readBytes() }
         }
@@ -1130,7 +1130,7 @@ internal class ChatViewModelTailPoll(
         val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
             "bash -lc " + shQuote("cat ${shQuote(path)} | gzip -c"),
         )
-        return SilentlyTry.loggedOrElse("SshAi-Tail", "stream full file to cache", null) {
+        return SilentlyTry.loggedOrElse("Conch-Tail", "stream full file to cache", null) {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(cmd)
@@ -1141,7 +1141,7 @@ internal class ChatViewModelTailPoll(
                 proc.join(120, java.util.concurrent.TimeUnit.SECONDS)
                 n
             } finally {
-                SilentlyTry.fired("SshAi-Tail", "close stream session") { sess.close() }
+                SilentlyTry.fired("Conch-Tail", "close stream session") { sess.close() }
             }
         }
     }
@@ -1384,7 +1384,7 @@ internal class ChatViewModelTailPoll(
         private fun dataSaverCached(): Boolean {
             val now = System.currentTimeMillis()
             if (now - dataSaverCacheAtMs < 30_000L) return dataSaverCacheValue
-            val v = SilentlyTry.loggedOrElse("SshAi-Chat", "read data saver pref", false) {
+            val v = SilentlyTry.loggedOrElse("Conch-Chat", "read data saver pref", false) {
                 runBlocking { ServiceLocator.preferences.dataSaverEnabled.first() }
             }
             dataSaverCacheValue = v

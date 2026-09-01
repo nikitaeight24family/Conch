@@ -43,14 +43,14 @@ private fun DownloadsFolderRow(vm: SettingsViewModel) {
         // Make the grant survive app restarts. Without this the URI
         // works for one Activity-result hop and then throws
         // SecurityException on next use.
-        SilentlyTry.fired("SshAi-Settings", "takePersistableUriPermission") {
+        SilentlyTry.fired("Conch-Settings", "takePersistableUriPermission") {
             ctx.contentResolver.takePersistableUriPermission(
                 uri,
                 android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
         }
-        val label = SilentlyTry.logged("SshAi-Settings", "read downloads folder name") {
+        val label = SilentlyTry.logged("Conch-Settings", "read downloads folder name") {
             androidx.documentfile.provider.DocumentFile.fromTreeUri(ctx, uri)?.name
         } ?: uri.lastPathSegment ?: uri.toString()
         vm.setDownloadsFolder(uri, label)

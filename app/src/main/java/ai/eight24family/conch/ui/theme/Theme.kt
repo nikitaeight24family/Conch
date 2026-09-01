@@ -101,7 +101,7 @@ private fun lightenForContainer(c: Color): Color {
 }
 
 @Composable
-fun SshAiTheme(
+fun ConchTheme(
     @Suppress("UNUSED_PARAMETER") dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
@@ -189,7 +189,7 @@ fun SshAiTheme(
     )
 }
 
-private fun parseHex(hex: String): Color = SilentlyTry.loggedOrElse("SshAi-Theme", "parse hex color", Cyan) {
+private fun parseHex(hex: String): Color = SilentlyTry.loggedOrElse("Conch-Theme", "parse hex color", Cyan) {
     val cleaned = hex.trim().removePrefix("#")
     val v = cleaned.toLong(16) or 0xFF000000
     Color(v.toInt())

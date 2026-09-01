@@ -44,7 +44,7 @@ internal fun ChatSearchBar(
     onClose: () -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { SilentlyTry.fired("SshAi-ChatSearch", "request focus on open") { focusRequester.requestFocus() } }
+    LaunchedEffect(Unit) { SilentlyTry.fired("Conch-ChatSearch", "request focus on open") { focusRequester.requestFocus() } }
     Row(
         modifier = Modifier
             .fillMaxWidth()

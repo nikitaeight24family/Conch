@@ -384,7 +384,7 @@ The server doesn't recognise your SSH public key. To fix it, the public half of 
 
 **1. Ask the agent.** If you already have a working session on this server with Claude / Codex / Gemini (even with password auth), just tell the agent:
 
-> Add this public key to my ~/.ssh/authorized_keys: `ssh-ed25519 AAAAC3... sshai@android`
+> Add this public key to my ~/.ssh/authorized_keys: `ssh-ed25519 AAAAC3... conch@android`
 
 The agent will append it for you.
 

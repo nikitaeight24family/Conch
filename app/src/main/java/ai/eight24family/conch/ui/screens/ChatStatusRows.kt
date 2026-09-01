@@ -143,6 +143,10 @@ internal fun WorkingStatusRow(
      * Codex/Gemini made those agents "look like Claude". Non-Claude agents get
      * a plain CLI spinner and a neutral "Working" verb instead. */
     agent: ai.eight24family.conch.agent.Agent = ai.eight24family.conch.agent.Agent.CLAUDE,
+    /** Replaces the spinner verb with a stated FACT when the wait is not the
+     * agent thinking at all — e.g. "loading model" while the local engine
+     * streams weights: calling that phase "Working" read as a dead hang. */
+    verbOverride: String? = null,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
@@ -189,7 +193,7 @@ internal fun WorkingStatusRow(
     // 2026-06-14).
     val verbSeed = remember(startMs > 0L) { startMs }
     val verbs = spec.spinnerVerbs
-    val verb = if (!verbs.isNullOrEmpty())
+    val verb = verbOverride ?: if (!verbs.isNullOrEmpty())
         verbs[(((verbSeed / 1000L) % verbs.size + verbs.size) % verbs.size).toInt()]
     else "Working"
     // Minutes like the CLI's «(1m13s · …)» — not a raw «104s». Compact (no space
@@ -241,7 +245,7 @@ internal fun WorkingStatusRow(
  * when the turn has ended but the session's background command(s) are still
  * running. The CLI resumes the session with a task-notification when they
  * land, so the chat is NOT done and must not just fall silent (paired with
- * the two-pulse [ai.eight24family.conch.ui.haptic.SshAiHaptic.TurnPausedBg]).
+ * the two-pulse [ai.eight24family.conch.ui.haptic.ConchHaptic.TurnPausedBg]).
  */
 @Composable
 internal fun WaitingForBackgroundRow(count: Int) {
@@ -273,7 +277,7 @@ internal fun WaitingForBackgroundRow(count: Int) {
  *  deliberately NOT any specific CLI's flair. Each agent's real identity
  *  (Claude's sparkle, Grok's ◆ pulse, Copilot's blinking eyes) lives on its
  *  spec as [ai.eight24family.conch.agent.spec.AgentCliSpec.spinnerGlyphs]. */
-private val WORK_GLYPHS_GENERIC = listOf("|", "/", "-", "\\")
+private val WORK_GLYPHS_GENERIC = listOf("|", "/", "–", "\\")
 
 /**
  * "Agent is thinking" indicator row — legacy 3-dot spinner. The chat now

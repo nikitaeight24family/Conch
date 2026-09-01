@@ -154,7 +154,7 @@ internal class ChatViewModelDownloads(
                 //    Every image we've ever shown or sent is cached by its remote
                 //    path, so a reopened chat (no live session / FIDO not tapped /
                 //    server /tmp already cleaned) paints instantly from disk.
-                val cached = SilentlyTry.logged("SshAi-Chat", "decode cached inline image") {
+                val cached = SilentlyTry.logged("Conch-Chat", "decode cached inline image") {
                     val cf = imageCacheFile(remotePath)
                     if (cf.exists() && cf.length() > 0) decodeDownscaled(cf.readBytes()) else null
                 }
@@ -182,7 +182,7 @@ internal class ChatViewModelDownloads(
                     is AgentSession.DownloadOutcome.Done -> {
                         val bytes = buf.toByteArray()
                         cacheImageBytes(remotePath, bytes)  // persist for offline reopen
-                        val bmp = SilentlyTry.logged("SshAi-Chat", "decode inline image") {
+                        val bmp = SilentlyTry.logged("Conch-Chat", "decode inline image") {
                             decodeDownscaled(bytes)
                         }
                         putInlineImage(
@@ -213,7 +213,7 @@ internal class ChatViewModelDownloads(
             // Persist to disk so a LATER reopen of this chat renders the image
             // locally too (the /tmp upload on the server may be gone by then).
             cacheImageBytes(remotePath, bytes)
-            val bmp = SilentlyTry.logged("SshAi-Chat", "decode preloaded inline image") {
+            val bmp = SilentlyTry.logged("Conch-Chat", "decode preloaded inline image") {
                 decodeDownscaled(bytes)
             }
             if (bmp != null) {
@@ -229,7 +229,7 @@ internal class ChatViewModelDownloads(
     // Lives under cacheDir → the OS reclaims it under storage pressure.
     private fun imageCacheFile(remotePath: String): java.io.File {
         val dir = java.io.File(ServiceLocator.appContext.cacheDir, "inline_images").apply { mkdirs() }
-        val key = SilentlyTry.loggedOrElse("SshAi-Chat", "hash image path", remotePath.hashCode().toString()) {
+        val key = SilentlyTry.loggedOrElse("Conch-Chat", "hash image path", remotePath.hashCode().toString()) {
             java.security.MessageDigest.getInstance("SHA-1")
                 .digest(remotePath.toByteArray())
                 .joinToString("") { "%02x".format(it) }
@@ -238,7 +238,7 @@ internal class ChatViewModelDownloads(
     }
 
     private fun cacheImageBytes(remotePath: String, bytes: ByteArray) {
-        SilentlyTry.fired("SshAi-Chat", "cache inline image bytes") {
+        SilentlyTry.fired("Conch-Chat", "cache inline image bytes") {
             imageCacheFile(remotePath).writeBytes(bytes)
         }
     }
@@ -285,7 +285,7 @@ internal class ChatViewModelDownloads(
                         if (hash != null && _downloads.value[path] !is ChatViewModel.DownloadStatus.Done) {
                             val entry = ServiceLocator.preferences.downloadIndex.first()[hash]
                             val uri = entry?.let {
-                                SilentlyTry.logged("SshAi-Chat", "parse download uri (probe)") {
+                                SilentlyTry.logged("Conch-Chat", "parse download uri (probe)") {
                                     android.net.Uri.parse(it.uriString)
                                 }
                             }
@@ -399,7 +399,7 @@ internal class ChatViewModelDownloads(
             scope.launch(Dispatchers.IO) {
                 val entry = ServiceLocator.preferences.downloadIndex.first()[knownHash]
                 val uri = entry?.let {
-                    SilentlyTry.logged("SshAi-Chat", "parse download uri (download)") {
+                    SilentlyTry.logged("Conch-Chat", "parse download uri (download)") {
                         android.net.Uri.parse(it.uriString)
                     }
                 }
@@ -426,7 +426,7 @@ internal class ChatViewModelDownloads(
     /** Sanity-check that a stored local URI still points to an existing, readable file. */
     private fun isLocalUriReadable(uri: android.net.Uri): Boolean {
         val ctx = ServiceLocator.appContext
-        return SilentlyTry.loggedOrElse("SshAi-Chat", "probe local uri readable", false) {
+        return SilentlyTry.loggedOrElse("Conch-Chat", "probe local uri readable", false) {
             if (uri.scheme == "file") {
                 val f = uri.path?.let { java.io.File(it) }
                 f != null && f.exists() && f.length() > 0
@@ -486,7 +486,7 @@ internal class ChatViewModelDownloads(
                         displayLocation = file.uri.toString()
                     }
                     is AgentSession.DownloadOutcome.Failed -> {
-                        if (existing == null) SilentlyTry.fired("SshAi-Chat", "delete failed download file") { file.delete() }
+                        if (existing == null) SilentlyTry.fired("Conch-Chat", "delete failed download file") { file.delete() }
                         _downloads.update { it + (remotePath to ChatViewModel.DownloadStatus.Failed(outcome.reason)) }
                         return@launch
                     }
@@ -523,7 +523,7 @@ internal class ChatViewModelDownloads(
                         displayLocation = "Download/conch/$basename2"
                     }
                     is AgentSession.DownloadOutcome.Failed -> {
-                        SilentlyTry.fired("SshAi-Chat", "delete failed mediastore uri") { resolver.delete(uri, null, null) }
+                        SilentlyTry.fired("Conch-Chat", "delete failed mediastore uri") { resolver.delete(uri, null, null) }
                         _downloads.update { it + (remotePath to ChatViewModel.DownloadStatus.Failed(outcome.reason)) }
                         return@launch
                     }
@@ -549,7 +549,7 @@ internal class ChatViewModelDownloads(
                         displayLocation = target.absolutePath
                     }
                     is AgentSession.DownloadOutcome.Failed -> {
-                        SilentlyTry.fired("SshAi-Chat", "delete failed target file") { target.delete() }
+                        SilentlyTry.fired("Conch-Chat", "delete failed target file") { target.delete() }
                         _downloads.update { it + (remotePath to ChatViewModel.DownloadStatus.Failed(outcome.reason)) }
                         return@launch
                     }
@@ -559,11 +559,11 @@ internal class ChatViewModelDownloads(
             val sizeBytes = run {
                 val u = resultUri ?: return@run -1L
                 if (u.scheme == "file") {
-                    SilentlyTry.loggedOrElse("SshAi-Chat", "read file size", -1L) {
+                    SilentlyTry.loggedOrElse("Conch-Chat", "read file size", -1L) {
                         java.io.File(u.path ?: return@loggedOrElse -1L).length()
                     }
                 } else {
-                    SilentlyTry.loggedOrElse("SshAi-Chat", "query content uri size", -1L) {
+                    SilentlyTry.loggedOrElse("Conch-Chat", "query content uri size", -1L) {
                         ctx.contentResolver.query(u, null, null, null, null)?.use { c ->
                             val idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
                             if (c.moveToFirst() && idx >= 0) c.getLong(idx) else -1L
@@ -576,9 +576,9 @@ internal class ChatViewModelDownloads(
             }
             if (resultUri != null) {
                 val hash = _remoteHashes.value[remotePath]?.takeIf { it.length == 64 }
-                    ?: SilentlyTry.logged("SshAi-Chat", "compute local sha256") { computeLocalSha256(resultUri) }
+                    ?: SilentlyTry.logged("Conch-Chat", "compute local sha256") { computeLocalSha256(resultUri) }
                 if (!hash.isNullOrBlank() && hash.length == 64) {
-                    SilentlyTry.fired("SshAi-Chat", "add download index entry") {
+                    SilentlyTry.fired("Conch-Chat", "add download index entry") {
                         ServiceLocator.preferences.addDownloadIndexEntry(
                             hash,
                             ai.eight24family.conch.data.prefs.AppPreferences.DownloadIndexEntry(
@@ -603,7 +603,7 @@ internal class ChatViewModelDownloads(
      */
     private fun computeLocalSha256(uri: android.net.Uri): String? {
         val ctx = ServiceLocator.appContext
-        return SilentlyTry.logged("SshAi-Chat", "compute SHA-256 of local file") {
+        return SilentlyTry.logged("Conch-Chat", "compute SHA-256 of local file") {
             val md = java.security.MessageDigest.getInstance("SHA-256")
             ctx.contentResolver.openInputStream(uri)?.use { stream ->
                 val buf = ByteArray(64 * 1024)

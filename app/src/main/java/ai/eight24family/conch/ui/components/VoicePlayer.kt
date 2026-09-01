@@ -60,7 +60,7 @@ private object VoicePlayback {
 
     fun stopOthers(key: String) {
         if (currentKey != null && currentKey != key) {
-            SilentlyTry.fired("SshAi-Audio", "stop other player") { current?.release() }
+            SilentlyTry.fired("Conch-Audio", "stop other player") { current?.release() }
             current = null
             currentKey = null
         }
@@ -102,7 +102,7 @@ fun VoicePlayer(
     // the user ever presses play.
     LaunchedEffect(key) {
         if (durationMs == 0) {
-            durationMs = SilentlyTry.loggedOrElse("SshAi-Audio", "probe duration", 0) {
+            durationMs = SilentlyTry.loggedOrElse("Conch-Audio", "probe duration", 0) {
                 // NOT `.use {}` — MediaMetadataRetriever only became AutoCloseable
                 // in API 29 and this app ships to 26.
                 val r = android.media.MediaMetadataRetriever()
@@ -111,7 +111,7 @@ fun VoicePlayer(
                     r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                         ?.toIntOrNull() ?: 0
                 } finally {
-                    SilentlyTry.fired("SshAi-Audio", "release retriever") { r.release() }
+                    SilentlyTry.fired("Conch-Audio", "release retriever") { r.release() }
                 }
             }
         }
@@ -122,7 +122,7 @@ fun VoicePlayer(
         while (playing) {
             kotlinx.coroutines.delay(60)
             val p = player ?: break
-            positionMs = SilentlyTry.loggedOrElse("SshAi-Audio", "read position", positionMs) {
+            positionMs = SilentlyTry.loggedOrElse("Conch-Audio", "read position", positionMs) {
                 p.currentPosition
             }
         }
@@ -130,12 +130,12 @@ fun VoicePlayer(
 
     DisposableEffect(key) {
         onDispose {
-            SilentlyTry.fired("SshAi-Audio", "release player") { player?.release() }
+            SilentlyTry.fired("Conch-Audio", "release player") { player?.release() }
             VoicePlayback.releaseIfMine(key)
         }
     }
 
-    fun ensurePlayer(): MediaPlayer? = player ?: SilentlyTry.logged("SshAi-Audio", "open player") {
+    fun ensurePlayer(): MediaPlayer? = player ?: SilentlyTry.logged("Conch-Audio", "open player") {
         // Build it OUTSIDE the apply so a throwing prepare() can still release
         // the native handle. `MediaPlayer().apply { prepare() }` leaks one per
         // failed attempt — visible in logcat as a stream of
@@ -147,11 +147,11 @@ fun VoicePlayer(
             mp.setOnCompletionListener {
                 playing = false
                 positionMs = 0
-                SilentlyTry.fired("SshAi-Audio", "rewind") { it.seekTo(0) }
+                SilentlyTry.fired("Conch-Audio", "rewind") { it.seekTo(0) }
             }
             mp
         } catch (t: Throwable) {
-            SilentlyTry.fired("SshAi-Audio", "release failed player") { mp.release() }
+            SilentlyTry.fired("Conch-Audio", "release failed player") { mp.release() }
             throw t
         }
     }?.also {
@@ -164,7 +164,7 @@ fun VoicePlayer(
         if (d <= 0) return
         val target = (f.coerceIn(0f, 1f) * d).toInt()
         positionMs = target
-        SilentlyTry.fired("SshAi-Audio", "seek") { player?.seekTo(target) }
+        SilentlyTry.fired("Conch-Audio", "seek") { player?.seekTo(target) }
     }
 
     val progress = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
@@ -187,11 +187,11 @@ fun VoicePlayer(
                 .clickable {
                     val p = ensurePlayer() ?: return@clickable
                     if (playing) {
-                        SilentlyTry.fired("SshAi-Audio", "pause") { p.pause() }
+                        SilentlyTry.fired("Conch-Audio", "pause") { p.pause() }
                         playing = false
                     } else {
                         VoicePlayback.claim(key, p)
-                        SilentlyTry.fired("SshAi-Audio", "play") { p.start() }
+                        SilentlyTry.fired("Conch-Audio", "play") { p.start() }
                         playing = true
                     }
                 },

@@ -147,6 +147,10 @@ internal fun ChatPromptHost(
         usageReport = usageReport,
         usageCost = usageCost,
         usageExpanded = usageExpanded,
+        // A local-model harness on the phone's own row runs the LOCAL engine:
+        // no quota to show — the bar shows the hardware the inference is spending.
+        localTelemetry = serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+            ai.eight24family.conch.agent.spec.AgentSpecRegistry[currentAgent].supportsLocalModel,
         onUsageExpandedChange = { exp ->
             // Kick off the (slow, copy-based) /context probe the first time the
             // panel opens — Claude-only, cached after the first fetch.

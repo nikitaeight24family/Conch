@@ -179,20 +179,20 @@ internal object GeminiAcpWire {
     fun parseLine(line: String): Incoming? {
         val t = line.trim()
         if (!t.startsWith("{")) return null
-        val obj = SilentlyTry.logged("SshAi-GeminiAcp", "parse rpc line") {
+        val obj = SilentlyTry.logged("Conch-GeminiAcp", "parse rpc line") {
             json.parseToJsonElement(t).jsonObject
         } ?: return null
         val method = (obj["method"] as? JsonPrimitive)?.contentOrNull
         val id = obj["id"]
-        val params = SilentlyTry.logged("SshAi-GeminiAcp", "rpc params obj") { obj["params"]?.jsonObject }
+        val params = SilentlyTry.logged("Conch-GeminiAcp", "rpc params obj") { obj["params"]?.jsonObject }
             ?: JsonObject(emptyMap())
         return when {
             method != null && id != null -> Incoming.ServerReq(id, method, params)
             method != null -> Incoming.Notification(method, params)
             id != null -> Incoming.Response(
                 id = (id as? JsonPrimitive)?.contentOrNull?.toLongOrNull(),
-                result = SilentlyTry.logged("SshAi-GeminiAcp", "rpc result obj") { obj["result"]?.jsonObject },
-                error = SilentlyTry.logged("SshAi-GeminiAcp", "rpc error obj") { obj["error"]?.jsonObject },
+                result = SilentlyTry.logged("Conch-GeminiAcp", "rpc result obj") { obj["result"]?.jsonObject },
+                error = SilentlyTry.logged("Conch-GeminiAcp", "rpc error obj") { obj["error"]?.jsonObject },
             )
             else -> null
         }
@@ -203,10 +203,10 @@ internal object GeminiAcpWire {
     data class PermissionOption(val optionId: String, val name: String, val kind: String)
 
     fun parsePermissionOptions(params: JsonObject): List<PermissionOption> {
-        val arr = SilentlyTry.logged("SshAi-GeminiAcp", "options array") { params["options"]?.jsonArray }
+        val arr = SilentlyTry.logged("Conch-GeminiAcp", "options array") { params["options"]?.jsonArray }
             ?: return emptyList()
         return arr.mapNotNull { o ->
-            SilentlyTry.logged("SshAi-GeminiAcp", "option obj") {
+            SilentlyTry.logged("Conch-GeminiAcp", "option obj") {
                 val obj = o.jsonObject
                 PermissionOption(
                     optionId = obj.str("optionId") ?: return@logged null,

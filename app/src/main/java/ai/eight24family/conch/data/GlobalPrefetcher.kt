@@ -320,7 +320,12 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
             }
         }
         val agents = (snapshot?.statuses ?: emptyMap())
-            .filter { it.value.installed && it.value.loggedIn }.keys
+            .filter {
+                it.value.installed && (
+                    it.value.loggedIn ||
+                        ai.eight24family.conch.linux.LocalLlm.localBrainAuthorizes(server.id, it.key)
+                    )
+            }.keys
         for (agent in agents) {
             val rawList = SilentlyTry.logged(TAG, "periodic list ${server.name}/${agent.name}") {
                 discovery.list(agent, key = "${server.id}:${agent.name}", exec = exec)
@@ -518,7 +523,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
         // the toggle remains for forcing thrift on unmetered links too.
         val metered = ai.eight24family.conch.util.NetworkCost.isMetered()
         val dataSaver = metered ||
-            SilentlyTry.loggedOrElse("SshAi-Prefetch", "read data saver pref", false) {
+            SilentlyTry.loggedOrElse("Conch-Prefetch", "read data saver pref", false) {
                 ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
             }
         // Data saver gates ONLY the expensive body downloads (MB per session),
@@ -579,11 +584,16 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
      *  loop so servers can run in parallel. */
     private suspend fun sweepServer(scope: CoroutineScope, server: Server, fetchBodies: Boolean) {
         if (!scope.isActive) return
-        val secrets = SilentlyTry.logged("SshAi-Prefetch", "read server secrets") { repo.getSecrets(server.id) } ?: return
+        val secrets = SilentlyTry.logged("Conch-Prefetch", "read server secrets") { repo.getSecrets(server.id) } ?: return
 
         suspend fun authorizedFromCache() =
-            SilentlyTry.loggedOrElse("SshAi-Prefetch", "load agent status cache", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>()) { agentStatusCache.load(server.id).statuses }
-                .filter { it.value.installed && it.value.loggedIn }.keys
+            SilentlyTry.loggedOrElse("Conch-Prefetch", "load agent status cache", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>()) { agentStatusCache.load(server.id).statuses }
+                .filter {
+                    it.value.installed && (
+                        it.value.loggedIn ||
+                            ai.eight24family.conch.linux.LocalLlm.localBrainAuthorizes(server.id, it.key)
+                        )
+                }.keys
         var authorizedAgents = authorizedFromCache()
         if (authorizedAgents.isEmpty()) {
             // Never probed yet — typically a server the user JUST added /
@@ -820,7 +830,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
      *  listing / body fetch in [prefetchOne] so SK servers never trigger a
      *  second touch for any background work. */
     private fun buildPooledExec(client: net.schmizz.sshj.SSHClient): suspend (String) -> String? = { cmd: String ->
-        SilentlyTry.logged("SshAi-Prefetch", "exec on pooled client") {
+        SilentlyTry.logged("Conch-Prefetch", "exec on pooled client") {
             val sess = client.startSession()
             try {
                 // Chokepoint: session-listing scripts are `bash -lc` and rode
@@ -836,7 +846,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
                 )
                 proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
                 String(out.toByteArray(), Charsets.UTF_8)
-            } finally { SilentlyTry.fired("SshAi-Prefetch", "close exec session") { sess.close() } }
+            } finally { SilentlyTry.fired("Conch-Prefetch", "close exec session") { sess.close() } }
         }
     }
 
@@ -958,7 +968,7 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
         repo.observeServers().first()
 
     companion object {
-        private const val TAG = "SshAi-Prefetch-Global"
+        private const val TAG = "Conch-Prefetch-Global"
 
         /**
          * Ceiling on a SPECULATIVE body download. Prefetch exists to make search

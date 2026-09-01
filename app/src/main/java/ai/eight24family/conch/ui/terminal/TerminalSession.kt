@@ -67,14 +67,14 @@ class TerminalSession(
         try {
             val s = client.startSession()
             session = s
-            SilentlyTry.fired("SshAi-Term", "allocate pty") {
+            SilentlyTry.fired("Conch-Term", "allocate pty") {
                 s.allocatePTY("xterm-256color", emulator.cols, emulator.rows, 0, 0, java.util.Collections.emptyMap())
             }
             val shell = s.startShell()
             shellRef = shell
             stdin = shell.outputStream
             _connected.value = true
-            android.util.Log.d("SshAi-Term", "shell started for $serverId (${emulator.cols}x${emulator.rows})")
+            android.util.Log.d("Conch-Term", "shell started for $serverId (${emulator.cols}x${emulator.rows})")
             val ins = shell.inputStream
             val buf = ByteArray(8192)
             while (true) {
@@ -89,14 +89,14 @@ class TerminalSession(
                 }
             }
         } catch (t: Throwable) {
-            android.util.Log.w("SshAi-Term", "shell error: ${t.javaClass.simpleName}: ${t.message}")
+            android.util.Log.w("Conch-Term", "shell error: ${t.javaClass.simpleName}: ${t.message}")
             emulator.feed("\r\n  [ session ended: ${t.message ?: t.javaClass.simpleName} ]\r\n")
             _screen.value = emulator.snapshot()
         } finally {
             _connected.value = false
             stdin = null
             shellRef = null
-            SilentlyTry.fired("SshAi-Term", "close session") { session?.close() }
+            SilentlyTry.fired("Conch-Term", "close session") { session?.close() }
             session = null
             started = false
         }
@@ -120,7 +120,7 @@ class TerminalSession(
 
     fun sendBytes(bytes: ByteArray) {
         scope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Term", "write stdin") {
+            SilentlyTry.fired("Conch-Term", "write stdin") {
                 stdin?.apply { write(bytes); flush() }
             }
         }
@@ -141,14 +141,14 @@ class TerminalSession(
         emulator.resize(cols, rows)
         _screen.value = emulator.snapshot()
         scope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Term", "resize pty") {
+            SilentlyTry.fired("Conch-Term", "resize pty") {
                 shellRef?.changeWindowDimensions(cols, rows, 0, 0)
             }
         }
     }
 
     fun close() {
-        SilentlyTry.fired("SshAi-Term", "close session (explicit)") { session?.close() }
+        SilentlyTry.fired("Conch-Term", "close session (explicit)") { session?.close() }
         session = null
         shellRef = null
         stdin = null

@@ -292,20 +292,20 @@ internal object CodexAppServerWire {
     fun parseLine(line: String): Incoming? {
         val t = line.trim()
         if (!t.startsWith("{")) return null
-        val obj = SilentlyTry.logged("SshAi-CodexApp", "parse rpc line") {
+        val obj = SilentlyTry.logged("Conch-CodexApp", "parse rpc line") {
             json.parseToJsonElement(t).jsonObject
         } ?: return null
         val method = (obj["method"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
         val id = obj["id"]
-        val params = SilentlyTry.logged("SshAi-CodexApp", "rpc params obj") { obj["params"]?.jsonObject }
+        val params = SilentlyTry.logged("Conch-CodexApp", "rpc params obj") { obj["params"]?.jsonObject }
             ?: JsonObject(emptyMap())
         return when {
             method != null && id != null -> Incoming.ServerReq(id, method, params)
             method != null -> Incoming.Notification(method, params)
             id != null -> Incoming.Response(
                 id = (id as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.toLongOrNull(),
-                result = SilentlyTry.logged("SshAi-CodexApp", "rpc result obj") { obj["result"]?.jsonObject },
-                error = SilentlyTry.logged("SshAi-CodexApp", "rpc error obj") { obj["error"]?.jsonObject },
+                result = SilentlyTry.logged("Conch-CodexApp", "rpc result obj") { obj["result"]?.jsonObject },
+                error = SilentlyTry.logged("Conch-CodexApp", "rpc error obj") { obj["error"]?.jsonObject },
             )
             else -> null
         }
@@ -334,16 +334,16 @@ internal object CodexAppServerWire {
     fun parseUserInputQuestions(
         params: JsonObject,
     ): List<Pair<String, AgentMessage.AskUserQuestion.Question>> {
-        val arr = SilentlyTry.logged("SshAi-CodexApp", "questions array") { params["questions"]?.jsonArray }
+        val arr = SilentlyTry.logged("Conch-CodexApp", "questions array") { params["questions"]?.jsonArray }
             ?: return emptyList()
         return arr.mapNotNull { q ->
-            SilentlyTry.logged("SshAi-CodexApp", "question obj") {
+            SilentlyTry.logged("Conch-CodexApp", "question obj") {
                 val o = q.jsonObject
                 val qid = o.str("id") ?: return@logged null
                 val options = o["options"]?.let { el ->
                     if (el is JsonNull) null
                     else el.jsonArray.mapNotNull { opt ->
-                        SilentlyTry.logged("SshAi-CodexApp", "option obj") {
+                        SilentlyTry.logged("Conch-CodexApp", "option obj") {
                             val oo = opt.jsonObject
                             AgentMessage.AskUserQuestion.Option(
                                 label = oo.str("label").orEmpty(),

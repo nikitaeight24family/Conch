@@ -204,7 +204,11 @@ fun AboutScreen(
             }
 
             Section("privacy") {
-                Bullet("no analytics, no crash reporting, no telemetry of any kind. the app makes no network connection to anyone but the servers you add.")
+                Bullet(
+                    "no analytics, no crash reporting, no telemetry of any kind. the app makes no network " +
+                        "connection to anyone but the servers you add — plus, only when you tap download, " +
+                        "the model files you chose (hugging face). local models run entirely on this phone.",
+                )
                 Bullet("no chat contents, no file contents, no server hostnames or IPs leave the device.")
                 Bullet("full breakdown of what gets sent and what doesn't lives in the Privacy Policy below.")
             }
@@ -299,7 +303,7 @@ fun AboutScreen(
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.clickable {
-                        SilentlyTry.fired("SshAi-About", "open mailto link") {
+                        SilentlyTry.fired("Conch-About", "open mailto link") {
                             uriHandler.openUri("mailto:nikita@eight24family.ai")
                         }
                     }
@@ -324,7 +328,7 @@ fun AboutScreen(
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.clickable {
-                        SilentlyTry.fired("SshAi-About", "open AndroidHarness link") {
+                        SilentlyTry.fired("Conch-About", "open AndroidHarness link") {
                             uriHandler.openUri("https://github.com/Sanuu7/AndroidHarness")
                         }
                     },

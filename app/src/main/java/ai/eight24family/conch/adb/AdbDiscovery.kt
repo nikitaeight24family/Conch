@@ -66,7 +66,7 @@ object AdbDiscovery {
                 // The discovery callback carries a NAME, not an address — the
                 // port only exists after a resolve, and skipping that step is
                 // how this reads back as port 0.
-                SilentlyTry.fired("SshAi-AdbDiscovery", "resolve mDNS service") {
+                SilentlyTry.fired("Conch-AdbDiscovery", "resolve mDNS service") {
                     @Suppress("DEPRECATION")
                     nsd.resolveService(
                         info,
@@ -89,10 +89,10 @@ object AdbDiscovery {
             nsd.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
             withTimeoutOrNull(timeoutMs) { found.await() }
         } catch (t: Throwable) {
-            android.util.Log.w("SshAi-AdbDiscovery", "discovery of $serviceType failed: ${t.message}")
+            android.util.Log.w("Conch-AdbDiscovery", "discovery of $serviceType failed: ${t.message}")
             null
         } finally {
-            SilentlyTry.fired("SshAi-AdbDiscovery", "stop mDNS discovery") {
+            SilentlyTry.fired("Conch-AdbDiscovery", "stop mDNS discovery") {
                 @Suppress("DEPRECATION")
                 nsd.stopServiceDiscovery(listener)
             }

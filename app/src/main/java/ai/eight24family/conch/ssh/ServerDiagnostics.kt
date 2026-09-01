@@ -35,12 +35,48 @@ object ServerDiagnostics {
 
     sealed class Diagnosis(val title: String, val reasons: List<String>) {
 
+        /**
+         * A remedy the app can START for the user, rather than describe.
+         *
+         * ⛔ A DIAGNOSIS THAT ONLY EXPLAINS IS A DEAD END. Every other case here
+         * ends in something the owner must do on another machine — power on a
+         * VPS, fix DNS — so words were all this card could offer.
+         */
+        enum class Action { PHONE_BRIDGE }
+
+        /** Null for everything the app cannot do anything about itself. */
+        open val action: Action? = null
+
         /** Probe outcome was good (TCP open + SSH banner). Caller
          *  should proceed to auth; any further failure is credential-side. */
         object Ok : Diagnosis(
             title = "Server responds normally",
             reasons = emptyList(),
         )
+
+        /**
+         * The phone's own Linux, and nothing wrong with any network.
+         *
+         * ⛔ NEVER "SERVER ISN'T RESPONDING" FOR THIS ONE. That card told the
+         * owner to put his phone on the same Wi-Fi as the server — about a
+         * machine inside the phone, reachable on loopback, whose endpoint CONCH
+         * starts. What is actually missing is Android's debugging switch, and
+         * the pairing behind it is stored forever: it is the SWITCH that Android
+         * clears at every restart, not the pairing that lapses. Say that, and
+         * offer the flow that fixes it.
+         */
+        object PhoneShellNotArmed : Diagnosis(
+            title = "This phone's shell isn't armed",
+            reasons = listOf(
+                "The Linux runs ON this phone, so there is nothing to check on the network — " +
+                    "what is missing is Android's own debugging switch, which is what lets Conch " +
+                    "start it.",
+                "One switch, and a six-digit code only the first time. Android turns the switch " +
+                    "off at every restart — its rule, not Conch's; the code is never asked twice.",
+            ),
+        ) {
+            override val action = Action.PHONE_BRIDGE
+        }
 
         /** Phone has no active network at all. Soft signal — we only
          *  fall here when `ConnectivityManager.activeNetwork == null`,
@@ -218,13 +254,27 @@ object ServerDiagnostics {
         cause: Throwable,
         context: Context,
         hostWorkedAgoMs: Long? = null,
-    ): Diagnosis = classify(
-        host = host,
-        port = port,
-        outcome = TcpProbe.Outcome.Failed(connectFailureKind(cause), cause),
-        context = context,
-        hostWorkedAgoMs = hostWorkedAgoMs,
-    )
+    ): Diagnosis {
+        // ⛔ ASKED BEFORE ANY NETWORK REASONING. The phone's endpoint is on
+        // loopback and this app starts it; a failure there is never about Wi-Fi,
+        // DNS or a powered-off box, and answering with those is how the owner
+        // was told to check the network of a machine in his pocket.
+        var t: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (t != null && seen.add(t)) {
+            if (t is ai.eight24family.conch.linux.LinuxSsh.NotReachable) {
+                return Diagnosis.PhoneShellNotArmed
+            }
+            t = t.cause
+        }
+        return classify(
+            host = host,
+            port = port,
+            outcome = TcpProbe.Outcome.Failed(connectFailureKind(cause), cause),
+            context = context,
+            hostWorkedAgoMs = hostWorkedAgoMs,
+        )
+    }
 
     /** Walks the cause chain for the socket-level failure sshj wrapped. */
     fun connectFailureKind(cause: Throwable): TcpProbe.Outcome.Failed.Kind {

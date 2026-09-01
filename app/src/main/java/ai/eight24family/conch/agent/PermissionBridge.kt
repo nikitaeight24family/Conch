@@ -2,19 +2,19 @@ package ai.eight24family.conch.agent
 
 object PermissionBridge {
     const val TOOL_NAME = "prompt_user"
-    const val MCP_SERVER_NAME = "sshai"
+    const val MCP_SERVER_NAME = "conch"
 
     val NODE_SCRIPT: String = """
 #!/usr/bin/env node
 // Conch permission bridge — minimal MCP stdio server.
 // Exposes one tool: prompt_user(tool_name, input, tool_use_id).
-// Writes each request to SSHAI_REQ_FILE as JSONL, blocks until a
-// response file appears at SSHAI_RESP_DIR/<tool_use_id>.json, then
+// Writes each request to CONCH_REQ_FILE as JSONL, blocks until a
+// response file appears at CONCH_RESP_DIR/<tool_use_id>.json, then
 // returns the response back to Claude Code via MCP.
 const fs = require('fs');
 const path = require('path');
-const REQ_FILE = process.env.SSHAI_REQ_FILE;
-const RESP_DIR = process.env.SSHAI_RESP_DIR;
+const REQ_FILE = process.env.CONCH_REQ_FILE;
+const RESP_DIR = process.env.CONCH_RESP_DIR;
 let buf = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {

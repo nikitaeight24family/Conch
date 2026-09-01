@@ -63,7 +63,7 @@ class SecurityKeyManager(application: Application) {
         } catch (_: TimeoutCancellationException) {
             null
         } finally {
-            SilentlyTry.fired("SshAi-SK-Mgr", "stop usb discovery") { ymgr.stopUsbDiscovery() }
+            SilentlyTry.fired("Conch-SK-Mgr", "stop usb discovery") { ymgr.stopUsbDiscovery() }
         }
     }
 
@@ -98,7 +98,7 @@ class SecurityKeyManager(application: Application) {
         timeoutMs: Long = 60_000,
         op: (YubiKeyDevice) -> T,
     ): T? {
-        val tag = "SshAi-SK-Mgr"
+        val tag = "Conch-SK-Mgr"
         val result = CompletableDeferred<T>()
         val cfg = NfcConfiguration().timeout(2_000)
         try {
@@ -127,7 +127,7 @@ class SecurityKeyManager(application: Application) {
             android.util.Log.w(tag, "withNfc: timed out after ${timeoutMs}ms")
             null
         } finally {
-            SilentlyTry.fired("SshAi-SK-Mgr", "stop nfc discovery") { ymgr.stopNfcDiscovery(activity) }
+            SilentlyTry.fired("Conch-SK-Mgr", "stop nfc discovery") { ymgr.stopNfcDiscovery(activity) }
         }
     }
 }

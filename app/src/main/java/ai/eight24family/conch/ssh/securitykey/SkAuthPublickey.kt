@@ -15,7 +15,18 @@ import java.security.MessageDigest
  * sshj 0.39 / 0.40 don't know the SK key types
  * (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`)
  * — its `KeyType` enum doesn't list them, so the stock
- * `AuthPublickey` path fails to even build the userauth REQUEST. This
+ * `AuthPublickey` path fails to even build the userauth REQUEST.
+ *
+ * ⚠ AND THAT IS WHY WE ARE STILL ON 0.39 (checked 2026-08-30). Upgrading to
+ * 0.40 buys nothing here and is not free: `KeyType` in the 0.40 TAG still has
+ * no SK constants, and the CHANNEL_CLOSE race that produces `Stream closed`
+ * was fixed back in 2022 (PR #813) — it is already in 0.39. What 0.40 does
+ * bring is a crypto refactor (BouncyCastle made optional, the eddsa library
+ * dropped for JCE), i.e. churn underneath the exact code that cannot be tested
+ * without physically tapping the owner's key. `SK_ED25519` / `SK_ECDSA` DO
+ * exist on sshj master, so the next release is the one worth taking — and when
+ * it lands, this whole class may be replaceable by the stock path. Until then
+ * an upgrade is risk with no return. This
  * class bypasses that path entirely: we hand-build the wire-format
  * packets per RFC 4252 §7 ("Public Key Authentication Method") and
  * OpenSSH's PROTOCOL.u2f extension, asking a [SkSigner] (the token)
@@ -64,7 +75,7 @@ class SkAuthPublickey(
     override fun request() {
         // One-shot dump of the EXACT authorized_keys line we expect
         // the server to have. When auth fails with "key not in
-        // authorized_keys" the user can grep `SshAi-SK-AuthorizedKey`
+        // authorized_keys" the user can grep `Conch-SK-AuthorizedKey`
         // in logcat to see what to paste server-side. Format mirrors
         // OpenSSH's `ssh-keygen -y` output:
         //   <algorithm-name> <base64-blob>
@@ -77,23 +88,23 @@ class SkAuthPublickey(
             val rem = b64.length % 4
             if (rem == 0) b64 else b64 + "=".repeat(4 - rem)
         }
-        android.util.Log.i("SshAi-SK-AuthorizedKey", "$algorithmName $padded")
+        android.util.Log.i("Conch-SK-AuthorizedKey", "$algorithmName $padded")
         // Log the credential ID so we can cross-reference with what's on the token
         // (e.g. via ykman fido credentials list). Useful when CTAP 0x2e (ERR_NO_CREDENTIALS)
         // fires — the credId in the app may not match what's physically on the token.
-        val credIdHex = SilentlyTry.loggedOrElse("SshAi-SK-Auth", "render credId hex", "?") {
+        val credIdHex = SilentlyTry.loggedOrElse("Conch-SK-Auth", "render credId hex", "?") {
             val credId = java.util.Base64.getDecoder().decode(signer.credentialIdBase64)
             credId.take(8).joinToString("") { "%02x".format(it.toInt() and 0xFF) } + "… (${credId.size}B)"
         }
-        android.util.Log.i("SshAi-SK-AuthorizedKey", "  credentialId (first 8B): $credIdHex  application: ${signer.application}")
-        android.util.Log.d("SshAi-SK-Auth", "request: sending test (has_signature=false) for $algorithmName")
+        android.util.Log.i("Conch-SK-AuthorizedKey", "  credentialId (first 8B): $credIdHex  application: ${signer.application}")
+        android.util.Log.d("Conch-SK-Auth", "request: sending test (has_signature=false) for $algorithmName")
         awaitingPkOk = true
         params.transport.write(buildTestRequest())
     }
 
     @Throws(UserAuthException::class, TransportException::class)
     override fun handle(cmd: Message, buf: SSHPacket) {
-        android.util.Log.d("SshAi-SK-Auth", "handle: cmd=$cmd")
+        android.util.Log.d("Conch-SK-Auth", "handle: cmd=$cmd")
         when (cmd) {
             Message.USERAUTH_60 -> {
                 if (!awaitingPkOk) {
@@ -107,10 +118,10 @@ class SkAuthPublickey(
                 // the server rejected the key — most informative log
                 // when the key looks valid client-side but server's
                 // authorized_keys / sshd_config is the real culprit.
-                val authMethods = SilentlyTry.loggedOrElse("SshAi-SK-Auth", "read remaining auth methods", "?") { buf.readString() }
-                val partial = SilentlyTry.loggedOrElse("SshAi-SK-Auth", "read partial_success flag", false) { buf.readBoolean() }
+                val authMethods = SilentlyTry.loggedOrElse("Conch-SK-Auth", "read remaining auth methods", "?") { buf.readString() }
+                val partial = SilentlyTry.loggedOrElse("Conch-SK-Auth", "read partial_success flag", false) { buf.readBoolean() }
                 android.util.Log.w(
-                    "SshAi-SK-Auth",
+                    "Conch-SK-Auth",
                     "USERAUTH_FAILURE: server still accepts methods=[$authMethods] partial_success=$partial"
                 )
                 // Wrap with informative message; sshj's default would
@@ -210,11 +221,11 @@ class SkAuthPublickey(
         }.compactData
 
         android.util.Log.d(
-            "SshAi-SK-Auth",
+            "Conch-SK-Auth",
             "outerSig[${outerSig.size}B]=${outerSig.joinToString("") { "%02x".format(it.toInt() and 0xFF) }}"
         )
         android.util.Log.d(
-            "SshAi-SK-Auth",
+            "Conch-SK-Auth",
             "rawSig[${signResult.rawSignature.size}B]=${signResult.rawSignature.joinToString("") { "%02x".format(it.toInt() and 0xFF) }} flags=0x${"%02x".format(signResult.flags.toInt() and 0xFF)} counter=${signResult.counter}"
         )
 

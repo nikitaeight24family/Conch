@@ -449,7 +449,7 @@ private fun openExternally(ctx: Context, uri: Uri, filename: String) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    SilentlyTry.fired("SshAi-TextViewer", "open non-text externally") { ctx.startActivity(intent) }
+    SilentlyTry.fired("Conch-TextViewer", "open non-text externally") { ctx.startActivity(intent) }
 }
 
 /**
@@ -485,6 +485,6 @@ private suspend fun writeRemote(
             "Server returned exit=$exit. You may not have write permission for $remotePath."
         } else null
     } finally {
-        SilentlyTry.fired("SshAi-TextViewer", "close save ssh session") { session.close() }
+        SilentlyTry.fired("Conch-TextViewer", "close save ssh session") { session.close() }
     }
 }.getOrElse { it.message ?: it.javaClass.simpleName }

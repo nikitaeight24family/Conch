@@ -47,6 +47,14 @@ internal class AgentSessionSshLifecycle(
     private val ssh: SshClient,
     private val scope: CoroutineScope,
 ) {
+    private companion object {
+        /** How many times to ask for a channel the server is momentarily
+         *  refusing. Four tries over ~1.5s covers a burst; beyond that the
+         *  problem is not a busy ceiling. */
+        const val CHANNEL_OPEN_TRIES = 4
+        const val CHANNEL_OPEN_BACKOFF_MS = 150L
+    }
+
     /** ⚠ PRIVATE ON PURPOSE — read the transport through [liveClient] only.
      *  This field is the captured client and goes stale whenever the pool
      *  rebuilds the transport; every consumer that read it kept talking to a
@@ -165,7 +173,7 @@ internal class AgentSessionSshLifecycle(
         if (pooled != null && captured != null && pooled !== captured) {
             sshClient = pooled
             android.util.Log.i(
-                "SshAi-AgentSession",
+                "Conch-AgentSession",
                 "transport rebound to the pool's live client for ${server.name} " +
                     "(captured one was ${if (captured.isConnected) "replaced" else "dead"})",
             )
@@ -193,6 +201,79 @@ internal class AgentSessionSshLifecycle(
     }
 
     /**
+     * Open a channel, waiting out a server that is momentarily at its channel
+     * ceiling.
+     *
+     * `MaxSessions` (10 by default) counts channels open SIMULTANEOUSLY on one
+     * transport, and this app opens them freely — chat, listing, tail poll,
+     * per-agent prefetch across every server, uploads. Bursting past the ceiling
+     * is normal and self-correcting: the channels in flight finish in
+     * milliseconds. Treating that refusal as failure is what turned an ordinary
+     * burst into a torn-down connection.
+     *
+     * Short waits, because that is all it takes; the last attempt's exception
+     * propagates so a genuinely broken transport still surfaces.
+     */
+    private suspend fun openChannelWithRetry(client: SSHClient): Session {
+        var lastFailure: Throwable? = null
+        repeat(CHANNEL_OPEN_TRIES) { attempt ->
+            try {
+                return client.startSession()
+            } catch (e: Exception) {
+                val refused = e is net.schmizz.sshj.connection.channel.OpenFailException ||
+                    e.message?.contains("open failed", ignoreCase = true) == true
+                // Only a REFUSAL is worth waiting out; anything else (dead
+                // transport, IO) will not improve by asking again.
+                if (!refused || !client.isConnected) throw e
+                lastFailure = e
+                android.util.Log.d(
+                    "Conch-AgentSession",
+                    "channel refused (attempt ${attempt + 1}/$CHANNEL_OPEN_TRIES) — server at its " +
+                        "channel ceiling, waiting ${CHANNEL_OPEN_BACKOFF_MS}ms",
+                )
+                delay(CHANNEL_OPEN_BACKOFF_MS * (attempt + 1))
+            }
+        }
+        throw lastFailure ?: net.schmizz.sshj.common.SSHException("channel open refused")
+    }
+
+    /**
+     * Throw away the current transport and run [block] on a rebuilt one.
+     *
+     * For the operations that CANNOT ride [execOnLive]'s recovery because they
+     * own their channel for the whole duration — the file transfers. When a
+     * channel dies mid-write, sshj reports `Stream closed` and the old upload
+     * path simply gave up, so a dead transport meant "attachments no longer
+     * work" while every command still ran (execOnLive quietly rebuilds under
+     * them). The asymmetry, not the network, is what made it look like the
+     * feature broke.
+     *
+     * ⚠ REFCOUNT: the acquire here is matched by the release in the `finally`,
+     * so this never disturbs the session's own 1:1 pairing (invariant 1). The
+     * pool is still the only thing that opens transports — on a seamless-
+     * enrolled server the rebuild needs no touch, and on one that does need a
+     * touch this is the same cost execOnLive's fresh-handshake fallback pays.
+     */
+    suspend fun <T> onRebuiltTransport(reason: String, block: suspend (SSHClient) -> T): T? =
+        withContext(Dispatchers.IO) {
+            val pool = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool
+            SilentlyTry.fired("Conch-AgentSession", "evict before rebuild") {
+                pool.evictPoisoned(server.id, reason)
+            }
+            val fresh = SilentlyTry.logged("Conch-AgentSession", "rebuild transport after $reason") {
+                pool.acquire(server, secrets, skSigner)
+            } ?: return@withContext null
+            sshClient = fresh
+            try {
+                block(fresh)
+            } finally {
+                SilentlyTry.fired("Conch-AgentSession", "release rebuilt transport") {
+                    pool.release(server.id)
+                }
+            }
+        }
+
+    /**
      * Release our reference to the pooled client + cancel the
      * supervisor scope. The pool closes the underlying connection only
      * when refcount hits zero (= no other AgentSessions on this server
@@ -205,7 +286,7 @@ internal class AgentSessionSshLifecycle(
     fun close(drainerJob: Job?) {
         drainerJob?.cancel()
         if (sshClient != null) {
-            SilentlyTry.fired("SshAi-AgentSession", "release pooled client") {
+            SilentlyTry.fired("Conch-AgentSession", "release pooled client") {
                 ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.release(server.id)
             }
             sshClient = null
@@ -251,17 +332,17 @@ internal class AgentSessionSshLifecycle(
         val cmd = currentTurnCommand
         if (cmd != null) {
             // Local turn we ourselves started.
-            SilentlyTry.fired("SshAi-AgentSession", "signal INT to cmd") { cmd.signal(Signal.INT) }
+            SilentlyTry.fired("Conch-AgentSession", "signal INT to cmd") { cmd.signal(Signal.INT) }
             scope.launch {
                 delay(2_000)
                 if (cmd.exitStatus == null) {
-                    SilentlyTry.fired("SshAi-AgentSession", "signal TERM to cmd") {
+                    SilentlyTry.fired("Conch-AgentSession", "signal TERM to cmd") {
                         cmd.signal(Signal.TERM)
                     }
                 }
                 delay(2_000)
                 if (cmd.exitStatus == null) {
-                    SilentlyTry.fired("SshAi-AgentSession", "signal KILL to cmd") {
+                    SilentlyTry.fired("Conch-AgentSession", "signal KILL to cmd") {
                         cmd.signal(Signal.KILL)
                     }
                 }
@@ -310,7 +391,7 @@ internal class AgentSessionSshLifecycle(
         val client = liveClient()
         if (client != null && client.isConnected) {
             try {
-                val sess = client.startSession()
+                val sess = openChannelWithRetry(client)
                 try {
                     val cmd = sess.exec(command)
                     val out = java.io.ByteArrayOutputStream()
@@ -334,7 +415,7 @@ internal class AgentSessionSshLifecycle(
                         ),
                     )
                     return@withContext str
-                } finally { SilentlyTry.fired("SshAi-AgentSession", "close execOnLive ssh session") { sess.close() } }
+                } finally { SilentlyTry.fired("Conch-AgentSession", "close execOnLive ssh session") { sess.close() } }
             } catch (e: Exception) {
                 // Surface WHY the live channel refused the command — this was
                 // swallowed, which hid the real cause of "Couldn't prepare the
@@ -344,7 +425,7 @@ internal class AgentSessionSshLifecycle(
                 // prohibited"), or a transport error. Logged loudly + tagged with
                 // the command so the failing op is unambiguous.
                 android.util.Log.w(
-                    "SshAi-AgentSession",
+                    "Conch-AgentSession",
                     "execOnLive LIVE channel failed (${e.javaClass.simpleName}: ${e.message}) for cmd=${command.take(60)} — falling back to fresh handshake",
                     e,
                 )
@@ -354,13 +435,33 @@ internal class AgentSessionSshLifecycle(
                 // socket stays up, so the app looks connected and does nothing.
                 // on a seamless-enrolled server that reconnect needs NO FIDO tap,
                 // so this is invisible rather than something the user must fix by
-                // hand.
-                if (e is net.schmizz.sshj.connection.channel.OpenFailException ||
-                    (e.message?.contains("open failed", ignoreCase = true) == true)
-                ) {
-                    SilentlyTry.fired("SshAi-AgentSession", "evict poisoned transport") {
+                // hand. ⛔ A REFUSED CHANNEL IS NOT A DEAD TRANSPORT — AND THIS
+                // USED TO KILL ONE EVERY TIME.
+                //
+                // sshd's MaxSessions is a ceiling on channels open AT ONCE, not a
+                // verdict on the connection. Channels close constantly, so the
+                // ceiling clears by itself in a moment — which is why
+                // [openChannelWithRetry] above now waits and asks again instead
+                // of giving up on the first refusal.
+                //
+                // What stood here was `evictPoisoned`, i.e. tear down the whole
+                // transport. Measured consequence (device log, 2026-08-30
+                // 17:12:19): a transport that had been serving fine for 8.7
+                // minutes was destroyed over ONE refused channel, every other
+                // subsystem instantly got `TransportException: Disconnected`, and
+                // for the 19 seconds until the watchdog rebuilt it the app had no
+                // SSH at all — which is exactly where the owner's photo upload
+                // landed: "no SSH connection", three seconds after we cut the
+                // line ourselves. The same self-inflicted teardown is what made a
+                // running upload die with sshj's `Stream closed` mid-transfer.
+                // On a security-key server the rebuild can even demand a tap.
+                //
+                // So the transport is dropped ONLY when it is actually gone. If
+                // it still answers, retrying is right and evicting is vandalism.
+                if (!client.isConnected) {
+                    SilentlyTry.fired("Conch-AgentSession", "evict dead transport") {
                         ai.eight24family.conch.di.ServiceLocator.sshConnectionPool
-                            .evictPoisoned(server.id, "channel open refused (MaxSessions?)")
+                            .evictPoisoned(server.id, "transport no longer connected")
                     }
                 }
             }
@@ -385,7 +486,7 @@ internal class AgentSessionSshLifecycle(
         val now = System.currentTimeMillis()
         if (now - lastFallbackFailMs < 60_000L) {
             android.util.Log.d(
-                "SshAi-AgentSession",
+                "Conch-AgentSession",
                 "execOnLive fallback suppressed (last fresh-handshake failure ${(now - lastFallbackFailMs) / 1000}s ago)",
             )
             return@withContext null
@@ -427,7 +528,7 @@ internal class AgentSessionSshLifecycle(
         } catch (_: Throwable) {
             false
         } finally {
-            SilentlyTry.fired("SshAi-AgentSession", "close stdin-write ssh session") { sess?.close() }
+            SilentlyTry.fired("Conch-AgentSession", "close stdin-write ssh session") { sess?.close() }
         }
     }
 }

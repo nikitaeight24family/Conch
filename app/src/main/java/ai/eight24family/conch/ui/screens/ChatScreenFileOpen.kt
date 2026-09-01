@@ -63,7 +63,7 @@ internal fun ChatFileOpenHandlers(
             val opened = runCatching { ctx.startActivity(intent) }.isSuccess
             if (!opened) {
                 android.util.Log.w(
-                    "SshAi-FileOpen",
+                    "Conch-FileOpen",
                     "no app handles ${req.mime} - forgetting the remembered choice and asking again",
                 )
                 vm.openFileFallbackToPrompt(req)
@@ -81,7 +81,7 @@ internal fun ChatFileOpenHandlers(
             val chooser = Intent.createChooser(send, req.filename).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            SilentlyTry.fired("SshAi-FileOpen", "startActivity share chooser") { ctx.startActivity(chooser) }
+            SilentlyTry.fired("Conch-FileOpen", "startActivity share chooser") { ctx.startActivity(chooser) }
         }
     }
     var openPrompt by remember {
@@ -107,7 +107,7 @@ internal fun ChatFileOpenHandlers(
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        SilentlyTry.fired("SshAi-FileOpen", "startActivity from prompt: view") { ctx.startActivity(intent) }
+                        SilentlyTry.fired("Conch-FileOpen", "startActivity from prompt: view") { ctx.startActivity(intent) }
                     }
                     "share" -> {
                         val send = Intent(Intent.ACTION_SEND).apply {
@@ -119,7 +119,7 @@ internal fun ChatFileOpenHandlers(
                         val chooser = Intent.createChooser(send, prompt.filename).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        SilentlyTry.fired("SshAi-FileOpen", "startActivity from prompt: share") { ctx.startActivity(chooser) }
+                        SilentlyTry.fired("Conch-FileOpen", "startActivity from prompt: share") { ctx.startActivity(chooser) }
                     }
                 }
                 openPrompt = null

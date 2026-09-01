@@ -51,7 +51,7 @@ interface LogCaptureService {
 
     data class CaptureRequest(
         /** Glob-ish tag pattern. `null` means no tag filter.
-         *  Examples: `"SshAi-*"`, `"AndroidRuntime"`. We pass it
+         *  Examples: `"Conch-*"`, `"AndroidRuntime"`. We pass it
          *  through to logcat's `--tag` filter (a list of
          *  `<tag>:<priority>` pairs). */
         val tagFilter: String? = null,

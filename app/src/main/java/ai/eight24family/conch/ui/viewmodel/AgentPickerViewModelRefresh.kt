@@ -106,7 +106,7 @@ internal class AgentPickerViewModelRefresh(
         // Source-of-truth gate so it catches EVERY trigger (ON_RESUME, init,
         // prefetch, watchdog), not just the one observer Step 1 guarded.
         if (!force && AgentPickerViewModel.activeLogin.value != null) {
-            android.util.Log.d("SshAi-AgentPicker", "refresh skipped — OAuth login in progress")
+            android.util.Log.d("Conch-AgentPicker", "refresh skipped — OAuth login in progress")
             return scope.launch { }
         }
         // Cancel any in-flight diagnose from a previous attempt before
@@ -115,7 +115,7 @@ internal class AgentPickerViewModelRefresh(
         // result for this same server.
         diagnosisJob?.cancel()
         return scope.launch(Dispatchers.IO) {
-            val tag = "SshAi-AgentPicker"
+            val tag = "Conch-AgentPicker"
             android.util.Log.d(tag, "refresh(serverId=$serverId, userTriggered=$userTriggered, force=$force) — enter")
             // **Two distinct "we're working" signals.**
             //  - `_probing`: any in-flight refresh. Drives the small
@@ -143,7 +143,7 @@ internal class AgentPickerViewModelRefresh(
             // (cached on disk) — we just don't spend SSH round-trips
             // re-confirming what we already know. Pull-to-refresh
             // always bypasses the gate.
-            val dataSaver = SilentlyTry.loggedOrElse("SshAi-AgentPicker", "read data saver pref", false) {
+            val dataSaver = SilentlyTry.loggedOrElse("Conch-AgentPicker", "read data saver pref", false) {
                 ServiceLocator.preferences.dataSaverEnabled.first()
             }
             val lastCheck = lastCheckedAtMut.value ?: 0L
@@ -171,17 +171,17 @@ internal class AgentPickerViewModelRefresh(
                     // Ride a pooled / alive session if we already paid for a tap.
                     val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
                     if (pooled != null) {
-                        android.util.Log.d("SshAi-AgentPicker", "probe via pooled SSH — no touch")
+                        android.util.Log.d("Conch-AgentPicker", "probe via pooled SSH — no touch")
                         authConfirmedMut.value = true
                         if (runProbeViaPooledClient(pooled)) return@launch
-                        android.util.Log.d("SshAi-AgentPicker", "  pooled probe failed — falling back to touch flow")
+                        android.util.Log.d("Conch-AgentPicker", "  pooled probe failed — falling back to touch flow")
                     }
                     val alive = Agent.entries.firstNotNullOfOrNull {
                         ServiceLocator.agentSessions.findAnyAlive(serverId, it)
                     }
                     if (alive != null) {
                         if (runProbeViaAliveSession(alive)) return@launch
-                        android.util.Log.d("SshAi-AgentPicker", "  alive-session probe failed — falling back to touch flow")
+                        android.util.Log.d("Conch-AgentPicker", "  alive-session probe failed — falling back to touch flow")
                     }
                     val info = skPrimary.securityInfo ?: run {
                         errorMut.value = "Security-key row is missing handle/application — re-add the key."
@@ -200,10 +200,10 @@ internal class AgentPickerViewModelRefresh(
                     if (silentUp) {
                         val pooledNow = ServiceLocator.sshConnectionPool.peek(serverId)
                         if (pooledNow != null) {
-                            android.util.Log.d("SshAi-AgentPicker", "silent device-key reconnect — no touch")
+                            android.util.Log.d("Conch-AgentPicker", "silent device-key reconnect — no touch")
                             authConfirmedMut.value = true
                             if (runProbeViaPooledClient(pooledNow)) return@launch
-                            android.util.Log.d("SshAi-AgentPicker", "  silent-pooled probe failed — falling through")
+                            android.util.Log.d("Conch-AgentPicker", "  silent-pooled probe failed — falling through")
                         }
                     }
                     // The FIDO touch is reserved for an EXPLICIT user gesture —
@@ -296,7 +296,7 @@ internal class AgentPickerViewModelRefresh(
                             ServiceLocator.sshConnectionPool.peek(serverId) == null
                         ) {
                             android.util.Log.w(
-                                "SshAi-AgentPicker",
+                                "Conch-AgentPicker",
                                 "connect failed for ${server.host}:${server.port} → ${diag::class.simpleName}",
                             )
                             diagnosisMut.value = diag
@@ -313,7 +313,7 @@ internal class AgentPickerViewModelRefresh(
     }
 
     private suspend fun runProbeViaPooledClient(client: net.schmizz.sshj.SSHClient): Boolean {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         try {
             probingMut.value = true
             var ok = false
@@ -321,7 +321,7 @@ internal class AgentPickerViewModelRefresh(
             // call; the fast probe still returns the instant its process exits.
             val execLambda: suspend (String) -> String? = { cmd ->
                 withContext(Dispatchers.IO) {
-                    SilentlyTry.logged("SshAi-AgentPicker", "probe agents on pool") {
+                    SilentlyTry.logged("Conch-AgentPicker", "probe agents on pool") {
                         val sess = client.startSession()
                         try {
                             val proc = sess.exec(cmd)
@@ -334,7 +334,7 @@ internal class AgentPickerViewModelRefresh(
                             )
                             proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
-                        } finally { SilentlyTry.fired("SshAi-AgentPicker", "close pool probe session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-AgentPicker", "close pool probe session") { sess.close() } }
                     }
                 }
             }
@@ -362,7 +362,7 @@ internal class AgentPickerViewModelRefresh(
     }
 
     private suspend fun runProbeViaAliveSession(alive: AgentSession): Boolean {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         try {
             probingMut.value = true
             var ok = false
@@ -402,7 +402,7 @@ internal class AgentPickerViewModelRefresh(
      * without a touch, so we leave the caller's optimistic state.
      */
     fun reprobeAgentQuiet(agent: Agent): Job = scope.launch(Dispatchers.IO) {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
         val alive = if (pooled == null) {
             Agent.entries.firstNotNullOfOrNull {
@@ -600,7 +600,7 @@ internal class AgentPickerViewModelRefresh(
     suspend fun runProbeWithSigner(
         signer: ai.eight24family.conch.ssh.securitykey.SkSigner,
     ) {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         val server = serverMut.value ?: repo.getById(serverId).also { serverMut.value = it } ?: return
         val secrets = repo.getSecrets(serverId)
         // **Silent background probe when cache is hot.** If we
@@ -626,7 +626,7 @@ internal class AgentPickerViewModelRefresh(
             ai.eight24family.conch.ssh.securitykey.SecurityKeyNotifier.cancel(ServiceLocator.appContext)
             val execLambda: suspend (String) -> String? = { cmd ->
                 withContext(Dispatchers.IO) {
-                    SilentlyTry.logged("SshAi-AgentPicker", "probe agents after connect") {
+                    SilentlyTry.logged("Conch-AgentPicker", "probe agents after connect") {
                         val sess = client.startSession()
                         try {
                             val cmdProc = sess.exec(cmd)
@@ -639,7 +639,7 @@ internal class AgentPickerViewModelRefresh(
                             )
                             cmdProc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             String(out.toByteArray(), Charsets.UTF_8)
-                        } finally { SilentlyTry.fired("SshAi-AgentPicker", "close post-connect probe session") { sess.close() } }
+                        } finally { SilentlyTry.fired("Conch-AgentPicker", "close post-connect probe session") { sess.close() } }
                     }
                 }
             }

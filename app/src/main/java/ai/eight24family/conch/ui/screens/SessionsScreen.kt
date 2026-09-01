@@ -181,7 +181,7 @@ fun SessionsScreen(
         // user intent. Don't show a touch dialog: the user might not even want
         // this server. Pop to the server list and let them pick.
         if (ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(serverId) == null) {
-            android.util.Log.d("SshAi-Sessions", "no active session on entry — popping to servers")
+            android.util.Log.d("Conch-Sessions", "no active session on entry — popping to servers")
             onBack()
             return@LaunchedEffect
         }
@@ -191,7 +191,7 @@ fun SessionsScreen(
             val live = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(serverId) != null
             val touchInProgress = vm.skTouchRequest.value != null
             if (!live && !touchInProgress) {
-                android.util.Log.d("SshAi-Sessions", "session dropped — popping to servers")
+                android.util.Log.d("Conch-Sessions", "session dropped — popping to servers")
                 onBack()
                 break
             }
@@ -947,7 +947,7 @@ internal fun SessionFileOpenHandlers(
                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "open external") { ctx.startActivity(intent) }
+            ai.eight24family.conch.util.SilentlyTry.fired("Conch-Sessions", "open external") { ctx.startActivity(intent) }
         }
     }
     LaunchedEffect(Unit) {
@@ -961,7 +961,7 @@ internal fun SessionFileOpenHandlers(
             val chooser = android.content.Intent.createChooser(send, req.filename).apply {
                 addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "share session") { ctx.startActivity(chooser) }
+            ai.eight24family.conch.util.SilentlyTry.fired("Conch-Sessions", "share session") { ctx.startActivity(chooser) }
         }
     }
     var openPrompt by remember {
@@ -983,7 +983,7 @@ internal fun SessionFileOpenHandlers(
                             addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "open external (prompt)") { ctx.startActivity(intent) }
+                        ai.eight24family.conch.util.SilentlyTry.fired("Conch-Sessions", "open external (prompt)") { ctx.startActivity(intent) }
                     }
                     "share" -> {
                         val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -995,7 +995,7 @@ internal fun SessionFileOpenHandlers(
                         val chooser = android.content.Intent.createChooser(send, prompt.filename).apply {
                             addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Sessions", "share session (prompt)") { ctx.startActivity(chooser) }
+                        ai.eight24family.conch.util.SilentlyTry.fired("Conch-Sessions", "share session (prompt)") { ctx.startActivity(chooser) }
                     }
                 }
                 openPrompt = null

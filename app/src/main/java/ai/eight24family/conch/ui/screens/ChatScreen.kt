@@ -2,17 +2,25 @@ package ai.eight24family.conch.ui.screens
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -110,7 +118,7 @@ fun ChatScreen(
         // (see rememberChatScrollController's VM-seeding), not lost to the first
         // message.
         android.util.Log.d(
-            "SshAi-PiP",
+            "Conch-PiP",
             "ChatScreen short-circuit (inPip) anchor=${vm.readingAnchorMsgId.value} off=${vm.readingAnchorOffset.value}",
         )
         return
@@ -384,6 +392,9 @@ fun ChatScreen(
         }
     }
     var modelMenuOpen by rememberSaveable { mutableStateOf(false) }
+    // Probe the phone's codex sign-in once per chat open, so the picker's
+    // first open already knows whether the cloud catalog may be offered.
+    LaunchedEffect(Unit) { vm.refreshPhoneCloudAuth() }
     var commandMenuOpen by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf<String?>(null) }
     var paletteOpen by rememberSaveable { mutableStateOf(false) }
@@ -480,7 +491,13 @@ fun ChatScreen(
                     // Tap-to-open → live re-probe of availability (models can
                     // be suspended mid-session; freshness gate bypassed). The
                     // cached list shows instantly and refreshes in place.
-                    if (opening) vm.onModelPickerOpened()
+                    if (opening) {
+                        vm.onModelPickerOpened()
+                        // The phone's cloud rows exist only when codex is
+                        // signed in there — re-check on every open, a login
+                        // may have happened since.
+                        vm.refreshPhoneCloudAuth()
+                    }
                 },
                 onCloseModelMenu = { modelMenuOpen = false },
                 commandMenuOpen = commandMenuOpen,
@@ -555,6 +572,60 @@ fun ChatScreen(
                         notice = notice,
                         onDismiss = { vm.dismissAttachmentNotice() },
                     )
+                }
+                // Green ✓ strip for GOOD news (vision pack landed) — shows for
+                // 3 s and leaves by itself
+                run {
+                    val success by vm.attachmentSuccess.collectAsState()
+                    success?.let { msg ->
+                        val green = Color(0xFF34C759)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Check,
+                                contentDescription = null,
+                                tint = green,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                msg,
+                                color = green,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            )
+                        }
+                    }
+                }
+                // Gigabytes moving for THIS chat's model (weights or vision
+                // pack) — a live bar, because a static "downloading…" sentence
+                // read as a hang.
+                run {
+                    val dl by vm.localModelDownload.collectAsState()
+                    dl?.let { (label, frac) ->
+                        androidx.compose.foundation.layout.Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                label,
+                                color = MaterialTheme.colorScheme.outline,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            )
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { frac },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 3.dp),
+                            )
+                        }
+                    }
                 }
                 // Outcome of a chat-level action (rewind). App feedback, not a
                 // transcript row — so it is never replayed on reopen.
@@ -887,5 +958,17 @@ private fun PinnedWorkingStatus(
         thinking = remoteThinking,
         waitingForInput = remoteWaiting,
         agent = workingAgent,
+        // While the LOCAL engine is still streaming weights, the turn is not
+        // "Working" — the model isn't even in memory yet. Say what the wait
+        // actually is; the verb flips to the agent's own the moment the
+        // engine reports Up (gated on this chat being the phone's Codex).
+        verbOverride = run {
+            val server by vm.server.collectAsState()
+            val engine by ai.eight24family.conch.linux.LocalLlmEngine.state.collectAsState()
+            if (server?.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+                ai.eight24family.conch.agent.spec.AgentSpecRegistry[workingAgent].supportsLocalModel &&
+                engine is ai.eight24family.conch.linux.LocalLlmEngine.State.Starting
+            ) "loading model" else null
+        },
     )
 }

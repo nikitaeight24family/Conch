@@ -73,7 +73,11 @@ class AgentSession(
      *  uses an EXISTING binding — never the current active — so switching the
      *  active method can't retro-break an old chat (a Codex ChatGPT rollout
      *  won't answer under API auth). Unbound resume ⇒ null ⇒ CLI default. */
-    private val bornNew: Boolean = (resumeId == null)
+    /** Internal so the home list can gate its synthetic rows: only a chat
+     *  born WITHOUT a session may mint one — a resumed chat always has its
+     *  cached row already, and the id the CLI announces on resume is not a
+     *  file (see HomeSessionsViewModel's live-session block). */
+    internal val bornNew: Boolean = (resumeId == null)
 
     /** Cached shell prefix that forces the session's chosen auth method
      *  (resolved async from [ai.eight24family.conch.data.AuthMethodStore]).
@@ -199,7 +203,7 @@ class AgentSession(
             // Publish into the spec-level globals FIRST (default model/key,
             // unavailable set, effort ladder) so any observer of the flow —
             // the VM's catalog adopter included — reads warm values.
-            ai.eight24family.conch.agent.claude.ClaudeSpec.adoptInitState(st)
+            ai.eight24family.conch.agent.claude.ClaudeSpec.adoptInitState(st, server.id)
             _claudeInitState.value = st
         },
         onLoopWakeup = { input ->
@@ -464,7 +468,7 @@ class AgentSession(
             // detail lines. (No-op if the user already started a turn — the
             // welcome stays put either way.)
             if (freshChat) {
-                SilentlyTry.fired("SshAi-AgentSession", "enrich welcome header") {
+                SilentlyTry.fired("Conch-AgentSession", "enrich welcome header") {
                     val info = execOnLive(loginShell(
                         "echo --CWD--; pwd 2>/dev/null; echo --VER--; ${server.agent.cliCommand} --version 2>/dev/null | head -1"
                     )).orEmpty()
@@ -502,7 +506,7 @@ class AgentSession(
      *  else (new chat only) the agent's active method; else none. */
     private fun recomputeAuthPrep() {
         scope.launch {
-            SilentlyTry.fired("SshAi-Auth", "resolve session auth method") {
+            SilentlyTry.fired("Conch-Auth", "resolve session auth method") {
                 val store = ai.eight24family.conch.di.ServiceLocator.authMethodStore
                 val bound = store.sessionMethod(resumeId)
                 val key = bound ?: if (bornNew) store.activeMethod(server.id, server.agent) else null
@@ -521,7 +525,7 @@ class AgentSession(
         // (the ghost row's file is already gone from the server).
         if (previousId != null && newId != null && previousId != newId) {
             scope.launch {
-                SilentlyTry.fired("SshAi-Chat", "retire superseded session id") {
+                SilentlyTry.fired("Conch-Chat", "retire superseded session id") {
                     ai.eight24family.conch.di.ServiceLocator.sessionsCache
                         .removeRow(server.id, server.agent, previousId)
                 }
@@ -541,7 +545,7 @@ class AgentSession(
             ai.eight24family.conch.di.ServiceLocator.sessionActivity.observeLocal(server.id, rid)
         }
         scope.launch {
-            SilentlyTry.fired("SshAi-Auth", "bind new session to auth method") {
+            SilentlyTry.fired("Conch-Auth", "bind new session to auth method") {
                 val store = ai.eight24family.conch.di.ServiceLocator.authMethodStore
                 if (bornNew && newId != null) {
                     store.activeMethod(server.id, server.agent)?.let { active ->
@@ -590,7 +594,7 @@ class AgentSession(
     }
 
     suspend fun send(text: String, imagePaths: List<String> = emptyList()) {
-        val tag = "SshAi-Turn"
+        val tag = "Conch-Turn"
         // A new turn supersedes any rewind: the mirror may speak freely again.
         rewindSuppressed = emptySet()
         android.util.Log.d(
@@ -691,7 +695,7 @@ class AgentSession(
      * and [AgentSessionPromptQueue.enqueue] it for exec.
      */
     fun redeliver(text: String, imagePaths: List<String> = emptyList()) {
-        android.util.Log.d("SshAi-Turn", "redeliver (echo-free) text=${text.length} images=${imagePaths.size} resume=$resumeId")
+        android.util.Log.d("Conch-Turn", "redeliver (echo-free) text=${text.length} images=${imagePaths.size} resume=$resumeId")
         promptQueue.markSent(text, resumeId)
         // emitOnStart=false: the row is already on screen (carried across a
         // reconnect, OR shown optimistically by the ViewModel for a mid-turn
@@ -945,7 +949,7 @@ class AgentSession(
             "{ command -v rg >/dev/null 2>&1 && rg --files --hidden -g '!.git' 2>/dev/null " +
             "|| find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null " +
             "| sed 's|^\\./||'; } | grep -iF -- " + shellEscape(token) + " | head -8"
-        val out = SilentlyTry.logged("SshAi-Turn", "file suggestion fallback") {
+        val out = SilentlyTry.logged("Conch-Turn", "file suggestion fallback") {
             execOnLive(loginShell(script))
         }
         val hits = out?.lineSequence()
@@ -1000,7 +1004,7 @@ class AgentSession(
                 }?.takeIf { it.isNotEmpty() }
             }
             android.util.Log.i(
-                "SshAi-Turn",
+                "Conch-Turn",
                 "rewind: dropped ${dropped.size} row(s) at $recordUuid, " +
                     "suppressing ${rewindSuppressed.size} body(ies) until next send",
             )
@@ -1028,7 +1032,7 @@ class AgentSession(
         val body = userBodyKey(text).ifBlank { return null }
         val script = "f=\$(ls \$HOME/.claude/projects/*/" + shellEscape(rid) + "'.jsonl' 2>/dev/null | head -1); " +
             "[ -n \"\$f\" ] || exit 0; tail -c 2000000 \"\$f\" | grep '\"type\":\"user\"' | tail -200"
-        val out = SilentlyTry.logged("SshAi-Turn", "resolve rewind anchor") {
+        val out = SilentlyTry.logged("Conch-Turn", "resolve rewind anchor") {
             execOnLive(loginShell(script))
         } ?: return null
         // Parse app-side (TURN-STATE-IS-LOCAL-1: never depend on jq being on

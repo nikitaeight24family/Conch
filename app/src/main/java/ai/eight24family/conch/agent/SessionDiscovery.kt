@@ -84,11 +84,11 @@ class SessionDiscovery(private val ssh: SshClient) {
             val raw = ssh.execute(server, secrets, cmd, skSigner)
             val out = raw.getOrNull().orEmpty()
             android.util.Log.d(
-                "SshAi-SK-Disc",
+                "Conch-SK-Disc",
                 "  ssh.execute raw: success=${raw.isSuccess} bytes=${out.length} preview='${out.take(300).replace("\n", "\\n")}'"
             )
             raw.exceptionOrNull()?.let {
-                android.util.Log.w("SshAi-SK-Disc", "  ssh.execute threw", it)
+                android.util.Log.w("Conch-SK-Disc", "  ssh.execute threw", it)
             }
             parseLines(agent, out)
         }

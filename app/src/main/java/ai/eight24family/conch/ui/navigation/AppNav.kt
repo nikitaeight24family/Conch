@@ -57,6 +57,13 @@ object Routes {
      *  / delete all live here; a list tap never connects. */
     const val SERVER_DETAIL = "server_detail/{serverId}"
     fun serverDetail(serverId: String) = "server_detail/$serverId"
+    const val localModels = "local_models"
+    /** The model store — the shelf of downloadable local brains, filtered by
+     *  what THIS phone can actually run. Reached from the local-models screen. */
+    const val modelStore = "model_store"
+    /** One model's store page (Play's "app page" shape). */
+    const val MODEL_PAGE = "model_page/{modelId}"
+    fun modelPage(modelId: String) = "model_page/$modelId"
     /** Agents bottom-tab: overview of ALL servers + their agents (cached, no
      *  key). Tapping a server drills into its per-server [AGENTS] picker. */
     const val AGENTS_OVERVIEW = "agents_overview"
@@ -252,7 +259,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             if (req == null || req.navigated) return@collect
             val alreadyThere = nav.currentDestination?.route == Routes.CHAT
             if (!alreadyThere && !nav.popBackStack(Routes.CHAT, false)) {
-                ai.eight24family.conch.util.SilentlyTry.fired("SshAi-AppNav", "return to the pairing chat") {
+                ai.eight24family.conch.util.SilentlyTry.fired("Conch-AppNav", "return to the pairing chat") {
                     nav.navigate(req.route)
                 }
             }
@@ -301,13 +308,13 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                             // The path; the chat paints from the cached JSONL
                             // by sessionId and never dials SSH.
                             android.util.Log.d(
-                                "SshAi-AppNav",
+                                "Conch-AppNav",
                                 "search hit cache-only sid=${sessionId.take(8)} agent=${r.agent} — read-only from local cache (server unknown)",
                             )
                             go(Routes.CACHE_ONLY_SERVER_ID, r.agent, null)
                         }
                         SessionResolve.Unresolved -> android.util.Log.w(
-                            "SshAi-AppNav",
+                            "Conch-AppNav",
                             "search hit not navigable: sid=${sessionId.take(8)} — nothing cached or indexed for this id",
                         )
                     }
@@ -333,10 +340,19 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 // New session = a fresh chat (no resumeId) for the picked agent
                 // on the picked server.
                 onNewChat = { serverId, agent -> nav.navigate(Routes.chat(serverId, agent)) },
+                onNewChatLocalModel = { serverId, modelId ->
+                    nav.navigate(
+                        Routes.chat(
+                            serverId, ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
+                        ),
+                    )
+                },
             )
         }
         composable(Routes.AGENTS_OVERVIEW) {
             AgentsOverviewScreen(
+                onOpenLocalModels = { nav.navigate(Routes.localModels) },
                 // Install / update / login / method-switch / touch-connect are
                 // all handled INLINE by the per-server panel now. The overview
                 // only routes a READY agent tap to its chat + the SK-recovery
@@ -346,6 +362,14 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 onOpenKeychainForDiscover = { sid -> nav.navigate(Routes.keychainForDiscover(sid)) },
                 onOpenKeychainForRegister = { sid -> nav.navigate(Routes.keychainForRegister(sid)) },
                 onOpenChatFromSearch = rememberOpenChatFromSearch(),
+                onOpenLocalModelChat = { sid, modelId ->
+                    nav.navigate(
+                        Routes.chat(
+                            sid, ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
+                        ),
+                    )
+                },
             )
         }
         composable(Routes.LINUX) {
@@ -409,6 +433,55 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
                 onOpenKeychain = { nav.navigate(Routes.keychain()) },
             )
         }
+        composable(Routes.localModels) {
+            ai.eight24family.conch.ui.screens.LocalModelsScreen(
+                onBack = { nav.popBackStack() },
+                onPickModel = { modelId ->
+                    nav.navigate(
+                        Routes.chat(
+                            ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
+                            ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
+                        ),
+                    )
+                },
+                onOpenStore = { nav.navigate(Routes.modelStore) },
+            )
+        }
+        composable(Routes.modelStore) {
+            ai.eight24family.conch.ui.screens.ModelStoreScreen(
+                onBack = { nav.popBackStack() },
+                onOpenModel = { modelId -> nav.navigate(Routes.modelPage(modelId)) },
+                onPickModel = { modelId ->
+                    nav.navigate(
+                        Routes.chat(
+                            ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
+                            ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
+                        ),
+                    )
+                },
+            )
+        }
+        composable(
+            Routes.MODEL_PAGE,
+            arguments = listOf(navArgument("modelId") { type = NavType.StringType }),
+        ) { entry ->
+            val modelId = entry.arguments?.getString("modelId") ?: return@composable
+            ai.eight24family.conch.ui.screens.ModelPageScreen(
+                modelId = modelId,
+                onBack = { nav.popBackStack() },
+                onPickModel = { id ->
+                    nav.navigate(
+                        Routes.chat(
+                            ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
+                            ai.eight24family.conch.linux.LocalLlm.harnessFor(id),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + id,
+                        ),
+                    )
+                },
+            )
+        }
         composable(
             Routes.AGENTS,
             arguments = listOf(
@@ -423,13 +496,24 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             // → auto-open that agent's login chooser on first composition (so the
             // tap actually STARTS login instead of just re-listing the agents).
             val autoLoginAgent = entry.arguments?.getString("login")?.takeIf { it.isNotEmpty() }
-                ?.let { name -> SilentlyTry.logged("SshAi-AppNav", "parse autoLogin agent") { Agent.valueOf(name) } }
+                ?.let { name -> SilentlyTry.logged("Conch-AppNav", "parse autoLogin agent") { Agent.valueOf(name) } }
             AgentPickerScreen(
                 serverId = id,
                 browse = browse,
                 autoLoginAgent = autoLoginAgent,
                 onBack = { nav.popBackStack() },
                 onPickAgent = { agent -> nav.navigate(Routes.sessions(id, agent)) },
+                // A local model IS a Codex model choice: open a fresh Codex
+                // chat already set to it. The turn itself starts the engine.
+                onOpenLocalModels = { nav.navigate(Routes.localModels) },
+                onPickLocalModel = { modelId ->
+                    nav.navigate(
+                        Routes.chat(
+                            id, ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
+                        ),
+                    )
+                },
                 onOpenKeychainForDiscover = { sid ->
                     // Pop the AgentPicker on the way out so its watchdog
                     // doesn't fire and pop Keychain itself once we're
@@ -456,7 +540,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val id = entry.arguments?.getString("serverId") ?: return@composable
             val agentName = entry.arguments?.getString("agent") ?: return@composable
-            val agent = SilentlyTry.logged("SshAi-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
+            val agent = SilentlyTry.logged("Conch-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
             SessionsScreen(
                 serverId = id,
                 onBack = { nav.popBackStack() },
@@ -536,7 +620,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val id = entry.arguments?.getString("serverId") ?: return@composable
             val agentName = entry.arguments?.getString("agent") ?: return@composable
-            val agent = SilentlyTry.logged("SshAi-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
+            val agent = SilentlyTry.logged("Conch-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
             // Chat ALWAYS full-width, on every device size. The earlier
             // two-pane (sessions+chat) and three-pane (servers+sessions+
             // chat) layouts reserved 30-50% of the window for a session
@@ -580,7 +664,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val id = entry.arguments?.getString("serverId") ?: return@composable
             val agentName = entry.arguments?.getString("agent") ?: return@composable
-            val agent = SilentlyTry.logged("SshAi-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
+            val agent = SilentlyTry.logged("Conch-AppNav", "parse agent name from nav") { Agent.valueOf(agentName) } ?: return@composable
             val chatId = entry.arguments?.getString("chatId")
             AgentsListScreen(
                 onBack = { nav.popBackStack() },
@@ -628,7 +712,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             val filename = entry.arguments?.getString("filename") ?: "file"
             val serverId = entry.arguments?.getString("serverId")
             val remotePath = entry.arguments?.getString("remotePath")
-            val uri = SilentlyTry.logged("SshAi-AppNav", "parse Uri from nav") { android.net.Uri.parse(uriStr) }
+            val uri = SilentlyTry.logged("Conch-AppNav", "parse Uri from nav") { android.net.Uri.parse(uriStr) }
                 ?: return@composable
             ai.eight24family.conch.ui.screens.TextViewerScreen(
                 uri = uri,
@@ -647,7 +731,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val uriStr = entry.arguments?.getString("uri") ?: return@composable
             val filename = entry.arguments?.getString("filename") ?: "file.pdf"
-            val uri = SilentlyTry.logged("SshAi-AppNav", "parse Uri from nav (pdf)") { android.net.Uri.parse(uriStr) }
+            val uri = SilentlyTry.logged("Conch-AppNav", "parse Uri from nav (pdf)") { android.net.Uri.parse(uriStr) }
                 ?: return@composable
             ai.eight24family.conch.ui.screens.PdfViewerScreen(
                 uri = uri,
@@ -664,7 +748,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val uriStr = entry.arguments?.getString("uri") ?: return@composable
             val filename = entry.arguments?.getString("filename") ?: "file.md"
-            val uri = SilentlyTry.logged("SshAi-AppNav", "parse Uri from nav (md)") { android.net.Uri.parse(uriStr) }
+            val uri = SilentlyTry.logged("Conch-AppNav", "parse Uri from nav (md)") { android.net.Uri.parse(uriStr) }
                 ?: return@composable
             ai.eight24family.conch.ui.screens.MarkdownViewerScreen(
                 uri = uri,
@@ -681,7 +765,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         ) { entry ->
             val uriStr = entry.arguments?.getString("uri") ?: return@composable
             val filename = entry.arguments?.getString("filename") ?: "file.diff"
-            val uri = SilentlyTry.logged("SshAi-AppNav", "parse Uri from nav (diff)") { android.net.Uri.parse(uriStr) }
+            val uri = SilentlyTry.logged("Conch-AppNav", "parse Uri from nav (diff)") { android.net.Uri.parse(uriStr) }
                 ?: return@composable
             ai.eight24family.conch.ui.screens.DiffViewerScreen(
                 uri = uri,
@@ -739,7 +823,7 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             KeychainScreen(
                 onBack = { nav.popBackStack() },
                 attachToServerId = attach,
-                autoArmMode = mode?.let { SilentlyTry.logged("SshAi-AppNav", "parse AddSkMode") { ai.eight24family.conch.ui.screens.AddSkMode.valueOf(it.uppercase()) } },
+                autoArmMode = mode?.let { SilentlyTry.logged("Conch-AppNav", "parse AddSkMode") { ai.eight24family.conch.ui.screens.AddSkMode.valueOf(it.uppercase()) } },
                 onAttachedRetry = { sid ->
                     // After auto-attach, send the user back to AGENTS for
                     // [sid] so the picker can re-run auth with the new key.
@@ -810,7 +894,7 @@ private sealed interface SessionResolve {
 }
 
 private suspend fun resolveSession(sessionId: String): SessionResolve {
-    val servers = SilentlyTry.logged("SshAi-AppNav", "list servers for resolver") {
+    val servers = SilentlyTry.logged("Conch-AppNav", "list servers for resolver") {
         ServiceLocator.serverRepository.observeServers().first()
     } ?: emptyList()
     val cache = ServiceLocator.sessionsCache
@@ -830,7 +914,7 @@ private suspend fun resolveSession(sessionId: String): SessionResolve {
     // was never recorded — pre-durable-log), but the AGENT is content-
     // detected, so we can still open the cache read-only.
     var knownAgent: Agent? = null
-    SilentlyTry.logged("SshAi-AppNav", "index session owner") {
+    SilentlyTry.logged("Conch-AppNav", "index session owner") {
         ServiceLocator.searchDatabase.searchDao().sessionOwner(sessionId)
     }?.let { row ->
         val agent = row.agent?.let { a -> Agent.entries.firstOrNull { it.name == a } }

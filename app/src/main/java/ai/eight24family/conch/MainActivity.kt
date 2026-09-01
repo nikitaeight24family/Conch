@@ -26,7 +26,7 @@ import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.service.ConnectionPermissions
 import ai.eight24family.conch.util.SilentlyTry
 import ai.eight24family.conch.ui.screens.ConnectionGuardSheet
-import ai.eight24family.conch.ui.theme.SshAiTheme
+import ai.eight24family.conch.ui.theme.ConchTheme
 import ai.eight24family.conch.ui.window.AppScaffold
 import ai.eight24family.conch.ui.window.AppWindowAdaptiveProvider
 
@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         isInPipState.value = isInPictureInPictureMode
-        android.util.Log.d("SshAi-PiP", "mode changed → inPip=$isInPictureInPictureMode")
+        android.util.Log.d("Conch-PiP", "mode changed → inPip=$isInPictureInPictureMode")
     }
 
     override fun onStart() {
@@ -53,11 +53,11 @@ class MainActivity : ComponentActivity() {
         // App in the foreground → silently connect EVERY server we can reach
         // without a tap: password/plain-key servers via their stored secret, and
         // seamless FIDO servers via their device key. Covers a WARM open / return
-        // from background that SshAiApp.onCreate (cold start only) misses. The
+        // from background that ConchApp.onCreate (cold start only) misses. The
         // user never navigates to "connect" when access exists. Idempotent —
         // skips already-connected.
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Reconnect", "silent auto-connect on foreground") {
+            ai.eight24family.conch.util.SilentlyTry.fired("Conch-Reconnect", "silent auto-connect on foreground") {
                 ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
             }
         }
@@ -65,11 +65,11 @@ class MainActivity : ComponentActivity() {
         // budget (Service.onTimeout, ~6h cumulative) stopped it while work
         // is still alive. Foregrounding the app RESETS the budget, so this
         // start always succeeds here; idempotent when already running.
-        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Service", "re-arm foreground service on app start") {
+        ai.eight24family.conch.util.SilentlyTry.fired("Conch-Service", "re-arm foreground service on app start") {
             val active = ServiceLocator.agentSessions.activeCount.value
             val held = ServiceLocator.sshConnectionPool.userHeldIds.value
             if (active > 0 || held.isNotEmpty()) {
-                ai.eight24family.conch.service.SshAiService.start(this)
+                ai.eight24family.conch.service.ConchService.start(this)
             }
         }
     }
@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
         // backed flow; the read is microseconds and we need the value
         // BEFORE setContent so the window's preferred mode is set
         // before Compose attaches.
-        val highRefreshOn = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read highRefreshRate pref", true) {
+        val highRefreshOn = SilentlyTry.loggedOrElse("Conch-MainActivity", "read highRefreshRate pref", true) {
             kotlinx.coroutines.runBlocking {
                 ServiceLocator.preferences.highRefreshRateEnabled.first()
             }
@@ -140,7 +140,7 @@ class MainActivity : ComponentActivity() {
             // few ms blocking on disk is invisible; the layout jank
             // isn't.
             val initialScale = remember {
-                SilentlyTry.loggedOrElse("SshAi-MainActivity", "read appScale pref", 1.0f) {
+                SilentlyTry.loggedOrElse("Conch-MainActivity", "read appScale pref", 1.0f) {
                     kotlinx.coroutines.runBlocking {
                         ServiceLocator.preferences.appScale
                             .first()
@@ -170,7 +170,7 @@ class MainActivity : ComponentActivity() {
             val serverAccents = ai.eight24family.conch.ui.theme.rememberServerAccents()
             androidx.compose.runtime.CompositionLocalProvider(
                 androidx.compose.ui.platform.LocalDensity provides scaled,
-                ai.eight24family.conch.ui.haptic.LocalSshAiHaptics provides haptics,
+                ai.eight24family.conch.ui.haptic.LocalConchHaptics provides haptics,
                 androidx.compose.ui.platform.LocalUriHandler provides customTabHandler,
                 ai.eight24family.conch.ui.theme.LocalServerAccents provides serverAccents,
             ) {
@@ -211,7 +211,7 @@ class MainActivity : ComponentActivity() {
      * wants to save battery / dial the panel down.
      */
     private fun cap60Hz() {
-        SilentlyTry.fired("SshAi-MainActivity", "cap to 60Hz") {
+        SilentlyTry.fired("Conch-MainActivity", "cap to 60Hz") {
             // ContextCompat path instead of the deprecated
             // windowManager.defaultDisplay — Play's SDK-35 edge-to-edge
             // check flags deprecated display-API references in the dex
@@ -229,14 +229,14 @@ class MainActivity : ComponentActivity() {
             attrs.preferredRefreshRate = 60f
             window.attributes = attrs
             android.util.Log.d(
-                "SshAi-Display",
+                "Conch-Display",
                 "capped to 60 Hz (was ${currentMode.refreshRate})",
             )
         }
     }
 
     private fun requestHighRefreshRate() {
-        SilentlyTry.fired("SshAi-MainActivity", "request high refresh") {
+        SilentlyTry.fired("Conch-MainActivity", "request high refresh") {
             // Same ContextCompat swap as cap60Hz — no deprecated
             // defaultDisplay reference in our dex.
             val display = androidx.core.content.ContextCompat.getDisplayOrDefault(this)
@@ -254,7 +254,7 @@ class MainActivity : ComponentActivity() {
             attrs.preferredRefreshRate = best.refreshRate
             window.attributes = attrs
             android.util.Log.d(
-                "SshAi-Display",
+                "Conch-Display",
                 "requested ${best.refreshRate} Hz (was ${currentMode.refreshRate}) at " +
                     "${best.physicalWidth}x${best.physicalHeight}",
             )
@@ -290,7 +290,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        val tag = "SshAi-PiP"
+        val tag = "Conch-PiP"
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             android.util.Log.d(tag, "skipped: api<26")
             return
@@ -314,7 +314,7 @@ class MainActivity : ComponentActivity() {
         // scrolled to an old reading anchor. PiP exists for one reason —
         // watching work you can't watch on screen — so it now opens only when
         // there IS work.
-        val turnInFlight = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read turn-in-flight for PiP", false) {
+        val turnInFlight = SilentlyTry.loggedOrElse("Conch-MainActivity", "read turn-in-flight for PiP", false) {
             // The WIDER test: a turn generating, a session still bootstrapping, or
             // a prompt drainer inside a turn. PiP keeps this process resumed, so
             // an in-flight handshake / touch / upload needs it as much as a
@@ -325,7 +325,7 @@ class MainActivity : ComponentActivity() {
         // A MIRRORED turn (driven from the console / another device) never flips
         // our own SessionState.Working, but it is exactly as much "work in
         // progress" as ours — the file-mirror flag is its Working.
-        val mirroredTurn = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read mirrored turn for PiP", false) {
+        val mirroredTurn = SilentlyTry.loggedOrElse("Conch-MainActivity", "read mirrored turn for PiP", false) {
             ai.eight24family.conch.ui.window.PipForegroundChat.current.value
                 ?.remoteFileOpen?.value == true
         }
@@ -339,7 +339,7 @@ class MainActivity : ComponentActivity() {
         // and PiP keeps this activity resumed so the SSH login process (blocked
         // on stdin waiting for the pasted code) stays alive instead of dying on
         // a frozen background. The PiP branch renders a login panel for it.
-        val loginInProgress = SilentlyTry.loggedOrElse("SshAi-MainActivity", "read login presence for PiP", false) {
+        val loginInProgress = SilentlyTry.loggedOrElse("Conch-MainActivity", "read login presence for PiP", false) {
             ai.eight24family.conch.ui.viewmodel.AgentPickerViewModel.activeLogin.value != null
         }
         if (!turnInFlight && !mirroredTurn && !loginInProgress) {
@@ -384,7 +384,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun Root(isInPip: Boolean) {
-    SshAiTheme {
+    ConchTheme {
         // **PiP branch.** When the activity is in Picture-in-Picture we render
         // a dedicated compact layout (server name, last assistant message
         // streaming, status footer) instead of the full app. The regular
@@ -424,7 +424,7 @@ private fun Root(isInPip: Boolean) {
                 if (login != null) {
                     ai.eight24family.conch.ui.screens.PipLoginPanel(login)
                 } else if (fgChat != null) {
-                    android.util.Log.d("SshAi-PiP", "overlay=FOREGROUND")
+                    android.util.Log.d("Conch-PiP", "overlay=FOREGROUND")
                     // The whole VM, not a snapshot: the window shows live status
                     // (verb, elapsed, tokens, agents, queue), which is a dozen
                     // flows, and the reading anchor is deliberately NOT among
@@ -444,7 +444,7 @@ private fun Root(isInPip: Boolean) {
                     // seconds at a time.
                     var session by androidx.compose.runtime.remember {
                         androidx.compose.runtime.mutableStateOf(
-                            SilentlyTry.logged("SshAi-MainActivity", "find working session for PiP") {
+                            SilentlyTry.logged("Conch-MainActivity", "find working session for PiP") {
                                 ServiceLocator.agentSessions.findWorkingSession()
                             }
                         )
@@ -452,12 +452,12 @@ private fun Root(isInPip: Boolean) {
                     androidx.compose.runtime.LaunchedEffect(Unit) {
                         while (true) {
                             kotlinx.coroutines.delay(500)
-                            session = SilentlyTry.logged("SshAi-MainActivity", "repoll working session for PiP") {
+                            session = SilentlyTry.logged("Conch-MainActivity", "repoll working session for PiP") {
                                 ServiceLocator.agentSessions.findWorkingSession()
                             }
                         }
                     }
-                    android.util.Log.d("SshAi-PiP", "overlay=FALLBACK working=${session != null}")
+                    android.util.Log.d("Conch-PiP", "overlay=FALLBACK working=${session != null}")
                     session?.let { ai.eight24family.conch.ui.screens.PipChatScreen(it) }
                     if (session == null) {
                         androidx.compose.foundation.layout.Box(

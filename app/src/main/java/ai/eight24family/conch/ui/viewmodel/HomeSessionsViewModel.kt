@@ -125,7 +125,7 @@ class HomeSessionsViewModel : ViewModel() {
         filterUserSet = true
         _agentFilter.value = agentName // instant — the list switches this frame
         viewModelScope.launch {
-            SilentlyTry.fired("SshAi-Home", "persist agent filter") {
+            SilentlyTry.fired("Conch-Home", "persist agent filter") {
                 ServiceLocator.preferences.setHomeAgentFilter(agentName)
             }
         }
@@ -145,7 +145,7 @@ class HomeSessionsViewModel : ViewModel() {
         val next = if (visible) _hiddenServerIds.value - serverId else _hiddenServerIds.value + serverId
         _hiddenServerIds.value = next
         viewModelScope.launch {
-            SilentlyTry.fired("SshAi-Home", "persist hidden servers") {
+            SilentlyTry.fired("Conch-Home", "persist hidden servers") {
                 ServiceLocator.preferences.setHiddenServerIds(next)
             }
         }
@@ -157,7 +157,7 @@ class HomeSessionsViewModel : ViewModel() {
         hiddenUserSet = true
         _hiddenServerIds.value = emptySet()
         viewModelScope.launch {
-            SilentlyTry.fired("SshAi-Home", "clear hidden servers") {
+            SilentlyTry.fired("Conch-Home", "clear hidden servers") {
                 ServiceLocator.preferences.setHiddenServerIds(emptySet())
             }
         }
@@ -373,7 +373,7 @@ class HomeSessionsViewModel : ViewModel() {
                     if (batch.isEmpty()) break
                     for ((id, agent) in batch) {
                         coldBodies.remove(id)
-                        SilentlyTry.fired("SshAi-Home", "warm body preview") {
+                        SilentlyTry.fired("Conch-Home", "warm body preview") {
                             if (agent == Agent.CLAUDE) titleFromBody(id)
                             lastMessageFromBody(id, agent)
                         }
@@ -466,13 +466,18 @@ class HomeSessionsViewModel : ViewModel() {
             // ones a chat can be opened with. Read from the status cache (filled
             // by the prefetch probe); absent/unprobed server → empty set.
             val srvStatuses = SilentlyTry.loggedOrElse(
-                "SshAi-Home", "load agent status", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
+                "Conch-Home", "load agent status", emptyMap<Agent, ai.eight24family.conch.agent.AgentStatus>(),
             ) { agentStatusCache.load(s.id).statuses }
             // "Usable" excludes an agent in a BLOCK run-state — logged in but can't
             // actually run a turn, so it must NOT count as a new-chat target (else
             // the FAB offers a doomed chat).
             usable[s.id] = srvStatuses
-                .filterValues { it.installed && it.loggedIn && it.claudeState?.isBlocked != true }.keys
+                .filter { (agent, st) ->
+                    st.installed && st.claudeState?.isBlocked != true && (
+                        st.loggedIn ||
+                            ai.eight24family.conch.linux.LocalLlm.localBrainAuthorizes(s.id, agent)
+                        )
+                }.keys
             for (agent in Agent.entries) {
                 val agentState = srvStatuses[agent]?.claudeState
                 val agentBlocked = agentState?.isBlocked == true
@@ -512,7 +517,16 @@ class HomeSessionsViewModel : ViewModel() {
                     if (liveWorking) ourTurnWorkingAtMs[sess.id] = System.currentTimeMillis()
                     val echoing = !liveWorking &&
                         System.currentTimeMillis() - (ourTurnWorkingAtMs[sess.id] ?: 0L) < OUR_TURN_ECHO_MS
-                    val working = liveWorking || (!echoing && (serverWorking || cacheWorking))
+                    // ⛔ THE PHONE HAS NO EXTERNAL DRIVER. serverWorking/cacheWorking
+                    // read a recent file mtime as "an agent is busy" — true for a
+                    // laptop-driven remote CLI, FALSE for the phone: a local turn
+                    // runs ONLY while THIS app holds a live AgentSession, and the
+                    // file's mtime is recent right after it FINISHES (the answer was
+                    // just written). After an app restart the echo-suppression is
+                    // gone, so that recent mtime lit a ghost spinner on a done turn
+                    // (owner, 2026-09-01). On the phone, only a live session works.
+                    val isPhone = s.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+                    val working = liveWorking || (!isPhone && !echoing && (serverWorking || cacheWorking))
                     // Unread: live message count while this process has the
                     // session (precise); otherwise the DURABLE byte watermark
                     // vs the mirrored body — new JSONL lines since last view.
@@ -523,7 +537,12 @@ class HomeSessionsViewModel : ViewModel() {
                         val seenB = ServiceLocator.historyCache.seenBytes(sess.id)
                         if (seenB == null) 0 else durableUnreadCached(sess.id, seenB)
                     }
-                    val unread = maxOf(liveUnread, durableUnread)
+                    // On the phone the DURABLE byte-watermark is unreliable: the
+                    // tail-poll that would maintain it is off for local sessions,
+                    // so it badged an already-read local answer as unread after a
+                    // restart (owner, 2026-09-01). Trust only the live count there —
+                    // 0 when no live session, which is the honest state.
+                    val unread = if (isPhone) liveUnread else maxOf(liveUnread, durableUnread)
                     val doneUnseen = !working && unread > 0
                     // Single source of truth for "last activity": the persisted,
                     // monotonic SessionActivityStore (fed by local sends/replies +
@@ -583,6 +602,13 @@ class HomeSessionsViewModel : ViewModel() {
         for (info in ServiceLocator.agentSessions.active.value) {
             val sess = ServiceLocator.agentSessions.get(info.serverId, info.agent, info.chatSessionId)
                 ?: continue
+            // ⛔ ONLY A CHAT BORN NEW MAY MINT A SYNTHETIC ROW. A RESUMED chat
+            // already has its cached row — and on resume the CLI announces a
+            // fresh id that is not a file, so the id-dedup misses, and the
+            // preview-dedup is a string comparison between two different
+            // extractors, which is exactly what let a logged-out Claude resume
+            // paint a duplicate WORKING row on every open.
+            if (!sess.bornNew) continue
             val hist = sess.history.value
             val firstUser = hist.firstOrNull { it is ai.eight24family.conch.agent.AgentMessage.UserText }
                 ?.let { (it as ai.eight24family.conch.agent.AgentMessage.UserText).text }
@@ -635,7 +661,7 @@ class HomeSessionsViewModel : ViewModel() {
         val counts = out.groupingBy { it.session.agent.name }.eachCount()
         if (counts != lastLoggedCounts) {
             lastLoggedCounts = counts
-            android.util.Log.d("SshAi-Home", "reload: ${out.size} rows by agent=$counts")
+            android.util.Log.d("Conch-Home", "reload: ${out.size} rows by agent=$counts")
         }
         // Final safety net: the home list keys its LazyColumn by
         // serverId/agent/sessionId and Compose HARD-CRASHES on a duplicate key
@@ -677,10 +703,10 @@ class HomeSessionsViewModel : ViewModel() {
             list.filterNot { it.serverId == serverId && it.session.id == session.id && it.session.path == session.path }
         }
         viewModelScope.launch(Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-Home", "persist delete tombstone") {
+            SilentlyTry.fired("Conch-Home", "persist delete tombstone") {
                 ServiceLocator.preferences.setDeletedSession(serverId, session.id, true)
             }
-            SilentlyTry.fired("SshAi-Home", "prune session from cache") {
+            SilentlyTry.fired("Conch-Home", "prune session from cache") {
                 val snap = cache.load(serverId, agent)
                 val pruned = snap.sessions.filterNot { it.id == session.id && it.path == session.path }
                 cache.save(serverId, agent, pruned)
@@ -703,14 +729,14 @@ class HomeSessionsViewModel : ViewModel() {
             if (pooled == null) {
                 // The same courtesy the per-agent screen extends: try to come up
                 // silently before giving up on the remote half.
-                SilentlyTry.fired("SshAi-Home", "silent connect for delete") {
+                SilentlyTry.fired("Conch-Home", "silent connect for delete") {
                     ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
                 }
                 pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             }
             if (pooled == null) {
                 android.util.Log.w(
-                    "SshAi-Home",
+                    "Conch-Home",
                     "deleteSession ${session.id.take(8)}: offline, hidden but body KEPT; " +
                         "server rm deferred to reconcile",
                 )
@@ -721,7 +747,7 @@ class HomeSessionsViewModel : ViewModel() {
             val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
                 "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner),
             )
-            val removed = SilentlyTry.logged("SshAi-Home", "delete session on server") {
+            val removed = SilentlyTry.logged("Conch-Home", "delete session on server") {
                 val sess = pooled.startSession()
                 try {
                     val proc = sess.exec(cmd)
@@ -729,11 +755,11 @@ class HomeSessionsViewModel : ViewModel() {
                     proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                     true
                 } finally {
-                    SilentlyTry.fired("SshAi-Home", "close delete session") { sess.close() }
+                    SilentlyTry.fired("Conch-Home", "close delete session") { sess.close() }
                 }
             } == true
             if (removed) {
-                SilentlyTry.fired("SshAi-Home", "forget cached session body") {
+                SilentlyTry.fired("Conch-Home", "forget cached session body") {
                     ServiceLocator.historyCache.forget(session.id)
                 }
             }
@@ -763,7 +789,7 @@ class HomeSessionsViewModel : ViewModel() {
                 // Still in a cache for this server means a listing saw it, which
                 // means the server still has it. Nothing cached, nothing owed.
                 val owed = Agent.entries.mapNotNull { agent ->
-                    val snap = SilentlyTry.logged("SshAi-Home", "load cache for reconcile") {
+                    val snap = SilentlyTry.logged("Conch-Home", "load cache for reconcile") {
                         cache.load(serverId, agent)
                     }
                     snap?.sessions?.firstOrNull { it.id == sessionId }?.let { agent to it }
@@ -775,10 +801,10 @@ class HomeSessionsViewModel : ViewModel() {
                         "bash -lc " + ai.eight24family.conch.agent.shellEscape(inner),
                     )
                     android.util.Log.i(
-                        "SshAi-Home",
+                        "Conch-Home",
                         "reconcile: finishing deferred delete of ${sess.id.take(8)} on $serverId",
                     )
-                    val ok = SilentlyTry.logged("SshAi-Home", "reconcile delete") {
+                    val ok = SilentlyTry.logged("Conch-Home", "reconcile delete") {
                         val ch = pooled.startSession()
                         try {
                             val proc = ch.exec(cmd)
@@ -786,11 +812,11 @@ class HomeSessionsViewModel : ViewModel() {
                             proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                             true
                         } finally {
-                            SilentlyTry.fired("SshAi-Home", "close reconcile session") { ch.close() }
+                            SilentlyTry.fired("Conch-Home", "close reconcile session") { ch.close() }
                         }
                     } == true
                     if (ok) {
-                        SilentlyTry.fired("SshAi-Home", "forget body after reconcile") {
+                        SilentlyTry.fired("Conch-Home", "forget body after reconcile") {
                             ServiceLocator.historyCache.forget(sess.id)
                         }
                     }

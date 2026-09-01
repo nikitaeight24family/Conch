@@ -129,8 +129,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
-import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.LocalConchHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
@@ -261,7 +261,7 @@ internal fun DownloadDisk(path: String, vm: ChatViewModel) {
     // Done state surfaces the byte count to the right of the
     // checkmark; other states show only the box (size is unknown
     // until the download finishes).
-    val diskHaptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+    val diskHaptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -277,7 +277,7 @@ internal fun DownloadDisk(path: String, vm: ChatViewModel) {
                 // physical feel of pressing a real button —
                 // important here because the icon is small and the
                 // user might wonder if their finger landed on it.
-                diskHaptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Tap)
+                diskHaptic.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Tap)
                 when (val s = state) {
                     is ChatViewModel.DownloadStatus.Done -> {
                         // Open routing lives in the ViewModel — it

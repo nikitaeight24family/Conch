@@ -170,7 +170,7 @@ internal fun PinPad(
             listOf("7", "8", "9"),
             listOf("⌫", "0", "✓"),
         )
-        val haptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+        val haptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
         for (row in rows) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(colGap),
@@ -188,9 +188,9 @@ internal fun PinPad(
                             // wondering if the press registered.
                             haptic.perform(
                                 if (label == "✓" || label == "⌫")
-                                    ai.eight24family.conch.ui.haptic.SshAiHaptic.Tap
+                                    ai.eight24family.conch.ui.haptic.ConchHaptic.Tap
                                 else
-                                    ai.eight24family.conch.ui.haptic.SshAiHaptic.Tick
+                                    ai.eight24family.conch.ui.haptic.ConchHaptic.Tick
                             )
                             when (label) {
                                 "⌫" -> if (pin.isNotEmpty()) onChange(pin.dropLast(1))

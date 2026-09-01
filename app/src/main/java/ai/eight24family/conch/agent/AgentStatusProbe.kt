@@ -315,7 +315,7 @@ class AgentStatusProbe(private val ssh: SshClient) {
                 if (os != null) onOs?.invoke(os)
                 if (os == ServerOs.WINDOWS) {
                     android.util.Log.i(
-                        "SshAi-Probe",
+                        "Conch-Probe",
                         "OS pre-probe says WINDOWS (${osOut?.trim()?.take(60)}) — skipping agent script",
                     )
                     return@runCatching Agent.entries.associateWith {

@@ -173,7 +173,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         // the end and the file was re-laid-out" from "there is genuinely new
         // content". See the note on that method.
         val sizeBeforeRewrite = size(sessionId)
-        SilentlyTry.fired("SshAi-HistCache", "write session bytes") {
+        SilentlyTry.fired("Conch-HistCache", "write session bytes") {
             val target = file(sessionId)
             val tmp = java.io.File(target.parentFile, target.name + ".tmp")
             tmp.writeBytes(bytes)
@@ -189,7 +189,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         // re-adopt, repair) — a leftover tail-base from an earlier tail-first
         // preload would shift every remote-offset computation off by its value.
         setBaseOffset(sessionId, 0L)
-        SilentlyTry.fired("SshAi-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
+        SilentlyTry.fired("Conch-HistCache", "index session after save") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
     /**
@@ -218,7 +218,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         val f = file(sessionId)
         if (!f.exists() || f.length() == 0L) return null
         val tmp = java.io.File(f.parentFile, f.name + ".rw")
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "local entrypoint rewrite", null) {
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "local entrypoint rewrite", null) {
             var hit = false
             f.bufferedReader(Charsets.UTF_8).use { r ->
                 tmp.bufferedWriter(Charsets.UTF_8).use { w ->
@@ -243,7 +243,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 tmp.copyTo(f, overwrite = true)
                 tmp.delete()
             }
-            SilentlyTry.fired("SshAi-HistCache", "index after local rewrite") {
+            SilentlyTry.fired("Conch-HistCache", "index after local rewrite") {
                 ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
             }
             f.length()
@@ -253,9 +253,9 @@ class HistoryCache internal constructor(private val rootDir: File) {
     /** Append new bytes (typically a tail fetched from the server). */
     fun append(sessionId: String, newBytes: ByteArray, liveActivity: Boolean = true) {
         if (newBytes.isEmpty()) return
-        SilentlyTry.fired("SshAi-HistCache", "append session bytes") { file(sessionId).appendBytes(newBytes) }
+        SilentlyTry.fired("Conch-HistCache", "append session bytes") { file(sessionId).appendBytes(newBytes) }
         if (liveActivity) liveActivityMs[sessionId] = System.currentTimeMillis()
-        SilentlyTry.fired("SshAi-HistCache", "index session after append") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
+        SilentlyTry.fired("Conch-HistCache", "index session after append") { ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId) }
     }
 
     /** sessionId → epoch ms of the last append that reflected LIVE agent
@@ -299,8 +299,8 @@ class HistoryCache internal constructor(private val rootDir: File) {
         try {
             tmp.outputStream().use { fos -> input.copyTo(fos, 64 * 1024) }
         } catch (t: Throwable) {
-            android.util.Log.w("SshAi-HistCache", "stream session ${sessionId.take(8)} failed: ${t.message}")
-            SilentlyTry.fired("SshAi-HistCache", "drop partial streamed tmp") { if (tmp.exists()) tmp.delete() }
+            android.util.Log.w("Conch-HistCache", "stream session ${sessionId.take(8)} failed: ${t.message}")
+            SilentlyTry.fired("Conch-HistCache", "drop partial streamed tmp") { if (tmp.exists()) tmp.delete() }
             return 0L
         }
         if (tmp.length() == 0L) { tmp.delete(); return 0L }
@@ -309,14 +309,14 @@ class HistoryCache internal constructor(private val rootDir: File) {
         if (!tmp.renameTo(f)) {
             // Same directory — rename "can't" fail; the in-place copy is the
             // documented last resort, not the normal path (see [save]).
-            SilentlyTry.fired("SshAi-HistCache", "fallback copy streamed tmp") {
+            SilentlyTry.fired("Conch-HistCache", "fallback copy streamed tmp") {
                 tmp.copyTo(f, overwrite = true)
                 tmp.delete()
             }
         }
         // Same complete-body statement as [save] — see the base reset there.
         setBaseOffset(sessionId, 0L)
-        SilentlyTry.fired("SshAi-HistCache", "index session after stream") {
+        SilentlyTry.fired("Conch-HistCache", "index session after stream") {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
         return f.length()
@@ -354,7 +354,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 }
             }
         } catch (t: Throwable) {
-            android.util.Log.w("SshAi-HistCache", "trim file ${f.name} failed: ${t.message}")
+            android.util.Log.w("Conch-HistCache", "trim file ${f.name} failed: ${t.message}")
         }
     }
 
@@ -391,7 +391,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
      * overwrite is correct. */
     fun recordOwner(sessionId: String, serverId: String, agent: Agent, path: String?, lastActiveAt: Long = 0L) {
         if (serverId.isBlank()) return
-        SilentlyTry.fired("SshAi-HistCache", "record session owner") {
+        SilentlyTry.fired("Conch-HistCache", "record session owner") {
             ownerFile(sessionId).writeText(
                 listOf(serverId, agent.name, path.orEmpty(), lastActiveAt.toString()).joinToString("\t"),
                 Charsets.UTF_8,
@@ -410,7 +410,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun owner(sessionId: String): CachedOwner? {
         val f = ownerFile(sessionId)
         if (!f.exists()) return null
-        return SilentlyTry.logged("SshAi-HistCache", "read session owner") {
+        return SilentlyTry.logged("Conch-HistCache", "read session owner") {
             val parts = f.readText(Charsets.UTF_8).split('\t')
             val serverId = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@logged null
             val agent = Agent.entries.firstOrNull { it.name == parts.getOrNull(1) } ?: return@logged null
@@ -449,7 +449,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun seenBytes(sessionId: String): Long? {
         seenMemo[sessionId]?.let { return if (it == SEEN_NONE) null else it }
         val f = seenFile(sessionId)
-        val v = if (!f.exists()) null else SilentlyTry.logged("SshAi-HistCache", "read seen watermark") {
+        val v = if (!f.exists()) null else SilentlyTry.logged("Conch-HistCache", "read seen watermark") {
             f.readText(Charsets.UTF_8).trim().toLongOrNull()
         }
         seenMemo[sessionId] = v ?: SEEN_NONE
@@ -481,7 +481,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     /** Stamp the watermark. Monotonic — a stale writer (background collector
      *  of a chat the user already left) can't roll a fresher view back. */
     fun markSeenBytes(sessionId: String, bytes: Long) {
-        SilentlyTry.fired("SshAi-HistCache", "write seen watermark") {
+        SilentlyTry.fired("Conch-HistCache", "write seen watermark") {
             val prev = seenBytes(sessionId) ?: -1L
             if (bytes > prev) writeSeen(sessionId, bytes)
         }
@@ -515,7 +515,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun baseOffset(sessionId: String): Long {
         val f = baseFile(sessionId)
         if (!f.exists()) return 0L
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read tail base", 0L) {
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "read tail base", 0L) {
             f.readText(Charsets.UTF_8).trim().toLongOrNull() ?: 0L
         }
     }
@@ -523,7 +523,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     /** Record where the local file starts in remote coordinates. 0 deletes the
      *  sidecar — "no sidecar" and "complete mirror" are the same statement. */
     fun setBaseOffset(sessionId: String, base: Long) {
-        SilentlyTry.fired("SshAi-HistCache", "write tail base") {
+        SilentlyTry.fired("Conch-HistCache", "write tail base") {
             val f = baseFile(sessionId)
             if (base <= 0L) f.delete() else f.writeText(base.toString(), Charsets.UTF_8)
         }
@@ -553,7 +553,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         if (bytes.isEmpty()) return
         val oldBase = baseOffset(sessionId)
         val oldSeen = seenBytes(sessionId)
-        SilentlyTry.fired("SshAi-HistCache", "write tail slab") {
+        SilentlyTry.fired("Conch-HistCache", "write tail slab") {
             val target = file(sessionId)
             val tmp = File(target.parentFile, target.name + ".tmp")
             tmp.writeBytes(bytes)
@@ -568,11 +568,11 @@ class HistoryCache internal constructor(private val rootDir: File) {
             // Direct write, not [markSeenBytes]: the LOCAL number may go DOWN
             // while naming the same remote position, and the monotonic guard
             // would (correctly, for its own callers) refuse that.
-            SilentlyTry.fired("SshAi-HistCache", "rebase seen after re-tail") {
+            SilentlyTry.fired("Conch-HistCache", "rebase seen after re-tail") {
                 writeSeen(sessionId, rebased)
             }
         }
-        SilentlyTry.fired("SshAi-HistCache", "index session after tail save") {
+        SilentlyTry.fired("Conch-HistCache", "index session after tail save") {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
     }
@@ -591,7 +591,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun taskNames(sessionId: String): Map<String, String> {
         val f = taskNamesFile(sessionId)
         if (!f.exists()) return emptyMap()
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read task names", emptyMap()) {
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "read task names", emptyMap()) {
             f.readLines(Charsets.UTF_8).mapNotNull { line ->
                 val tab = line.indexOf('\t')
                 if (tab <= 0) null else line.substring(0, tab) to line.substring(tab + 1)
@@ -602,7 +602,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     /** Merge-write [names] into the sidecar (latest subject wins per id). */
     fun recordTaskNames(sessionId: String, names: Map<String, String>) {
         if (names.isEmpty()) return
-        SilentlyTry.fired("SshAi-HistCache", "write task names") {
+        SilentlyTry.fired("Conch-HistCache", "write task names") {
             val merged = taskNames(sessionId) + names
             taskNamesFile(sessionId).writeText(
                 merged.entries.joinToString("\n") { (id, subj) ->
@@ -636,7 +636,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         val f = file(sessionId)
         val len = f.length()
         if (len <= fromBytes) return 0
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "count new messages", 0) {
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "count new messages", 0) {
             val start = maxOf(fromBytes, len - cap)
             var count = 0
             RandomAccessFile(f, "r").use { raf ->
@@ -684,11 +684,11 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun rebaseSeenAfterRewrite(sessionId: String, oldSize: Long) {
         val seen = seenBytes(sessionId) ?: return
         if (seen < oldSize) return  // genuinely unread content existed — keep it
-        SilentlyTry.fired("SshAi-HistCache", "rebase seen watermark after rewrite") {
+        SilentlyTry.fired("Conch-HistCache", "rebase seen watermark after rewrite") {
             writeSeen(sessionId, size(sessionId))
         }
         android.util.Log.d(
-            "SshAi-HistCache",
+            "Conch-HistCache",
             "rebased seen watermark for ${sessionId.take(8)} after cache rewrite ($seen → ${size(sessionId)})",
         )
     }
@@ -703,7 +703,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         val out = HashMap<String, CachedOwner>()
         for (f in files) {
             if (!f.isFile || !f.name.endsWith(".owner")) continue
-            SilentlyTry.logged("SshAi-HistCache", "read owner in allOwners") {
+            SilentlyTry.logged("Conch-HistCache", "read owner in allOwners") {
                 val parts = f.readText(Charsets.UTF_8).split('\t')
                 val serverId = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@logged
                 val agent = Agent.entries.firstOrNull { it.name == parts.getOrNull(1) } ?: return@logged
@@ -720,7 +720,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
 
     fun forget(sessionId: String) {
         seenMemo.remove(sessionId)
-        SilentlyTry.fired("SshAi-HistCache", "delete owner sidecar") { ownerFile(sessionId).delete() }
+        SilentlyTry.fired("Conch-HistCache", "delete owner sidecar") { ownerFile(sessionId).delete() }
         val f = file(sessionId)
         if (!f.exists()) return
         if (f.delete()) return
@@ -742,15 +742,15 @@ class HistoryCache internal constructor(private val rootDir: File) {
         // yield between them: deterministic in practice, still bounded, and it
         // protects the real app too if a Snapshot is ever leaked.
         repeat(5) { attempt ->
-            SilentlyTry.fired("SshAi-HistCache", "gc before delete") { System.gc() }
-            if (SilentlyTry.loggedOrElse("SshAi-HistCache", "delete after gc", false) { f.delete() } ||
+            SilentlyTry.fired("Conch-HistCache", "gc before delete") { System.gc() }
+            if (SilentlyTry.loggedOrElse("Conch-HistCache", "delete after gc", false) { f.delete() } ||
                 !f.exists()
             ) {
                 return
             }
-            SilentlyTry.fired("SshAi-HistCache", "yield before retry") { Thread.sleep(20L * (attempt + 1)) }
+            SilentlyTry.fired("Conch-HistCache", "yield before retry") { Thread.sleep(20L * (attempt + 1)) }
         }
-        android.util.Log.w("SshAi-HistCache", "could not delete cached session file: ${f.name}")
+        android.util.Log.w("Conch-HistCache", "could not delete cached session file: ${f.name}")
         // Indexer's reconcile will drop this session next pass; eager
         // cleanup of the search rows happens through the indexer's
         // own reconcile, which is also kicked off by app start.
@@ -777,7 +777,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
         val f = file(sessionId)
         val len = f.length()
         if (len <= 0L) return emptyList()
-        return SilentlyTry.loggedOrElse("SshAi-HistCache", "read cached tail", emptyList()) {
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "read cached tail", emptyList()) {
             val take = minOf(len, maxBytes)
             val buf = ByteArray(take.toInt())
             java.io.RandomAccessFile(f, "r").use { raf ->
@@ -811,7 +811,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun loadDrafts(serverId: String, agent: Agent): List<String> {
         val f = draftFile(serverId, agent)
         if (!f.exists() || f.length() == 0L) return emptyList()
-        val raw = SilentlyTry.logged("SshAi-HistCache", "read drafts file") { f.readText(Charsets.UTF_8) } ?: return emptyList()
+        val raw = SilentlyTry.logged("Conch-HistCache", "read drafts file") { f.readText(Charsets.UTF_8) } ?: return emptyList()
         if (raw.isEmpty()) return emptyList()
         return raw.split(DRAFT_SEPARATOR).filter { it.isNotEmpty() }
     }
@@ -819,7 +819,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun appendDraft(serverId: String, agent: Agent, text: String) {
         if (text.isEmpty()) return
         val f = draftFile(serverId, agent)
-        SilentlyTry.fired("SshAi-HistCache", "append draft text") {
+        SilentlyTry.fired("Conch-HistCache", "append draft text") {
             val sep = if (f.exists() && f.length() > 0L) DRAFT_SEPARATOR else ""
             f.appendText(sep + text, Charsets.UTF_8)
         }
@@ -837,16 +837,16 @@ class HistoryCache internal constructor(private val rootDir: File) {
     }
 
     fun clearDrafts(serverId: String, agent: Agent) {
-        SilentlyTry.fired("SshAi-HistCache", "delete drafts file") { draftFile(serverId, agent).delete() }
+        SilentlyTry.fired("Conch-HistCache", "delete drafts file") { draftFile(serverId, agent).delete() }
     }
 
     private fun writeDrafts(serverId: String, agent: Agent, texts: List<String>) {
         val f = draftFile(serverId, agent)
         if (texts.isEmpty()) {
-            SilentlyTry.fired("SshAi-HistCache", "delete empty drafts file") { f.delete() }
+            SilentlyTry.fired("Conch-HistCache", "delete empty drafts file") { f.delete() }
             return
         }
-        SilentlyTry.fired("SshAi-HistCache", "write drafts file") { f.writeText(texts.joinToString(DRAFT_SEPARATOR), Charsets.UTF_8) }
+        SilentlyTry.fired("Conch-HistCache", "write drafts file") { f.writeText(texts.joinToString(DRAFT_SEPARATOR), Charsets.UTF_8) }
     }
 
     private fun draftFile(serverId: String, agent: Agent): File {
@@ -885,7 +885,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
             val localLen = localBuffer?.remaining() ?: 0
             if (localLen > MERGE_MAX_BYTES) {
                 android.util.Log.w(
-                    "SshAi-HistCache",
+                    "Conch-HistCache",
                     "merge skipped — local ${localLen}B exceeds ${MERGE_MAX_BYTES}B cap; keeping file as-is (no crash)"
                 )
                 return null
@@ -1060,7 +1060,7 @@ class HistoryCache internal constructor(private val rootDir: File) {
             for (f in files) {
                 val dst = File(newDir, f.name)
                 if (dst.exists()) continue
-                SilentlyTry.fired("SshAi-HistCache", "migrate history file") {
+                SilentlyTry.fired("Conch-HistCache", "migrate history file") {
                     f.copyTo(dst, overwrite = false)
                     f.delete()
                     moved++
@@ -1068,11 +1068,11 @@ class HistoryCache internal constructor(private val rootDir: File) {
             }
             if (moved > 0) {
                 android.util.Log.i(
-                    "SshAi-HistCache",
+                    "Conch-HistCache",
                     "migrated $moved history file(s) from cacheDir to filesDir",
                 )
             }
-            SilentlyTry.fired("SshAi-HistCache", "delete legacy cache dir") { oldDir.delete() }
+            SilentlyTry.fired("Conch-HistCache", "delete legacy cache dir") { oldDir.delete() }
         }
     }
 }

@@ -113,7 +113,7 @@ fun PdfViewerScreen(
                 renderer = r
                 state = PdfState.Ready(r, r.pageCount)
             } catch (t: Throwable) {
-                android.util.Log.w("SshAi-PdfViewer", "open failed: ${t.javaClass.simpleName}: ${t.message}")
+                android.util.Log.w("Conch-PdfViewer", "open failed: ${t.javaClass.simpleName}: ${t.message}")
                 state = PdfState.Error(
                     when {
                         t.message?.contains("password", true) == true ||
@@ -130,8 +130,8 @@ fun PdfViewerScreen(
             // mid-render (use-after-free → native crash).
             CoroutineScope(Dispatchers.IO).launch {
                 renderMutex.withLock {
-                    SilentlyTry.fired("SshAi-PdfViewer", "close renderer") { renderer?.close() }
-                    SilentlyTry.fired("SshAi-PdfViewer", "close fd") { pfd?.close() }
+                    SilentlyTry.fired("Conch-PdfViewer", "close renderer") { renderer?.close() }
+                    SilentlyTry.fired("Conch-PdfViewer", "close fd") { pfd?.close() }
                 }
             }
         }
@@ -242,7 +242,7 @@ private fun PdfPage(renderer: PdfRenderer, mutex: Mutex, index: Int, widthPx: In
                         bmp
                     }
                 }.onFailure {
-                    android.util.Log.w("SshAi-PdfViewer", "render page $index failed: ${it.message}")
+                    android.util.Log.w("Conch-PdfViewer", "render page $index failed: ${it.message}")
                 }.getOrNull()
             }
         }
@@ -279,7 +279,7 @@ private fun sharePdf(ctx: Context, uri: Uri, filename: String) {
         putExtra(Intent.EXTRA_TITLE, filename)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    SilentlyTry.fired("SshAi-PdfViewer", "share pdf") {
+    SilentlyTry.fired("Conch-PdfViewer", "share pdf") {
         ctx.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }
@@ -290,5 +290,5 @@ private fun openPdfExternally(ctx: Context, uri: Uri) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    SilentlyTry.fired("SshAi-PdfViewer", "open pdf externally") { ctx.startActivity(intent) }
+    SilentlyTry.fired("Conch-PdfViewer", "open pdf externally") { ctx.startActivity(intent) }
 }

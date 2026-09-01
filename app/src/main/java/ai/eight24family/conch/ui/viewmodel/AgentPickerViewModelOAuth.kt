@@ -203,7 +203,7 @@ internal class AgentPickerViewModelOAuth(
         // A human pressing the button starts a fresh retry budget.
         if (!internalRetry) loginAutoRetries = 0
         loginJob = scope.launch(Dispatchers.IO) {
-            val tag = "SshAi-AgentPicker"
+            val tag = "Conch-AgentPicker"
             // ⚠ NEVER VANISH. This was a bare `return@launch` when the pool had no
             // live transport: the method picker has ALREADY closed by the time we
             // get here, so tapping [ OAuth ] shut the dialog and produced nothing
@@ -407,7 +407,7 @@ internal class AgentPickerViewModelOAuth(
                             val authed = checkAuthOnly(pooled, agent, loginSince)
                             if (authed) {
                                 android.util.Log.d(tag, "login($agent) — credentials detected, closing")
-                                SilentlyTry.fired("SshAi-AgentPicker", "close login proc on auth") { proc.close() }
+                                SilentlyTry.fired("Conch-AgentPicker", "close login proc on auth") { proc.close() }
                                 return@launch
                             }
                         }
@@ -430,7 +430,7 @@ internal class AgentPickerViewModelOAuth(
                             val transportDead = runCatching { !pooled.isConnected }.getOrDefault(true)
                             if (transportDead || idle > LOGIN_STALL_MS) {
                                 android.util.Log.w(tag, "login($agent) watchdog: transportDead=$transportDead idle=${idle}ms — closing proc")
-                                SilentlyTry.fired("SshAi-AgentPicker", "close login proc on stall") { proc.close() }
+                                SilentlyTry.fired("Conch-AgentPicker", "close login proc on stall") { proc.close() }
                                 return@launch
                             }
                         }
@@ -498,7 +498,7 @@ internal class AgentPickerViewModelOAuth(
                                     rawTail = "Repairing installation…",
                                 )
                             }
-                            SilentlyTry.fired("SshAi-AgentPicker", "close login proc on broken-install") { proc.close() }
+                            SilentlyTry.fired("Conch-AgentPicker", "close login proc on broken-install") { proc.close() }
                             break
                         }
                         // ── /login wizard stops (Claude TUI). Each answered once;
@@ -524,8 +524,11 @@ internal class AgentPickerViewModelOAuth(
                                 // Composer is up (footer hints render) → type the
                                 // slash command. Slowly: ink's composer drops blob
                                 // pastes, keystrokes pass (same bug family as the
-                                // paste prompt, GitHub #47745).
-                                !ansLoginTyped && (flat.contains("shift+tab") || flat.contains("forshortcuts")) -> {
+                                // paste prompt, GitHub #47745). NOT after the method
+                                // menu was already answered: on a virgin install the
+                                // composer only appears once OAuth has completed, and
+                                // typing /login into it would start the wizard over.
+                                !ansLoginTyped && !ansMethod && (flat.contains("shift+tab") || flat.contains("forshortcuts")) -> {
                                     ansLoginTyped = true
                                     delay(400)
                                     key("/login", perByteMs = 120)
@@ -533,8 +536,13 @@ internal class AgentPickerViewModelOAuth(
                                     android.util.Log.d(tag, "login(CLAUDE) — typed /login")
                                 }
                                 // Method menu: option 1 (subscription) is
-                                // preselected — Enter.
-                                !ansMethod && ansLoginTyped && flat.contains("selectloginmethod") -> {
+                                // preselected — Enter. ⛔ NOT gated on having typed
+                                // /login: a VIRGIN install (the phone's Linux was the
+                                // first, 2026-08-31) demands the login method right
+                                // after the theme picker, before any composer exists —
+                                // gated on ansLoginTyped, the menu sat unanswered
+                                // until the stall watchdog killed every attempt.
+                                !ansMethod && flat.contains("selectloginmethod") -> {
                                     ansMethod = true
                                     delay(300); key("\r")
                                     android.util.Log.d(tag, "login(CLAUDE) — method menu → Enter (subscription)")
@@ -739,7 +747,7 @@ internal class AgentPickerViewModelOAuth(
                 // auto-retry hands the dialog to its successor the same way a
                 // recovery does.
                 if (!recovering && !autoRetrying && stdinGen == myGen) {
-                    SilentlyTry.fired("SshAi-AgentPicker", "close login stdin (finally)") { loginProcStdin?.close() }
+                    SilentlyTry.fired("Conch-AgentPicker", "close login stdin (finally)") { loginProcStdin?.close() }
                     loginProcStdin = null
                     // But keep the dialog UP on a real failure so the user sees why
                     // (fatalError + Cancel); only clear it on success.
@@ -781,7 +789,7 @@ internal class AgentPickerViewModelOAuth(
      */
     /** @param myGen the attempt that owns the stdin handle — see [loginGen]. */
     private suspend fun handleGeminiLogin(pooled: net.schmizz.sshj.SSHClient, myGen: Int) {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         // Pre-configure ~/.gemini/settings.json so Gemini skips the
         // /auth selector and immediately starts oauth-personal. We
         // set BOTH the old flat key and the new nested form; whichever
@@ -822,7 +830,7 @@ internal class AgentPickerViewModelOAuth(
         var bailedFatal = false
         try {
             pooled.startSession().use { sess ->
-                SilentlyTry.fired("SshAi-AgentPicker", "allocate gemini login PTY") {
+                SilentlyTry.fired("Conch-AgentPicker", "allocate gemini login PTY") {
                     sess.allocatePTY(
                         "xterm", 1000, 40, 0, 0,
                         java.util.Collections.emptyMap(),
@@ -861,7 +869,7 @@ internal class AgentPickerViewModelOAuth(
                             android.util.Log.d(tag, "gemini: oauth creds written — grace 7s before close (let it finalize Code Assist)")
                             delay(7_000)
                             android.util.Log.d(tag, "gemini: closing after grace")
-                            SilentlyTry.fired("SshAi-AgentPicker", "close gemini login proc on auth") { proc.close() }
+                            SilentlyTry.fired("Conch-AgentPicker", "close gemini login proc on auth") { proc.close() }
                             break
                         }
                     }
@@ -893,7 +901,7 @@ internal class AgentPickerViewModelOAuth(
                                 "account/region (“we can't connect to Gemini Code Assist for " +
                                 "individuals”). Sign in with a Gemini API key instead.",
                         )
-                        SilentlyTry.fired("SshAi-AgentPicker", "close gemini login proc on fatal") { proc.close() }
+                        SilentlyTry.fired("Conch-AgentPicker", "close gemini login proc on fatal") { proc.close() }
                         break
                     }
                     fullBuf.append(line).append('\n')
@@ -930,7 +938,7 @@ internal class AgentPickerViewModelOAuth(
             // clear it as usual.
             if (!bailedFatal) loginRequestMut.value = null
             if (stdinGen == myGen) {
-                SilentlyTry.fired("SshAi-AgentPicker", "close gemini login stdin") { loginProcStdin?.close() }
+                SilentlyTry.fired("Conch-AgentPicker", "close gemini login stdin") { loginProcStdin?.close() }
                 loginProcStdin = null
             }
         }
@@ -966,7 +974,7 @@ internal class AgentPickerViewModelOAuth(
      */
     fun submitCodexCallback(raw: String) {
         if (raw.isBlank()) return
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         scope.launch(Dispatchers.IO) {
             val pooled = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@launch
             val cleaned = raw.replace(Regex("\\s+"), "")
@@ -1043,7 +1051,7 @@ internal class AgentPickerViewModelOAuth(
      * an answer.
      */
     fun submitOAuthCode(code: String, manual: Boolean = true) {
-        val tag = "SshAi-AgentPicker"
+        val tag = "Conch-AgentPicker"
         android.util.Log.d(tag, "submitOAuthCode — entry, manual=$manual, codeLen=${code.trim().length}, stdin=${if (loginProcStdin == null) "NULL" else "live"}")
         val stdin = loginProcStdin ?: run {
             val cur = loginRequestMut.value
@@ -1222,7 +1230,7 @@ internal class AgentPickerViewModelOAuth(
                     "m=\$(stat -c %Y \"\$f\" 2>/dev/null || stat -f %m \"\$f\" 2>/dev/null || echo 0); " +
                     "[ \"\$m\" -gt $sinceEpoch ] && grep -qs '\"copilotToken\"' \"\$f\" && exit 0; done; exit 1"
         }
-        return SilentlyTry.loggedOrElse("SshAi-AgentPicker", "checkAuthOnly probe", false) {
+        return SilentlyTry.loggedOrElse("Conch-AgentPicker", "checkAuthOnly probe", false) {
             client.startSession().use { sess ->
                 val proc = sess.exec(
                     ai.eight24family.conch.agent.RemoteEnv.portable("bash -lc " + shellEscape(checks)),
@@ -1236,7 +1244,7 @@ internal class AgentPickerViewModelOAuth(
     fun cancelLogin() {
         loginJob?.cancel()
         loginRequestMut.value = null
-        SilentlyTry.fired("SshAi-AgentPicker", "close login stdin (cancelLogin)") { loginProcStdin?.close() }
+        SilentlyTry.fired("Conch-AgentPicker", "close login stdin (cancelLogin)") { loginProcStdin?.close() }
         loginProcStdin = null
     }
 

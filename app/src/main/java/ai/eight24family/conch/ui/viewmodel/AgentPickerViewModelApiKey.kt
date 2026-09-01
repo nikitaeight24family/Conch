@@ -99,7 +99,7 @@ internal class AgentPickerViewModelApiKey(
     fun submitApiKey(agent: Agent, key: String) {
         if (key.isBlank()) return
         scope.launch(Dispatchers.IO) {
-            val tag = "SshAi-AgentPicker"
+            val tag = "Conch-AgentPicker"
             val pooled = ServiceLocator.sshConnectionPool.peek(serverId)
             if (pooled == null) {
                 // ⛔ NOT SILENCE. This used to `return@launch` here: the dialog

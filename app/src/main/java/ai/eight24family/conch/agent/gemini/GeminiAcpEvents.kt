@@ -61,13 +61,13 @@ internal object GeminiAcpEvents {
             }
 
             "plan" -> {
-                val entries = SilentlyTry.logged("SshAi-GeminiAcp", "plan entries") {
+                val entries = SilentlyTry.logged("Conch-GeminiAcp", "plan entries") {
                     update["entries"]?.jsonArray
                 } ?: return emptyList()
                 if (entries.isEmpty()) return emptyList()
                 var done = 0
                 val lines = entries.mapNotNull { e ->
-                    SilentlyTry.logged("SshAi-GeminiAcp", "plan entry") {
+                    SilentlyTry.logged("Conch-GeminiAcp", "plan entry") {
                         val o = e.jsonObject
                         val status = o.str("status")
                         if (status == "completed") done++
@@ -108,11 +108,11 @@ internal object GeminiAcpEvents {
      * text; `{type:"diff", path, …}` becomes a one-line diff marker.
      */
     fun extractToolContent(update: JsonObject): String {
-        val arr = SilentlyTry.logged("SshAi-GeminiAcp", "tool content array") {
+        val arr = SilentlyTry.logged("Conch-GeminiAcp", "tool content array") {
             update["content"]?.jsonArray
         } ?: return ""
         return arr.mapNotNull { item ->
-            SilentlyTry.logged("SshAi-GeminiAcp", "tool content item") {
+            SilentlyTry.logged("Conch-GeminiAcp", "tool content item") {
                 val o = item.jsonObject
                 when (o.str("type")) {
                     "content" -> o["content"]?.jsonObject?.str("text")

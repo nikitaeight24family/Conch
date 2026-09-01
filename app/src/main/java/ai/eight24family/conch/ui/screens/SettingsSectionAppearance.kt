@@ -259,13 +259,13 @@ internal fun SettingsSectionAppearance(vm: SettingsViewModel) {
         // flags deprecated window/display API REFERENCES in the dex even
         // when they're behind a version gate — keep our own code clean.
         val currentHz: Float = remember(tickN, activity) {
-            SilentlyTry.loggedOrElse("SshAi-Settings", "read current refresh rate", 0f) {
+            SilentlyTry.loggedOrElse("Conch-Settings", "read current refresh rate", 0f) {
                 activity?.let { androidx.core.content.ContextCompat.getDisplayOrDefault(it) }
                     ?.refreshRate ?: 0f
             }
         }
         val maxHz: Float = remember(activity) {
-            SilentlyTry.loggedOrElse("SshAi-Settings", "read max refresh rate", 0f) {
+            SilentlyTry.loggedOrElse("Conch-Settings", "read max refresh rate", 0f) {
                 activity?.let { androidx.core.content.ContextCompat.getDisplayOrDefault(it) }
                     ?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 0f
             }
@@ -295,7 +295,7 @@ internal fun SettingsSectionAppearance(vm: SettingsViewModel) {
             )
         }
         val hapticsOn by vm.hapticsEnabled.collectAsState()
-        val haptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+        val haptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
         SettingsRow(
             icon = Icons.Filled.Vibration,
             title = "Haptic feedback",
@@ -309,7 +309,7 @@ internal fun SettingsSectionAppearance(vm: SettingsViewModel) {
                     // user can feel exactly what they just enabled.
                     // When turning off, no pulse (would be confusing).
                     if (newValue) {
-                        haptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Confirm)
+                        haptic.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Confirm)
                     }
                 },
             )

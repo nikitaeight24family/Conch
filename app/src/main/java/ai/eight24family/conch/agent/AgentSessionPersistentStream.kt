@@ -93,7 +93,7 @@ internal class AgentSessionPersistentStream(
      *  anything. The user asked for a loop and does not have one; say so. */
     private val onLoopNotArmed: () -> Unit = {},
 ) {
-    private val tag = "SshAi-Persist"
+    private val tag = "Conch-Persist"
 
     /** Everything that requires a process RESTART when changed. Captured
      *  at launch; compared at every turn start. */
@@ -524,14 +524,14 @@ internal class AgentSessionPersistentStream(
 
     /** Rolling tail of the last raw stdout lines — dumped on EOF so a
      *  mid-turn death (the "stdin write failed" + EOF loop, 2026-06-12)
-     *  is diagnosable from `adb logcat -s SshAi-Persist` without guessing. */
+     *  is diagnosable from `adb logcat -s Conch-Persist` without guessing. */
     private val rawTail = ArrayDeque<String>()
 
     /** Rolling tail of the process's STDERR. A CLI that dies at birth — an
      *  expired login, a bad flag — explains itself HERE, and nothing read it:
      *  the reader saw stdout EOF, the write path said "disconnected", and the
      *  app silently reconnect-looped over a perfectly healthy transport while
-     * the chat spun a thinking indicator with zero tokens (the dev server,
+     *  the chat spun a thinking indicator with zero tokens (the dev server,
      *  2026-08-17: claude logged out — the LIST preview even showed "Not
      *  logged in · Please run /login" while the open chat showed nothing). */
     private val errTail = ArrayDeque<String>()

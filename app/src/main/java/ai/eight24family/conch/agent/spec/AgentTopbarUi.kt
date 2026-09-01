@@ -80,6 +80,10 @@ data class TopbarModelState(
     /** Human-readable agent name ("Claude Code", "Codex CLI", …). Last-resort
      *  fallback label when every model source is null. */
     val agentDisplayName: String,
+    /** The server this chat is open on. A CLI default is a fact about ONE box
+     *  (its `~/.claude/settings.json`), so any spec-level default lookup has to
+     *  be asked by server — see `claudeDefaultModelFor`. */
+    val serverId: String? = null,
     /** User's explicit pick this session — `null` = "use CLI default". */
     val selectedModel: String?,
     /** Model parsed from the session JSONL header during discovery, set
@@ -127,6 +131,11 @@ data class TopbarModelState(
     val reasoningPickIsNewer: Boolean = false,
     /** True while [AgentCliSpec.probeAvailableModels] is in flight. */
     val modelsProbing: Boolean,
+    /** Whether the PHONE's codex has its own cloud sign-in (auth.json).
+     * Decides if the phone picker may offer the cloud catalog at all — a
+     * model that cannot run must not be offered. Meaningless (and left true)
+     * for ordinary servers. */
+    val phoneCloudLoggedIn: Boolean = true,
     /** Per-chat reasoning effort pick. `null` = use the model's
      *  default. Codex uses `low|medium|high|xhigh`, Claude uses
      *  `low|medium|high|max`. */
@@ -182,6 +191,9 @@ data class ModelMenuItem(
      *  unavailable …" after an export-control suspension). The picker
      *  renders it dimmed + non-selectable, matching the CLI's own menu. */
     val available: Boolean = true,
+    /** The MODEL's own brand mark, when it has one (local models). null →
+     *  the row renders text-only, as every cloud entry always has. */
+    val iconRes: Int? = null,
 )
 
 /**
@@ -214,3 +226,84 @@ data class ModelReasoningInfo(
     val defaultEffort: String,
     val levels: List<ReasoningLevel>,
 )
+
+/**
+ * The topbar model-picker pieces for LOCAL on-device models, shared by every
+ * [AgentCliSpec] whose `supportsLocalModel` is true (Codex, Qwen Code, opencode).
+ *
+ * A local model is the phone's own brain regardless of which CLI is the harness,
+ * so its picker row, its decoded name, and its instant/thinking effort are
+ * identical everywhere — they used to live only in Codex's topbar, which is why
+ * a Qwen/opencode chat on the phone showed a raw `local:…` slug and a dead menu.
+ * Each spec composes these with its OWN cloud-model logic (Codex merges the
+ * OpenAI catalog; Qwen/opencode map their endpoint's models).
+ */
+object LocalTopbar {
+
+    /** Downloaded local models as picker rows — ONLY on the phone's own server
+     *  row; everywhere else 127.0.0.1:8317 is some other machine's loopback. */
+    fun localModelItems(state: TopbarModelState): List<ModelMenuItem> {
+        if (state.serverId != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return emptyList()
+        return ai.eight24family.conch.linux.LocalLlm.CATALOG
+            .filter { ai.eight24family.conch.linux.LocalLlm.isReady(it) }
+            .map { m ->
+                ModelMenuItem(
+                    display = m.label,
+                    storedValue = "${ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX}${m.id}",
+                    // The engine's reasoning switch, worn as two effort levels so
+                    // the standard drill-down serves it.
+                    reasoning = listOf(
+                        ReasoningLevel(
+                            effort = ai.eight24family.conch.linux.LocalLlm.EFFORT_INSTANT,
+                            displayName = "Instant",
+                            description = "Answer right away — no hidden reasoning",
+                        ),
+                        ReasoningLevel(
+                            effort = ai.eight24family.conch.linux.LocalLlm.EFFORT_THINKING,
+                            displayName = "Thinking",
+                            description = "Reason before answering — slower, better on hard tasks",
+                        ),
+                    ),
+                    defaultReasoning = ai.eight24family.conch.linux.LocalLlm.EFFORT_INSTANT,
+                    // Store families carry no drawable of their own — the neutral
+                    // chip beats wearing another vendor's face.
+                    iconRes = if (m.family == "qwen") m.iconRes
+                    else ai.eight24family.conch.R.drawable.ic_local_models,
+                )
+            }
+    }
+
+    /** Decode a `local:<id>` pick to the model's real name (or "no model" for a
+     *  deleted/absent one). Null when the current pick is NOT a local model —
+     *  the caller then falls through to its own cloud label logic. */
+    fun localDisplayLabel(state: TopbarModelState): String? {
+        val anyPick = state.selectedModel?.takeIf { it.isNotBlank() }
+            ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
+            ?: state.observedModel?.takeIf { it.isNotBlank() }
+        val id = anyPick
+            ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+            ?: return null
+        val m = ai.eight24family.conch.linux.LocalLlm.byId(id) ?: return "no model"
+        return if (ai.eight24family.conch.linux.LocalLlm.isReady(m)) m.label else "no model"
+    }
+
+    /** The instant/thinking sub-label for a local pick; null when not local. */
+    fun localReasoningLabel(state: TopbarModelState): String? {
+        val slug = state.selectedModel?.takeIf { it.isNotBlank() }
+            ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
+            ?: state.observedModel?.takeIf { it.isNotBlank() }
+            ?: state.defaultModel?.takeIf { it.isNotBlank() }
+        if (slug?.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) != true) return null
+        val id = slug.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+        val m = ai.eight24family.conch.linux.LocalLlm.byId(id) ?: return null
+        if (!ai.eight24family.conch.linux.LocalLlm.isReady(m)) return null
+        return state.selectedReasoning?.takeIf { ai.eight24family.conch.linux.LocalLlm.isLocalEffort(it) }
+            ?: ai.eight24family.conch.linux.LocalLlm.EFFORT_INSTANT
+    }
+
+    /** True on the phone's own row, where the picker is always tappable (it
+     *  renders local models / an explanation, never a dead button). */
+    fun isPhoneRow(state: TopbarModelState): Boolean =
+        state.serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+}

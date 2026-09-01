@@ -34,6 +34,19 @@ object ErrorMessages {
 
         // Order matters: most specific first.
         return when {
+            // The phone's own Linux already explains itself in a sentence the
+            // owner can act on; anything this layer added would be a guess about
+            // networks, and the machine is in his hand.
+            t is ai.eight24family.conch.linux.LinuxSsh.NotReachable ->
+                t.message ?: "This phone's Linux is not reachable right now."
+
+            // The pool's host-key-changed sentence is crafted end to end: it
+            // names both fingerprints and the exact way out (server →
+            // // system → fingerprint → forget). At ~300 chars it outgrows the
+            // length gate below, which would degrade THE security message that
+            // most needs to arrive into a bare "IllegalStateException".
+            msg.startsWith("Host key changed") -> msg
+
             t is UnknownHostException ->
                 "Host not found. Check the address."
 

@@ -251,8 +251,8 @@ internal fun rememberChatScrollController(
             reportLayout = { result, prefixLen ->
                 val target = (matchCharOffset + prefixLen)
                     .coerceIn(0, result.layoutInput.text.length.coerceAtLeast(0))
-                val line = SilentlyTry.loggedOrElse("SshAi-Autoscroll", "getLineForOffset", 0) { result.getLineForOffset(target) }
-                val y = SilentlyTry.loggedOrElse("SshAi-Autoscroll", "getLineTop", 0f) { result.getLineTop(line) }.toInt()
+                val line = SilentlyTry.loggedOrElse("Conch-Autoscroll", "getLineForOffset", 0) { result.getLineForOffset(target) }
+                val y = SilentlyTry.loggedOrElse("Conch-Autoscroll", "getLineTop", 0f) { result.getLineTop(line) }.toInt()
                 if (matchedLineY != y) matchedLineY = y
             },
         )
@@ -265,7 +265,7 @@ internal fun rememberChatScrollController(
             lazyListState.scrollToBottom(messages.size)
             anchorApplied = true
             android.util.Log.d(
-                "SshAi-Hl",
+                "Conch-Hl",
                 "first-scroll: normal open msgs=${messages.size} → last"
             )
             return@LaunchedEffect
@@ -273,7 +273,7 @@ internal fun rememberChatScrollController(
         val ord = targetOrd
         if (ord < 0) {
             android.util.Log.w(
-                "SshAi-Hl",
+                "Conch-Hl",
                 "first-scroll: target not in messages (size=${messages.size}, urlOrd=${vm.initialMatchOrdinal}, mid=${vm.initialMatchMsgId}) — falling back to last"
             )
             lazyListState.scrollToBottom(messages.size)
@@ -302,7 +302,7 @@ internal fun rememberChatScrollController(
         lazyListState.scrollToItem(ord, scrollOffset)
         anchorApplied = true
         android.util.Log.d(
-            "SshAi-Hl",
+            "Conch-Hl",
             "first-scroll: ord=$ord mid=${messages.getOrNull(ord)?.id} charOff=$matchCharOffset lineY=${lineY}px vh=${viewportH}px scrollOffset=$scrollOffset"
         )
     }
@@ -317,7 +317,7 @@ internal fun rememberChatScrollController(
         if (messages.isEmpty()) return@LaunchedEffect
         kotlinx.coroutines.delay(350)
         if (!anchorApplied) {
-            android.util.Log.w("SshAi-Hl", "failsafe reveal: line-y never arrived")
+            android.util.Log.w("Conch-Hl", "failsafe reveal: line-y never arrived")
             anchorApplied = true
         }
     }
@@ -341,7 +341,7 @@ internal fun rememberChatScrollController(
         }
         val idx = messages.indexOfFirst { it.id == aid }
         android.util.Log.d(
-            "SshAi-PiP",
+            "Conch-PiP",
             "anchor restore: aid=$aid off=$readingAnchorOffset idx=$idx/${messages.size}",
         )
         if (idx >= 0) {

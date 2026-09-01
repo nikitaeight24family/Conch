@@ -212,7 +212,7 @@ internal fun <T> PillPicker(
     }
 }
 
-internal fun parseAccentHex(hex: String): androidx.compose.ui.graphics.Color = SilentlyTry.loggedOrElse("SshAi-Settings", "parse accent hex", androidx.compose.ui.graphics.Color(0xFF00E5FF)) {
+internal fun parseAccentHex(hex: String): androidx.compose.ui.graphics.Color = SilentlyTry.loggedOrElse("Conch-Settings", "parse accent hex", androidx.compose.ui.graphics.Color(0xFF00E5FF)) {
     val cleaned = hex.trim().removePrefix("#")
     val v = cleaned.toLong(16) or 0xFF000000
     androidx.compose.ui.graphics.Color(v.toInt())

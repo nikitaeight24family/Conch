@@ -24,7 +24,7 @@ object BridgeInstaller {
 
     /** Version string this app ships, parsed once from the bundled asset. */
     val bundledVersion: String by lazy {
-        SilentlyTry.loggedOrElse("SshAi-BridgeInstall", "parse bundled version", "?") {
+        SilentlyTry.loggedOrElse("Conch-BridgeInstall", "parse bundled version", "?") {
             val text = ServiceLocator.appContext.assets.open("conch-bridge").use { it.readBytes() }
                 .toString(Charsets.UTF_8)
             Regex("CONCH_BRIDGE_VERSION=\"([^\"]*)\"").find(text)?.groupValues?.get(1) ?: "?"
@@ -33,7 +33,7 @@ object BridgeInstaller {
 
     /** Write the bundled CLI + dirs to [serverId]. */
     suspend fun install(serverId: String): InstallResult {
-        val script = SilentlyTry.logged("SshAi-BridgeInstall", "read conch-bridge asset") {
+        val script = SilentlyTry.logged("Conch-BridgeInstall", "read conch-bridge asset") {
             ServiceLocator.appContext.assets.open("conch-bridge").use { it.readBytes() }
         } ?: return InstallResult(false, "bundled conch-bridge asset missing")
         val cmd = "set -e; " +
@@ -77,7 +77,7 @@ object BridgeInstaller {
     private suspend fun run(serverId: String, cmd: String, stdin: ByteArray?): Pair<Int, String>? =
         withContext(Dispatchers.IO) {
             val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@withContext null
-            SilentlyTry.logged("SshAi-BridgeInstall", "exec on server") {
+            SilentlyTry.logged("Conch-BridgeInstall", "exec on server") {
                 val sess = client.startSession()
                 try {
                     val proc = sess.exec(cmd)
@@ -87,7 +87,7 @@ object BridgeInstaller {
                     proc.join(20, TimeUnit.SECONDS)
                     (proc.exitStatus ?: -1) to (out + "\n" + err)
                 } finally {
-                    SilentlyTry.fired("SshAi-BridgeInstall", "close session") { sess.close() }
+                    SilentlyTry.fired("Conch-BridgeInstall", "close session") { sess.close() }
                 }
             }
         }
