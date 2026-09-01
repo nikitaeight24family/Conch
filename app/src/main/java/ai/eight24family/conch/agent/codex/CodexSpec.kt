@@ -94,9 +94,50 @@ object CodexSpec : AgentCliSpec {
     override val memoryGlobalPath = "\$HOME/.codex/AGENTS.md"
     override val memoryGlobalDisplay = "~/.codex/AGENTS.md"
 
+    /** Drives the phone's local model via its custom provider — see
+     *  [localProviderArgs]. */
+    override val supportsLocalModel = true
+
+    /**
+     * The phone's own model, as a Codex model choice.
+     *
+     * A `local:<id>` model value routes the turn to the LOCAL inference
+     * engine ([ai.eight24family.conch.linux.LocalLlmEngine], llama-server on
+     * loopback) through Codex's own custom-provider mechanism — so the AGENT
+     * is still the real Codex CLI with its real tools, sessions and sandbox;
+     * only the brain is the phone's. `wire_api` MUST be "responses":
+     * 0.151 dropped "chat" outright, and llama-server serves `/v1/responses`
+     * (both verified on the owner's phone, 2026-08-31 — including a full
+     * tool-use turn where Codex + Qwen3-1.7B created a file via the shell).
+     */
+    internal fun localProviderArgs(): String = listOf(
+        "model_providers.conchlocal.name=\"local\"",
+        "model_providers.conchlocal.base_url=\"${ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL}/v1\"",
+        "model_providers.conchlocal.wire_api=\"responses\"",
+        "model_provider=\"conchlocal\"",
+        // Tell codex the engine's REAL context so it compacts before the
+        // wall instead of hitting it: without this it assumes a cloud-sized
+        // window, and a session that outgrew the engine died with a raw
+        // `400 request (8257 tokens) exceeds context` on resume, twice per
+        // send, forever (owner's screenshot, 2026-09-01). Slightly under the
+        // engine's -c so the reply has room to stream.
+        "model_context_window=${ai.eight24family.conch.linux.LocalLlmEngine.CTX_TOKENS - 1024}",
+        // No view_image tool against the local engine: codex puts the image
+        // INSIDE the tool-call output, and llama-server's /v1/responses
+        // requires tool output to be plain text — every view_image call died
+        // as a 400 spam-loop ("Output of tool call should be 'Input text'",
+        // 2026-09-01). The photo itself still reaches the model structurally
+        // via turn/start's image paths, so nothing is lost.
+        "features.view_image=false",
+    ).joinToString("") { " -c ${shellEscape(it)}" }
+
     override fun buildExecCommand(input: ExecInput): String {
         val escapedText = shellEscape(input.text)
-        val modelArg = input.model?.takeIf { it.isNotBlank() }
+        val localModel = input.model
+            ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+        val providerArg = if (localModel != null) localProviderArgs() else ""
+        val modelArg = (localModel ?: input.model)?.takeIf { it.isNotBlank() }
             ?.let { " --model ${shellEscape(it)}" } ?: ""
         // Codex's reasoning effort lives behind the generic `-c key=value`
         // config override. Quote the value so a future enum widening
@@ -155,10 +196,10 @@ object CodexSpec : AgentCliSpec {
         return if (input.resumeId != null) {
             val rid = shellEscape(input.resumeId)
             "printf '%s' $escapedText | codex exec resume $rid - " +
-                "--json --skip-git-repo-check$approvalArg$modelArg$reasoningArg 2>&1"
+                "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
         } else {
             "printf '%s' $escapedText | codex exec - " +
-                "--json --skip-git-repo-check$approvalArg$modelArg$reasoningArg 2>&1"
+                "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
         }
     }
 
@@ -302,7 +343,7 @@ esac
             echo --END--
         """.trimIndent()
         val raw = exec.exec("bash -lc " + shellEscape(script)).orEmpty()
-        android.util.Log.d("SshAi-Models", "codex probe output (${raw.length}B)")
+        android.util.Log.d("Conch-Models", "codex probe output (${raw.length}B)")
 
         val cacheChunk = raw.substringAfter("--CACHE--", "").substringBefore("--CONFIG--", "")
         val configChunk = raw.substringAfter("--CONFIG--", "").substringBefore("--END--", "")
@@ -319,7 +360,7 @@ esac
             val root = json.parseToJsonElement(cacheChunk.trim()).jsonObject
             val list = root["models"]?.jsonArray ?: JsonArray(emptyList())
             for (entry in list) {
-                val o = SilentlyTry.logged("SshAi-CodexSpec", "cast model entry") { entry.jsonObject } ?: continue
+                val o = SilentlyTry.logged("Conch-CodexSpec", "cast model entry") { entry.jsonObject } ?: continue
                 val slug = o["slug"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                     ?: continue
                 // Skip models codex explicitly marks as not user-pickable.
@@ -330,7 +371,7 @@ esac
                 if (visibility == "hidden" || visibility == "deprecated" ||
                     visibility == "internal" || visibility == "private"
                 ) continue
-                val hidden = SilentlyTry.loggedOrElse("SshAi-CodexSpec", "read hidden flag", false) { o["hidden"]?.jsonPrimitive?.contentOrNull == "true" }
+                val hidden = SilentlyTry.loggedOrElse("Conch-CodexSpec", "read hidden flag", false) { o["hidden"]?.jsonPrimitive?.contentOrNull == "true" }
                 if (hidden) continue
                 val available = o["available"]?.jsonPrimitive?.contentOrNull
                 if (available == "false") continue
@@ -366,11 +407,11 @@ esac
                 //   ]
                 val defaultEffort = o["default_reasoning_level"]
                     ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                val levelsArr = SilentlyTry.logged("SshAi-CodexSpec", "read supported_reasoning_levels") {
+                val levelsArr = SilentlyTry.logged("Conch-CodexSpec", "read supported_reasoning_levels") {
                     o["supported_reasoning_levels"]?.jsonArray
                 }
                 val levels = levelsArr?.mapNotNull { lvl ->
-                    val obj = SilentlyTry.logged("SshAi-CodexSpec", "cast reasoning level entry") { lvl.jsonObject } ?: return@mapNotNull null
+                    val obj = SilentlyTry.logged("Conch-CodexSpec", "cast reasoning level entry") { lvl.jsonObject } ?: return@mapNotNull null
                     val effort = obj["effort"]?.jsonPrimitive?.contentOrNull
                         ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     val desc = obj["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -394,12 +435,12 @@ esac
                 reasoningCache = reasoningMap.toMap()
             }
             android.util.Log.d(
-                "SshAi-Models",
+                "Conch-Models",
                 "codex cache parsed ${ordered.size} models from models_cache.json (${reasoningMap.size} with reasoning info)",
             )
         }.onFailure {
             android.util.Log.w(
-                "SshAi-Models",
+                "Conch-Models",
                 "codex cache parse failed (will fall back to config.toml): ${it.message}",
             )
         }
@@ -413,7 +454,7 @@ esac
                 ?.takeIf { it.isNotBlank() }
                 ?.let { ordered[it] = it }
             android.util.Log.d(
-                "SshAi-Models",
+                "Conch-Models",
                 "codex cache empty; config.toml fallback yielded ${ordered.size} models",
             )
         }
@@ -592,7 +633,7 @@ esac
         val startIdx = recs.indexOfLast { it[0] in CODEX_START_MARKERS }
         val turnStartMs = if (inFlight && startIdx >= 0)
             recs[startIdx].getOrNull(1)?.takeIf { it.isNotBlank() }?.let { ts ->
-                SilentlyTry.logged("SshAi-CodexSpec", "parse turn-start ts") {
+                SilentlyTry.logged("Conch-CodexSpec", "parse turn-start ts") {
                     java.time.Instant.parse(ts).toEpochMilli()
                 }
             } else null
@@ -655,6 +696,9 @@ private object CodexTopbarUi : AgentTopbarUi {
      *                            has shouted about each of them).
      */
     override fun displayLabel(state: TopbarModelState): String? {
+        // The phone's own model reads as its NAME, not the `local:` slug the
+        // plumbing carries — shared with every local-capable harness.
+        ai.eight24family.conch.agent.spec.LocalTopbar.localDisplayLabel(state)?.let { return it }
         val slug = state.selectedModel?.takeIf { it.isNotBlank() }
             ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
             ?: state.observedModel?.takeIf { it.isNotBlank() }
@@ -678,10 +722,21 @@ private object CodexTopbarUi : AgentTopbarUi {
      * --help` + binary grep + OpenAI `/v1/models`), so opening the
      * dropdown before that returns shows a near-empty list. Gate the
      * click until we have both a finished probe AND a non-empty
-     * result.
+     * result — or, on the phone's own row, a downloaded local model
+     * (those need no probe: they are files on this device).
      */
     override fun isMenuEnabled(state: TopbarModelState): Boolean =
-        !state.modelsProbing && state.availableModels.isNotEmpty()
+        // The menu is tappable exactly when it will SHOW something. On the
+        // phone's row it is always tappable: an empty state there renders an
+        // explanation (download a model / sign in), not a dead button —
+        // "the picker won't even open" with zero context was worse
+        // (owner, 2026-09-01).
+        state.serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID ||
+            menuItems(state).isNotEmpty()
+
+    /** Downloaded local models — shared across every local-capable harness. */
+    private fun localModelItems(state: TopbarModelState): List<ModelMenuItem> =
+        ai.eight24family.conch.agent.spec.LocalTopbar.localModelItems(state)
 
     /**
      * `availableModels` carries `slug -> display_name` from codex's
@@ -702,8 +757,13 @@ private object CodexTopbarUi : AgentTopbarUi {
      * so the picker can show a reasoning submenu off each model
      * entry, matching codex CLI's own `/model` interactive flow.
      */
-    override fun menuItems(state: TopbarModelState): List<ModelMenuItem> =
-        state.availableModels.entries.map { (slug, label) ->
+    override fun menuItems(state: TopbarModelState): List<ModelMenuItem> {
+        // The phone's row leads with ITS OWN models and lists the cloud
+        // catalog after them — the owner picked GPT-5 on a qwen session and
+        // expected it to run (2026-09-01), which supersedes 08-31's "only
+        // local models here". A cloud pick relaunches the channel onto
+        // codex's normal provider (see AgentSessionCodexAppServer).
+        val cloud = state.availableModels.entries.map { (slug, label) ->
             val info = state.reasoningCatalog[slug]
             ModelMenuItem(
                 display = label,
@@ -719,6 +779,15 @@ private object CodexTopbarUi : AgentTopbarUi {
                     ?: info?.defaultEffort,
             )
         }
+        val local = localModelItems(state)
+        // On the phone's row the cloud catalog is offered ONLY when codex is
+        // actually signed in there — otherwise every cloud pick is a dead end
+        // by construction, and the picker must not sell dead ends.
+        if (state.serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+            !state.phoneCloudLoggedIn
+        ) return local
+        return local + cloud
+    }
 
     /**
      * Sub-label rendered next to the model name in the topbar — the
@@ -754,6 +823,8 @@ private object CodexTopbarUi : AgentTopbarUi {
             ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
             ?: state.observedModel?.takeIf { it.isNotBlank() }
             ?: state.defaultModel?.takeIf { it.isNotBlank() }
+        // A local model's instant/thinking effort — shared across harnesses.
+        ai.eight24family.conch.agent.spec.LocalTopbar.localReasoningLabel(state)?.let { return it }
         val info = slug?.let { state.reasoningCatalog[it] }
         val effort = state.selectedReasoning?.takeIf { it.isNotBlank() }
             ?: state.sessionInitialReasoning?.takeIf { it.isNotBlank() }

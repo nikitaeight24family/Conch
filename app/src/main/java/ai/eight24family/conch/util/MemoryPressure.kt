@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
  * must be purely rebuildable (re-decodable, re-parsable, re-fetchable), so
  * running the action can never lose user state — only cost a repaint.
  *
- * [ai.eight24family.conch.SshAiApp] dispatches: any `onTrimMemory` at
+ * [ai.eight24family.conch.ConchApp] dispatches: any `onTrimMemory` at
  * TRIM_MEMORY_UI_HIDDEN or above, plus legacy `onLowMemory`, fires every
  * registered action.
  */
@@ -41,7 +41,7 @@ object MemoryPressure {
     fun trimAll(reason: String): Int {
         var ran = 0
         for ((key, action) in actions) {
-            SilentlyTry.fired("SshAi-Memory", "trim $key ($reason)") {
+            SilentlyTry.fired("Conch-Memory", "trim $key ($reason)") {
                 action()
                 ran++
             }

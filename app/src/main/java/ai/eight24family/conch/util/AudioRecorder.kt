@@ -26,7 +26,7 @@ import java.io.File
  */
 object AudioRecorder {
 
-    private const val TAG = "SshAi-Audio"
+    private const val TAG = "Conch-Audio"
 
     /** Sane ceiling for a single capture. A runaway recorder is both a privacy
      *  problem and a way to fill the cache. */

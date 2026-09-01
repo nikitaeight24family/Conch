@@ -111,7 +111,19 @@ class CredentialVault(
         Agent.QWEN, Agent.CURSOR, Agent.OPENCODE, Agent.CRUSH, Agent.CONTINUE -> null
     }
 
-    private val slotsDir = "\$HOME/.sshai-auth/${agent.name.lowercase()}/slots"
+    private val slotsDir = "\$HOME/.conch-auth/${agent.name.lowercase()}/slots"
+
+    /** One-time server-side move of the whole vault off the dead brand so saved
+     *  accounts survive the rename. A MERGE (copy-then-remove), not a bare mv,
+     *  so it's safe even if `.conch-auth` was already created by another op —
+     *  old slots still fold in; `rm` only after a clean copy; idempotent once
+     *  `.sshai-auth` is gone. POSIX (the 2026-08-17 dash/ash sweep). Runs on
+     *  the vault's entry point (listSlots), which the account sheet always hits
+     *  before any save. */
+    private val legacyMigrate =
+        "[ -d \"\$HOME/.sshai-auth\" ] && { mkdir -p \"\$HOME/.conch-auth\" && " +
+            "cp -r \"\$HOME/.sshai-auth/.\" \"\$HOME/.conch-auth/\" 2>/dev/null && " +
+            "rm -rf \"\$HOME/.sshai-auth\"; }; "
 
     /** List saved accounts. Each prints as one TAB-joined line:
      *  `SLOT <id> method=.. label=.. created=.. masked=..`.
@@ -162,7 +174,7 @@ class CredentialVault(
         val out = SilentlyTry.logged(TAG, "list slots") {
             exec(
                 "bash -lc " + sh(
-                    enrich +
+                    legacyMigrate + enrich +
                         "for d in $slotsDir/*/; do " +
                         "[ -f \"\${d}meta\" ] || continue; " +
                         "enrich_slot \"\${d%/}\"; " +
@@ -347,7 +359,7 @@ class CredentialVault(
     private fun sh(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     companion object {
-        private const val TAG = "SshAi-Vault"
+        private const val TAG = "Conch-Vault"
 
         /** OAuth (file) and API-key methods are both juggleable accounts now.
          *  Vertex / Bedrock / Bearer are ambient/proxy — not slotted. */

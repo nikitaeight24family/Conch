@@ -29,7 +29,7 @@ internal fun SettingsSectionAbout(
     // `applicationIdSuffix=".debug"` split (BuildConfig.VERSION_NAME
     // is correct in both flavours).
     val versionInfo = remember(ctx) {
-        SilentlyTry.loggedOrElse("SshAi-Settings", "read version info", "v?") {
+        SilentlyTry.loggedOrElse("Conch-Settings", "read version info", "v?") {
             val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
             val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P)
                 pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()

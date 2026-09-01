@@ -39,7 +39,7 @@ internal object ListingSingleFlight {
         val mine = CompletableDeferred<List<RemoteSession>>()
         val leader = inFlight.putIfAbsent(key, mine)
         if (leader != null) {
-            android.util.Log.d("SshAi-Listing", "riding the in-flight listing for $key")
+            android.util.Log.d("Conch-Listing", "riding the in-flight listing for $key")
             return try {
                 leader.await()
             } catch (c: CancellationException) {
@@ -49,10 +49,10 @@ internal object ListingSingleFlight {
                 // take us with it: report "nothing this time" and let the next
                 // tick relist.
                 if (!currentCoroutineContext().isActive) throw c
-                android.util.Log.d("SshAi-Listing", "listing leader for $key went away — empty this pass")
+                android.util.Log.d("Conch-Listing", "listing leader for $key went away — empty this pass")
                 emptyList()
             } catch (t: Throwable) {
-                android.util.Log.w("SshAi-Listing", "in-flight listing for $key failed: ${t.message}")
+                android.util.Log.w("Conch-Listing", "in-flight listing for $key failed: ${t.message}")
                 emptyList()
             }
         }

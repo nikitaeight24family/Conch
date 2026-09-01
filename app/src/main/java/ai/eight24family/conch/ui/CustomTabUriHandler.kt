@@ -37,14 +37,14 @@ import ai.eight24family.conch.util.SilentlyTry
  */
 class CustomTabUriHandler(private val context: Context) : UriHandler {
     override fun openUri(uri: String) {
-        val parsed = SilentlyTry.logged("SshAi-UriHandler", "parse link uri") { Uri.parse(uri) } ?: return
+        val parsed = SilentlyTry.logged("Conch-UriHandler", "parse link uri") { Uri.parse(uri) } ?: return
         // Reject anything that isn't an http(s) URL. ACTION_VIEW on a
         // `javascript:` / `file:` / `intent:` URI could be exploited
         // by a malicious server-side reply; we only want web links.
         val scheme = parsed.scheme?.lowercase()
         if (scheme != "http" && scheme != "https") {
             android.util.Log.w(
-                "SshAi-UriHandler",
+                "Conch-UriHandler",
                 "blocked non-http link: scheme=$scheme",
             )
             return
@@ -59,10 +59,10 @@ class CustomTabUriHandler(private val context: Context) : UriHandler {
         tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { tab.launchUrl(context, parsed) }.onFailure { t ->
             android.util.Log.w(
-                "SshAi-UriHandler",
+                "Conch-UriHandler",
                 "custom tab launch failed (${t.javaClass.simpleName}: ${t.message}) — falling back to ACTION_VIEW",
             )
-            SilentlyTry.fired("SshAi-UriHandler", "ACTION_VIEW fallback") {
+            SilentlyTry.fired("Conch-UriHandler", "ACTION_VIEW fallback") {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW, parsed).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )

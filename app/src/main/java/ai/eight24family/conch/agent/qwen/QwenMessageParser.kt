@@ -166,5 +166,5 @@ object QwenMessageParser {
     private fun JsonObject.str(key: String): String? =
         SilentlyTry.logged(TAG, "read str '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
-    private const val TAG = "SshAi-QwenParse"
+    private const val TAG = "Conch-QwenParse"
 }

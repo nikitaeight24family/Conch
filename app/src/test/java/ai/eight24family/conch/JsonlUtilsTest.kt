@@ -9,7 +9,7 @@ import java.nio.ByteBuffer
 
 /**
  * Edge-case coverage for [JsonlUtils.trimToLastNewline] — the
- * boundary trimmer that lets ssh.ai tail incrementally-written
+ * boundary trimmer that lets Conch tail incrementally-written
  * stream-json without ever feeding a half-line to a parser.
  *
  * Part of issue #21 ("edge cases — slow/no network, large JSONL,

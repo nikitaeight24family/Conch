@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object AudioWaveform {
 
-    private const val TAG = "SshAi-Audio"
+    private const val TAG = "Conch-Audio"
 
     /** How many bars a player draws. Enough to look like speech, few enough to
      *  stay legible on a phone-width row. */

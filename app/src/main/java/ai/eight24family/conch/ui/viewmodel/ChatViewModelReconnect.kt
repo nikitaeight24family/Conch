@@ -130,7 +130,7 @@ internal class ChatViewModelReconnect(
         if (stableJob?.isActive == true) return
         stableJob = scope.launch {
             delay(RUNNING_STABLE_MS)
-            android.util.Log.d("SshAi-Reconnect", "Running held ${RUNNING_STABLE_MS}ms, resetting attempts")
+            android.util.Log.d("Conch-Reconnect", "Running held ${RUNNING_STABLE_MS}ms, resetting attempts")
             _reconnectAttempt.value = 0
         }
     }
@@ -169,7 +169,7 @@ internal class ChatViewModelReconnect(
     fun standDown(why: String) {
         if (!_reconnecting.value && reconnectJob == null) return
         android.util.Log.i(
-            "SshAi-Reconnect",
+            "Conch-Reconnect",
             "standing down: $why - no further attempt is scheduled, the connect chip owns it now",
         )
         _reconnecting.value = false
@@ -219,12 +219,12 @@ internal class ChatViewModelReconnect(
             (30_000L * (attempt - 4)).coerceAtMost(300_000L)
         }
         android.util.Log.d(
-            "SshAi-Reconnect",
+            "Conch-Reconnect",
             "scheduling reconnect attempt=$attempt in ${waitMs}ms (reason=$reason)"
         )
         reconnectJob = scope.launch {
             delay(waitMs)
-            android.util.Log.d("SshAi-Reconnect", "firing retry, attempt=$attempt")
+            android.util.Log.d("Conch-Reconnect", "firing retry, attempt=$attempt")
             retry()
         }
     }

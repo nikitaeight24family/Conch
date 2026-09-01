@@ -9,8 +9,8 @@
     lint forbids a redundant <exclude> for a path no <include> covers.
 -->
 <full-backup-content>
-    <include domain="database" path="sshai.db" requireFlags="clientSideEncryption"/>
-    <include domain="database" path="sshai.db-wal" requireFlags="clientSideEncryption"/>
+    <include domain="database" path="conch.db" requireFlags="clientSideEncryption"/>
+    <include domain="database" path="conch.db-wal" requireFlags="clientSideEncryption"/>
     <include domain="file" path="datastore/settings.preferences_pb"/>
     <include domain="file" path="datastore/auth_methods.preferences_pb"/>
 </full-backup-content>

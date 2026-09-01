@@ -8,7 +8,7 @@ import kotlinx.coroutines.launch
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.security.Security
 
-class SshAiApp : Application() {
+class ConchApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Security.removeProvider("BC")
@@ -26,7 +26,7 @@ class SshAiApp : Application() {
         // (and before the user even taps-to-connect on SK servers).
         ai.eight24family.conch.agent.UsageProbe.preload()
         // Battery temp + CPU usage sampled every 5s to logcat tag
-        // `SshAi-Perf`. DEBUG-ONLY (BUG-2): nothing in the app collects
+        // `Conch-Perf`. DEBUG-ONLY (BUG-2): nothing in the app collects
         // PerfMonitor.snapshot, so in release it was a forever-loop logging
         // INFO every 5s + a /proc/stat CPU metric that SELinux denies on
         // modern Android — i.e. dead numbers + battery cost for zero
@@ -40,7 +40,7 @@ class SshAiApp : Application() {
         // background coroutine; gated by a marker pref so it's a
         // no-op after the first install of this version.
         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-App", "run chat model keys cleanup") { ServiceLocator.preferences.runChatModelKeysCleanupIfNeeded() }
+            SilentlyTry.fired("Conch-App", "run chat model keys cleanup") { ServiceLocator.preferences.runChatModelKeysCleanupIfNeeded() }
         }
         // Launch auto-connect is handled ENTIRELY by connectAllPossibleSilently()
         // below. It connects every server reachable without a tap — password /
@@ -55,7 +55,7 @@ class SshAiApp : Application() {
         // device key — even ones the user disconnected. App open + access exists →
         // just connect, no manual navigation anywhere. Idempotent — skips live.
         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            SilentlyTry.fired("SshAi-App", "silent auto-connect all reachable servers") {
+            SilentlyTry.fired("Conch-App", "silent auto-connect all reachable servers") {
                 ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
             }
         }
@@ -114,7 +114,7 @@ class SshAiApp : Application() {
                 throwable.cause is net.schmizz.sshj.common.SSHException
             if (benign) {
                 android.util.Log.w(
-                    "SshAi",
+                    "Conch",
                     "swallowed sshj ${throwable.javaClass.simpleName} on ${thread.name}: ${throwable.message}",
                 )
                 return@setDefaultUncaughtExceptionHandler

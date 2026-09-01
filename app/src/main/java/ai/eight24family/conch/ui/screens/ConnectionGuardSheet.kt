@@ -154,7 +154,7 @@ fun ConnectionGuardSheet(
                         val intent = ConnectionPermissions.batteryRequestIntent(ctx)
                             ?: ConnectionPermissions.batteryAppDetailIntent(ctx)
                         intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        SilentlyTry.fired("SshAi-ConnGuard", "open permission settings") { ctx.startActivity(intent) }
+                        SilentlyTry.fired("Conch-ConnGuard", "open permission settings") { ctx.startActivity(intent) }
                     },
                 )
             }
@@ -172,7 +172,7 @@ fun ConnectionGuardSheet(
                     onAction = {
                         val intent = ConnectionPermissions.oemAutoStartIntent(ctx)
                         if (intent != null) {
-                            SilentlyTry.fired("SshAi-ConnGuard", "open battery whitelist") { ctx.startActivity(intent) }
+                            SilentlyTry.fired("Conch-ConnGuard", "open battery whitelist") { ctx.startActivity(intent) }
                         }
                         // Mark acknowledged on first launch so we don't keep
                         // pestering the user — they can flip it back from

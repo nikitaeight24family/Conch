@@ -34,31 +34,35 @@ object DataEraser {
         // 1) Close all live AgentSession SSH connections so Room/file
         //    handles aren't held open. Skip if ServiceLocator was never
         //    initialised (defensive — shouldn't happen here).
-        SilentlyTry.fired("SshAi-Eraser", "close all agent sessions") { ServiceLocator.agentSessions.closeAll() }
+        SilentlyTry.fired("Conch-Eraser", "close all agent sessions") { ServiceLocator.agentSessions.closeAll() }
 
         // 2) Wipe the Room DB file. Closing first is necessary or the
         //    file delete on Windows-style file systems silently fails.
-        SilentlyTry.fired("SshAi-Eraser", "close room db") {
+        SilentlyTry.fired("Conch-Eraser", "close room db") {
             ServiceLocator.appContext.let { ctx ->
                 ai.eight24family.conch.data.db.AppDatabase.get(ctx).close()
             }
         }
-        SilentlyTry.fired("SshAi-Eraser", "delete room db files") {
-            val dbFile = app.getDatabasePath("sshai.db")
-            dbFile.delete()
-            File("${dbFile.path}-shm").delete()
-            File("${dbFile.path}-wal").delete()
-            File("${dbFile.path}-journal").delete()
+        SilentlyTry.fired("Conch-Eraser", "delete room db files") {
+            // Current name + the legacy "sshai.db" (a device that never opened
+            // a build past the rename may still hold it).
+            for (name in listOf(ai.eight24family.conch.data.db.AppDatabase.DB_NAME, "sshai.db")) {
+                val dbFile = app.getDatabasePath(name)
+                dbFile.delete()
+                File("${dbFile.path}-shm").delete()
+                File("${dbFile.path}-wal").delete()
+                File("${dbFile.path}-journal").delete()
+            }
         }
 
         // 3) DataStore (preferences) — files live under
         //    `<filesDir>/datastore/`. Wipe the directory.
-        SilentlyTry.fired("SshAi-Eraser", "wipe datastore dir") {
+        SilentlyTry.fired("Conch-Eraser", "wipe datastore dir") {
             File(app.filesDir, "datastore").deleteRecursively()
         }
 
         // 4) SharedPreferences — every file in the directory.
-        SilentlyTry.fired("SshAi-Eraser", "wipe shared_prefs dir") {
+        SilentlyTry.fired("Conch-Eraser", "wipe shared_prefs dir") {
             File(app.dataDir, "shared_prefs").listFiles()?.forEach { it.delete() }
         }
 
@@ -66,10 +70,10 @@ object DataEraser {
         //    AgentStatusCache + SessionsCache live in DataStore (already
         //    wiped above). Plus everything else we may have left in
         //    cacheDir / filesDir.
-        SilentlyTry.fired("SshAi-Eraser", "delete session history cache") { File(app.cacheDir, "session_history").deleteRecursively() }
-        SilentlyTry.fired("SshAi-Eraser", "delete server activity logs") { File(app.filesDir, "activity-log").deleteRecursively() }
-        SilentlyTry.fired("SshAi-Eraser", "delete usage cache") { File(app.filesDir, "usage-cache.json").delete() }
-        SilentlyTry.fired("SshAi-Eraser", "delete external files dir") {
+        SilentlyTry.fired("Conch-Eraser", "delete session history cache") { File(app.cacheDir, "session_history").deleteRecursively() }
+        SilentlyTry.fired("Conch-Eraser", "delete server activity logs") { File(app.filesDir, "activity-log").deleteRecursively() }
+        SilentlyTry.fired("Conch-Eraser", "delete usage cache") { File(app.filesDir, "usage-cache.json").delete() }
+        SilentlyTry.fired("Conch-Eraser", "delete external files dir") {
             // External-files dump dir (debug feature only — production
             // builds shouldn't have anything here, but be thorough).
             app.getExternalFilesDir(null)?.deleteRecursively()
@@ -78,7 +82,7 @@ object DataEraser {
         // 6) `EncryptedSharedPreferences` master key in Android Keystore.
         //    The encrypted blobs we wiped at step 4 are useless without
         //    it, but for completeness we drop it too.
-        SilentlyTry.fired("SshAi-Eraser", "wipe androidx security keystore aliases") {
+        SilentlyTry.fired("Conch-Eraser", "wipe androidx security keystore aliases") {
             val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             ks.aliases().toList()
                 .filter { it.startsWith("_androidx_security_") }

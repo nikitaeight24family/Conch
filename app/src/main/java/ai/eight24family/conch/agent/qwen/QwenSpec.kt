@@ -73,13 +73,33 @@ object QwenSpec : AgentCliSpec {
     /** Real read-only planning mode: `--approval-mode plan`. */
     override val supportsPlanMode = true
 
+    /** Drives the phone's local model natively: Qwen Code speaks OpenAI-
+     *  compatible endpoints (OPENAI_BASE_URL), and Qwen models emit tool calls
+     *  in the format llama.cpp parses — the point of using Qwen Code over Codex
+     *  for a Qwen model. See [buildExecCommand]. */
+    override val supportsLocalModel = true
+
     override val memoryFilename = "QWEN.md"
     override val memoryGlobalPath = "\$HOME/.qwen/QWEN.md"
     override val memoryGlobalDisplay = "~/.qwen/QWEN.md"
 
     override fun buildExecCommand(input: ExecInput): String {
         val escapedText = shellEscape(input.text)
-        val modelArg = input.model?.takeIf { it.isNotBlank() }
+        // A `local:<id>` model routes the turn to the phone's own llama-server
+        // (loopback, OpenAI-compatible). Qwen Code's documented headless setup
+        // for that is env-only: OPENAI_BASE_URL + OPENAI_API_KEY (+ OPENAI_MODEL),
+        // no settings.json needed. The CLI is still the real Qwen Code with its
+        // tools and sessions — only the brain is the phone's.
+        val localId = input.model
+            ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+        val localEnv = if (localId != null) {
+            "OPENAI_BASE_URL=" +
+                shellEscape(ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL + "/v1") +
+                " OPENAI_API_KEY=local OPENAI_MODEL=" + shellEscape(localId) + " "
+        } else ""
+        val realModel = localId ?: input.model
+        val modelArg = realModel?.takeIf { it.isNotBlank() }
             ?.let { " -m ${shellEscape(it)}" } ?: ""
         // plan → read-only; default → tools ask (headless: auto-DENIED and the
         // run continues, reporting the refusal in result.permission_denials[],
@@ -101,7 +121,7 @@ object QwenSpec : AgentCliSpec {
         // only there, and dropping it would show the user an empty chat
         // instead of the reason. Clean JSONL still owns stdout, and the parser
         // surfaces non-JSON lines as Raw.
-        return "QWEN_CODE_LANG=en qwen -p $escapedText -o stream-json" +
+        return localEnv + "QWEN_CODE_LANG=en qwen -p $escapedText -o stream-json" +
             approvalArg + resumeArg + sessionIdArg + modelArg + " 2>&1"
     }
 
@@ -322,18 +342,26 @@ esac
 }
 
 private object QwenTopbarUi : AgentTopbarUi {
-    /** Same chain every non-alias agent uses; the slug IS the model name the
-     *  endpoint accepts, so it is shown verbatim rather than prettified into
+    /** A local model shows its real name; otherwise the slug IS the model name
+     *  the endpoint accepts, shown verbatim rather than prettified into
      *  something the CLI would not take back. */
     override fun displayLabel(state: TopbarModelState): String? =
-        state.selectedModel?.takeIf { it.isNotBlank() }
+        ai.eight24family.conch.agent.spec.LocalTopbar.localDisplayLabel(state)
+            ?: state.selectedModel?.takeIf { it.isNotBlank() }
             ?: state.sessionInitialModel?.takeIf { it.isNotBlank() }
             ?: state.observedModel?.takeIf { it.isNotBlank() }
             ?: state.defaultModel?.takeIf { it.isNotBlank() }
 
+    override fun reasoningLabel(state: TopbarModelState): String? =
+        ai.eight24family.conch.agent.spec.LocalTopbar.localReasoningLabel(state)
+
+    // On the phone's own row the picker always opens (local models live on
+    // disk — no endpoint probe stands behind them to be empty).
     override fun isMenuEnabled(state: TopbarModelState): Boolean =
-        !state.modelsProbing && state.availableModels.isNotEmpty()
+        ai.eight24family.conch.agent.spec.LocalTopbar.isPhoneRow(state) ||
+            (!state.modelsProbing && state.availableModels.isNotEmpty())
 
     override fun menuItems(state: TopbarModelState): List<ModelMenuItem> =
-        state.availableModels.map { (slug, label) -> ModelMenuItem(display = label, storedValue = slug) }
+        ai.eight24family.conch.agent.spec.LocalTopbar.localModelItems(state) +
+            state.availableModels.map { (slug, label) -> ModelMenuItem(display = label, storedValue = slug) }
 }

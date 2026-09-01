@@ -2,6 +2,8 @@ package ai.eight24family.conch.ssh
 
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.util.SilentlyTry
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,17 +33,40 @@ import java.net.Socket
  * remove. Secondarily: traffic leaves from the server's address, and a café
  * network sees nothing but SSH.
  *
- * Two shapes, one primitive. Both open a `direct-tcpip` channel on the pooled
- * client — the same connection the chat uses, no second authentication, no
- * second touch for a security key:
- *
- *  • [LocalForward] — one port on the phone stands for one port on the server.
- *    `http://127.0.0.1:3000` in any browser reaches the server's own :3000.
- *  • [HttpProxy] — every connection through it is dialled FROM the server. This
- *    is what a device VPN hands to apps, so the phone's apparent address becomes
- *    the server's without a single packet being parsed.
+ * One shape, one primitive — [LocalForward] opens a `direct-tcpip` channel on
+ * the pooled client (the same connection the chat uses, no second
+ * authentication, no second touch for a security key): one port on the phone
+ * stands for one port on the server, `http://127.0.0.1:3000` in any browser
+ * reaches the server's own :3000. (An HttpProxy sibling existed for the VPN
+ * feature; both are gone — see the tombstones at the bottom.)
  */
 object SshTunnel {
+
+    /**
+     * ⛔ A TUNNEL MAY NEVER KILL THE APP.
+     *
+     * Every coroutine here works on sockets and channels that die on their own
+     * schedule — the phone switches network, the server drops the transport,
+     * the other pump wins the race and closes the socket a microsecond before
+     * this one asks it for a stream. `SupervisorJob` does NOT make that safe: it
+     * stops a sibling from being cancelled, but an exception with no handler
+     * still reaches the thread's default handler, and on Android that is a
+     * process kill. It killed one: `java.net.SocketException: Socket is closed`
+     * out of `bridge`, FATAL EXCEPTION, the whole app gone with every SSH
+     * transport and every upload in flight (device log, 2026-08-30 09:47).
+     *
+     * So the scope carries a handler and the pumps carry their own catch. A
+     * connection dying is the ordinary end of a connection — it gets a log line,
+     * never a crash.
+     */
+    private fun tunnelScope(): CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+            android.util.Log.w(
+                "Conch-Tunnel",
+                "tunnel coroutine ended on ${t.javaClass.simpleName}: ${t.message}",
+            )
+        },
+    )
 
     /** Copy until either side closes. Returns quietly: a closed tunnel is the
      *  normal end of every connection, not an error to report. */
@@ -90,18 +115,44 @@ object SshTunnel {
         lateinit var handle: java.io.Closeable
         val closeBoth = {
             if (shut.compareAndSet(false, true)) {
-                SilentlyTry.fired("SshAi-Tunnel", "close bridged sockets") { local.close() }
-                SilentlyTry.fired("SshAi-Tunnel", "close channel") { closer() }
+                SilentlyTry.fired("Conch-Tunnel", "close bridged sockets") { local.close() }
+                SilentlyTry.fired("Conch-Tunnel", "close channel") { closer() }
                 untrack(handle)
             }
         }
         handle = java.io.Closeable { closeBoth() }
         track(handle)
-        scope.launch(Dispatchers.IO) {
-            try { pump(local.getInputStream(), remoteOut) } finally { closeBoth() }
-        }
-        scope.launch(Dispatchers.IO) {
-            try { pump(remoteIn, local.getOutputStream()) } finally { closeBoth() }
+        // ⛔ THE CATCH IS THE POINT, NOT THE `finally`.
+        //
+        // [pump] swallows its own IO, so this looked covered — but the socket
+        // accessors are evaluated OUTSIDE it, as the call's arguments. Whichever
+        // pump finishes first calls `closeBoth`, and the other one then asks a
+        // closed socket for its stream: `SocketException: Socket is closed`,
+        // thrown before pump is even entered, straight out of a `launch` with
+        // nothing to catch it. That is a FATAL EXCEPTION on Android — the app
+        // dies, taking the SSH transports and any upload mid-flight with it
+        // (device log, 2026-08-30 09:47). The race is normal operation; only the
+        // crash was a bug.
+        scope.launch(Dispatchers.IO) { pumpQuietly(closeBoth) { pump(local.getInputStream(), remoteOut) } }
+        scope.launch(Dispatchers.IO) { pumpQuietly(closeBoth) { pump(remoteIn, local.getOutputStream()) } }
+    }
+
+    /** Run one direction of a bridge: any end-of-connection throw is a log line,
+     *  and both directions close no matter how this ended. Cancellation is not an
+     *  error — it is `stop()` doing its job, so it propagates (after the close,
+     *  which the `finally` guarantees either way). */
+    private inline fun pumpQuietly(closeBoth: () -> Unit, body: () -> Unit) {
+        try {
+            body()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            android.util.Log.d(
+                "Conch-Tunnel",
+                "bridge direction ended: ${t.javaClass.simpleName}: ${t.message}",
+            )
+        } finally {
+            closeBoth()
         }
     }
 
@@ -136,7 +187,7 @@ object SshTunnel {
         fun closeAll() {
             val copy = ArrayList(items)
             items.clear()
-            copy.forEach { SilentlyTry.fired("SshAi-Tunnel", "close tracked") { it.close() } }
+            copy.forEach { SilentlyTry.fired("Conch-Tunnel", "close tracked") { it.close() } }
         }
     }
 
@@ -158,25 +209,25 @@ object SshTunnel {
         // "forwarding …", return success, and never accept a connection. The UI
         // happens to build a new object each time, which hides it; the next
         // caller would not be so lucky (audit, 2026-08-30).
-        private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private var scope = tunnelScope()
         private var job: Job? = null
         private var server: ServerSocket? = null
         private val liveConnections = LiveSet()
 
         /** @return null on success, else why it could not start. */
         fun start(): String? {
-            if (!scope.isActive) scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            if (!scope.isActive) scope = tunnelScope()
             // Pre-flight only. The client used for actual traffic is looked up
             // per connection — see the accept loop.
             ServiceLocator.sshConnectionPool.peek(serverId)
                 ?: return "not connected to this server"
-            val socket = SilentlyTry.logged("SshAi-Tunnel", "bind local port") {
+            val socket = SilentlyTry.logged("Conch-Tunnel", "bind local port") {
                 ServerSocket(localPort, 50, InetAddress.getByName("127.0.0.1"))
             } ?: return "port $localPort is already in use on this phone"
             server = socket
             job = scope.launch {
                 while (isActive && !socket.isClosed) {
-                    val local = SilentlyTry.logged("SshAi-Tunnel", "accept") { socket.accept() } ?: break
+                    val local = SilentlyTry.logged("Conch-Tunnel", "accept") { socket.accept() } ?: break
                     // ⛔ RESOLVED HERE, NEVER CAPTURED. Switching Wi-Fi to mobile
                     // kills the transport; the app reconnects silently and the
                     // pool hands out a NEW client. A forward holding the old one
@@ -187,12 +238,12 @@ object SshTunnel {
                     // moment the reconnect lands.
                     val live = ServiceLocator.sshConnectionPool.peek(serverId)
                     val conn = live?.let {
-                        SilentlyTry.logged("SshAi-Tunnel", "open channel to $remoteHost:$remotePort") {
+                        SilentlyTry.logged("Conch-Tunnel", "open channel to $remoteHost:$remotePort") {
                             it.newDirectConnection(remoteHost, remotePort)
                         }
                     }
                     if (conn == null) {
-                        SilentlyTry.fired("SshAi-Tunnel", "close unroutable") { local.close() }
+                        SilentlyTry.fired("Conch-Tunnel", "close unroutable") { local.close() }
                         continue
                     }
                     bridge(
@@ -202,7 +253,7 @@ object SshTunnel {
                     )
                 }
             }
-            android.util.Log.i("SshAi-Tunnel", "forwarding 127.0.0.1:$localPort → $remoteHost:$remotePort")
+            android.util.Log.i("Conch-Tunnel", "forwarding 127.0.0.1:$localPort → $remoteHost:$remotePort")
             return null
         }
 
@@ -211,7 +262,7 @@ object SshTunnel {
          *  traffic flowing through a tunnel the user had just switched off. */
         fun stop() {
             job?.cancel()
-            SilentlyTry.fired("SshAi-Tunnel", "close listener") { server?.close() }
+            SilentlyTry.fired("Conch-Tunnel", "close listener") { server?.close() }
             server = null
             liveConnections.closeAll()
             scope.cancel()
@@ -228,149 +279,15 @@ object SshTunnel {
     // profile is worse than no code (audit, 2026-08-30). If a SOCKS endpoint is
     // ever needed, it comes back WITH per-session credentials.
 
-    /**
-     * An HTTP proxy on the phone whose connections are made BY THE SERVER.
-     *
-     * ⭐ THIS IS THE PIECE THAT ACTUALLY CHANGES THE PHONE'S ADDRESS, and it is
-     * why it exists next to the SOCKS one. Android lets a VPN hand apps a proxy
-     * (`VpnService.Builder.setHttpProxy`, API 29+), and everything that honours
-     * the system proxy — browsers, most HTTP stacks — then dials through here,
-     * which means out of the server. No packet capture, no userspace TCP stack,
-     * no native library: the whole reason a device-wide route was out of reach.
-     *
-     * ⚠ AND ITS LIMIT IS REAL, so the UI must say it: an app that ignores the
-     * system proxy is untouched. This covers browsing, not the whole device.
-     *
-     * Two verbs, which is all a proxy needs:
-     *  • `CONNECT host:port` — every HTTPS request. We answer 200 and become a
-     *    pipe; the TLS handshake happens end-to-end between the app and the
-     *    site, so nothing here can read it.
-     *  • an absolute-URI request line (`GET http://host/path`) — plain HTTP.
-     *    The request is passed on with the origin form restored, which is what
-     *    the far side expects.
-     *
-     * The hostname is resolved BY THE SERVER in both cases. Resolving here would
-     * hand every lookup to the local network and undo the point.
-     */
-    class HttpProxy(private val serverId: String, val port: Int) {
-        // ⚠ RECREATED ON EVERY START. stop() cancels this scope, and a cancelled
-        // scope launches nothing — so a second start() would bind the port, log
-        // "forwarding …", return success, and never accept a connection. The UI
-        // happens to build a new object each time, which hides it; the next
-        // caller would not be so lucky (audit, 2026-08-30).
-        private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private var job: Job? = null
-        private var server: ServerSocket? = null
-        private val liveConnections = LiveSet()
-
-        fun start(): String? {
-            if (!scope.isActive) scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            ServiceLocator.sshConnectionPool.peek(serverId)
-                ?: return "not connected to this server"
-            val socket = SilentlyTry.logged("SshAi-Tunnel", "bind http proxy") {
-                ServerSocket(port, 200, InetAddress.getByName("127.0.0.1"))
-            } ?: return "port $port is already in use on this phone"
-            server = socket
-            job = scope.launch {
-                while (isActive && !socket.isClosed) {
-                    val local = SilentlyTry.logged("SshAi-Tunnel", "proxy accept") { socket.accept() } ?: break
-                    scope.launch(Dispatchers.IO) { serve(local) }
-                }
-            }
-            android.util.Log.i("SshAi-Tunnel", "http proxy on 127.0.0.1:$port via $serverId")
-            return null
-        }
-
-        fun stop() {
-            job?.cancel()
-            SilentlyTry.fired("SshAi-Tunnel", "close proxy listener") { server?.close() }
-            server = null
-            liveConnections.closeAll()
-            scope.cancel()
-        }
-
-        private fun serve(local: Socket) {
-            val handled = SilentlyTry.logged("SshAi-Tunnel", "proxy request") {
-                val inp = java.io.BufferedInputStream(local.getInputStream())
-                val out = local.getOutputStream()
-                val requestLine = readLine(inp) ?: return@logged null
-                val parts = requestLine.split(" ")
-                if (parts.size < 3) return@logged null
-
-                // The transport in use NOW, never one captured at start-up: a
-                // network change hands the pool a new client.
-                val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: run {
-                    out.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray()); out.flush()
-                    return@logged null
-                }
-
-                if (parts[0].equals("CONNECT", ignoreCase = true)) {
-                    val hostPort = parts[1]
-                    val host = hostPort.substringBeforeLast(':')
-                    val p = hostPort.substringAfterLast(':').toIntOrNull() ?: 443
-                    while (true) { val l = readLine(inp) ?: break; if (l.isEmpty()) break } // drain headers
-                    val conn = try {
-                        client.newDirectConnection(host, p)
-                    } catch (t: Throwable) {
-                        out.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray()); out.flush()
-                        return@logged null
-                    }
-                    out.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                    out.flush()
-                    bridge(
-                        scope, local, conn.inputStream, conn.outputStream, { conn.close() },
-                        track = { liveConnections.add(it) },
-                        untrack = { liveConnections.remove(it) },
-                    )
-                    return@logged true
-                }
-
-                // Plain HTTP: GET http://host[:port]/path HTTP/1.1
-                val uri = parts[1]
-                if (!uri.startsWith("http://", ignoreCase = true)) return@logged null
-                val rest = uri.removePrefix("http://").removePrefix("HTTP://")
-                val authority = rest.substringBefore('/')
-                val path = "/" + rest.substringAfter('/', "")
-                val host = authority.substringBefore(':')
-                val p = authority.substringAfter(':', "80").toIntOrNull() ?: 80
-                val conn = try {
-                    client.newDirectConnection(host, p)
-                } catch (t: Throwable) {
-                    out.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray()); out.flush()
-                    return@logged null
-                }
-                // Re-send the request in origin form, then let the rest stream.
-                val head = StringBuilder("${'$'}{parts[0]} ${'$'}path ${'$'}{parts[2]}\r\n")
-                while (true) {
-                    val l = readLine(inp) ?: break
-                    head.append(l).append("\r\n")
-                    if (l.isEmpty()) break
-                }
-                conn.outputStream.write(head.toString().toByteArray())
-                conn.outputStream.flush()
-                bridge(
-                    scope, local, conn.inputStream, conn.outputStream, { conn.close() },
-                    track = { liveConnections.add(it) },
-                    untrack = { liveConnections.remove(it) },
-                )
-                true
-            }
-            if (handled == null) SilentlyTry.fired("SshAi-Tunnel", "close proxy client") { local.close() }
-        }
-
-        /** One CRLF-terminated line, without allocating a reader that would
-         *  buffer past the headers and swallow the body. */
-        private fun readLine(inp: java.io.InputStream): String? {
-            val sb = StringBuilder()
-            while (true) {
-                val c = inp.read()
-                if (c < 0) return if (sb.isEmpty()) null else sb.toString()
-                if (c == '\n'.code) return sb.toString().removeSuffix("\r")
-                sb.append(c.toChar())
-                if (sb.length > 8192) return sb.toString()
-            }
-        }
-    }
+    // ⛔ AND THE HTTP PROXY THAT STOOD HERE IS GONE TOO (2026-09-01). It was
+    // the VPN feature's carrier: VpnService.Builder.setHttpProxy handed apps
+    // 127.0.0.1:8118 and every connection was dialled from the server. Play's
+    // enforcement removed the VPN feature, and the proxy follows the same law
+    // as the SOCKS server above: an unauthenticated loopback proxy that
+    // nothing constructs is dead code with a real risk profile — on Android
+    // any installed app can reach 127.0.0.1. If device routing ever returns,
+    // it returns WITH per-session credentials and its own Play declaration
+    // story, not by resurrecting this class from git.
 }
 
 /** Where a forward points, for the UI and for persistence. */

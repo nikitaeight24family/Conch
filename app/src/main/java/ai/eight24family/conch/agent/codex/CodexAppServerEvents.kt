@@ -49,7 +49,7 @@ internal object CodexAppServerEvents {
 
             "reasoning" -> {
                 if (started) return emptyList()
-                val text = SilentlyTry.logged("SshAi-CodexApp", "reasoning summary") {
+                val text = SilentlyTry.logged("Conch-CodexApp", "reasoning summary") {
                     item["summary"]?.jsonArray
                         ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                         ?.joinToString(" ")
@@ -85,11 +85,11 @@ internal object CodexAppServerEvents {
             }
 
             "fileChange" -> {
-                val changes = SilentlyTry.logged("SshAi-CodexApp", "fileChange changes") {
+                val changes = SilentlyTry.logged("Conch-CodexApp", "fileChange changes") {
                     item["changes"]?.jsonArray
                 }
                 val paths = changes?.mapNotNull { c ->
-                    SilentlyTry.logged("SshAi-CodexApp", "change row") {
+                    SilentlyTry.logged("Conch-CodexApp", "change row") {
                         c.jsonObject.str("path")
                     }
                 }.orEmpty()
@@ -118,7 +118,7 @@ internal object CodexAppServerEvents {
                     listOf(AgentMessage.ToolUse(baseId, "$server/$tool", item["arguments"]?.toString().orEmpty()))
                 } else {
                     val status = item.str("status").orEmpty()
-                    val result = SilentlyTry.logged("SshAi-CodexApp", "mcp result") {
+                    val result = SilentlyTry.logged("Conch-CodexApp", "mcp result") {
                         item["result"]?.jsonObject?.get("content")?.toString()
                     } ?: item.str("error") ?: ""
                     listOf(
@@ -196,12 +196,12 @@ internal object CodexAppServerEvents {
      * `turn/plan/updated` → live progress note (upserts in place per turn).
      */
     fun mapPlanUpdate(params: JsonObject, turnId: String): List<AgentMessage> {
-        val steps = SilentlyTry.logged("SshAi-CodexApp", "plan steps") { params["plan"]?.jsonArray }
+        val steps = SilentlyTry.logged("Conch-CodexApp", "plan steps") { params["plan"]?.jsonArray }
             ?: return emptyList()
         if (steps.isEmpty()) return emptyList()
         var done = 0
         val lines = steps.mapNotNull { s ->
-            SilentlyTry.logged("SshAi-CodexApp", "plan step") {
+            SilentlyTry.logged("Conch-CodexApp", "plan step") {
                 val o = s.jsonObject
                 val status = o.str("status")
                 if (status == "completed") done++
@@ -226,13 +226,30 @@ internal object CodexAppServerEvents {
      * terminal ones render as a real Error.
      */
     fun mapError(params: JsonObject): List<AgentMessage> {
-        val msg = SilentlyTry.logged("SshAi-CodexApp", "error message") {
+        val msg = SilentlyTry.logged("Conch-CodexApp", "error message") {
             params["error"]?.jsonObject?.str("message")
         } ?: "error"
+        // Codex warns it has no metadata for any model outside its own
+        // catalog and falls back on its own — by design for a local model
+        // (there is nothing to look up), and nothing the user can act on
+        // for any other. Never a red line in the chat.
+        if (msg.startsWith("Model metadata for")) return emptyList()
+        // Same self-directed migration note as the warning path filters.
+        if (msg.startsWith("Full-history hydration is deprecated")) return emptyList()
+        if (msg.startsWith("Skill descriptions were shortened")) return emptyList()
         val willRetry = params.str("willRetry") == "true"
+        // The local engine's context wall arrives as a raw JSON 400 — say what
+        // it means instead ("request (8257 tokens) exceeds…", 2026-09-01).
+        val friendly = when {
+            "exceeds" in msg && "context" in msg && "tokens)" in msg ->
+                "this chat has outgrown the local model's context — start a new chat"
+            "image input is not supported" in msg ->
+                "this model can't see images yet — download its vision pack on the models panel"
+            else -> msg
+        }
         return if (willRetry) listOf(CodexMessageParser.note(
-            "retrying · ${msg.take(100)}", tone = AgentMessage.EventNote.Tone.WARN,
-        )) else listOf(AgentMessage.Error(ParserHelpers.uuid(), msg))
+            "retrying · ${friendly.take(100)}", tone = AgentMessage.EventNote.Tone.WARN,
+        )) else listOf(AgentMessage.Error(ParserHelpers.uuid(), friendly))
     }
 
     /** `model/rerouted` — the model changed under the user; they must see it. */

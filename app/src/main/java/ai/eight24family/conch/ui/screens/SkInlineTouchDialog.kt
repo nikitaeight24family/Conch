@@ -206,7 +206,7 @@ fun SkInlineTouchDialog(
             cached.application == application
         ) {
             android.util.Log.d(
-                "SshAi-SK-Dlg",
+                "Conch-SK-Dlg",
                 "reusing cached signer (phase=${cached.holder.phase.value}) — composition was recreated"
             )
             cached
@@ -220,7 +220,7 @@ fun SkInlineTouchDialog(
             val fresh = DeferredCtapSkSigner(credentialIdBase64, application)
             ai.eight24family.conch.di.ServiceLocator.cachedSkDialogSigner = fresh
             android.util.Log.d(
-                "SshAi-SK-Dlg",
+                "Conch-SK-Dlg",
                 "created fresh signer (attempt=$attempt key=$signerKey)"
             )
             fresh
@@ -270,7 +270,7 @@ fun SkInlineTouchDialog(
             ?: (wrongPinAttempts + 1).coerceAtMost(8)
         pinInput = ""
         // 0.3 s vibration.
-        SilentlyTry.fired("SshAi-SkDialog", "wrong-pin vibrate") {
+        SilentlyTry.fired("Conch-SkDialog", "wrong-pin vibrate") {
             val vib = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
                 vibrateCtx.getSystemService(android.os.VibratorManager::class.java).defaultVibrator
             else
@@ -363,7 +363,7 @@ fun SkInlineTouchDialog(
             return
         }
         android.util.Log.d(
-            "SshAi-SK-Dlg",
+            "Conch-SK-Dlg",
             "startEither: arming USB+NFC in parallel (credId=${credentialIdBase64.length}B64 app=$application attempt=$attempt)"
         )
         // Preserve the TagLostDuringPin pause state across re-arm —
@@ -383,11 +383,11 @@ fun SkInlineTouchDialog(
                 onNfcSigner = onNfcSigner,
                 onSuccess = { status = TouchStatus.Done },
                 onRetry = { reason ->
-                    android.util.Log.w("SshAi-SK-Dlg", "  attempt $attempt failed: $reason — retrying")
+                    android.util.Log.w("Conch-SK-Dlg", "  attempt $attempt failed: $reason — retrying")
                     attempt += 1
                 },
                 onPermanent = { reason, kind ->
-                    android.util.Log.w("SshAi-SK-Dlg", "  permanent ($kind): $reason")
+                    android.util.Log.w("Conch-SK-Dlg", "  permanent ($kind): $reason")
                     status = TouchStatus.Failed(reason, kind)
                 },
                 onTransportResolved = { t -> actualTransport = t },
@@ -401,7 +401,7 @@ fun SkInlineTouchDialog(
             return
         }
         android.util.Log.d(
-            "SshAi-SK-Dlg",
+            "Conch-SK-Dlg",
             "startNfc: deferred-tap flow (credId=${credentialIdBase64.length}B64 app=$application attempt=$attempt)"
         )
         if ((status as? TouchStatus.Failed)?.kind != SkFailureKind.TagLostDuringPin) {
@@ -417,11 +417,11 @@ fun SkInlineTouchDialog(
                 onNfcSigner = onNfcSigner,
                 onSuccess = { status = TouchStatus.Done },
                 onRetry = { reason ->
-                    android.util.Log.w("SshAi-SK-Dlg", "  attempt $attempt failed: $reason — retrying")
+                    android.util.Log.w("Conch-SK-Dlg", "  attempt $attempt failed: $reason — retrying")
                     attempt += 1
                 },
                 onPermanent = { reason, kind ->
-                    android.util.Log.w("SshAi-SK-Dlg", "  permanent ($kind): $reason")
+                    android.util.Log.w("Conch-SK-Dlg", "  permanent ($kind): $reason")
                     status = TouchStatus.Failed(reason, kind)
                 },
                 onTagCaptured = { actualTransport = SecurityKeyTransport.NFC },
@@ -470,10 +470,10 @@ fun SkInlineTouchDialog(
         // bump→cap→Failed→bump loop. Past the cap the user must hit
         // the explicit Cancel + reopen flow.
         if (attempt >= 6) {
-            android.util.Log.w("SshAi-SK-Dlg", "  recoverable failure but attempt=$attempt past cap — not auto-bumping")
+            android.util.Log.w("Conch-SK-Dlg", "  recoverable failure but attempt=$attempt past cap — not auto-bumping")
             return@LaunchedEffect
         }
-        android.util.Log.d("SshAi-SK-Dlg", "recoverable failure (kind=$failedKind) → auto-bump attempt $attempt→${attempt + 1} to re-arm main flow")
+        android.util.Log.d("Conch-SK-Dlg", "recoverable failure (kind=$failedKind) → auto-bump attempt $attempt→${attempt + 1} to re-arm main flow")
         kotlinx.coroutines.delay(800L)
         attempt += 1
     }
@@ -484,14 +484,14 @@ fun SkInlineTouchDialog(
     // body branches resume normal rendering). Without this hook the
     // 'Put the key back' message would linger past the moment the user
     // actually put the key back.
-    val dialogHaptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+    val dialogHaptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
     androidx.compose.runtime.LaunchedEffect(phase) {
         if (phase == DeferredCtapSkSigner.Phase.WaitingForPin) {
             pinFlowEntered = true
             // Tag captured + asking for PIN — emphatic Heavy so the
             // user physically feels "you can stop pressing the key
             // against the back of the phone, we got it".
-            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy)
+            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Heavy)
         }
         if (phase == DeferredCtapSkSigner.Phase.TagCaptured &&
             (status as? TouchStatus.Failed)?.kind == SkFailureKind.TagLostDuringPin) {
@@ -501,7 +501,7 @@ fun SkInlineTouchDialog(
             // Auth completed end-to-end — double-tap Confirm. This
             // also gives the user a tactile cue when the dialog
             // disappears for the success path.
-            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Confirm)
+            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Confirm)
             // Drop the cached signer — this auth flow is done, next
             // dialog open should mint a fresh one.
             if (ai.eight24family.conch.di.ServiceLocator.cachedSkDialogSigner === nfcSigner) {
@@ -509,19 +509,19 @@ fun SkInlineTouchDialog(
             }
         }
         if (phase == DeferredCtapSkSigner.Phase.Failed) {
-            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Reject)
+            dialogHaptic.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Reject)
         }
     }
 
 
     androidx.compose.runtime.LaunchedEffect(transport, attempt) {
-        android.util.Log.d("SshAi-SK-Dlg", "auto-arm fired, transport=$transport attempt=$attempt activity=${activity != null}")
+        android.util.Log.d("Conch-SK-Dlg", "auto-arm fired, transport=$transport attempt=$attempt activity=${activity != null}")
         // Hard cap on auto-retries. 6 × ~2 s backoff each = ~12 s of
         // patient retry before showing the user a 'something's really
         // wrong' UI.
         val MAX_AUTO_RETRIES = 6
         if (attempt >= MAX_AUTO_RETRIES) {
-            android.util.Log.w("SshAi-SK-Dlg", "  attempt $attempt >= cap — stopping auto-retry, user must pull-down")
+            android.util.Log.w("Conch-SK-Dlg", "  attempt $attempt >= cap — stopping auto-retry, user must pull-down")
             status = TouchStatus.Failed("Can't reach the server. Plug in or tap your key to retry.", SkFailureKind.NetworkBlip)
             return@LaunchedEffect
         }
@@ -1135,10 +1135,10 @@ private suspend fun runDeferredNfcAttempt(
         if (classified.permanent) {
             // Don't loop on something that won't fix itself. Surface
             // the real reason once, let the user act.
-            android.util.Log.w("SshAi-SK-Dlg", "  permanent failure: ${classified.userMessage}")
+            android.util.Log.w("Conch-SK-Dlg", "  permanent failure: ${classified.userMessage}")
             onPermanent(classified.userMessage, classified.kind)
         } else {
-            android.util.Log.w("SshAi-SK-Dlg", "  transient failure: ${classified.userMessage} — retrying")
+            android.util.Log.w("Conch-SK-Dlg", "  transient failure: ${classified.userMessage} — retrying")
             // Backoff so the previous TCP socket closes, NFC reader-
             // mode releases, and the user has a moment to react.
             kotlinx.coroutines.delay(2_000L)
@@ -1290,7 +1290,7 @@ private fun classifySkFailure(
 
     // Visibility: dump the full chain + phase at debug level so we can
     // see which classifier branch SHOULD have caught a given failure.
-    android.util.Log.d("SshAi-SK-Dlg", "  classifying chain (phaseAtFailure=$signerPhaseAtFailure): $joined")
+    android.util.Log.d("Conch-SK-Dlg", "  classifying chain (phaseAtFailure=$signerPhaseAtFailure): $joined")
 
     // 0a. Tag-lift detected by the in-PIN watcher (cancel reason ends with
     //     'TagLost during PIN entry'). Must come BEFORE the generic
@@ -1712,7 +1712,7 @@ private suspend fun runDeferredEitherAttempt(
     onPermanent: (reason: String, kind: SkFailureKind) -> Unit,
     onTransportResolved: (SecurityKeyTransport) -> Unit = {},
 ) {
-    val tag = "SshAi-SK-Dlg"
+    val tag = "Conch-SK-Dlg"
     try {
         coroutineScope {
             val opJob = async(Dispatchers.IO) { onNfcSigner(signer) }
@@ -1794,7 +1794,7 @@ private suspend fun runDeferredNfcDance(
     signer: DeferredCtapSkSigner,
     onTagCaptured: () -> Unit = {},
 ) {
-    val tag = "SshAi-SK-Dlg"
+    val tag = "Conch-SK-Dlg"
     android.util.Log.d(tag, "  runDeferredNfcDance: arming reader-mode")
     val ok = ServiceLocator.securityKeyManager.withNfc(
         activity = activity,
@@ -1918,7 +1918,7 @@ private fun runEnumerateAndHoldSession(
                     }
                 }
             }.also {
-                it.name = "SshAi-SK-TagWatcher"
+                it.name = "Conch-SK-TagWatcher"
                 it.isDaemon = true
                 it.start()
             }
@@ -1928,8 +1928,8 @@ private fun runEnumerateAndHoldSession(
             // session — Ctap2Session / FidoConnection are NOT thread-safe, and
             // two concurrent commands scramble the USB endpoint. join() lets an
             // in-flight session.info() round-trip finish first.
-            SilentlyTry.fired("SshAi-SkDialog", "interrupt watcher thread") { watcher.interrupt() }
-            SilentlyTry.fired("SshAi-SkDialog", "join watcher thread") { watcher.join(2_000L) }
+            SilentlyTry.fired("Conch-SkDialog", "interrupt watcher thread") { watcher.interrupt() }
+            SilentlyTry.fired("Conch-SkDialog", "join watcher thread") { watcher.join(2_000L) }
             if (watcher.isAlive) {
                 android.util.Log.w(tag, "  watcher thread didn't exit after 2s — may collide with main session use")
             }
@@ -2200,10 +2200,10 @@ private fun SkKeyHero(state: KeyHeroState) {
     // motion — vibration stays on regardless.
     val reduceMotion = run {
         val a11y = androidx.compose.ui.platform.LocalAccessibilityManager.current
-        val composeFlag = SilentlyTry.logged("SshAi-SkDialog", "read reduceMotion flag") {
+        val composeFlag = SilentlyTry.logged("Conch-SkDialog", "read reduceMotion flag") {
             a11y?.javaClass?.getMethod("isReduceMotionEnabled")?.invoke(a11y) as? Boolean
         }
-        composeFlag ?: SilentlyTry.loggedOrElse("SshAi-SkDialog", "read animator duration scale", false) {
+        composeFlag ?: SilentlyTry.loggedOrElse("Conch-SkDialog", "read animator duration scale", false) {
             android.provider.Settings.Global.getFloat(
                 ctx.contentResolver,
                 android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
@@ -2219,7 +2219,7 @@ private fun SkKeyHero(state: KeyHeroState) {
             // Smooth ramp from gentle to firm over ~1.6 s. Telegraphs
             // "we're working — keep holding" without being startling.
             // VibrationEffect.createWaveform with rising amplitude.
-            SilentlyTry.fired("SshAi-SkDialog", "play ramp waveform") {
+            SilentlyTry.fired("Conch-SkDialog", "play ramp waveform") {
                 val timings = longArrayOf(0, 80, 80, 80, 80, 120, 80, 160, 80, 220, 80, 300)
                 val amplitudes = intArrayOf(0, 60, 0, 90, 0, 120, 0, 160, 0, 200, 0, 240)
                 val effect = VibrationEffect.createWaveform(timings, amplitudes, /* repeat */ 0)
@@ -2229,7 +2229,7 @@ private fun SkKeyHero(state: KeyHeroState) {
         onDispose {
             // Stop any in-flight pattern when leaving Captured (Done /
             // Idle / dialog dismissal). Idempotent.
-            SilentlyTry.fired("SshAi-SkDialog", "cancel ramp vibration") { vibrator?.cancel() }
+            SilentlyTry.fired("Conch-SkDialog", "cancel ramp vibration") { vibrator?.cancel() }
         }
     }
 
@@ -2246,7 +2246,7 @@ private fun SkKeyHero(state: KeyHeroState) {
     LaunchedEffect(state) {
         if (state == KeyHeroState.Done) {
             val v = vibrator(ctx)
-            SilentlyTry.fired("SshAi-SkDialog", "play final haptic pulse") {
+            SilentlyTry.fired("Conch-SkDialog", "play final haptic pulse") {
                 v?.cancel()
                 if (v?.hasVibrator() == true) {
                     val effect = VibrationEffect.createOneShot(150, 255)
@@ -2254,7 +2254,7 @@ private fun SkKeyHero(state: KeyHeroState) {
                 }
             }
             kotlinx.coroutines.delay(60)
-            SilentlyTry.fired("SshAi-SkDialog", "play completion chime") {
+            SilentlyTry.fired("Conch-SkDialog", "play completion chime") {
                 val ringtone = RingtoneManager.getRingtone(
                     ctx,
                     RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
@@ -2410,7 +2410,7 @@ private fun SkKeyHero(state: KeyHeroState) {
 }
 
 private fun vibrator(ctx: android.content.Context): Vibrator? {
-    return SilentlyTry.logged("SshAi-SkDialog", "resolve vibrator service") {
+    return SilentlyTry.logged("Conch-SkDialog", "resolve vibrator service") {
         if (Build.VERSION.SDK_INT >= 31) {
             val mgr = ctx.getSystemService(android.content.Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
             mgr?.defaultVibrator

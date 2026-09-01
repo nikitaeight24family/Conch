@@ -781,7 +781,7 @@ object UsageProbe {
      *  /context probe spawns a CLI and needs much longer. */
     private fun execOnServer(serverId: String, cmd: String, timeoutSec: Long = 8): String? {
         val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return null
-        return SilentlyTry.logged("SshAi-Usage", "fetch usage") {
+        return SilentlyTry.logged("Conch-Usage", "fetch usage") {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(RemoteEnv.portable("bash -lc " + shellEscape(cmd)))
@@ -795,7 +795,7 @@ object UsageProbe {
                 proc.join(timeoutSec, TimeUnit.SECONDS)
                 String(out.toByteArray(), Charsets.UTF_8)
             } finally {
-                SilentlyTry.fired("SshAi-Usage", "close usage session") { sess.close() }
+                SilentlyTry.fired("Conch-Usage", "close usage session") { sess.close() }
             }
         }
     }
@@ -968,7 +968,7 @@ object UsageProbe {
     }
 
     private fun isoToEpoch(iso: String): Long? =
-        SilentlyTry.logged("SshAi-Usage", "parse codex resetsAt") {
+        SilentlyTry.logged("Conch-Usage", "parse codex resetsAt") {
             try { Instant.parse(iso).epochSecond }
             catch (_: Throwable) { OffsetDateTime.parse(iso).toInstant().epochSecond }
         }

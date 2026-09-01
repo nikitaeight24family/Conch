@@ -151,7 +151,7 @@ object ChatSearch {
                     hits = hits,
                 )
             }.getOrElse {
-                android.util.Log.w("SshAi-Search", "search($q) failed: ${it.message}")
+                android.util.Log.w("Conch-Search", "search($q) failed: ${it.message}")
                 Result(q, 0, 0, emptyList())
             }
         }
@@ -163,7 +163,7 @@ object ChatSearch {
         val trimmed = q.trim()
         if (trimmed.isEmpty()) return@withContext emptyList()
         val dao = ServiceLocator.searchDatabase.searchDao()
-        SilentlyTry.loggedOrElse("SshAi-Search", "loadMore search page", emptyList()) {
+        SilentlyTry.loggedOrElse("Conch-Search", "loadMore search page", emptyList()) {
             dao.search(buildMatchExpression(trimmed), limit = PAGE_SIZE, offset = offset)
                 .flatMap { expandRowToHits(it, trimmed) }
         }

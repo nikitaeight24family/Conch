@@ -24,8 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -73,6 +71,10 @@ fun HomeSessionsScreen(
     onOpenChatFromSearch: (sessionId: String, msgId: String, ordinal: Int, query: String, charOffset: Int) -> Unit = { _, _, _, _, _ -> },
     onAddServer: () -> Unit = {},
     onNewChat: (serverId: String, agent: Agent) -> Unit = { _, _ -> },
+    /** New chat on the phone's Codex with a LOCAL model preselected — the +
+     * menu offers each downloaded model as its own target, because a bare "Codex
+     * CLI · this phone" hides the one choice that matters there. */
+    onNewChatLocalModel: (serverId: String, modelId: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     vm: HomeSessionsViewModel = viewModel(),
 ) {
@@ -98,12 +100,43 @@ fun HomeSessionsScreen(
     val usableAgents = remember(usableByServer, agentsWithSessions) {
         Agent.entries.filter { a -> usableByServer.values.any { a in it } || a in agentsWithSessions }
     }
-    val barShown = usableAgents.size >= 2
+    // Local-model sessions are DRIVEN by a harness (Codex / Qwen Code / opencode)
+    // but they are not that CLI to the user — they get their own chip (the model's
+    // face), and the harness chip stops claiming them. Keyed off the MODEL, so a
+    // cloud pick on the phone stays with its CLI and only actual local turns group
+    // here. A local session is one whose model resolves to the on-device catalog.
+    // Codex stores the BARE model id (no `local:` prefix), so detect by catalog,
+    // not by prefix — the prefix check counted 0 and lumped these under the
+    // harness chip.
+    fun localModelOf(r: ai.eight24family.conch.ui.viewmodel.HomeSessionRow): ai.eight24family.conch.linux.LocalLlm.Model? =
+        if (r.serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID)
+            r.session.model?.let {
+                ai.eight24family.conch.linux.LocalLlm.byId(ai.eight24family.conch.linux.LocalLlm.cliModelName(it))
+            } else null
+    fun isLocalRow(r: ai.eight24family.conch.ui.viewmodel.HomeSessionRow) = localModelOf(r) != null
+    // Each local MODEL the user has chatted with gets its OWN top chip (its face,
+    // name, count) — driven by Codex but not "Codex" to the user. Ordered by the
+    // catalog; only models with sessions appear.
+    val localModelCounts = remember(rows) {
+        rows.mapNotNull { localModelOf(it)?.id }.groupingBy { it }.eachCount()
+    }
+    val localChipModels = remember(localModelCounts) {
+        ai.eight24family.conch.linux.LocalLlm.CATALOG.filter { localModelCounts.containsKey(it.id) }
+    }
+    val brands by ai.eight24family.conch.linux.store.BrandIcons.flow.collectAsState()
+    LaunchedEffect(Unit) { ai.eight24family.conch.linux.store.BrandIcons.loadCached() }
+    val barShown = usableAgents.size + localChipModels.size >= 2
     // Effective filter: a lone usable agent is forced (no bar); with ≥2 the
-    // persisted pick applies (validated against the usable set; unknown → All);
-    // before the status probe lands (empty) → All so nothing is hidden.
+    // persisted pick applies (validated; unknown → All). A "LOCAL:<id>" pick
+    // selects that model's sessions.
+    val selectedLocalModelId = if (barShown)
+        filterName?.takeIf { it.startsWith(LOCAL_FILTER_PREFIX) }
+            ?.removePrefix(LOCAL_FILTER_PREFIX)?.takeIf { localModelCounts.containsKey(it) }
+    else null
+    val localSelected = selectedLocalModelId != null
     val selectedAgent: Agent? = when {
-        usableAgents.size == 1 -> usableAgents[0]
+        localSelected -> null
+        usableAgents.size == 1 && localChipModels.isEmpty() -> usableAgents[0]
         barShown -> filterName?.let { n -> usableAgents.firstOrNull { it.name == n } }
         else -> null
     }
@@ -113,18 +146,26 @@ fun HomeSessionsScreen(
     // below, which offers "show all" so a forgotten filter can't look like
     // vanished sessions.
     val hiddenServers by vm.hiddenServerIds.collectAsState()
-    val visibleRows = remember(rows, selectedAgent, hiddenServers) {
+    val visibleRows = remember(rows, selectedAgent, localSelected, hiddenServers) {
         rows.filter {
-            (selectedAgent == null || it.session.agent == selectedAgent) &&
-                it.serverId !in hiddenServers
+            when {
+                localSelected -> localModelOf(it)?.id == selectedLocalModelId
+                selectedAgent != null -> it.session.agent == selectedAgent && !isLocalRow(it)
+                else -> true
+            } && it.serverId !in hiddenServers
         }
     }
     // Per-server session counts for the filter sheet — counted AFTER the agent
     // filter but BEFORE the server filter, so an un-ticked server still shows
     // what un-hiding it would bring back.
-    val countsByServer = remember(rows, selectedAgent) {
-        rows.filter { selectedAgent == null || it.session.agent == selectedAgent }
-            .groupingBy { it.serverId }.eachCount()
+    val countsByServer = remember(rows, selectedAgent, localSelected) {
+        rows.filter {
+            when {
+                localSelected -> localModelOf(it)?.id == selectedLocalModelId
+                selectedAgent != null -> it.session.agent == selectedAgent && !isLocalRow(it)
+                else -> true
+            }
+        }.groupingBy { it.serverId }.eachCount()
     }
     var serverFilterOpen by remember { mutableStateOf(false) }
     if (serverFilterOpen) {
@@ -145,14 +186,24 @@ fun HomeSessionsScreen(
         else servers.filter { usableByServer[it.id]?.contains(a) == true }
     }
     // New-session targets as (server, agent) pairs. With a focused agent → that
-    // agent's servers. Under "All" (no focus) the FAB STILL starts a chat: offer
-    // every usable (server, agent) pair so a new chat is reachable from All too.
+    // agent's servers; the local chip → the phone's Codex (the sheet expands it
+    // into one row per model). Under "All" (no focus) the FAB STILL starts a
+    // chat: offer every usable (server, agent) pair so a new chat is reachable
+    // from All too.
     val newChatPairs =
-        remember(servers, usableByServer, selectedAgent, newChatTargets) {
+        remember(servers, usableByServer, selectedAgent, localSelected, newChatTargets) {
             val a = selectedAgent
-            if (a != null) newChatTargets.map { it to a }
-            else servers.flatMap { s ->
-                Agent.entries.filter { usableByServer[s.id]?.contains(it) == true }.map { s to it }
+            when {
+                localSelected -> servers
+                    .filter { it.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID }
+                    // A local-capable anchor so this reads as the phone's local
+                    // target; the REAL harness is picked per model at open time
+                    // (LocalLlm.harnessFor), since it depends on which model.
+                    .map { it to Agent.CODEX }
+                a != null -> newChatTargets.map { it to a }
+                else -> servers.flatMap { s ->
+                    Agent.entries.filter { usableByServer[s.id]?.contains(it) == true }.map { s to it }
+                }
             }
         }
 
@@ -186,7 +237,7 @@ fun HomeSessionsScreen(
 
     SearchableScaffold(
         title = {
-            val haptics = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+            val haptics = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
             Column {
                 Text(
                     "Conch ▌ sessions",
@@ -200,7 +251,7 @@ fun HomeSessionsScreen(
                         Modifier.handCursor().combinedClickable(
                             onClick = {},
                             onLongClick = {
-                                haptics.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy)
+                                haptics.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Heavy)
                                 serverFilterOpen = true
                             },
                         )
@@ -230,9 +281,20 @@ fun HomeSessionsScreen(
                             if (barShown) {
                                 AgentFilterChips(
                                     agents = usableAgents,
-                                    counts = rows.groupingBy { it.session.agent }.eachCount(),
+                                    // Local rows belong to their MODEL's chip — the
+                                    // harness (Codex) count must not claim them.
+                                    counts = rows.filterNot(::isLocalRow)
+                                        .groupingBy { it.session.agent }.eachCount(),
                                     total = rows.size,
                                     selected = selectedAgent,
+                                    localModels = localChipModels,
+                                    localCounts = localModelCounts,
+                                    selectedLocalId = selectedLocalModelId,
+                                    brands = brands,
+                                    onSelectLocal = { id ->
+                                        vm.setAgentFilter(LOCAL_FILTER_PREFIX + id)
+                                        scrollTopTrigger++
+                                    },
                                     onSelect = {
                                         vm.setAgentFilter(it?.name)
                                         // Bump the trigger → a LaunchedEffect scrolls
@@ -356,8 +418,14 @@ fun HomeSessionsScreen(
                                     .clip(CircleShape)
                                     .handCursor()
                                     .clickable {
-                                        if (newChatPairs.size == 1) {
-                                            onNewChat(newChatPairs[0].first.id, newChatPairs[0].second)
+                                        val lone = newChatPairs.singleOrNull()
+                                        // The phone's LOCAL target always goes through
+                                        // the menu — that's where its models live.
+                                        val lonePhoneLocal = lone != null &&
+                                            lone.first.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+                                            ai.eight24family.conch.agent.spec.AgentSpecRegistry[lone.second].supportsLocalModel
+                                        if (lone != null && !lonePhoneLocal) {
+                                            onNewChat(lone.first.id, lone.second)
                                         } else {
                                             serverMenuOpen = true
                                         }
@@ -371,57 +439,149 @@ fun HomeSessionsScreen(
                                     modifier = Modifier.size(22.dp),
                                 )
                             }
-                            // >1 target → pick which (server and/or agent).
-                            DropdownMenu(expanded = serverMenuOpen, onDismissRequest = { serverMenuOpen = false }) {
-                                for ((s, a) in newChatPairs) {
-                                    DropdownMenuItem(
-                                        // Only the server NAME carries its accent; the rest of
-                                        // the label keeps the menu's own content colour.
-                                        text = {
-                                            val accent = ai.eight24family.conch.ui.theme.serverNameColor(
-                                                serverId = s.id,
-                                                serverName = s.name,
-                                                fallback = androidx.compose.material3.LocalContentColor.current,
-                                            )
-                                            val accentSpan = androidx.compose.ui.text.SpanStyle(color = accent)
-                                            Text(
-                                                androidx.compose.ui.text.buildAnnotatedString {
-                                                    when {
-                                                        multiAgent && multiServer -> {
-                                                            append("${a.displayName} · ")
-                                                            withStyle(accentSpan) { append(s.name) }
-                                                        }
-                                                        multiAgent -> append(a.displayName)
-                                                        else -> {
-                                                            append("${s.username}@")
-                                                            withStyle(accentSpan) { append(s.name) }
-                                                        }
-                                                    }
-                                                },
-                                            )
-                                        },
-                                        // Agent/company logo next to each target so
-                                        // the pick is scannable at a glance, not
-                                        // just text.
-                                        leadingIcon = {
-                                            Image(
-                                                painter = painterResource(AgentSpecRegistry[a].iconRes),
-                                                contentDescription = null,
-                                                modifier = Modifier.size(20.dp),
-                                            )
-                                        },
-                                        onClick = {
-                                            serverMenuOpen = false
-                                            onNewChat(s.id, a)
-                                        },
-                                    )
-                                }
+                            // >1 target → a SCROLLING sheet, not a dropdown: with
+                            // several servers × agents plus one row per local
+                            // model the dropdown hit the ceiling.
+                            if (serverMenuOpen) {
+                                NewChatSheet(
+                                    pairs = newChatPairs,
+                                    multiAgent = multiAgent,
+                                    multiServer = multiServer,
+                                    onPick = { s, a ->
+                                        serverMenuOpen = false
+                                        onNewChat(s, a)
+                                    },
+                                    onPickModel = { s, m ->
+                                        serverMenuOpen = false
+                                        onNewChatLocalModel(s, m)
+                                    },
+                                    onDismiss = { serverMenuOpen = false },
+                                )
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * New-chat target picker: every usable (server, agent) pair, with the phone's
+ * Codex expanded into one row per downloaded model wearing the model's own
+ * face. A bottom sheet with a lazy list — it scrolls, so any number of servers
+ * and models fits (the dropdown it replaced clipped at the screen edge).
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun NewChatSheet(
+    pairs: List<Pair<ai.eight24family.conch.domain.Server, Agent>>,
+    multiAgent: Boolean,
+    multiServer: Boolean,
+    onPick: (serverId: String, agent: Agent) -> Unit,
+    onPickModel: (serverId: String, modelId: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // Ready local models, read once per open (a handful of file stats).
+    val readyLocal = remember {
+        ai.eight24family.conch.linux.LocalLlm.CATALOG
+            .filter { ai.eight24family.conch.linux.LocalLlm.isReady(it) }
+    }
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
+            item {
+                Text(
+                    "// new chat",
+                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                )
+            }
+            for ((s, a) in pairs) {
+                val isPhoneLocal =
+                    s.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+                        ai.eight24family.conch.agent.spec.AgentSpecRegistry[a].supportsLocalModel
+                if (isPhoneLocal && readyLocal.isNotEmpty()) {
+                    items(readyLocal, key = { "local-${it.id}" }) { m ->
+                        NewChatRow(
+                            iconRes = m.iconRes,
+                            label = {
+                                val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                                    serverId = s.id,
+                                    serverName = s.name,
+                                    fallback = androidx.compose.material3.LocalContentColor.current,
+                                )
+                                Text(
+                                    androidx.compose.ui.text.buildAnnotatedString {
+                                        append("${m.label} · ")
+                                        withStyle(
+                                            androidx.compose.ui.text.SpanStyle(color = accent),
+                                        ) { append(s.name) }
+                                    },
+                                )
+                            },
+                        ) { onPickModel(s.id, m.id) }
+                    }
+                    continue
+                }
+                item(key = "${s.id}-${a.name}") {
+                    NewChatRow(
+                        iconRes = AgentSpecRegistry[a].iconRes,
+                        label = {
+                            val accent = ai.eight24family.conch.ui.theme.serverNameColor(
+                                serverId = s.id,
+                                serverName = s.name,
+                                fallback = androidx.compose.material3.LocalContentColor.current,
+                            )
+                            val accentSpan = androidx.compose.ui.text.SpanStyle(color = accent)
+                            Text(
+                                androidx.compose.ui.text.buildAnnotatedString {
+                                    when {
+                                        multiAgent && multiServer -> {
+                                            append("${a.displayName} · ")
+                                            withStyle(accentSpan) { append(s.name) }
+                                        }
+                                        multiAgent -> append(a.displayName)
+                                        else -> {
+                                            append("${s.username}@")
+                                            withStyle(accentSpan) { append(s.name) }
+                                        }
+                                    }
+                                },
+                            )
+                        },
+                    ) { onPick(s.id, a) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewChatRow(
+    iconRes: Int,
+    label: @Composable () -> Unit,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .handCursor()
+            .clickable { onClick() }
+            .padding(horizontal = 20.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Image(
+            painter = painterResource(iconRes),
+            contentDescription = null,
+            modifier = Modifier.size(22.dp),
+        )
+        label()
     }
 }
 
@@ -527,6 +687,14 @@ private fun AgentFilterChips(
     total: Int,
     selected: Agent?,
     onSelect: (Agent?) -> Unit,
+    /** Each local MODEL the user has chatted with is its OWN chip with the
+     *  model's face + name — driven by Codex but not "Codex" to the user.
+     *  Empty = no local sessions, no local chips. */
+    localModels: List<ai.eight24family.conch.linux.LocalLlm.Model> = emptyList(),
+    localCounts: Map<String, Int> = emptyMap(),
+    selectedLocalId: String? = null,
+    brands: Map<String, android.graphics.Bitmap> = emptyMap(),
+    onSelectLocal: (String) -> Unit = {},
     /** Long-press ANY chip → the server filter. The chips are the one control
      *  the user already reaches for when the list shows too much, so the
      *  by-server cut lives on the same control rather than in a menu they'd
@@ -534,12 +702,16 @@ private fun AgentFilterChips(
     onLongPress: () -> Unit = {},
 ) {
     val state = rememberLazyListState()
-    // Bring the active chip on-screen — tapping "Codex" when it sits off the
-    // right edge now scrolls it into view. Index 0 = "All", then one per
-    // agent.
-    val selIndex = if (selected == null) 0 else agents.indexOf(selected) + 1
-    LaunchedEffect(selIndex, agents.size) {
-        if (selIndex in 0..agents.size) state.animateScrollToItem(selIndex)
+    // Bring the active chip on-screen — tapping a chip off the right edge scrolls
+    // it into view. Index 0 = "All", then the local-model chips, then agents.
+    val selIndex = when {
+        selectedLocalId != null ->
+            1 + localModels.indexOfFirst { it.id == selectedLocalId }.coerceAtLeast(0)
+        selected == null -> 0
+        else -> agents.indexOf(selected) + 1 + localModels.size
+    }
+    LaunchedEffect(selIndex, agents.size, localModels.size) {
+        if (selIndex in 0..(agents.size + localModels.size)) state.animateScrollToItem(selIndex)
     }
     LazyRow(
         state = state,
@@ -549,7 +721,21 @@ private fun AgentFilterChips(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         item {
-            AgentChip("All", total, null, selected == null, onLongClick = onLongPress) { onSelect(null) }
+            AgentChip("All", total, null, selected == null && selectedLocalId == null, onLongClick = onLongPress) {
+                onSelect(null)
+            }
+        }
+        items(localModels) { m ->
+            AgentChip(
+                label = m.label,
+                count = localCounts[m.id] ?: 0,
+                iconRes = null,
+                selected = selectedLocalId == m.id,
+                onLongClick = onLongPress,
+                leadingIcon = {
+                    FamilyMark(m.family, m.iconRes.takeIf { m.family == "qwen" }, true, 16.dp, brands[m.brandOrg])
+                },
+            ) { onSelectLocal(m.id) }
         }
         items(agents) { a ->
             AgentChip(
@@ -560,6 +746,11 @@ private fun AgentFilterChips(
     }
 }
 
+/** Persisted [HomeSessionsViewModel.agentFilter] value for the local-models
+ *  chip — deliberately not an [Agent] name, so the agent-name validation
+ *  keeps treating unknown strings as "All" on builds without the chip. */
+private const val LOCAL_FILTER_PREFIX = "LOCAL:"
+
 @Composable
 private fun AgentChip(
     label: String,
@@ -567,6 +758,9 @@ private fun AgentChip(
     iconRes: Int?,
     selected: Boolean,
     onLongClick: (() -> Unit)? = null,
+    /** Custom leading icon (a local model's brand via FamilyMark); overrides
+     *  [iconRes] when set. */
+    leadingIcon: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val primary = MaterialTheme.colorScheme.primary
@@ -574,7 +768,7 @@ private fun AgentChip(
     val bg = if (selected) primary.copy(alpha = 0.18f) else Color.Transparent
     val borderC = if (selected) primary else dim.copy(alpha = 0.5f)
     val fg = if (selected) primary else MaterialTheme.colorScheme.onSurface
-    val haptics = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+    val haptics = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
     Row(
         modifier = Modifier
             .background(bg, RoundedCornerShape(50))
@@ -586,7 +780,7 @@ private fun AgentChip(
                     {
                         // A pulse so the gesture confirms itself — a long-press
                         // with no feedback reads as a missed tap.
-                        haptics.perform(ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy)
+                        haptics.perform(ai.eight24family.conch.ui.haptic.ConchHaptic.Heavy)
                         action()
                     }
                 },
@@ -595,7 +789,9 @@ private fun AgentChip(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (iconRes != null) {
+        if (leadingIcon != null) {
+            leadingIcon()
+        } else if (iconRes != null) {
             Image(
                 painter = painterResource(iconRes),
                 contentDescription = null,
@@ -646,18 +842,44 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Image(
-            painter = painterResource(AgentSpecRegistry[row.session.agent].iconRes),
-            contentDescription = row.session.agent.displayName,
-            colorFilter = null,
-            modifier = Modifier.size(30.dp),
-        )
+        // Local-model sessions wear the MODEL's face, not the CLI that drives
+        // them. Codex records the BARE model id in its session (no `local:`
+        // prefix), so detect by resolving it against the catalog, not by the
+        // prefix — the prefix check left these rows wearing the Codex knot. a
+        // family monogram otherwise (R for Granite, Q for Qwen…); a deleted
+        // model falls back to the CLI mark next to its "no model" note.
+        val localModel = if (row.serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID)
+            row.session.model?.let {
+                ai.eight24family.conch.linux.LocalLlm.byId(ai.eight24family.conch.linux.LocalLlm.cliModelName(it))
+            } else null
+        val modelGone = localModel != null && !ai.eight24family.conch.linux.LocalLlm.isReady(localModel)
+        if (localModel != null && !modelGone) {
+            val brands by ai.eight24family.conch.linux.store.BrandIcons.flow.collectAsState()
+            LaunchedEffect(Unit) { ai.eight24family.conch.linux.store.BrandIcons.loadCached() }
+            FamilyMark(
+                family = localModel.family,
+                iconRes = localModel.iconRes.takeIf { localModel.family == "qwen" },
+                lit = true,
+                size = 30.dp,
+                brand = brands[localModel.brandOrg],
+            )
+        } else {
+            Image(
+                painter = painterResource(AgentSpecRegistry[row.session.agent].iconRes),
+                contentDescription = row.session.agent.displayName,
+                colorFilter = null,
+                modifier = Modifier.size(30.dp),
+            )
+        }
         Column(modifier = Modifier.weight(1f)) {
             // Server — small, grey, insignificant, ABOVE the name. Breadcrumb
             // over the accent. The NAME carries the server's accent colour
             val accent = ai.eight24family.conch.ui.theme.serverNameColor(
                 serverId = row.serverId, serverName = row.serverName, fallback = dim,
             )
+            // A session whose LOCAL model was deleted says so right on the
+            // row — dry fact, so the user knows before opening why this chat
+            // cannot answer.
             Text(
                 androidx.compose.ui.text.buildAnnotatedString {
                     append("${row.username}@")
@@ -667,6 +889,7 @@ private fun SessionListItem(row: HomeSessionRow, onClick: () -> Unit) {
                             fontWeight = FontWeight.SemiBold,
                         ),
                     ) { append(row.serverName) }
+                    if (modelGone) append(" · no model")
                 },
                 color = dim,
                 style = MaterialTheme.typography.labelSmall,

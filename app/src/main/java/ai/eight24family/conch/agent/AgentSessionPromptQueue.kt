@@ -167,7 +167,7 @@ internal class AgentSessionPromptQueue(
                     null
                 } else pendingPrompts.removeFirst()
             } ?: return
-            android.util.Log.d("SshAi-Turn", "queue: running next prompt (${pendingPrompts.size} more queued)")
+            android.util.Log.d("Conch-Turn", "queue: running next prompt (${pendingPrompts.size} more queued)")
             // Emit the UserText NOW (right before the turn starts) — not at
             // send() time — so the chat ordering is correct when a second
             // prompt was queued mid-turn. Redeliver bypasses this (its row is

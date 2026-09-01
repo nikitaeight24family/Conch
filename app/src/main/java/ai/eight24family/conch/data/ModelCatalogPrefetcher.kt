@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object ModelCatalogPrefetcher {
 
-    private const val TAG = "SshAi-Models"
+    private const val TAG = "Conch-Models"
 
     /** How long a probe result is considered current. The warm-up re-runs
      *  on every app start and server connect anyway; this only suppresses
@@ -53,27 +53,12 @@ object ModelCatalogPrefetcher {
      */
     suspend fun probeAndPersist(client: SSHClient, agent: Agent, serverId: String): Map<String, String> {
         val spec = AgentSpecRegistry[agent]
-        val exec = AgentExec { cmd ->
-            SilentlyTry.logged(TAG, "catalog exec on pooled client") {
-                val sess = client.startSession()
-                try {
-                    // Chokepoint: spec probes compose `bash -lc` scripts; the
-                    // chat path runs them via execOnLive (portable), this
-                    // warm-up path used to bypass the rewrite.
-                    val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
-                    val out = java.io.ByteArrayOutputStream()
-                    // Bounded read: the deadline wraps the READ, not the join after it.
-                    ai.eight24family.conch.ssh.BoundedExec.drain(
-                        proc, out,
-                        deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
-                        maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
-                    )
-                    proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
-                    String(out.toByteArray(), Charsets.UTF_8)
-                } finally {
-                    SilentlyTry.fired(TAG, "close catalog exec session") { sess.close() }
-                }
-            }
+        val execServerId = serverId
+        val exec = object : AgentExec {
+            // Warming N servers at app start means N answers to "what is the
+            // default" — each true only for its own box. Tag them.
+            override val serverId: String = execServerId
+            override suspend fun exec(cmd: String): String? = probeExec(client, cmd)
         }
         val map = runCatching { spec.probeAvailableModels(exec) }
             .onFailure { android.util.Log.w(TAG, "catalog warm-up failed for ${spec.agent}", it) }
@@ -90,12 +75,51 @@ object ModelCatalogPrefetcher {
         spec.serializeReasoningCatalog(rmap)?.let {
             ServiceLocator.preferences.setReasoningCatalogForAgent(agent.name, it)
         }
+        // THE DEFAULT THIS SERVER JUST REPORTED, PERSISTED UNDER THIS SERVER.
+        // The probe's initialize handshake already filed it in the spec (keyed
+        // by exec.serverId); mirroring it to prefs is what lets the next cold
+        // start paint the right chip before any SSH is up. Nothing here may be
+        // written agent-wide — that is the bug this whole split removes.
+        val defaultLabel = runCatching { spec.probeDefaultModel(exec) }.getOrNull()
+        if (!defaultLabel.isNullOrBlank()) {
+            ServiceLocator.preferences.setDefaultModelForAgent(agent.name, serverId, defaultLabel)
+        }
+        if (agent == Agent.CLAUDE) {
+            ai.eight24family.conch.agent.claude.claudeDefaultModelKeyFor(serverId)?.let { key ->
+                ServiceLocator.preferences.setDefaultModelWireKeyForAgent(agent.name, serverId, key)
+            }
+        }
         markProbed(serverId, agent)
         android.util.Log.d(
             TAG,
             "catalog warm ${spec.agent}@$serverId: probed=${map.keys} merged=${merged.keys} " +
+                "default=$defaultLabel " +
                 "levels=${rmap.values.firstOrNull()?.levels?.map { l -> l.effort }}",
         )
         return merged
     }
+
+    /** One bounded command over the pooled transport. Extracted so the tagged
+     *  [AgentExec] above stays readable. */
+    private suspend fun probeExec(client: SSHClient, cmd: String): String? =
+        SilentlyTry.logged(TAG, "catalog exec on pooled client") {
+            val sess = client.startSession()
+            try {
+                // Chokepoint: spec probes compose `bash -lc` scripts; the chat
+                // path runs them via execOnLive (portable), this warm-up path
+                // used to bypass the rewrite.
+                val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
+                val out = java.io.ByteArrayOutputStream()
+                // Bounded read: the deadline wraps the READ, not the join after it.
+                ai.eight24family.conch.ssh.BoundedExec.drain(
+                    proc, out,
+                    deadlineMs = ai.eight24family.conch.ssh.BoundedExec.Deadline.INTERACTIVE_MS,
+                    maxBytes = ai.eight24family.conch.ssh.BoundedExec.Cap.INTERACTIVE,
+                )
+                proc.join(60, java.util.concurrent.TimeUnit.SECONDS)
+                String(out.toByteArray(), Charsets.UTF_8)
+            } finally {
+                SilentlyTry.fired(TAG, "close catalog exec session") { sess.close() }
+            }
+        }
 }

@@ -48,6 +48,10 @@ fun AgentsOverviewScreen(
     onOpenKeychainForDiscover: (serverId: String) -> Unit = {},
     onOpenKeychainForRegister: (serverId: String) -> Unit = {},
     onOpenChatFromSearch: (sessionId: String, msgId: String, ordinal: Int, query: String, charOffset: Int) -> Unit = { _, _, _, _, _ -> },
+    /** A downloaded LOCAL model row was tapped on the phone's panel → open a
+     *  Codex chat with `local:<modelId>` as the session model. */
+    onOpenLocalModels: () -> Unit = {},
+    onOpenLocalModelChat: (serverId: String, modelId: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     vm: AgentsOverviewViewModel = viewModel(),
 ) {
@@ -100,6 +104,8 @@ fun AgentsOverviewScreen(
                             onManageServer = onManageServer,
                             onOpenKeychainForDiscover = onOpenKeychainForDiscover,
                             onOpenKeychainForRegister = onOpenKeychainForRegister,
+                            onOpenLocalModelChat = onOpenLocalModelChat,
+                            onOpenLocalModels = onOpenLocalModels,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                     }
@@ -126,6 +132,8 @@ private fun ServerSection(
     onManageServer: (serverId: String) -> Unit,
     onOpenKeychainForDiscover: (serverId: String) -> Unit,
     onOpenKeychainForRegister: (serverId: String) -> Unit,
+    onOpenLocalModelChat: (serverId: String, modelId: String) -> Unit = { _, _ -> },
+    onOpenLocalModels: () -> Unit = {},
 ) {
     val cyan = MaterialTheme.colorScheme.primary
     val dim = MaterialTheme.colorScheme.outline
@@ -241,6 +249,8 @@ private fun ServerSection(
             onPickAgent = { agent -> onOpenChat(entry.server.id, agent) },
             onOpenKeychainForDiscover = onOpenKeychainForDiscover,
             onOpenKeychainForRegister = onOpenKeychainForRegister,
+            onPickLocalModel = { modelId -> onOpenLocalModelChat(entry.server.id, modelId) },
+            onOpenLocalModels = onOpenLocalModels,
             modifier = Modifier.padding(start = 18.dp, end = 8.dp, bottom = 6.dp),
         )
     }

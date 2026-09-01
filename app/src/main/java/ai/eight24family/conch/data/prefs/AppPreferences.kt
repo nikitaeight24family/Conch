@@ -86,17 +86,31 @@ class AppPreferences(private val context: Context) {
     // What the CLI runs when no `--model` is passed, per agent. Persisted so a
     // NEW chat can show its real default at frame zero: the value is discovered
     // by the live `/model` probe, and keeping it only in memory meant every
-    // process restart produced an empty model chip until something re-probed.
-    private fun defaultModelKeyFor(agent: String) =
-        stringPreferencesKey("agent_default_model_${agent.uppercase()}_v1")
+    // process restart produced an empty model chip until something re-probed. ⛔
+    // PER SERVER, AND THE KEY SAYS SO.
+    //
+    // v1 was one slot per agent, so the last server probed owned "the default"
+    // for every server — a new chat on a box whose CLI runs sonnet showed the
+    // opus the other box had answered with, and the launch (no `--model` on a
+    // fresh chat, on purpose) let the CLI start on its own default anyway. The
+    // chip lied until the first `system.init` corrected it (2026-08-30).
+    //
+    // The old v1 keys are deliberately NOT read as a fallback: their value is
+    // "some server's default", which is precisely the thing that was wrong.
+    // An unknown server shows no default until its own CLI answers — which the
+    // handshake does within a second of the chat opening.
+    private fun defaultModelKeyFor(agent: String, serverId: String) =
+        stringPreferencesKey("agent_default_model_${agent.uppercase()}_srv_${serverId}_v2")
 
     /** The WIRE KEY of that same default (`opus[1m]`), not its label. Persisted
      *  next to the label because the launch resolution needs the key and had
      *  nothing to read at cold start — it then fell back to the first catalog
      *  entry, which after the scraper→registry migration is a STALE key, and
-     *  launched `--model sonnet` under an "Opus 5 1M" chip (2026-08-02). */
-    private fun defaultModelWireKeyFor(agent: String) =
-        stringPreferencesKey("agent_default_model_key_${agent.uppercase()}_v1")
+     *  launched `--model sonnet` under an "Opus 5 1M" chip (2026-08-02).
+     *  Per server for the same reason as [defaultModelKeyFor]: label and key
+     *  are one fact about one box and must never come from different ones. */
+    private fun defaultModelWireKeyFor(agent: String, serverId: String) =
+        stringPreferencesKey("agent_default_model_key_${agent.uppercase()}_srv_${serverId}_v2")
     private val userHeldServerIdsKey = stringPreferencesKey("user_held_server_ids")
     private val highRefreshRateKey = booleanPreferencesKey("high_refresh_rate_enabled")
     private val stopOrdersKey = stringPreferencesKey("stop_orders")
@@ -208,13 +222,18 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { it[reasoningCatalogKeyFor(agent)] = raw }
     }
 
-    /** The CLI's own default model for [agent] — null when never probed. */
-    fun defaultModelForAgent(agent: String): Flow<String?> =
-        context.dataStore.data.map { p -> p[defaultModelKeyFor(agent)]?.takeIf { it.isNotBlank() } }
+    /** What [agent]'s CLI starts on with no `--model` ON [serverId] — null when
+     *  that server has never told us. Never another server's answer. */
+    fun defaultModelForAgent(agent: String, serverId: String?): Flow<String?> {
+        if (serverId.isNullOrBlank()) return kotlinx.coroutines.flow.flowOf(null)
+        return context.dataStore.data.map { p ->
+            p[defaultModelKeyFor(agent, serverId)]?.takeIf { it.isNotBlank() }
+        }
+    }
 
-    suspend fun setDefaultModelForAgent(agent: String, model: String) {
-        if (model.isBlank()) return
-        context.dataStore.edit { it[defaultModelKeyFor(agent)] = model }
+    suspend fun setDefaultModelForAgent(agent: String, serverId: String?, model: String) {
+        if (model.isBlank() || serverId.isNullOrBlank()) return
+        context.dataStore.edit { it[defaultModelKeyFor(agent, serverId)] = model }
     }
 
     /**
@@ -241,13 +260,17 @@ class AppPreferences(private val context: Context) {
     private fun registryModelKeysFor(agent: String) =
         stringPreferencesKey("agent_registry_model_keys_${agent.uppercase()}_v1")
 
-    /** Wire key of the CLI's default model — see [defaultModelWireKeyFor]. */
-    fun defaultModelWireKeyForAgent(agent: String): Flow<String?> =
-        context.dataStore.data.map { p -> p[defaultModelWireKeyFor(agent)]?.takeIf { it.isNotBlank() } }
+    /** Wire key of that server's default model — see [defaultModelWireKeyFor]. */
+    fun defaultModelWireKeyForAgent(agent: String, serverId: String?): Flow<String?> {
+        if (serverId.isNullOrBlank()) return kotlinx.coroutines.flow.flowOf(null)
+        return context.dataStore.data.map { p ->
+            p[defaultModelWireKeyFor(agent, serverId)]?.takeIf { it.isNotBlank() }
+        }
+    }
 
-    suspend fun setDefaultModelWireKeyForAgent(agent: String, key: String) {
-        if (key.isBlank()) return
-        context.dataStore.edit { it[defaultModelWireKeyFor(agent)] = key }
+    suspend fun setDefaultModelWireKeyForAgent(agent: String, serverId: String?, key: String) {
+        if (key.isBlank() || serverId.isNullOrBlank()) return
+        context.dataStore.edit { it[defaultModelWireKeyFor(agent, serverId)] = key }
     }
 
     /**
@@ -364,7 +387,7 @@ class AppPreferences(private val context: Context) {
 
     suspend fun unsentQueueOnce(chatId: String): List<UnsentMessage> {
         val raw = context.dataStore.data.first()[unsentQueueKey(chatId)] ?: return emptyList()
-        return SilentlyTry.loggedOrElse("SshAi-Prefs", "parse unsent queue", emptyList()) {
+        return SilentlyTry.loggedOrElse("Conch-Prefs", "parse unsent queue", emptyList()) {
             val arr = org.json.JSONArray(raw)
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -414,7 +437,7 @@ class AppPreferences(private val context: Context) {
     }
 
     val themeMode: Flow<ThemeMode> = context.dataStore.data.map { p ->
-        SilentlyTry.loggedOrElse("SshAi-Prefs", "parse themeMode", ThemeMode.SYSTEM) { ThemeMode.valueOf(p[themeKey] ?: "SYSTEM") }
+        SilentlyTry.loggedOrElse("Conch-Prefs", "parse themeMode", ThemeMode.SYSTEM) { ThemeMode.valueOf(p[themeKey] ?: "SYSTEM") }
     }
 
     val enterSends: Flow<Boolean> = context.dataStore.data.map { p ->
@@ -643,7 +666,7 @@ class AppPreferences(private val context: Context) {
      */
     val downloadsFolderUri: Flow<android.net.Uri?> = context.dataStore.data.map { p ->
         p[downloadsFolderUriKey]?.takeIf { it.isNotBlank() }
-            ?.let { SilentlyTry.logged("SshAi-Prefs", "parse downloads folder uri") { android.net.Uri.parse(it) } }
+            ?.let { SilentlyTry.logged("Conch-Prefs", "parse downloads folder uri") { android.net.Uri.parse(it) } }
     }
 
     /** Human-readable label for the chosen folder (e.g.
@@ -718,7 +741,7 @@ class AppPreferences(private val context: Context) {
      *  and switching it silently would surprise existing users. New users opt
      *  down via the topbar shield icon. */
     val approvalMode: Flow<AgentApprovalMode> = context.dataStore.data.map { p ->
-        SilentlyTry.loggedOrElse("SshAi-Prefs", "parse approval mode", AgentApprovalMode.YOLO) {
+        SilentlyTry.loggedOrElse("Conch-Prefs", "parse approval mode", AgentApprovalMode.YOLO) {
             AgentApprovalMode.valueOf(p[approvalKey] ?: "YOLO")
         }
     }
@@ -739,7 +762,7 @@ class AppPreferences(private val context: Context) {
     fun approvalModeFor(agentKey: String): Flow<AgentApprovalMode> {
         val key = stringPreferencesKey("agent_approval_mode_${agentKey.lowercase()}")
         return context.dataStore.data.map { p ->
-            SilentlyTry.loggedOrElse("SshAi-Prefs", "parse per-agent approval mode", AgentApprovalMode.YOLO) {
+            SilentlyTry.loggedOrElse("Conch-Prefs", "parse per-agent approval mode", AgentApprovalMode.YOLO) {
                 AgentApprovalMode.valueOf(p[key] ?: p[approvalKey] ?: "YOLO")
             }
         }
@@ -1073,7 +1096,7 @@ class AppPreferences(private val context: Context) {
 
     /** Lock-screen visibility of the "tap your security key" prompt. */
     val skNotificationVisibility: Flow<SkNotificationVisibility> = context.dataStore.data.map { p ->
-        SilentlyTry.loggedOrElse("SshAi-Prefs", "parse sk notification visibility", SkNotificationVisibility.PRIVATE) {
+        SilentlyTry.loggedOrElse("Conch-Prefs", "parse sk notification visibility", SkNotificationVisibility.PRIVATE) {
             SkNotificationVisibility.valueOf(p[skNotificationVisibilityKey] ?: "PRIVATE")
         }
     }

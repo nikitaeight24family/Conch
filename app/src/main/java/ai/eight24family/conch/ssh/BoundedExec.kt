@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object BoundedExec {
 
-    private const val TAG = "SshAi-BoundedExec"
+    private const val TAG = "Conch-BoundedExec"
 
     /** What actually happened, so callers can say so instead of guessing. */
     data class Outcome(

@@ -282,7 +282,7 @@ internal class AgentSessionHistory(
             val preserved = merged.size - incoming.size
             if (preserved > 0) {
                 android.util.Log.d(
-                    "SshAi-Hist",
+                    "Conch-Hist",
                     "loadHistory: preserved $preserved un-synced user prompt(s) in place",
                 )
             }

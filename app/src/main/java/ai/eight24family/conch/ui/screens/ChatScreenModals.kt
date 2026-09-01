@@ -162,6 +162,31 @@ internal fun ChatModalsHost(
             onCancel = { vm.cancelModelSwitch() },
         )
     }
+    // A photo needs the model's vision pack and the network is METERED — the
+    // pack fetches itself on Wi-Fi, but mobile data asks with the exact size.
+    val pendingVision by vm.pendingVisionDownload.collectAsState()
+    pendingVision?.let { m ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { vm.cancelVisionDownload() },
+            title = { androidx.compose.material3.Text("Mobile data") },
+            text = {
+                androidx.compose.material3.Text(
+                    "${m.label} needs its vision pack to see images — download " +
+                        "${ai.eight24family.conch.linux.PhoneResources.gb(m.mmprojBytes)} GB over mobile data?",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.confirmVisionDownload() }) {
+                    androidx.compose.material3.Text("Download")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.cancelVisionDownload() }) {
+                    androidx.compose.material3.Text("Cancel")
+                }
+            },
+        )
+    }
 }
 
 /**

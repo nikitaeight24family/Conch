@@ -41,7 +41,7 @@ object NetworkCost {
         notMeteredCapability?.not() ?: true
 
     fun isMetered(context: Context): Boolean = decideMetered(
-        SilentlyTry.loggedOrElse<Boolean?>("SshAi-Net", "read metered state", null) {
+        SilentlyTry.loggedOrElse<Boolean?>("Conch-Net", "read metered state", null) {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return@loggedOrElse null
             val net = cm.activeNetwork ?: return@loggedOrElse null
@@ -87,7 +87,7 @@ object NetworkCost {
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         }
         _online.value = validated(cm.activeNetwork)
-        SilentlyTry.fired("SshAi-Net", "register connectivity callback") {
+        SilentlyTry.fired("Conch-Net", "register connectivity callback") {
             cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
                     _online.value = validated(network)

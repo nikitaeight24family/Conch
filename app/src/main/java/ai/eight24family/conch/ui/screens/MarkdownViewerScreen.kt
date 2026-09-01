@@ -221,7 +221,7 @@ internal fun shareLocalFile(ctx: Context, uri: Uri, mime: String, filename: Stri
         putExtra(Intent.EXTRA_TITLE, filename)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    SilentlyTry.fired("SshAi-Viewer", "share file") {
+    SilentlyTry.fired("Conch-Viewer", "share file") {
         ctx.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }
@@ -232,5 +232,5 @@ internal fun openLocalFileExternally(ctx: Context, uri: Uri, mime: String) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    SilentlyTry.fired("SshAi-Viewer", "open file externally") { ctx.startActivity(intent) }
+    SilentlyTry.fired("Conch-Viewer", "open file externally") { ctx.startActivity(intent) }
 }

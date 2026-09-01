@@ -34,9 +34,9 @@ import java.io.File
  *     system delta). 100% = one full core busy on us; >100% means we
  *     are multi-threaded actively burning cores.
  *
- * Logs to `SshAi-Perf` at INFO level so it's easy to grep:
+ * Logs to `Conch-Perf` at INFO level so it's easy to grep:
  *   ```
- *   adb logcat -d --pid $(adb shell pidof ai.eight24family.conch) -s SshAi-Perf
+ *   adb logcat -d --pid $(adb shell pidof ai.eight24family.conch) -s Conch-Perf
  *   ```
  *
  * Also exposes [snapshot] as a [StateFlow] so a UI overlay can read
@@ -47,7 +47,7 @@ import java.io.File
  */
 object PerfMonitor {
 
-    private const val TAG = "SshAi-Perf"
+    private const val TAG = "Conch-Perf"
     private const val SAMPLE_INTERVAL_MS = 5_000L
 
     /** Current readings. Null fields = couldn't read this metric. */

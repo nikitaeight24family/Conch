@@ -139,8 +139,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
-import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.LocalConchHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import ai.eight24family.conch.agent.UsageReport
 import ai.eight24family.conch.ui.viewmodel.CostStats
 import kotlin.math.roundToInt
@@ -402,6 +402,76 @@ private fun CodeBlockedBanner(text: String) {
  *  inside itself. Paired with SubagentRosterRow's 0.38 so that both panels open
  *  at once still leave the prompt row — and a slice of chat — on screen. */
 private const val USAGE_PANEL_MAX_SCREEN_FRACTION = 0.28f
+
+/**
+ * The local-inference twin of [UsageBar]. A local model has no quota — its
+ * cost is HARDWARE, so the slot the plan-limits bar owns shows what the engine
+ * is doing to this phone instead: the compute readout of WHERE it runs (a cpu
+ * bar+percent when the CPU is the path, "gpu ● serving" under offload — GPU
+ * busy% is closed to apps), its resident ram, the phone's free ram, the
+ * temperature (a real cpu thermal zone over the bridge when armed, else
+ * battery — labeled), and the in-flight prompt%. Owner, 2026-08-31:;
+ * 2026-09-01: no CPU load when the model is on the GPU.
+ */
+@Composable
+private fun LocalTelemetryBar() {
+    var snap by remember { mutableStateOf<ai.eight24family.conch.linux.LocalLlmTelemetry.Snapshot?>(null) }
+    val engine by ai.eight24family.conch.linux.LocalLlmEngine.state.collectAsState()
+    LaunchedEffect(Unit) {
+        while (true) {
+            snap = ai.eight24family.conch.linux.LocalLlmTelemetry.sample()
+            kotlinx.coroutines.delay(2_000L)
+        }
+    }
+    val s = snap ?: return
+    val gb = ai.eight24family.conch.linux.PhoneResources::gb
+    val up = engine as? ai.eight24family.conch.linux.LocalLlmEngine.State.Up
+    val text = buildString {
+        // The compute readout follows where inference actually runs. Under GPU
+        // offload the CPU is near-idle (tokenize/sample only) — its % is not
+        // the story and reads as a lie, and GPU busy% is SELinux-closed to
+        // apps, so the GPU is stated, not fabricated. CPU load shows ONLY when
+        // the CPU is the path.
+        val pct = s.cpuPct
+        when {
+            up?.gpu == true -> append("gpu ● serving")
+            pct != null -> {
+                val filled = (pct * 8 + 50) / 100
+                append("cpu ")
+                repeat(filled.coerceIn(0, 8)) { append('▰') }
+                repeat((8 - filled).coerceIn(0, 8)) { append('▱') }
+                append(' '); append(pct); append('%')
+            }
+            else -> append("engine off")
+        }
+        // llm = the engine's own resident set; ram = the PHONE, used/total —
+        // "ram 2.1G" alone read as the device having 2 GB.
+        s.rssBytes?.let { append("  llm "); append(gb(it)); append('G') }
+        append("  ram "); append(gb(s.ramTotalBytes - s.ramFreeBytes))
+        append('/'); append(gb(s.ramTotalBytes)); append('G')
+        s.tempC?.let {
+            append("  ")
+            append(String.format(java.util.Locale.US, "%.1f", it)); append('°')
+            if (s.tempSource == "batt") append(" batt")
+        }
+        // The moving number that separates "working on a huge prompt" from
+        // "dead": prompt digestion of the in-flight request, cache included.
+        s.prefillPct?.let { append("  prompt "); append(it); append('%') }
+    }
+    // No GPU line: the platform hides real GPU utilization from apps (every
+    // kgsl busy node is Permission denied, GPU dmabuf buffers never appear in
+    // smaps), and a line that can't carry a live number is noise the owner
+    // asked removed. The offload FACT still shows on the models panel engine
+    // row.
+    Text(
+        text,
+        color = MaterialTheme.colorScheme.outline,
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+        maxLines = 1,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+    )
+}
 
 @Composable
 private fun UsageBar(
@@ -822,6 +892,10 @@ internal fun PromptBar(
     usageCost: CostStats,
     usageExpanded: Boolean,
     onUsageExpandedChange: (Boolean) -> Unit,
+    /** Local-brain chat (codex @ this phone): the plan-limits bar would be a
+     *  lie — a local model has no quota, its cost is HARDWARE. Show the
+     *  engine's live cpu / ram / heat instead. */
+    localTelemetry: Boolean = false,
     contextBreakdown: List<ai.eight24family.conch.agent.ContextSegment>? = null,
     contextLoading: Boolean = false,
     claudePlan: String? = null,
@@ -919,8 +993,11 @@ internal fun PromptBar(
         // stale "12% · resets now" from when the plan was live), so replace it
         // with an honest warning — the dead subscription must read as dead here
         // too, not just on the agent-picker row.
-        if (codeBlocked) CodeBlockedBanner(codeBlockText ?: "This account can't run Claude Code right now.")
-        else UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, claudePlan)
+        when {
+            localTelemetry -> LocalTelemetryBar()
+            codeBlocked -> CodeBlockedBanner(codeBlockText ?: "This account can't run Claude Code right now.")
+            else -> UsageBar(usage, usageReport, usageCost, usageExpanded, onUsageExpandedChange, contextBreakdown, contextLoading, claudePlan)
+        }
 
         // Staged attachments strip.
         // AUDIO gets a full-width player row instead of a 64dp square: a voice
@@ -1102,7 +1179,7 @@ internal fun PromptBar(
                 sendEnabled -> cyan
                 else -> outline
             }
-            val sendHaptic = ai.eight24family.conch.ui.haptic.LocalSshAiHaptics.current
+            val sendHaptic = ai.eight24family.conch.ui.haptic.LocalConchHaptics.current
             IconButton(
                 onClick = {
                     // Tap on send, Heavy on stop (stop is consequential
@@ -1110,9 +1187,9 @@ internal fun PromptBar(
                     // the more emphatic feedback).
                     sendHaptic.perform(
                         if (showStop)
-                            ai.eight24family.conch.ui.haptic.SshAiHaptic.Heavy
+                            ai.eight24family.conch.ui.haptic.ConchHaptic.Heavy
                         else
-                            ai.eight24family.conch.ui.haptic.SshAiHaptic.Tap
+                            ai.eight24family.conch.ui.haptic.ConchHaptic.Tap
                     )
                     if (showStop) onStop() else onSend()
                 },
@@ -1375,7 +1452,7 @@ internal fun AttachmentChip(att: StagedAttachment, onRemove: () -> Unit) {
             // megabytes of JPEG, i.e. tens of MB of pixels), and RGB_565 halves
             // the chip again: an opaque 64 dp thumbnail can't show the difference.
             val bitmap: ImageBitmap? = remember(att.id) {
-                SilentlyTry.logged("SshAi-ChatPrompt", "decode attachment bitmap") {
+                SilentlyTry.logged("Conch-ChatPrompt", "decode attachment bitmap") {
                     val file = att.localFile
                     if (att.bytes.isNotEmpty()) {
                         ai.eight24family.conch.util.Bitmaps
@@ -1550,7 +1627,7 @@ private fun ingestUri(
     // stream to a temp file in cacheDir, never materialising it in the heap.
     val keepInMemory = isImage && size in 0..MAX_INMEM_ATTACHMENT_BYTES
     if (keepInMemory) {
-        val bytes = SilentlyTry.logged("SshAi-ChatPrompt", "read attachment bytes") {
+        val bytes = SilentlyTry.logged("Conch-ChatPrompt", "read attachment bytes") {
             ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
         } ?: return
         onAddAttachment(bytes, name, mime)
@@ -1558,12 +1635,12 @@ private fun ingestUri(
     }
     val dir = java.io.File(ctx.cacheDir, "conch_uploads").apply { mkdirs() }
     val tmp = java.io.File(dir, "${System.currentTimeMillis()}_${name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)}")
-    val ok = SilentlyTry.logged("SshAi-ChatPrompt", "stream attachment to temp") {
+    val ok = SilentlyTry.logged("Conch-ChatPrompt", "stream attachment to temp") {
         ctx.contentResolver.openInputStream(uri)?.use { input ->
             tmp.outputStream().use { out -> input.copyTo(out, 64 * 1024) }
         } != null
     } == true
-    if (!ok || !tmp.exists()) { SilentlyTry.fired("SshAi-ChatPrompt", "delete failed temp") { tmp.delete() }; return }
+    if (!ok || !tmp.exists()) { SilentlyTry.fired("Conch-ChatPrompt", "delete failed temp") { tmp.delete() }; return }
     onAddFileAttachment(tmp, name, mime, tmp.length())
 }
 
@@ -1580,7 +1657,7 @@ private const val CAMERA_DIR = "conch_camera"
  * locked-down work profile — so the caller can leave the tile out instead of
  * launching an intent that resolves to nothing and looks like a crash.
  */
-private fun newCaptureUri(ctx: Context): Uri? = SilentlyTry.logged("SshAi-ChatPrompt", "create capture uri") {
+private fun newCaptureUri(ctx: Context): Uri? = SilentlyTry.logged("Conch-ChatPrompt", "create capture uri") {
     val dir = java.io.File(ctx.cacheDir, CAMERA_DIR).apply { mkdirs() }
     val file = java.io.File(dir, "cam_${System.currentTimeMillis()}.jpg")
     androidx.core.content.FileProvider.getUriForFile(
@@ -1592,7 +1669,7 @@ private fun newCaptureUri(ctx: Context): Uri? = SilentlyTry.logged("SshAi-ChatPr
  *  anything an earlier run left behind — a process death between capture and
  *  ingest would otherwise leak a photo into the cache for good. */
 private fun cleanUpCapture(ctx: Context, uri: Uri?) {
-    SilentlyTry.fired("SshAi-ChatPrompt", "clean capture temp") {
+    SilentlyTry.fired("Conch-ChatPrompt", "clean capture temp") {
         uri?.lastPathSegment?.substringAfterLast('/')?.let { name ->
             java.io.File(java.io.File(ctx.cacheDir, CAMERA_DIR), name).delete()
         }
@@ -1604,17 +1681,17 @@ private fun cleanUpCapture(ctx: Context, uri: Uri?) {
 
 /** True when something on this device can service ACTION_IMAGE_CAPTURE. */
 private fun hasCameraApp(ctx: Context): Boolean =
-    SilentlyTry.loggedOrElse("SshAi-ChatPrompt", "resolve camera app", false) {
+    SilentlyTry.loggedOrElse("Conch-ChatPrompt", "resolve camera app", false) {
         ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
     }
 
-private fun querySize(ctx: Context, uri: Uri): Long = SilentlyTry.loggedOrElse("SshAi-ChatPrompt", "query attachment size", -1L) {
+private fun querySize(ctx: Context, uri: Uri): Long = SilentlyTry.loggedOrElse("Conch-ChatPrompt", "query attachment size", -1L) {
     ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
         if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
     } ?: -1L
 }
 
-private fun queryDisplayName(ctx: Context, uri: Uri): String? = SilentlyTry.logged("SshAi-ChatPrompt", "query attachment display name") {
+private fun queryDisplayName(ctx: Context, uri: Uri): String? = SilentlyTry.logged("Conch-ChatPrompt", "query attachment display name") {
     ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
         if (c.moveToFirst()) c.getString(0) else null
     }

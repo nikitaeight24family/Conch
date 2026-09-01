@@ -94,7 +94,7 @@ class SecurityKeyRegistrar {
         pinProvider: () -> CharArray?,
         onlyRpIdPrefix: String? = "ssh:",
     ): Outcome {
-        val tag = "SshAi-SK-Import"
+        val tag = "Conch-SK-Import"
         android.util.Log.d(tag, "begin transport=${device.transport}")
 
         return runOnSession(device) { session ->
@@ -147,7 +147,7 @@ class SecurityKeyRegistrar {
                 return@runOnSession when (e.ctapError) {
                     CtapException.ERR_PIN_INVALID,
                     CtapException.ERR_PIN_AUTH_INVALID -> Outcome.WrongPin(
-                        attemptsLeft = SilentlyTry.logged("SshAi-SK-Reg", "read pin retries (enroll)") { clientPin.pinRetries.count }
+                        attemptsLeft = SilentlyTry.logged("Conch-SK-Reg", "read pin retries (enroll)") { clientPin.pinRetries.count }
                     )
                     CtapException.ERR_PIN_BLOCKED,
                     CtapException.ERR_PIN_AUTH_BLOCKED -> Outcome.PinBlocked
@@ -217,7 +217,7 @@ class SecurityKeyRegistrar {
                     // the CTAP response. credProtect=3 or hmac-secret w/ UV=true
                     // would indicate the credential was created with
                     // -O verify-required and getAssertion will need pinUvAuthParam.
-                    android.util.Log.d(tag, "      cred raw fields: ${cred::class.simpleName} keys=${SilentlyTry.loggedOrElse("SshAi-SK-Reg", "render cred toString", "?") { cred.toString().take(200) }}")
+                    android.util.Log.d(tag, "      cred raw fields: ${cred::class.simpleName} keys=${SilentlyTry.loggedOrElse("Conch-SK-Reg", "render cred toString", "?") { cred.toString().take(200) }}")
                 }
             }
             if (imported.isEmpty()) Outcome.NoResidentCredentials
@@ -251,7 +251,7 @@ class SecurityKeyRegistrar {
         displayName: String,
         rpId: String = "ssh:",
     ): Outcome {
-        val tag = "SshAi-SK-Register"
+        val tag = "Conch-SK-Register"
         android.util.Log.d(tag, "begin transport=${device.transport}")
 
         return runOnSession(device) { session ->
@@ -275,7 +275,7 @@ class SecurityKeyRegistrar {
                 return@runOnSession when (e.ctapError) {
                     CtapException.ERR_PIN_INVALID,
                     CtapException.ERR_PIN_AUTH_INVALID -> Outcome.WrongPin(
-                        attemptsLeft = SilentlyTry.logged("SshAi-SK-Reg", "read pin retries (sign)") { clientPin.pinRetries.count },
+                        attemptsLeft = SilentlyTry.logged("Conch-SK-Reg", "read pin retries (sign)") { clientPin.pinRetries.count },
                     )
                     CtapException.ERR_PIN_BLOCKED,
                     CtapException.ERR_PIN_AUTH_BLOCKED -> Outcome.PinBlocked
@@ -289,7 +289,7 @@ class SecurityKeyRegistrar {
             // even forward this value. Just needs to be a 32-byte SHA-256
             // hash so the token doesn't reject the request shape.
             val clientDataHash = MessageDigest.getInstance("SHA-256")
-                .digest("ssh.ai-register".toByteArray(Charsets.UTF_8))
+                .digest("conch-register".toByteArray(Charsets.UTF_8))
 
             val rp = mapOf<String, Any>("id" to rpId, "name" to "SSH")
             val userId = ByteArray(16).also { SecureRandom().nextBytes(it) }

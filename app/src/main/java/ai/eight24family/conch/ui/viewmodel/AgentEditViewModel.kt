@@ -31,7 +31,7 @@ class AgentEditViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Encoded by the route helper; URLDecode here. */
     val path: String? = savedStateHandle.get<String>("path")
         ?.takeIf { it.isNotBlank() }
-        ?.let { SilentlyTry.logged("SshAi-AgentEdit", "URLDecode agent path") { URLDecoder.decode(it, "UTF-8") } }
+        ?.let { SilentlyTry.logged("Conch-AgentEdit", "URLDecode agent path") { URLDecoder.decode(it, "UTF-8") } }
 
     val isNew: Boolean get() = path == null
 

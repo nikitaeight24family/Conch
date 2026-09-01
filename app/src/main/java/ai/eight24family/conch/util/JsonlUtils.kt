@@ -198,7 +198,7 @@ object JsonlUtils {
                     onOversize(String(head, Charsets.UTF_8), size.toLong())
                 } else {
                     android.util.Log.w(
-                        "SshAi-Jsonl",
+                        "Conch-Jsonl",
                         "skipping oversized JSONL line (${size}B > ${MAX_LINE_BYTES}B) — no oversize handler"
                     )
                 }

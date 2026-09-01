@@ -86,7 +86,7 @@ class YubikitSkSigner(
 ) : SkSigner {
 
     override fun sign(clientDataHash: ByteArray): SkSignResult {
-        val tag = "SshAi-SK-Sign"
+        val tag = "Conch-SK-Sign"
         android.util.Log.d(tag, "sign: enter (challenge=${clientDataHash.size}B credId=${credentialIdBase64.length}B64)")
         if (clientDataHash.size != 32) {
             throw SkAuthException("clientDataHash must be 32 bytes, got ${clientDataHash.size}")
@@ -312,7 +312,7 @@ class DeferredCtapSkSigner(
     fun cancel(reason: String = "user cancelled") = holder.cancel(reason)
 
     override fun sign(clientDataHash: ByteArray): SkSignResult {
-        val tag = "SshAi-SK-Sign"
+        val tag = "Conch-SK-Sign"
         android.util.Log.d(tag, "deferred sign(${credentialIdBase64.take(8)}): enter — phase=${holder.phase.value}")
         if (clientDataHash.size != 32) {
             throw SkAuthException("clientDataHash must be 32 bytes, got ${clientDataHash.size}")

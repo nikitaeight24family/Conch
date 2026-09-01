@@ -137,8 +137,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
-import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.LocalConchHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
@@ -543,7 +543,7 @@ internal fun UserLine(text: String) {
     androidx.compose.runtime.LaunchedEffect(effectiveQuery) {
         if (effectiveQuery != null) {
             android.util.Log.d(
-                "SshAi-Hl",
+                "Conch-Hl",
                 "UserLine match q=«${effectiveQuery}» rawOff=$rawCharOffset msg=${myId} text=${text.take(60)}"
             )
         }
@@ -832,7 +832,7 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
     androidx.compose.runtime.LaunchedEffect(effectiveQuery) {
         if (effectiveQuery != null) {
             android.util.Log.d(
-                "SshAi-Hl",
+                "Conch-Hl",
                 "AssistantLine match q=«${effectiveQuery}» rawOff=$rawCharOffset msg=${myId} text=${text.take(60)}"
             )
         }

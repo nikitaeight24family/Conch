@@ -254,7 +254,7 @@ esac
             val slug = m.groupValues[1]
             out[slug] = copilotLabelFromId(slug)
         }
-        android.util.Log.d("SshAi-Models", "copilot help-config probe: ${out.size - 1} models")
+        android.util.Log.d("Conch-Models", "copilot help-config probe: ${out.size - 1} models")
         // Only the synthetic "auto" ⇒ the probe failed — return empty so the
         // caller keeps its cached catalog instead of a one-row picker.
         return if (out.size > 1) out else emptyMap()

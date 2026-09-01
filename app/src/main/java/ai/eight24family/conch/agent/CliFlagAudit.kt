@@ -30,7 +30,7 @@ import ai.eight24family.conch.util.SilentlyTry
  */
 object CliFlagAudit {
 
-    private const val TAG = "SshAi-FlagAudit"
+    private const val TAG = "Conch-FlagAudit"
 
     /** One mode's verdict. [error] is the CLI's own first complaint. */
     data class ModeVerdict(

@@ -18,7 +18,7 @@ import java.io.InputStreamReader
  *
  * Output looks like:
  * ```
- * 05-08 12:00:00.123  1234  1234 D SshAi-Pool: acquire(...) MISS
+ * 05-08 12:00:00.123  1234  1234 D Conch-Pool: acquire(...) MISS
  * ```
  */
 class OwnUidLogCapture : LogCaptureService {
@@ -50,7 +50,7 @@ class OwnUidLogCapture : LogCaptureService {
         }
         // `-d` mode causes logcat to exit on its own when it has
         // dumped the buffer. If we hit `maxLines` first, kill it.
-        SilentlyTry.fired("SshAi-OwnLog", "destroy logcat process") { process.destroy() }
+        SilentlyTry.fired("Conch-OwnLog", "destroy logcat process") { process.destroy() }
 
         LogCaptureService.CaptureResult(
             text = sb.toString(),
@@ -69,7 +69,7 @@ class OwnUidLogCapture : LogCaptureService {
         // Cap the line count at the logcat side so we don't even
         // spool extra lines into our process.
         args += listOf("-t", req.maxLines.toString())
-        // Tag filter: convert "SshAi-*" into a `*:S SshAi-*:V`
+        // Tag filter: convert "Conch-*" into a `*:S Conch-*:V`
         // logcat-filterspec. With no tag filter, default to "*:V"
         // truncated by --uid above.
         if (req.tagFilter.isNullOrBlank()) {

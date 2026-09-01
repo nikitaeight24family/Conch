@@ -1,4 +1,3 @@
-Neu
-• Fünf weitere Agenten — insgesamt zehn. Qwen Code, Cursor, opencode, Crush und Continue kommen zu Claude, Codex, Gemini, Grok und Copilot: eigener Parser, Sitzungen, Modellauswahl und Logo für jeden.
-• Die Sitzungsliste öffnet wieder sofort und wartet nicht mehr auf das Lesen aller Chats.
-• Die Telefon-Brücke antwortet auch bei ausgeschaltetem Display, Limit-Warnungen zeigen den echten Prozentwert.
+• Lokale Modelle sind jetzt echte Agenten – sofort einsatzbereit. Lade ein Modell und es steuert den Agenten: führt Shell-Befehle aus, liest Dateien, prüft dein Gerät – mit der passenden Chat-Vorlage. Keine Einrichtung: die App wählt für jedes Modell die passende CLI.
+• Jedes lokale Modell zeigt sein eigenes Logo überall in der App, mit einem Filter-Chip pro Modell.
+• Stabiler nach einem Neustart: kein Geister-Spinner, keine falschen Ungelesen-Markierungen.

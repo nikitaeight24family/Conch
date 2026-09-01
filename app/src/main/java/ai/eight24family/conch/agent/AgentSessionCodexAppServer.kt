@@ -70,7 +70,7 @@ internal class AgentSessionCodexAppServer(
     private val onPromptUndelivered: (String) -> Unit,
     private val onThinkingTokens: (Long?) -> Unit = {},
 ) {
-    private val tag = "SshAi-CodexApp"
+    private val tag = "Conch-CodexApp"
 
     @Volatile private var procSession: Session? = null
     @Volatile private var procCmd: Session.Command? = null
@@ -154,6 +154,50 @@ internal class AgentSessionCodexAppServer(
         // guard in the Claude stream + one-shot runner.
         sshLifecycle.userCancelled = false
         try {
+            // The phone's own brain must be SERVING before codex dials
+            // loopback — the channel twin of the exec path's ensure. First,
+            // because it is the slow half (weight load), and idempotent when
+            // the right model is already warm. On this row the channel is
+            // ALWAYS loopback-bound (see the launch), so with no explicit pick
+            // yet the first downloaded model serves rather than nothing.
+            // A CLOUD model on the phone needs codex's own sign-in. Without it
+            // codex retries api.openai.com forever and the chat shows a lying
+            // "waiting for network" (owner picked GPT-5.6-Luna, 2026-09-01,
+            // NO_AUTH measured). Say the real thing once and hand the prompt
+            // back instead of burning retries.
+            if (server.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID &&
+                !wantsLocalProvider() && !cloudAuthPresent()
+            ) {
+                history.emitMsg(
+                    AgentMessage.Error(
+                        UUID.randomUUID().toString(),
+                        "Codex isn't signed in on this device — open the agents panel to " +
+                            "log in, or pick one of this device's local models",
+                    ),
+                )
+                onPromptUndelivered(text)
+                onStateChange(SessionState.Running)
+                return@withContext true
+            }
+            if (server.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID && wantsLocalProvider()) {
+                val m = getModelOverride()
+                    ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+                    ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+                    ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+                    ?: ai.eight24family.conch.linux.LocalLlm.CATALOG.firstOrNull {
+                        ai.eight24family.conch.linux.LocalLlm.status(it) is ai.eight24family.conch.linux.LocalLlm.Status.Ready
+                    }
+                m?.let {
+                    SilentlyTry.logged(tag, "start local engine") {
+                        ai.eight24family.conch.linux.LocalLlmEngine.start(
+                            it,
+                            // The chat's effort pick doubles as the local
+                            // thinking switch — launch state for the engine.
+                            thinking = getReasoningOverride() == ai.eight24family.conch.linux.LocalLlm.EFFORT_THINKING,
+                        )
+                    }
+                }
+            }
             if (!ensureReady()) return@withContext false
             val tid = threadId ?: run { broken = true; return@withContext false }
             val done = CompletableDeferred<Boolean>()
@@ -164,7 +208,12 @@ internal class AgentSessionCodexAppServer(
             val curModel = getModelOverride()?.takeIf { it.isNotBlank() }
             val curEffort = getReasoningOverride()?.takeIf { it.isNotBlank() }
             if (lastEchoModel != null && curModel != null && curModel != lastEchoModel)
-                history.emitMsg(CodexMessageParser.note("model · $curModel", tone = AgentMessage.EventNote.Tone.INFO))
+                history.emitMsg(
+                    CodexMessageParser.note(
+                        "model · ${ai.eight24family.conch.linux.LocalLlm.cliModelName(curModel)}",
+                        tone = AgentMessage.EventNote.Tone.INFO,
+                    ),
+                )
             if (lastEchoEffort != null && curEffort != null && curEffort != lastEchoEffort)
                 history.emitMsg(CodexMessageParser.note("effort · $curEffort", tone = AgentMessage.EventNote.Tone.INFO))
             lastEchoModel = curModel ?: lastEchoModel
@@ -179,8 +228,14 @@ internal class AgentSessionCodexAppServer(
                     id = turnReqId,
                     threadId = tid,
                     text = text,
-                    model = getModelOverride()?.takeIf { it.isNotBlank() },
-                    effort = getReasoningOverride()?.takeIf { it.isNotBlank() },
+                    model = getModelOverride()?.takeIf { it.isNotBlank() }
+                        ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
+                    // Local levels (instant/thinking) are the ENGINE's launch
+                    // switch, not a codex effort — codex validates its enum and
+                    // would refuse the turn.
+                    effort = getReasoningOverride()?.takeIf {
+                        it.isNotBlank() && !ai.eight24family.conch.linux.LocalLlm.isLocalEffort(it)
+                    },
                     approval = getApprovalMode(),
                     cwd = cwdSnapshot(),
                     imagePaths = imagePaths,
@@ -289,10 +344,52 @@ internal class AgentSessionCodexAppServer(
         }
     }
 
+    /** Cached per channel process: does the phone's codex have its own cloud
+     *  sign-in (~/.codex/auth.json)? Cleared on teardown so a fresh login is
+     *  picked up by the next launch. */
+    @Volatile private var cloudAuthCache: Boolean? = null
+
+    private suspend fun cloudAuthPresent(): Boolean {
+        cloudAuthCache?.let { return it }
+        val client = sshLifecycle.liveClient() ?: return false
+        val present = SilentlyTry.loggedOrElse(tag, "probe codex auth", false) {
+            val sess = client.startSession()
+            try {
+                val cmd = sess.exec("test -f \$HOME/.codex/auth.json && echo YES")
+                val out = cmd.inputStream.bufferedReader().readText()
+                cmd.join(10, java.util.concurrent.TimeUnit.SECONDS)
+                "YES" in out
+            } finally {
+                SilentlyTry.fired(tag, "close auth probe") { sess.close() }
+            }
+        }
+        cloudAuthCache = present
+        return present
+    }
+
+    /** True when THIS chat's current model rides the phone's own engine —
+     *  decides the provider the channel must be launched with. No pick yet on
+     *  the phone's row defaults to local (the first downloaded model serves). */
+    private fun wantsLocalProvider(): Boolean {
+        if (server.id != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return false
+        val m = getModelOverride()?.takeIf { it.isNotBlank() } ?: return true
+        return m.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+    }
+
+    /** Provider mode the live process was launched with — switching a phone
+     *  chat between a local model and a cloud one (the picker offers both,
+     *  2026-09-01) changes launch params, so it restarts the channel like an
+     *  auth change does. A cloud pick against the baked loopback provider
+     *  dialed 127.0.0.1 with gpt-5 and spun "waiting for network" forever
+     *  (owner's screenshot). */
+    @Volatile private var launchedLocalProvider: Boolean? = null
+
     /** Process + handshake + thread open. True when a turn can be sent. */
     private suspend fun ensureReady(): Boolean {
         val authPrep = getAuthPrep()
-        if (procAlive && launchedAuthPrep == authPrep && threadId != null) return true
+        if (procAlive && launchedAuthPrep == authPrep && threadId != null &&
+            launchedLocalProvider == wantsLocalProvider()
+        ) return true
         // ⛔ A COLD START IS NOT "THE AGENT IS THINKING".
         //
         // Launching app-server and resuming a thread takes real time, and
@@ -321,13 +418,26 @@ internal class AgentSessionCodexAppServer(
             // continuously; protect it from receive-window starvation under
             // shared-transport contention (see [startStreamSession]).
             val sess = client.startStreamSession()
+            // The phone's own model rides through Codex's custom-provider
+            // flags, and the app-server carries provider config PER PROCESS —
+            // so it is baked into the channel launch. On the phone's row the
+            // provider follows the MODEL: local: → the loopback engine, a
+            // cloud slug → codex's normal OpenAI provider (the picker offers
+            // both since 2026-09-01). "No pick yet" counts as local, so the
+            // async seeding race of 2026-08-31 (fast first send dialed
+            // api.openai.com into a 401) stays closed; a provider-mode switch
+            // restarts the channel via ensureReady's idempotency key.
+            val wantsLocal = wantsLocalProvider()
+            val localProvider =
+                if (wantsLocal) ai.eight24family.conch.agent.codex.CodexSpec.localProviderArgs() else ""
             // stderr DROPPED — app-server logs there and any line would
             // corrupt the stdout JSONL framing.
-            val cmd = sess.exec(loginShell(authPrep + "codex app-server 2>/dev/null"))
+            val cmd = sess.exec(loginShell(authPrep + "codex app-server$localProvider 2>/dev/null"))
             procSession = sess
             procCmd = cmd
             procAlive = true
             launchedAuthPrep = authPrep
+            launchedLocalProvider = wantsLocal
             startReader(cmd)
         } catch (t: Throwable) {
             android.util.Log.w(tag, "app-server launch failed: ${t.message} — falling back to exec", t)
@@ -359,14 +469,16 @@ internal class AgentSessionCodexAppServer(
             if (rid != null) {
                 CodexAppServerWire.encodeThreadResume(
                     threadReqId, rid,
-                    model = getModelOverride()?.takeIf { it.isNotBlank() },
+                    model = getModelOverride()?.takeIf { it.isNotBlank() }
+                        ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
                     cwd = cwdSnapshot(),
                     approval = getApprovalMode(),
                 )
             } else {
                 CodexAppServerWire.encodeThreadStart(
                     threadReqId,
-                    model = getModelOverride()?.takeIf { it.isNotBlank() },
+                    model = getModelOverride()?.takeIf { it.isNotBlank() }
+                        ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
                     cwd = cwdSnapshot(),
                     approval = getApprovalMode(),
                 )
@@ -574,6 +686,21 @@ internal class AgentSessionCodexAppServer(
 
             "warning", "guardianWarning", "configWarning", "deprecationNotice" -> {
                 val text = params.str("summary") ?: params.str("message") ?: method
+                // Codex warns it has no metadata for any model outside its own
+                // catalog and falls back BY ITSELF — by design for a local
+                // model (there is nothing to look up), nothing to act on for
+                // any other. Never a line in the chat (same rule in
+                // CodexAppServerEvents.mapError, which carries the copy the
+                // error notification uses).
+                if (text.startsWith("Model metadata for")) return
+                // Codex-internal migration note on thread/resume (paginated
+                // threads) — self-directed, acts on nothing the user controls,
+                // and it printed in red on every resumed local chat.
+                if (text.startsWith("Full-history hydration is deprecated")) return
+                // Another self-directed housekeeping note (skills list got
+                // trimmed to fit ITS budget) — nothing the user can act on,
+                // and it printed red on every turn of a skills-heavy host.
+                if (text.startsWith("Skill descriptions were shortened")) return
                 history.emitMsg(CodexMessageParser.note(
                     text.take(140),
                     detail = params.str("details"),
@@ -852,6 +979,8 @@ internal class AgentSessionCodexAppServer(
     fun teardownProcess() {
         readerJob?.cancel()
         readerJob = null
+        // A login can happen between launches — never trust a stale verdict.
+        cloudAuthCache = null
         procCmd?.let { cmd ->
             SilentlyTry.fired(tag, "close app-server stdin") { cmd.outputStream.close() }
         }

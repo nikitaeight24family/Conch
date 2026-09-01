@@ -1,0 +1,21 @@
+<!-- Local models: an on-device chip with a live core — the mark for the
+     phone's own brains, deliberately vendor-neutral (models come and go,
+     the silicon stays). Cyan, matching the app's terminal accent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- chip body -->
+    <path
+        android:fillColor="#00E5D0"
+        android:pathData="M7,7h10a1,1 0,0 1,1 1v8a1,1 0,0 1,-1 1H7a1,1 0,0 1,-1 -1V8a1,1 0,0 1,1 -1zM8,9v6h8V9H8z"/>
+    <!-- core -->
+    <path
+        android:fillColor="#00E5D0"
+        android:pathData="M10.5,10.5h3v3h-3z"/>
+    <!-- pins -->
+    <path
+        android:fillColor="#00E5D0"
+        android:pathData="M9,3h1.6v3H9zM13.4,3H15v3h-1.6zM9,18h1.6v3H9zM13.4,18H15v3h-1.6zM3,9h3v1.6H3zM3,13.4h3V15H3zM18,9h3v1.6h-3zM18,13.4h3V15h-3z"/>
+</vector>

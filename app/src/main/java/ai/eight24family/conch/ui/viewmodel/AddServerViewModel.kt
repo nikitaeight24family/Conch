@@ -136,13 +136,13 @@ class AddServerViewModel(private val savedStateHandle: SavedStateHandle) : ViewM
         port = savedStateHandle["form_port"] ?: savedStateHandle.get<String>("port")?.toIntOrNull() ?: 22,
         user = savedStateHandle["form_user"] ?: "",
         authMethod = (savedStateHandle.get<String>("form_auth")
-            ?.let { SilentlyTry.logged("SshAi-AddServer", "parse auth method") { AuthMethod.valueOf(it) } })
+            ?.let { SilentlyTry.logged("Conch-AddServer", "parse auth method") { AuthMethod.valueOf(it) } })
             ?: AuthMethod.PASSWORD,
         password = "",
         // No default agent — the user must pick one (no more silent Claude
         // default). Null until picked / pre-filled from a saved edit.
         agent = savedStateHandle.get<String>("form_agent")
-            ?.let { SilentlyTry.logged("SshAi-AddServer", "parse agent") { Agent.valueOf(it) } },
+            ?.let { SilentlyTry.logged("Conch-AddServer", "parse agent") { Agent.valueOf(it) } },
         sshKeyIds = (savedStateHandle.get<String>("form_keyIds") ?: "")
             .split(",")
             .mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() } },
@@ -302,8 +302,8 @@ class AddServerViewModel(private val savedStateHandle: SavedStateHandle) : ViewM
         // one-shot cleanup.
         val id = heldConnectionId ?: return
         heldConnectionId = null
-        kotlin.concurrent.thread(isDaemon = true, name = "SshAi-AddServer-release") {
-            SilentlyTry.fired("SshAi-AddServer", "release warm test connection") {
+        kotlin.concurrent.thread(isDaemon = true, name = "Conch-AddServer-release") {
+            SilentlyTry.fired("Conch-AddServer", "release warm test connection") {
                 ServiceLocator.sshConnectionPool.release(id)
             }
         }
@@ -475,7 +475,7 @@ class AddServerViewModel(private val savedStateHandle: SavedStateHandle) : ViewM
             // one for a brand-new server, biased away from the hues already in
             // use so two servers never read as the same colour.
             colorHex = existing?.colorHex ?: ai.eight24family.conch.ui.theme.ServerAccent.randomHex(
-                SilentlyTry.loggedOrElse("SshAi-AddServer", "read taken colours", emptyList()) {
+                SilentlyTry.loggedOrElse("Conch-AddServer", "read taken colours", emptyList()) {
                     repo.observeServers().first().map { it.colorHex }
                 },
             ),

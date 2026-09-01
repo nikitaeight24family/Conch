@@ -6,13 +6,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -25,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ai.eight24family.conch.linux.LinuxEnv
 import ai.eight24family.conch.linux.LinuxInstaller
+import ai.eight24family.conch.linux.LinuxSsh
 import kotlinx.coroutines.launch
 
 /**
@@ -35,22 +37,39 @@ import kotlinx.coroutines.launch
  * user needs, installed from inside it. No root anywhere — the userland runs
  * under a syscall-rewriting runtime as the shell uid the phone bridge already
  * obtained, and believes it is root only within its own directory tree.
+ *
+ * ⛔ THIS PAGE IS THE ENVIRONMENT'S LIFECYCLE AND NOTHING ELSE — no agent list,
+ * no install buttons, no "open chat". Installing it REGISTERS THE PHONE AS A
+ * SERVER, and from that moment it is reached exactly like every other machine:
+ * the same list, the same picker, the same install / login / chat. A
+ * phone-shaped copy of those screens is a second thing to keep correct and a
+ * second thing for the owner to learn.
+ *
+ * What the old version of this page said — "Ready ✓" and three paragraphs
+ * restating the previous screen — is gone for the same reason. The one line
+ * kept is the SIZE, because that is the fact a phone owner decides on.
  */
 @Composable
 fun LinuxEnvironmentPanel() {
     val scope = rememberCoroutineScope()
 
-    var installed by remember { mutableStateOf<Boolean?>(null) }
-    var summary by remember { mutableStateOf<String?>(null) }
+    var presence by remember { mutableStateOf<LinuxEnv.Presence?>(null) }
     var size by remember { mutableStateOf<String?>(null) }
     var busyStep by remember { mutableStateOf<String?>(null) }
     var problem by remember { mutableStateOf<String?>(null) }
     var refresh by remember { mutableStateOf(0) }
+    var confirmRemove by remember { mutableStateOf(false) }
 
     LaunchedEffect(refresh) {
-        installed = LinuxEnv.isInstalled()
-        if (installed == true) {
-            summary = LinuxEnv.describe()
+        presence = LinuxEnv.presence()
+        if (presence == LinuxEnv.Presence.INSTALLED) {
+            // An environment set up by an older Conch keeps that Conch's
+            // runtime, and the runtime is what decides whether anything inside
+            // runs at all. Free once the versions agree.
+            LinuxInstaller.ensureRuntimeCurrent()
+            // And it is a machine, so it has a row — including when it was
+            // installed before that was true.
+            LinuxSsh.ensureRow()
             size = LinuxEnv.diskUsage()
         }
     }
@@ -65,38 +84,32 @@ fun LinuxEnvironmentPanel() {
                 LinuxAside("It takes a few seconds. Nothing is downloaded — the whole system ships inside Conch.")
             }
 
-            installed == null -> {
+            presence == null -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
                     LinuxBody("Checking…")
                 }
             }
 
-            installed == true -> {
-                SettingsRow(
-                    icon = Icons.Filled.CheckCircle,
-                    title = "Ready ✓",
-                    subtitle = summary ?: "Linux is running on this phone.",
-                )
-                LinuxBody(
-                    "Ask an agent to use it, or run anything yourself: it is a full userland with " +
-                        "its own package manager and this phone's internet connection. " +
-                        "`apk add python3 git` works exactly as it does on a server.",
-                )
-                size?.let { LinuxAside("Using $it.") }
+            presence == LinuxEnv.Presence.INSTALLED -> {
+                size?.let { LinuxAside("Using $it") }
+                LinuxBody("It is on the machines list, as any other machine is.")
                 OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            busyStep = "removing"
-                            LinuxEnv.remove()
-                            busyStep = null
-                            summary = null
-                            size = null
-                            refresh++
-                        }
-                    },
+                    onClick = { confirmRemove = true },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Remove") }
+                ) { Text("Remove Linux") }
+            }
+
+            presence == LinuxEnv.Presence.UNREACHABLE -> {
+                SettingsRow(
+                    icon = Icons.Filled.Terminal,
+                    title = "Phone shell not connected",
+                    subtitle = "The environment is installed; Conch cannot reach it right now.",
+                )
+                LinuxAside(
+                    "Turn Wireless debugging on once (Android only allows it on Wi-Fi) and it comes " +
+                        "back — nothing here has to be installed again.",
+                )
             }
 
             else -> {
@@ -137,6 +150,9 @@ fun LinuxEnvironmentPanel() {
                             problem = null
                             busyStep = "starting"
                             val err = LinuxInstaller.install { step -> busyStep = step }
+                            // The machine exists now, so it takes its place on
+                            // the list beside the others.
+                            if (err == null) LinuxSsh.ensureRow()
                             busyStep = null
                             problem = err
                             refresh++
@@ -146,6 +162,30 @@ fun LinuxEnvironmentPanel() {
                 ) { Text("Install Linux") }
             }
         }
+    }
+
+    if (confirmRemove) {
+        AlertDialog(
+            onDismissRequest = { confirmRemove = false },
+            title = { Text("Remove the Linux environment?") },
+            text = { Text("Everything installed inside it goes with it — the agents, their logins and anything you built there.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemove = false
+                    scope.launch {
+                        busyStep = "removing"
+                        LinuxSsh.forget()
+                        LinuxEnv.remove()
+                        busyStep = null
+                        size = null
+                        refresh++
+                    }
+                }) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

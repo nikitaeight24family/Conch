@@ -52,7 +52,7 @@ class AgentBridge(
     private val handler: BridgeHandler,
 ) {
 
-    private val tag = "SshAi-Bridge"
+    private val tag = "Conch-Bridge"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pollJob: Job? = null
     private val seenIds = LinkedHashSet<String>()
@@ -71,7 +71,7 @@ class AgentBridge(
                 val foreground = ai.eight24family.conch.util.AppForeground.isForeground
                 // Has the user ever wired a chat on THIS server to the phone? Only
                 // then can a `conch-bridge` request appear in its inbox at all.
-                val wired = SilentlyTry.loggedOrElse("SshAi-AgentBridge", "read phone-wired servers", false) {
+                val wired = SilentlyTry.loggedOrElse("Conch-AgentBridge", "read phone-wired servers", false) {
                     ai.eight24family.conch.di.ServiceLocator.preferences.phoneBridgeSessions
                         .first().any { it.startsWith("$serverId:") }
                 }
@@ -105,7 +105,7 @@ class AgentBridge(
                     runCatching { sweepStaleOutbox() }
                         .onFailure { android.util.Log.w(tag, "sweep failed: ${it.message}") }
                 }
-                val dataSaver = SilentlyTry.loggedOrElse("SshAi-AgentBridge", "read data saver pref", false) {
+                val dataSaver = SilentlyTry.loggedOrElse("Conch-AgentBridge", "read data saver pref", false) {
                     ai.eight24family.conch.di.ServiceLocator.preferences.dataSaverEnabled.first()
                 }
                 val base = if (foreground) POLL_INTERVAL_MS else POLL_INTERVAL_BACKGROUND_MS
@@ -198,7 +198,7 @@ class AgentBridge(
             seenIds.remove(filename)
             return
         }
-        val req = SilentlyTry.logged("SshAi-AgentBridge", "parse bridge request json") { JSON.parseToJsonElement(raw).jsonObject }
+        val req = SilentlyTry.logged("Conch-AgentBridge", "parse bridge request json") { JSON.parseToJsonElement(raw).jsonObject }
         if (req == null) {
             android.util.Log.w(tag, "  $filename: not JSON, deleting")
             execOnServer("rm -f \$HOME/.conch-bridge/inbox/'$filename'")
@@ -359,7 +359,7 @@ class AgentBridge(
     /** Fresh channel on the pooled client, exec, return stdout. */
     private suspend fun execOnServer(cmd: String): String? {
         val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return null
-        return SilentlyTry.logged("SshAi-AgentBridge", "exec on server") {
+        return SilentlyTry.logged("Conch-AgentBridge", "exec on server") {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(cmd)
@@ -372,14 +372,14 @@ class AgentBridge(
                 )
                 proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 String(out.toByteArray(), Charsets.UTF_8)
-            } finally { SilentlyTry.fired("SshAi-AgentBridge", "close exec session") { sess.close() } }
+            } finally { SilentlyTry.fired("Conch-AgentBridge", "close exec session") { sess.close() } }
         }
     }
 
     /** Pipe [stdin] into [cmd]; useful for `cat > path` writes. */
     private suspend fun execOnServerWithStdin(cmd: String, stdin: ByteArray): Boolean {
         val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return false
-        return SilentlyTry.loggedOrElse("SshAi-AgentBridge", "exec with stdin", false) {
+        return SilentlyTry.loggedOrElse("Conch-AgentBridge", "exec with stdin", false) {
             val sess = client.startSession()
             try {
                 val proc = sess.exec(cmd)
@@ -387,7 +387,7 @@ class AgentBridge(
                 proc.inputStream.use { it.readBytes() }
                 proc.join(15, java.util.concurrent.TimeUnit.SECONDS)
                 (proc.exitStatus ?: -1) == 0
-            } finally { SilentlyTry.fired("SshAi-AgentBridge", "close stdin-exec session") { sess.close() } }
+            } finally { SilentlyTry.fired("Conch-AgentBridge", "close stdin-exec session") { sess.close() } }
         }
     }
 
@@ -520,7 +520,7 @@ class DefaultBridgeHandler(
                 "screencap produced nothing (exit ${r.exitCode}): ${r.stderr.trim().take(200)}",
             )
         }
-        val bytes = SilentlyTry.logged("SshAi-AgentBridge", "decode screenshot") {
+        val bytes = SilentlyTry.logged("Conch-AgentBridge", "decode screenshot") {
             android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
         } ?: return BridgeResponse.err("screenshot came back unreadable")
         // A PNG starts with the eight-byte signature. Checking it turns "the
@@ -559,7 +559,7 @@ class DefaultBridgeHandler(
         val req = LogCaptureService.CaptureRequest(
             tagFilter = args["filter"]?.jsonPrimitive?.contentOrNull,
             minLevel = args["level"]?.jsonPrimitive?.contentOrNull?.let {
-                SilentlyTry.logged("SshAi-AgentBridge", "parse log level") { LogCaptureService.CaptureRequest.Level.valueOf(it.lowercase().replaceFirstChar(Char::titlecase)) }
+                SilentlyTry.logged("Conch-AgentBridge", "parse log level") { LogCaptureService.CaptureRequest.Level.valueOf(it.lowercase().replaceFirstChar(Char::titlecase)) }
             } ?: LogCaptureService.CaptureRequest.Level.Verbose,
             maxLines = args["lines"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 2_000,
             sinceTime = args["since"]?.jsonPrimitive?.contentOrNull,
@@ -575,7 +575,7 @@ class DefaultBridgeHandler(
                         "own", "ownuid", "own-uid", "app" -> LogCaptureService.Tier.OwnUid
                         else -> {
                             android.util.Log.w(
-                                "SshAi-AgentBridge",
+                                "Conch-AgentBridge",
                                 "unknown log tier '$name' — falling back to the automatic pick",
                             )
                             null

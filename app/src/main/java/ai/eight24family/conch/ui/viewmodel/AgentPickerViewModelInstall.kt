@@ -336,7 +336,17 @@ internal class AgentPickerViewModelInstall(
                 elif command -v pacman >/dev/null 2>&1; then
                     ${'$'}SUDO pacman -Sy --noconfirm nodejs npm 2>&1
                 elif command -v apk >/dev/null 2>&1; then
-                    ${'$'}SUDO apk add --no-cache nodejs npm 2>&1
+                    # Alpine is musl, and musl is where a plain `nodejs npm`
+                    # install produces a CLI that installs cleanly and then
+                    # ABORTS. Measured on Alpine 3.21 and 3.24, 2026-08-31:
+                    # Claude Code needs bash (Alpine ships only BusyBox ash, and
+                    # the vendor installer is a bash script), libgcc, libstdc++,
+                    # and a real ripgrep — the one it carries is a glibc build.
+                    # With all four present it runs (2.1.251); without them the
+                    # crash names none of them. coreutils is for `stdbuf`:
+                    # BusyBox has none, and without it the chat's line-buffering
+                    # wrapper falls away and streaming arrives in bursts.
+                    ${'$'}SUDO apk add --no-cache nodejs npm bash libgcc libstdc++ ripgrep coreutils ca-certificates 2>&1
                 elif command -v zypper >/dev/null 2>&1; then
                     ${'$'}SUDO zypper -n install -y nodejs npm 2>&1
                 elif command -v xbps-install >/dev/null 2>&1; then
@@ -444,6 +454,21 @@ PROFEOF
                 fi
             fi
             """}
+
+            # ── musl hosts: make the ripgrep opt-out outlive this script ──
+            # `USE_BUILTIN_RIPGREP=0` is what stops Claude Code reaching for the
+            # glibc ripgrep bundled inside it. It has to be set for the shells
+            # the CHAT launches later, so it goes in ~/.profile — once, and only
+            # where it is needed (a glibc host must not get it: there the
+            # built-in ripgrep is the faster path).
+            if command -v apk >/dev/null 2>&1; then
+                # …and in THIS shell too, so the verification below runs the CLI
+                # the same way the chat later will.
+                export USE_BUILTIN_RIPGREP=0
+                if ! grep -q USE_BUILTIN_RIPGREP ~/.profile 2>/dev/null; then
+                    echo 'export USE_BUILTIN_RIPGREP=0' >> ~/.profile
+                fi
+            fi
 
             # Final verification — RUN the binary directly from every
             # known install location. If it executes (exit 0 from its

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.SshAi" parent="android:Theme.Material.NoActionBar" />
+    <style name="Theme.Conch" parent="android:Theme.Material.NoActionBar" />
 
     <!--
         Splash screen theme — applied as MainActivity's `android:theme`.
         `installSplashScreen()` in MainActivity.onCreate consumes it and
-        swaps to `Theme.SshAi` for the actual UI. Without this redirect
+        swaps to `Theme.Conch` for the actual UI. Without this redirect
         the launcher icon flashes a white "blank window" while
         ServiceLocator + Compose warm up.
 
@@ -13,9 +13,9 @@
         windowSplashScreenBackground   = near-black brand background.
         postSplashScreenTheme          = real app theme to swap into.
     -->
-    <style name="Theme.SshAi.Splash" parent="Theme.SplashScreen">
+    <style name="Theme.Conch.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
-        <item name="postSplashScreenTheme">@style/Theme.SshAi</item>
+        <item name="postSplashScreenTheme">@style/Theme.Conch</item>
     </style>
 </resources>

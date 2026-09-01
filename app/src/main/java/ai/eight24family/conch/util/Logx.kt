@@ -4,7 +4,7 @@ import ai.eight24family.conch.BuildConfig
 
 /**
  * Compile-time-gated verbose diagnostic logging — the single on/off switch
- * for our chatty `SshAi-*` traces (persistent-stream wire, tail-poll
+ * for our chatty `Conch-*` traces (persistent-stream wire, tail-poll
  * cadence, app-server / ACP RPC, /model menu dumps, model auto-switch, …).
  *
  * - **OFF** in the Play Store / GitHub release artifact

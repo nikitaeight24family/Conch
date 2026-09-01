@@ -92,7 +92,7 @@ object PairingNotifier {
             .setAutoCancel(false)
             .addAction(action)
             .build()
-        SilentlyTry.fired("SshAi-Pairing", "post pairing notification") {
+        SilentlyTry.fired("Conch-Pairing", "post pairing notification") {
             NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, n)
         }
     }
@@ -123,7 +123,7 @@ object PairingNotifier {
             )
             .setAutoCancel(true)
             .build()
-        SilentlyTry.fired("SshAi-Pairing", "post pairing result") {
+        SilentlyTry.fired("Conch-Pairing", "post pairing result") {
             NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, n)
         }
     }
@@ -147,13 +147,13 @@ object PairingNotifier {
      * the user taps the notification.
      */
     fun openApp(context: Context) {
-        SilentlyTry.fired("SshAi-Pairing", "bring the app back after pairing") {
+        SilentlyTry.fired("Conch-Pairing", "bring the app back after pairing") {
             context.startActivity(appIntent(context))
         }
     }
 
     fun clear(context: Context) {
-        SilentlyTry.fired("SshAi-Pairing", "clear pairing notification") {
+        SilentlyTry.fired("Conch-Pairing", "clear pairing notification") {
             NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
         }
     }
@@ -185,12 +185,12 @@ object PairingWatcher {
                 val port = PhoneBridgePairing.findPairingPort(app)
                 if (port != null && port != lastPort) {
                     lastPort = port
-                    android.util.Log.i("SshAi-Pairing", "pairing dialog is open on port $port")
+                    android.util.Log.i("Conch-Pairing", "pairing dialog is open on port $port")
                     PairingNotifier.askForCode(app, port)
                 }
                 delay(1_500)
             }
-            android.util.Log.i("SshAi-Pairing", "pairing window closed")
+            android.util.Log.i("Conch-Pairing", "pairing window closed")
         }
     }
 

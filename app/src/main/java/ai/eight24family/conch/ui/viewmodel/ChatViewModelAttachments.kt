@@ -74,10 +74,26 @@ internal class ChatViewModelAttachments(
             )
         }
         scope.launch(Dispatchers.IO) {
-            val tag = "SshAi-Upload"
+            val tag = "Conch-Upload"
             android.util.Log.d(tag, "addAttachment: $displayName ${bytes.size}B mime=$mimeType")
 
-            val sha = UploadCache.sha256Hex(bytes)
+            // A photo for the phone's own model is downscaled BEFORE hashing
+            // and upload — full camera shots tile into thousands of vision
+            // tokens and minutes of prefill (see LocalImageShrink). The staged
+            // preview keeps the original bytes; only what the model gets
+            // shrinks. Renamed .jpg to match the re-encode.
+            var sendBytes = bytes
+            var sendName = displayName
+            if (isImage && serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+                val small = ai.eight24family.conch.util.LocalImageShrink.shrink(bytes)
+                if (small !== bytes) {
+                    android.util.Log.d(tag, "local-model image shrunk ${bytes.size}B → ${small.size}B")
+                    sendBytes = small
+                    sendName = displayName.substringBeforeLast('.') + ".jpg"
+                }
+            }
+
+            val sha = UploadCache.sha256Hex(sendBytes)
             android.util.Log.d(tag, "sha256=$sha")
 
             // Wait until the session has actually reached Running.
@@ -119,7 +135,7 @@ internal class ChatViewModelAttachments(
             // progress handler into the failure slot.
             var why: String? = null
             val path = s.uploadFile(
-                bytes, displayName,
+                sendBytes, sendName,
                 onProgress = { progress -> updateAttachmentStatus(attId, UploadStatus.Uploading(progress)) },
                 onFailure = { reason -> why = reason },
             )
@@ -164,7 +180,7 @@ internal class ChatViewModelAttachments(
             )
         }
         scope.launch(Dispatchers.IO) {
-            val tag = "SshAi-Upload"
+            val tag = "Conch-Upload"
             try {
                 android.util.Log.d(tag, "addFileAttachment: $displayName ${sizeBytes}B mime=$mimeType (streamed)")
                 val sha = file.inputStream().use { UploadCache.sha256HexStream(it) }

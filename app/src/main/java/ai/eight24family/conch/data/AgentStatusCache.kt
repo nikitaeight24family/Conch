@@ -209,7 +209,7 @@ class AgentStatusCache(private val context: Context) {
                         val stale = oldSt0 != null && oldSt0.isBlocked && ageMs > BLOCK_VERDICT_TTL_MS
                         if (stale) {
                             android.util.Log.w(
-                                "SshAi-StatusCache",
+                                "Conch-StatusCache",
                                 "dropping unconfirmed ${oldSt0.name} for $serverId " +
                                     "(${ageMs / 60_000} min old, probes not landing)",
                             )

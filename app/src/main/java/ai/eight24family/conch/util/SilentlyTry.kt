@@ -65,7 +65,7 @@ object SilentlyTry {
      * afterwards.
      *
      * [tag] / [msg] format: tag is the source-file logcat tag
-     * (`SshAi-Chat`, `SshAi-Pool`, …); msg names the operation
+     * (`Conch-Chat`, `Conch-Pool`, …); msg names the operation
      * ("save draft", "decode JSONL").
      */
     inline fun <R> logged(tag: String, msg: String, block: () -> R): R? =

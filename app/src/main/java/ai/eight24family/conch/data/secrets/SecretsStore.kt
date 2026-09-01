@@ -44,7 +44,7 @@ class SecretsStore(
         val second = runCatching { createPrefs(context) }
         second.getOrNull()?.let { return it }
         android.util.Log.w(
-            "SshAi-Secrets",
+            "Conch-Secrets",
             "encrypted store unreadable twice — resetting device-bound secrets " +
                 "(expected only after a device migration copied a foreign blob)",
             second.exceptionOrNull(),

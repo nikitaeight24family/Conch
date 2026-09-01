@@ -30,7 +30,7 @@ import kotlinx.coroutines.runBlocking
  */
 object SecurityKeyNotifier {
 
-    private const val CHANNEL_ID = "sshai_security_key"
+    private const val CHANNEL_ID = "conch_security_key"
     private const val NOTIF_ID = 1003
 
     enum class Reason { REGISTER, CONNECT }

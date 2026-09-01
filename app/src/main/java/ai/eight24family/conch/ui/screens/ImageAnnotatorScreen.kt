@@ -233,7 +233,7 @@ internal fun ImageAnnotatorOverlay(
                             Icon(Icons.Filled.Clear, contentDescription = "clear", tint = Color.White)
                         }
                         IconButton(onClick = {
-                            SilentlyTry.fired("SshAi-Annot", "share annotated image") {
+                            SilentlyTry.fired("Conch-Annot", "share annotated image") {
                                 val out = exportAnnotated(image, elements, contentW.toInt(), contentH.toInt())
                                 shareBitmap(ctx, out, filename)
                             }

@@ -48,11 +48,20 @@ abstract class SearchDatabase : RoomDatabase() {
     companion object {
         /** Single VM-level instance — Room handles connection pooling
          *  internally. ServiceLocator owns the singleton. */
-        fun create(context: Context): SearchDatabase =
-            Room.databaseBuilder(
+        fun create(context: Context): SearchDatabase {
+            // Drop the abandoned legacy index (derived data — no loss).
+            runCatching {
+                for (s in listOf("", "-wal", "-shm")) {
+                    context.getDatabasePath("ssh_ai_search.db$s").delete()
+                }
+            }
+            return Room.databaseBuilder(
                 context.applicationContext,
                 SearchDatabase::class.java,
-                "ssh_ai_search.db",
+                // Renamed off the dead brand. This index is 100% derived from
+                // HistoryCache, so the old ssh_ai_search.db is just abandoned
+                // (best-effort deleted below) and this one rebuilds itself.
+                "conch_search.db",
             )
                 // Real migration for the known 7→8 path…
                 .addMigrations(MIGRATION_7_8)
@@ -68,6 +77,7 @@ abstract class SearchDatabase : RoomDatabase() {
                 // could persist undetected.
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
+        }
     }
 }
 

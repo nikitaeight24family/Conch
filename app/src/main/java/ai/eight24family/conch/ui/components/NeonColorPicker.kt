@@ -355,7 +355,7 @@ private fun hsvToHex(hsv: Hsv): String {
     return "#%02X%02X%02X".format(r, g, b)
 }
 
-private fun parseHex(hex: String): Color = SilentlyTry.loggedOrElse("SshAi-ColorPicker", "parse hex color", Color(0xFF00E5FF)) {
+private fun parseHex(hex: String): Color = SilentlyTry.loggedOrElse("Conch-ColorPicker", "parse hex color", Color(0xFF00E5FF)) {
     val cleaned = hex.trim().removePrefix("#")
     val v = cleaned.toLong(16) or 0xFF000000
     Color(v.toInt())

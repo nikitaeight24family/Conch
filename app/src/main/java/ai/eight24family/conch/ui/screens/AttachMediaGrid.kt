@@ -139,7 +139,7 @@ internal fun AttachMediaStrip(
             permLauncher.launch(arrayOf(Manifest.permission.CAMERA))
         } else {
             ai.eight24family.conch.util.SilentlyTry.fired(
-                "SshAi-Attach", "open app permission settings",
+                "Conch-Attach", "open app permission settings",
             ) {
                 ctx.startActivity(
                     android.content.Intent(
@@ -228,7 +228,7 @@ private fun EmbeddedPickerPane(
             // Alpha library talking to a system surface: if the session dies, the
             // sheet keeps its camera tile and the picker tile below still opens
             // the full-screen picker. Never a crash, never a dead grey box.
-            android.util.Log.w("SshAi-ChatPrompt", "embedded photo picker session error: ${t.message}")
+            android.util.Log.w("Conch-ChatPrompt", "embedded photo picker session error: ${t.message}")
         },
     )
     EmbeddedPhotoPicker(state = state, modifier = modifier)
@@ -308,7 +308,7 @@ private fun CameraCell(
                             // every other app, with no DisposableEffect left to
                             // release it.
                             if (alive.get()) {
-                                SilentlyTry.fired("SshAi-ChatPrompt", "bind camera preview") {
+                                SilentlyTry.fired("Conch-ChatPrompt", "bind camera preview") {
                                     val provider = future.get()
                                     val preview = Preview.Builder().build()
                                         .also { p -> p.setSurfaceProvider(view.surfaceProvider) }
@@ -348,7 +348,7 @@ private fun CameraCell(
                     alive.set(false)
                     val future = ProcessCameraProvider.getInstance(ctx)
                     future.addListener({
-                        SilentlyTry.fired("SshAi-ChatPrompt", "release camera") {
+                        SilentlyTry.fired("Conch-ChatPrompt", "release camera") {
                             future.get().unbindAll()
                         }
                     }, ContextCompat.getMainExecutor(ctx))

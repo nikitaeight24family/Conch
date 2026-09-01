@@ -102,7 +102,7 @@ internal class AgentSessionRunOneShot(
      *  chain. On a rate-limit we silently activate the next OAuth account and
      *  re-issue "continue"; the set stops us looping over the same accounts. */
     private suspend fun runOneShotInternal(text: String, triedSlots: Set<String>): Unit = withContext(Dispatchers.IO) {
-        val tag = "SshAi-Turn"
+        val tag = "Conch-Turn"
         // Set when a rate-limit failover should re-issue the turn AFTER this
         // one's SSH session closes (see the exit handler + the tail below).
         var failoverContinue: Set<String>? = null
@@ -171,6 +171,26 @@ internal class AgentSessionRunOneShot(
                 }
             }
         }
+        // A `local:` model means the brain is the phone's own inference
+        // engine — it must be SERVING before the CLI dials 127.0.0.1, or the
+        // very first turn dies on a connection refusal. Idempotent when the
+        // right model is already up (warm KV survives); a swap stops the
+        // other model first. Engine failures don't throw here — the CLI's own
+        // connection error carries the turn's failure, as it does for any
+        // unreachable provider.
+        getModelOverride()
+            ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
+            ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
+            ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
+            ?.let { m ->
+                android.util.Log.d(tag, "runOneShot: ensuring local engine serves ${m.id}")
+                SilentlyTry.logged(tag, "start local engine") {
+                    ai.eight24family.conch.linux.LocalLlmEngine.start(
+                        m,
+                        thinking = getReasoningOverride() == ai.eight24family.conch.linux.LocalLlm.EFFORT_THINKING,
+                    )
+                }
+            }
         val cliCmd = buildCommand(server.agent, text)
         android.util.Log.d(tag, "runOneShot exec: agent=${server.agent} cwd=${cwdSnapshot() ?: "(default \$HOME)"} resumeId=${getResumeId()} cmdLen=${cliCmd.length}")
         val activityLogStart = System.currentTimeMillis()
@@ -422,7 +442,7 @@ internal class AgentSessionRunOneShot(
                 ))
             }
         } finally {
-            sess?.let { s -> SilentlyTry.fired("SshAi-AgentSession", "close turn ssh session") { s.close() } }
+            sess?.let { s -> SilentlyTry.fired("Conch-AgentSession", "close turn ssh session") { s.close() } }
             sshLifecycle.currentSshSession = null
             sshLifecycle.currentTurnCommand = null
             sshLifecycle.userCancelled = false
@@ -489,7 +509,7 @@ internal class AgentSessionRunOneShot(
     private suspend fun switchToNextOAuthSlot(tried: Set<String>): String? {
         val client = sshLifecycle.liveClient() ?: return null
         val exec: suspend (String) -> String? = { cmd ->
-            SilentlyTry.logged("SshAi-Turn", "failover vault exec") {
+            SilentlyTry.logged("Conch-Turn", "failover vault exec") {
                 val s = client.startSession()
                 try {
                     val p = s.exec(RemoteEnv.portable(cmd))
@@ -502,7 +522,7 @@ internal class AgentSessionRunOneShot(
                     )
                     p.join(20, TimeUnit.SECONDS)
                     String(o.toByteArray(), Charsets.UTF_8)
-                } finally { SilentlyTry.fired("SshAi-Turn", "close failover session") { s.close() } }
+                } finally { SilentlyTry.fired("Conch-Turn", "close failover session") { s.close() } }
             }
         }
         val vault = CredentialVault(server.agent, exec)
@@ -543,7 +563,7 @@ internal class AgentSessionRunOneShot(
         // look identical across models — without this line there's no
         // way to confirm the swap from the app side either.
         android.util.Log.d(
-            "SshAi-Turn",
+            "Conch-Turn",
             "buildCommand agent=$agent resume=${getResumeId()} model=${effectiveModel ?: "<cli-default>"} reasoning=${effectiveReasoning ?: "<cli-default>"}",
         )
         val inner = spec.buildExecCommand(
@@ -576,7 +596,7 @@ internal class AgentSessionRunOneShot(
             "bash -lc " + shellEscape(RemoteTurnKiller.killScript(sid)),
         )
         android.util.Log.d(
-            "SshAi-Turn",
+            "Conch-Turn",
             "killZombieRemoteTurn → ${RemoteTurnKiller.parseOutcome(out)}",
         )
     }

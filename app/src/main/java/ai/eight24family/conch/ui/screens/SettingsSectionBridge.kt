@@ -223,9 +223,9 @@ private fun Step(
  * promising nothing. Falls back to plain Developer options, then all Settings,
  * if the dev-options action cannot resolve at all.
  */
-private fun openWirelessDebugging(ctx: Context) {
+internal fun openWirelessDebugging(ctx: Context) {
     val key = "toggle_adb_wireless"
-    val opened = SilentlyTry.loggedOrElse("SshAi-Settings", "open wireless debugging (highlighted)", false) {
+    val opened = SilentlyTry.loggedOrElse("Conch-Settings", "open wireless debugging (highlighted)", false) {
         val args = android.os.Bundle().apply { putString(":settings:fragment_args_key", key) }
         ctx.startActivity(
             Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
@@ -237,7 +237,7 @@ private fun openWirelessDebugging(ctx: Context) {
         true
     }
     if (!opened) {
-        SilentlyTry.fired("SshAi-Settings", "open settings fallback") {
+        SilentlyTry.fired("Conch-Settings", "open settings fallback") {
             ctx.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
     }

@@ -51,12 +51,12 @@ internal object ClaudeControlWire {
         line.startsWith("{") && line.contains("\"control_request\"")
 
     fun parseControlRequest(line: String): ControlRequest? {
-        val obj = SilentlyTry.logged("SshAi-Control", "parse control line") {
+        val obj = SilentlyTry.logged("Conch-Control", "parse control line") {
             json.parseToJsonElement(line).jsonObject
         } ?: return null
         if (obj["type"]?.jsonPrimitive?.contentOrNull != "control_request") return null
         val requestId = obj["request_id"]?.jsonPrimitive?.contentOrNull ?: return null
-        val req = SilentlyTry.logged("SshAi-Control", "read request obj") {
+        val req = SilentlyTry.logged("Conch-Control", "read request obj") {
             obj["request"]?.jsonObject
         } ?: return null
         val subtype = req["subtype"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -64,7 +64,7 @@ internal object ClaudeControlWire {
             requestId = requestId,
             subtype = subtype,
             toolName = req["tool_name"]?.jsonPrimitive?.contentOrNull,
-            inputJson = SilentlyTry.logged("SshAi-Control", "read input obj") {
+            inputJson = SilentlyTry.logged("Conch-Control", "read input obj") {
                 req["input"]?.jsonObject
             },
             raw = line,
@@ -75,16 +75,16 @@ internal object ClaudeControlWire {
      *  Schema (CLI 2.1.170): questions[1-4]{question,header,
      *  options[2-4]{label,description},multiSelect}. */
     fun parseAskQuestions(input: JsonObject): List<AgentMessage.AskUserQuestion.Question> {
-        val arr = SilentlyTry.logged("SshAi-Control", "read questions array") {
+        val arr = SilentlyTry.logged("Conch-Control", "read questions array") {
             input["questions"]?.jsonArray
         } ?: return emptyList()
         return arr.mapNotNull { q ->
-            val qo = SilentlyTry.logged("SshAi-Control", "question obj") { q.jsonObject }
+            val qo = SilentlyTry.logged("Conch-Control", "question obj") { q.jsonObject }
                 ?: return@mapNotNull null
-            val options = SilentlyTry.logged("SshAi-Control", "options array") {
+            val options = SilentlyTry.logged("Conch-Control", "options array") {
                 qo["options"]?.jsonArray
             }?.mapNotNull { o ->
-                val oo = SilentlyTry.logged("SshAi-Control", "option obj") { o.jsonObject }
+                val oo = SilentlyTry.logged("Conch-Control", "option obj") { o.jsonObject }
                     ?: return@mapNotNull null
                 AgentMessage.AskUserQuestion.Option(
                     label = oo["label"]?.jsonPrimitive?.contentOrNull.orEmpty(),
@@ -172,7 +172,7 @@ internal object ClaudeControlWire {
         val questions = originalInput["questions"]?.jsonArray
         val answersByText = buildJsonObject {
             questions?.forEachIndexed { qi, q ->
-                val qo = SilentlyTry.logged("SshAi-Control", "answer question obj") { q.jsonObject }
+                val qo = SilentlyTry.logged("Conch-Control", "answer question obj") { q.jsonObject }
                     ?: return@forEachIndexed
                 val text = qo["question"]?.jsonPrimitive?.contentOrNull ?: return@forEachIndexed
                 val chosen = answers[qi].orEmpty()
@@ -394,11 +394,11 @@ internal object ClaudeControlWire {
      *  — request_id NESTED inside `response` (the documented asymmetry). */
     fun parseControlResponse(line: String): ControlResponse? {
         if (!line.startsWith("{") || !line.contains("\"control_response\"")) return null
-        val obj = SilentlyTry.logged("SshAi-Control", "parse control response") {
+        val obj = SilentlyTry.logged("Conch-Control", "parse control response") {
             json.parseToJsonElement(line).jsonObject
         } ?: return null
         if (obj["type"]?.jsonPrimitive?.contentOrNull != "control_response") return null
-        val resp = SilentlyTry.logged("SshAi-Control", "read response obj") {
+        val resp = SilentlyTry.logged("Conch-Control", "read response obj") {
             obj["response"]?.jsonObject
         } ?: return null
         val requestId = resp["request_id"]?.jsonPrimitive?.contentOrNull ?: return null
@@ -407,7 +407,7 @@ internal object ClaudeControlWire {
             requestId = requestId,
             ok = ok,
             error = resp["error"]?.jsonPrimitive?.contentOrNull,
-            payload = SilentlyTry.logged("SshAi-Control", "read response payload") {
+            payload = SilentlyTry.logged("Conch-Control", "read response payload") {
                 resp["response"]?.jsonObject
             },
         )
@@ -437,7 +437,7 @@ internal object ClaudeControlWire {
      *  Returns the cancelled request_id, or null if [line] isn't one. */
     fun parseCancelRequest(line: String): String? {
         if (!line.startsWith("{") || !line.contains("\"control_cancel_request\"")) return null
-        val obj = SilentlyTry.logged("SshAi-Control", "parse cancel line") {
+        val obj = SilentlyTry.logged("Conch-Control", "parse cancel line") {
             json.parseToJsonElement(line).jsonObject
         } ?: return null
         if (obj["type"]?.jsonPrimitive?.contentOrNull != "control_cancel_request") return null

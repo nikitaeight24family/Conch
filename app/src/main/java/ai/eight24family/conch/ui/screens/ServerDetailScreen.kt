@@ -32,7 +32,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.filled.Cable
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.material.icons.filled.CheckCircle
@@ -53,6 +52,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,8 +65,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import ai.eight24family.conch.agent.ServerStats
+import ai.eight24family.conch.ui.components.ActionRow
 import ai.eight24family.conch.ui.components.ConnectionDot
+import ai.eight24family.conch.ui.components.InfoRow
+import ai.eight24family.conch.ui.components.SectionDivider
+import ai.eight24family.conch.ui.components.SectionLabel
 import ai.eight24family.conch.ui.viewmodel.ServerDetailViewModel
 import ai.eight24family.conch.ui.window.handCursor
 
@@ -339,7 +344,9 @@ fun ServerDetailScreen(
             // database and the admin page live, and which a phone otherwise
             // cannot see at all.
             SectionLabel("// tunnel")
-            VpnRow(serverId = s.id, connected = connected)
+            // The device-wide "route traffic through this server" switch that
+            // lived here was removed with ConchVpnService (Play enforcement,
+            // 2026-09-01) — port forwarding below is the tunnel that remains.
             TunnelSection(serverId = s.id, connected = connected)
 
             SectionDivider()
@@ -473,12 +480,53 @@ fun ServerDetailScreen(
 
             // ── // manage ──
             SectionLabel("// manage")
-            ActionRow(
-                icon = Icons.Filled.Edit,
-                title = "Edit connection",
-                subtitle = "host, port, user, key, default agent",
-                onClick = { onEditServer(s.id) },
-            )
+            // The phone's own row: the endpoint (127.0.0.1:8022, the generated
+            // key) belongs to the ENVIRONMENT — editing it would only break the
+            // row. The NAME is the user's, so that is what the row offers.
+            val isPhoneRow = s.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+            var renameOpen by remember { mutableStateOf(false) }
+            if (isPhoneRow) {
+                ActionRow(
+                    icon = Icons.Filled.Edit,
+                    title = "Rename",
+                    subtitle = "what this phone is called across the app",
+                    onClick = { renameOpen = true },
+                )
+            } else {
+                ActionRow(
+                    icon = Icons.Filled.Edit,
+                    title = "Edit connection",
+                    subtitle = "host, port, user, key, default agent",
+                    onClick = { onEditServer(s.id) },
+                )
+            }
+            if (renameOpen) {
+                var nameText by remember { mutableStateOf(s.name) }
+                AlertDialog(
+                    onDismissRequest = { renameOpen = false },
+                    title = { Text("Rename") },
+                    text = {
+                        OutlinedTextField(
+                            value = nameText,
+                            onValueChange = { nameText = it },
+                            singleLine = true,
+                            label = { Text("name") },
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = nameText.trim().isNotEmpty(),
+                            onClick = {
+                                vm.rename(nameText)
+                                renameOpen = false
+                            },
+                        ) { Text("Save") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { renameOpen = false }) { Text("Cancel") }
+                    },
+                )
+            }
             ActionRow(
                 icon = Icons.Filled.PersonAdd,
                 title = "Add another user on this host",
@@ -621,80 +669,6 @@ private fun ServerColorRow(
 }
 
 /**
- * Sending this phone's traffic out through the server.
- *
- * Android asks for its own consent the first time — [VpnService.prepare]
- * returns an Intent when it has not been granted — and that dialog is the right
- * gate for a capability this broad, so it is never worked around.
- *
- * The switch reads the SERVICE's own state, not a local flag: Android can take
- * the tunnel away at any moment (the user revokes it in system settings,
- * another VPN takes over), and a switch that kept claiming "on" through that
- * would be lying about where traffic is going — the worst thing this screen
- * could be wrong about.
- */
-@Composable
-private fun VpnRow(serverId: String, connected: Boolean) {
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val routed by ai.eight24family.conch.vpn.ConchVpnService.routedServerId.collectAsState()
-    val on = routed == serverId
-
-    val consent = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) startVpn(ctx, serverId)
-    }
-
-    ActionRow(
-        icon = if (on) Icons.Filled.CheckCircle else Icons.Filled.VpnKey,
-        title = if (on) "Traffic goes out through this server" else "Route traffic through this server",
-        subtitle = when {
-            !ai.eight24family.conch.vpn.ConchVpnService.supported ->
-                "needs Android 10 or newer"
-            on -> "browsers and apps that use the system proxy — not every app"
-            else -> "your address becomes the server's, for apps that use the system proxy"
-        },
-        trailing = {
-            androidx.compose.material3.Switch(
-                checked = on,
-                enabled = connected && ai.eight24family.conch.vpn.ConchVpnService.supported,
-                onCheckedChange = { want ->
-                    if (want) {
-                        val prepare = android.net.VpnService.prepare(ctx)
-                        if (prepare != null) consent.launch(prepare) else startVpn(ctx, serverId)
-                    } else {
-                        ctx.startService(
-                            android.content.Intent(ctx, ai.eight24family.conch.vpn.ConchVpnService::class.java)
-                                .setAction(ai.eight24family.conch.vpn.ConchVpnService.ACTION_STOP),
-                        )
-                    }
-                },
-            )
-        },
-        onClick = {},
-    )
-    if (on) {
-        Text(
-            "⚠ Not every app is covered: this hands apps a proxy, and an app that ignores the " +
-                "system proxy keeps using the phone's own connection. Browsers are covered.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-    }
-}
-
-private fun startVpn(ctx: android.content.Context, serverId: String) {
-    ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Vpn", "start vpn service") {
-        ctx.startService(
-            android.content.Intent(ctx, ai.eight24family.conch.vpn.ConchVpnService::class.java)
-                .setAction(ai.eight24family.conch.vpn.ConchVpnService.ACTION_START)
-                .putExtra(ai.eight24family.conch.vpn.ConchVpnService.EXTRA_SERVER_ID, serverId),
-        )
-    }
-}
-
-/**
  * Reaching the server's own ports from this phone.
  *
  * One row per port, each a switch. Open one and the address becomes tappable:
@@ -739,7 +713,7 @@ private fun TunnelSection(serverId: String, connected: Boolean) {
             else "reach the server's own :${spec.remotePort} from this phone",
             onClick = {
                 if (on) {
-                    ai.eight24family.conch.util.SilentlyTry.fired("SshAi-Tunnel", "open forwarded url") {
+                    ai.eight24family.conch.util.SilentlyTry.fired("Conch-Tunnel", "open forwarded url") {
                         ctx.startActivity(
                             android.content.Intent(
                                 android.content.Intent.ACTION_VIEW,
@@ -794,78 +768,8 @@ private fun TunnelSection(serverId: String, connected: Boolean) {
     )
 }
 
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        color = MaterialTheme.colorScheme.tertiary,
-        style = MaterialTheme.typography.labelMedium,
-        fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
-    )
-}
+// SectionLabel / SectionDivider / ActionRow / InfoRow moved to
+// ai.eight24family.conch.ui.components.Sections — the local-models section
+// renders the same rows on the Linux page, and two hand-kept copies of the
+// `//`-page grammar is how they drift apart.
 
-@Composable
-private fun SectionDivider() {
-    HorizontalDivider(
-        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f),
-        modifier = Modifier.padding(vertical = 12.dp),
-    )
-}
-
-@Composable
-private fun ActionRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    subtitle: String?,
-    tint: Color = MaterialTheme.colorScheme.onSurface,
-    /** Optional control on the right. When present it REPLACES the chevron:
-     *  a row that carries a switch is not also a navigation. */
-    trailing: (@Composable () -> Unit)? = null,
-    onClick: () -> Unit,
-) {
-    val dim = MaterialTheme.colorScheme.outline
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .handCursor()
-            .clickable { onClick() }
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.padding(end = 14.dp).size(22.dp))
-        Column(modifier = Modifier.weight(1f, fill = true)) {
-            Text(title, color = tint, style = MaterialTheme.typography.bodyLarge)
-            if (subtitle != null) {
-                Text(subtitle, color = dim, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        if (trailing != null) trailing() else Text("›", color = dim, style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.outline,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(top = 1.dp).weight(0.5f, fill = true),
-        )
-        Text(
-            value,
-            color = MaterialTheme.colorScheme.onSurface,
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = true),
-        )
-    }
-}

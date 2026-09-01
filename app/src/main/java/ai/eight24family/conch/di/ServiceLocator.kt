@@ -239,19 +239,19 @@ object ServiceLocator {
      * buzzing. Owning it here lets the ViewModel — which outlives composition
      * and survives the PiP round-trip — be the one to fire turn-level haptics.
      *
-     * The Settings toggle is honoured inside [SshAiHaptics.perform], so call
+     * The Settings toggle is honoured inside [ConchHaptics.perform], so call
      * sites never check. The initial value is read synchronously (microseconds
      * off a warm DataStore) because a haptic that arrives after the pref lands
      * is a haptic the user has already missed; the collector below keeps it
      * live for the rest of the process.
      */
-    val haptics: ai.eight24family.conch.ui.haptic.SshAiHaptics by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    val haptics: ai.eight24family.conch.ui.haptic.ConchHaptics by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         val initial = ai.eight24family.conch.util.SilentlyTry.loggedOrElse(
-            "SshAi-Haptics", "read haptics pref", true,
+            "Conch-Haptics", "read haptics pref", true,
         ) {
             kotlinx.coroutines.runBlocking { preferences.hapticsEnabled.first() }
         }
-        ai.eight24family.conch.ui.haptic.SshAiHaptics(appContext, enabled = initial).also { h ->
+        ai.eight24family.conch.ui.haptic.ConchHaptics(appContext, enabled = initial).also { h ->
             startupScope.launch {
                 ai.eight24family.conch.util.SilentlyTry.nullOnError {
                     preferences.hapticsEnabled.collect { h.enabled = it }
@@ -276,7 +276,7 @@ object ServiceLocator {
      * Spawns/reaps per-server [ai.eight24family.conch.diagnostics.AgentBridge]
      * pollers that fulfil `conch-bridge` requests written to
      * `~/.conch-bridge/inbox/` on the user's server. Started by
-     * SshAiService when the foreground service is up.
+     * ConchService when the foreground service is up.
      */
     val bridgeManager: BridgeManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         BridgeManager(handler = DefaultBridgeHandler(logCaptureCoordinator))

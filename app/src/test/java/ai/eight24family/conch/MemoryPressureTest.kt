@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * The trim registry is the app's answer to Google Play's memory-quality
- * requirement: [ai.eight24family.conch.SshAiApp] fires it on every
+ * requirement: [ai.eight24family.conch.ConchApp] fires it on every
  * onTrimMemory at TRIM_MEMORY_UI_HIDDEN and above. The contract pinned here:
  * every registered action runs, one failing action never blocks the rest,
  * and unregister actually severs the hook (a leaked hook pins its captured

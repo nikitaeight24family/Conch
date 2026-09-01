@@ -26,6 +26,9 @@ import androidx.compose.ui.unit.dp
  * whole point is that someone with no server and no computer still has one
  * (owner, 2026-08-30). So it is reached from the servers screen, beside the
  * button that adds the other kind.
+ *
+ * Local MODELS are deliberately NOT here: they are brains for the agents, so
+ * they live where agents are installed — the phone's agent panel.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable

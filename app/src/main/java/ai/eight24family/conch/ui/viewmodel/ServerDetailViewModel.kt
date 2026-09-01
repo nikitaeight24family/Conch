@@ -10,6 +10,7 @@ import ai.eight24family.conch.domain.SecurityKeyTransport
 import ai.eight24family.conch.domain.Server
 import ai.eight24family.conch.domain.ServerSecrets
 import ai.eight24family.conch.ssh.securitykey.SkSigner
+import ai.eight24family.conch.util.ErrorMessages
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -94,7 +95,7 @@ class ServerDetailViewModel(
                 _probing.value = true
                 withContext(Dispatchers.IO) {
                     probe.probe { cmd ->
-                        SilentlyTry.logged("SshAi-ServerDetail", "exec host info probe") {
+                        SilentlyTry.logged("Conch-ServerDetail", "exec host info probe") {
                             val sess = client.startSession()
                             try {
                                 val proc = sess.exec(cmd)
@@ -108,7 +109,7 @@ class ServerDetailViewModel(
                                 proc.join(20, java.util.concurrent.TimeUnit.SECONDS)
                                 String(out.toByteArray(), Charsets.UTF_8)
                             } finally {
-                                SilentlyTry.fired("SshAi-ServerDetail", "close host info session") { sess.close() }
+                                SilentlyTry.fired("Conch-ServerDetail", "close host info session") { sess.close() }
                             }
                         }
                     }.onSuccess { _stats.value = it }
@@ -174,9 +175,9 @@ class ServerDetailViewModel(
                 if (skPrimary != null) {
                     // SEAMLESS FIRST: if a device key is enrolled, reconnect
                     // SILENTLY over it — NO physical key tap. A still-valid,
-                    // on-server device key must NEVER re-prompt the physical
-                    // key. Mirrors the picker's refresh path; this connect() was
-                    // the one place that skipped it and always demanded a tap.
+                    // on-server device key must NEVER re-prompt the physical key.
+                    // Mirrors the picker's refresh path; this connect() was the one
+                    // place that skipped it and always demanded a tap.
                     val eph = runCatching {
                         ServiceLocator.sshConnectionPool.userConnectEphemeral(srv)
                     }.getOrNull()
@@ -208,13 +209,18 @@ class ServerDetailViewModel(
                         _connected.value = true
                         _connectedTo.tryEmit(serverId)
                     } catch (t: Throwable) {
-                        _connectError.value = "Connect failed: ${t.message?.take(120) ?: t::class.simpleName}"
+                        // Humanized, WHOLE: the dialog already titles itself
+                        // "Connect failed", and take(120) cut the host-key
+                        // sentence off at "Expect" — right before the
+                        // fingerprints and the way out (owner's phone,
+                        // 2026-08-31).
+                        _connectError.value = ErrorMessages.humanize(t)
                     } finally {
                         _connecting.value = false
                     }
                 }
             } catch (t: Throwable) {
-                _connectError.value = "Connect failed: ${t.message?.take(120) ?: t::class.simpleName}"
+                _connectError.value = ErrorMessages.humanize(t)
                 _connecting.value = false
             }
         }
@@ -276,7 +282,7 @@ class ServerDetailViewModel(
                     throw t
                 }
                 else -> {
-                    _connectError.value = "Connect failed: ${t.message?.take(120) ?: t::class.simpleName}"
+                    _connectError.value = ErrorMessages.humanize(t)
                 }
             }
         }
@@ -305,13 +311,24 @@ class ServerDetailViewModel(
      *  no form round-trip, nothing else in the row can be clobbered. */
     fun setColorHex(hex: String?) {
         viewModelScope.launch {
-            SilentlyTry.fired("SshAi-ServerDetail", "save accent colour") {
+            SilentlyTry.fired("Conch-ServerDetail", "save accent colour") {
                 val next = hex ?: ai.eight24family.conch.ui.theme.ServerAccent.randomHex(
                     repo.observeServers().first()
                         .filter { it.id != serverId }
                         .map { it.colorHex },
                 )
                 repo.updateColorHex(serverId, next)
+            }
+        }
+    }
+
+    /** Rename the row — the phone's page uses this instead of the full edit
+     * form. */
+    fun rename(name: String) {
+        val trimmed = name.trim().ifEmpty { return }
+        viewModelScope.launch {
+            SilentlyTry.fired("Conch-ServerDetail", "rename server") {
+                repo.rename(serverId, trimmed)
             }
         }
     }
@@ -356,7 +373,7 @@ class ServerDetailViewModel(
     init {
         viewModelScope.launch {
             _isSkServer.value = withContext(Dispatchers.IO) {
-                SilentlyTry.logged("SshAi-ServerDetail", "load secrets for sk check") {
+                SilentlyTry.logged("Conch-ServerDetail", "load secrets for sk check") {
                     repo.getSecrets(serverId).skKeys.isNotEmpty()
                 } ?: false
             }

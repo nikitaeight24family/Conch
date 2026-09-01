@@ -242,7 +242,7 @@ fun foldSubagents(messages: List<AgentMessage>): List<SubagentRun> {
                     m.toolName.equals("Agent", ignoreCase = true)
                 if (!nameIsAgentish && !m.input.contains("\"subagent_type\"")) continue
                 var parsedAgent = false
-                SilentlyTry.fired("SshAi-Subagents", "parse agent-spawn input") {
+                SilentlyTry.fired("Conch-Subagents", "parse agent-spawn input") {
                     val o = rosterJson.parseToJsonElement(m.input).jsonObject
                     val type = o["subagent_type"]?.jsonPrimitive?.content
                     val task = (o["description"] ?: o["prompt"])?.jsonPrimitive?.content

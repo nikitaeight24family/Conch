@@ -89,6 +89,7 @@ internal fun ChatTopBarHost(
     val defaultReasoning by vm.defaultReasoning.collectAsState()
     val sessionInitialReasoning by vm.sessionInitialReasoning.collectAsState()
     val observedReasoning by vm.observedReasoning.collectAsState()
+    val phoneCloudLoggedIn by vm.phoneCloudLoggedIn.collectAsState()
     val customCommands by vm.customCommands.collectAsState()
     val agentCommands by vm.agentCommands.collectAsState()
     val approvalMode by vm.approvalMode.collectAsState()
@@ -292,6 +293,7 @@ internal fun ChatTopBarHost(
         sessionInitialReasoning = sessionInitialReasoning,
         observedReasoning = observedReasoning,
         modelMenuOpen = modelMenuOpen,
+        phoneCloudLoggedIn = phoneCloudLoggedIn,
         onToggleModelMenu = onToggleModelMenu,
         // requestSetModel, NOT setModel: a switch busts the per-model prompt
         // cache, so the user is asked first — on Anthropic's own terms.

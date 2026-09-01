@@ -2,8 +2,8 @@ package ai.eight24family.conch.ui.viewmodel
 
 import ai.eight24family.conch.agent.AgentMessage
 import ai.eight24family.conch.agent.SessionState
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
-import ai.eight24family.conch.ui.haptic.SshAiHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
+import ai.eight24family.conch.ui.haptic.ConchHaptics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -32,30 +32,30 @@ import kotlinx.coroutines.launch
  * PiP round-trip (Root keeps the NavHost composed) and keeps collecting with the
  * screen off. Haptics themselves come from the app-scoped
  * [ai.eight24family.conch.di.ServiceLocator.haptics], and the Settings toggle is
- * still honoured inside [SshAiHaptics.perform], so there is nothing to check
+ * still honoured inside [ConchHaptics.perform], so there is nothing to check
  * here.
  *
  * Preserves the shipped design (INVARIANT STREAM-HAPTICS-1, 2026-06-28): a new
- * tool row is a [SshAiHaptic.Tick], a new assistant row is a
- * [SshAiHaptic.Tap], and the seed guard means opening a chat never buzzes
+ * tool row is a [ConchHaptic.Tick], a new assistant row is a
+ * [ConchHaptic.Tap], and the seed guard means opening a chat never buzzes
  * through existing history. What changed: the turn END is now a
- * [SshAiHaptic.TurnEnd] — three long pulses instead of the old double-tick,
+ * [ConchHaptic.TurnEnd] — three long pulses instead of the old double-tick,
  * which was too close to an ordinary UI ack to feel from a pocket.
  */
 internal class ChatViewModelHaptics(
     private val scope: CoroutineScope,
     /**
-     * Where a buzz goes. A function, not the [SshAiHaptics] object, for one
+     * Where a buzz goes. A function, not the [ConchHaptics] object, for one
      * reason: this class had to be force-stopped by the user once, and a rule
      * that can do that must be unit-testable without an Android Vibrator.
      * Production passes `ServiceLocator.haptics::perform`.
      */
-    private val perform: (SshAiHaptic) -> Unit,
+    private val perform: (ConchHaptic) -> Unit,
     /**
      * "The turn stopped, but the session's background work is still running" —
      * the CLI re-invokes the session with a task-notification when it lands,
      * so the stop is a PAUSE, not an answer. Consulted at announce time: true
-     * → two pulses ([SshAiHaptic.TurnPausedBg]) instead of the three-pulse
+     * → two pulses ([ConchHaptic.TurnPausedBg]) instead of the three-pulse
      * "…and done".
      */
     private val pendingBackground: () -> Boolean = { false },
@@ -209,9 +209,9 @@ internal class ChatViewModelHaptics(
         for (m in fresh.asReversed()) {
             when (m) {
                 is AgentMessage.ToolUse, is AgentMessage.ToolResult ->
-                    if (turnRecent) pulse(SshAiHaptic.Tick)
+                    if (turnRecent) pulse(ConchHaptic.Tick)
                 is AgentMessage.AssistantText ->
-                    if (turnRecent) pulse(SshAiHaptic.Tap)
+                    if (turnRecent) pulse(ConchHaptic.Tap)
                 // The AUTHORITATIVE end of a turn — the parser's non-rendering
                 // marker, emitted from the CLI's own `result`/`error` record and
                 // ordered after the final text. Preferred over the state edge:
@@ -247,7 +247,7 @@ internal class ChatViewModelHaptics(
         if (lastTurnEndMs?.let { now - it < turnEndDebounceMs } == true) return
         announcedThisTurn = true
         lastTurnEndMs = now
-        val intent = if (pendingBackground()) SshAiHaptic.TurnPausedBg else SshAiHaptic.TurnEnd
+        val intent = if (pendingBackground()) ConchHaptic.TurnPausedBg else ConchHaptic.TurnEnd
         // ⛔ THE ONE EVENT THE USER FEELS, AND IT USED TO LOG NOTHING.
         //
         // "It buzzed three times and there was no answer" (user,
@@ -258,7 +258,7 @@ internal class ChatViewModelHaptics(
         // record: which turn, how long it ran, and whether the app was
         // sure the turn had ended or only guessed from the state edge.
         android.util.Log.i(
-            "SshAi-TurnLife",
+            "Conch-TurnLife",
             "turn-end buzz: intent=$intent ranForMs=" +
                 (workingSinceMs?.let { now - it } ?: -1L) +
                 " wasWorking=$wasWorking sinceWorkingEndedMs=" +
@@ -296,7 +296,7 @@ internal class ChatViewModelHaptics(
         wasWorking = working
     }
 
-    private fun pulse(intent: SshAiHaptic) {
+    private fun pulse(intent: ConchHaptic) {
         val now = now()
         if (lastPulseMs?.let { now - it < minGapMs } == true) return
         lastPulseMs = now

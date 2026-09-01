@@ -150,7 +150,7 @@ class SshKeyRepository(
             it.fingerprint == cred.fingerprint && it.credentialIdBase64 == cred.credentialIdBase64
         }
         if (existing != null) {
-            android.util.Log.d("SshAi-KeyRepo", "addSecurityKey: dedup → ${existing.id} (already in DB)")
+            android.util.Log.d("Conch-KeyRepo", "addSecurityKey: dedup → ${existing.id} (already in DB)")
             return existing.toDomain()
         }
         val typeFromAlgo = when (cred.algorithm) {
@@ -208,7 +208,7 @@ class SshKeyRepository(
         for (entity in matches) {
             if (entity.application == realApplication) continue
             android.util.Log.i(
-                "SshAi-KeyRepo",
+                "Conch-KeyRepo",
                 "healSecurityKeyApplication(${entity.id}): app '${entity.application}' → '$realApplication'",
             )
             dao.upsert(entity.copy(application = realApplication))
@@ -217,11 +217,11 @@ class SshKeyRepository(
 
     suspend fun delete(id: String) {
         val before = dao.getById(id)
-        android.util.Log.i("SshAi-KeyRepo", "delete(id=$id) before: name=${before?.name} type=${before?.type}")
+        android.util.Log.i("Conch-KeyRepo", "delete(id=$id) before: name=${before?.name} type=${before?.type}")
         dao.deleteById(id)
         secretsStore.deleteKeySecret(id)
         val after = dao.getById(id)
-        android.util.Log.i("SshAi-KeyRepo", "delete(id=$id) after: ${if (after == null) "GONE" else "STILL THERE name=${after.name}"}")
+        android.util.Log.i("Conch-KeyRepo", "delete(id=$id) after: ${if (after == null) "GONE" else "STILL THERE name=${after.name}"}")
     }
 
     /**
@@ -238,7 +238,7 @@ class SshKeyRepository(
         var recovered = 0
         for (id in orphans) {
             val secret = secretsStore.loadKeySecret(id) ?: continue
-            val info = SilentlyTry.logged("SshAi-KeyRepo", "extract public info from orphan key") { extractPublicInfo(secret.privateKeyPem, secret.passphrase) }
+            val info = SilentlyTry.logged("Conch-KeyRepo", "extract public info from orphan key") { extractPublicInfo(secret.privateKeyPem, secret.passphrase) }
             if (info != null) {
                 val key = SshKey(
                     id = id,

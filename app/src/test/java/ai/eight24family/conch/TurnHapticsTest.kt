@@ -3,7 +3,7 @@ package ai.eight24family.conch
 import ai.eight24family.conch.agent.AgentMessage
 import ai.eight24family.conch.agent.SessionState
 import ai.eight24family.conch.agent.claude.ClaudeMessageParser
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import ai.eight24family.conch.ui.viewmodel.ChatViewModelHaptics
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,11 +36,11 @@ class TurnHapticsTest {
     private fun end(id: String) = AgentMessage.TurnEnd(id, "result")
 
     private class Rig {
-        val fired = mutableListOf<SshAiHaptic>()
+        val fired = mutableListOf<ConchHaptic>()
         val messages = MutableStateFlow<List<AgentMessage>>(emptyList())
         val state = MutableStateFlow<SessionState>(SessionState.Running)
         val remote = MutableStateFlow(false)
-        val ends get() = fired.count { it == SshAiHaptic.TurnEnd }
+        val ends get() = fired.count { it == ConchHaptic.TurnEnd }
     }
 
     private fun runRig(body: suspend kotlinx.coroutines.test.TestScope.(Rig) -> Unit) = runTest {
@@ -168,7 +168,7 @@ class TurnHapticsTest {
         advanceUntilIdle()
         rig.messages.value = rig.messages.value + asst("a2")
         advanceUntilIdle()
-        assertTrue(rig.fired.contains(SshAiHaptic.Tap))
+        assertTrue(rig.fired.contains(ConchHaptic.Tap))
     }
 
     @Test

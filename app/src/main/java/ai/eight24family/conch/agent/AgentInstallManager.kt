@@ -50,7 +50,7 @@ enum class InstallOp(val badge: String, val line: String) {
  * error UI (per product policy).
  */
 object AgentInstallManager {
-    private const val TAG = "SshAi-Install"
+    private const val TAG = "Conch-Install"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun key(serverId: String, agent: Agent) = "$serverId ${agent.name}"

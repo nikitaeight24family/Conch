@@ -115,7 +115,7 @@ fun KeychainScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        SilentlyTry.logged("SshAi-Keychain", "read selected key file") {
+        SilentlyTry.logged("Conch-Keychain", "read selected key file") {
             ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
         }?.let { bytes ->
             val pem = bytes.toString(Charsets.UTF_8)
@@ -648,7 +648,7 @@ private fun looksLikePrivateKey(s: String): Boolean {
 }
 
 private fun queryDisplayName(ctx: Context, uri: android.net.Uri): String? {
-    return SilentlyTry.logged("SshAi-Keychain", "query display name") {
+    return SilentlyTry.logged("Conch-Keychain", "query display name") {
         ctx.contentResolver.query(
             uri,
             arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),

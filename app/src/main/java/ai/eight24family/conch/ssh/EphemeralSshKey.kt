@@ -37,18 +37,38 @@ import java.security.spec.ECGenParameterSpec
  * `sshai-ephemeral` line from the server. Everything here is best-effort.
  */
 object EphemeralSshKey {
-    private const val TAG = "SshAi-EphKey"
-    private const val ALIAS_PREFIX = "sshai_eph_"
+    private const val TAG = "Conch-EphKey"
+    private const val ALIAS_PREFIX = "conch_eph_"
+    /** Keys minted before the rename live under this prefix — still read and
+     *  signed with, so existing silent-reconnect keys are NOT stranded (a
+     *  rename with no migration would force a re-enrol touch on every server). */
+    private const val LEGACY_ALIAS_PREFIX = "sshai_eph_"
     private fun alias(serverId: String) = ALIAS_PREFIX + serverId
-    /** Unique comment on the authorized_keys line — used to find/strip our key
-     *  (`grep sshai-ephemeral ~/.ssh/authorized_keys`). A server's real FIDO
-     *  line never contains this string. */
-    fun markerComment(serverId: String) = "sshai-ephemeral-$serverId"
+
+    /** The alias a server's key ACTUALLY lives under: the new one if present,
+     *  else the legacy one, else the new (for creation). Every read/sign/delete
+     *  goes through this so pre-rename keys keep working. */
+    private fun resolvedAlias(serverId: String): String = runCatching {
+        val ks = keyStore()
+        val n = ALIAS_PREFIX + serverId
+        if (ks.containsAlias(n)) n
+        else (LEGACY_ALIAS_PREFIX + serverId).takeIf { ks.containsAlias(it) } ?: n
+    }.getOrDefault(ALIAS_PREFIX + serverId)
+
+    /** Comment written on NEW authorized_keys lines. */
+    fun markerComment(serverId: String) = "conch-ephemeral-$serverId"
+
+    /** What the STRIP matches — the suffix common to the new `conch-ephemeral-`
+     *  and the legacy `sshai-ephemeral-` markers, so cleanup removes an old
+     *  server-side line too. A real FIDO line never contains this. */
+    fun markerMatch(serverId: String) = "-ephemeral-$serverId"
 
     private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
-    fun exists(serverId: String): Boolean =
-        runCatching { keyStore().containsAlias(alias(serverId)) }.getOrDefault(false)
+    fun exists(serverId: String): Boolean = runCatching {
+        val ks = keyStore()
+        ks.containsAlias(ALIAS_PREFIX + serverId) || ks.containsAlias(LEGACY_ALIAS_PREFIX + serverId)
+    }.getOrDefault(false)
 
     /** Get-or-create the per-server Keystore key. Returns true if it now exists. */
     fun ensure(serverId: String): Boolean = runCatching {
@@ -73,16 +93,24 @@ object EphemeralSshKey {
     /** Destroy the local private key for one server → revokes silent reconnect
      *  for it (the authorized_keys line, if any, becomes dead text + expires). */
     fun delete(serverId: String) {
-        runCatching { keyStore().deleteEntry(alias(serverId)) }
+        runCatching {
+            val ks = keyStore()
+            ks.deleteEntry(ALIAS_PREFIX + serverId)
+            ks.deleteEntry(LEGACY_ALIAS_PREFIX + serverId)
+        }
     }
 
     /** Server ids that currently have a local device key. NON-destructive —
      *  used by Settings to show the user where seamless reconnect is armed
      *  (presence only; the private key value never leaves secure hardware). */
     fun serverIdsWithKeys(): List<String> = runCatching {
-        keyStore().aliases().toList()
-            .filter { it.startsWith(ALIAS_PREFIX) }
-            .map { it.removePrefix(ALIAS_PREFIX) }
+        keyStore().aliases().toList().mapNotNull {
+            when {
+                it.startsWith(ALIAS_PREFIX) -> it.removePrefix(ALIAS_PREFIX)
+                it.startsWith(LEGACY_ALIAS_PREFIX) -> it.removePrefix(LEGACY_ALIAS_PREFIX)
+                else -> null
+            }
+        }.distinct()
     }.getOrDefault(emptyList())
 
     /** Wipe ALL device keys (toggle-off / revoke). Returns the server ids that
@@ -90,12 +118,15 @@ object EphemeralSshKey {
     fun deleteAll(): List<String> = runCatching {
         val ks = keyStore()
         val ids = serverIdsWithKeys()
-        ids.forEach { runCatching { ks.deleteEntry(alias(it)) } }
+        ids.forEach {
+            runCatching { ks.deleteEntry(ALIAS_PREFIX + it) }
+            runCatching { ks.deleteEntry(LEGACY_ALIAS_PREFIX + it) }
+        }
         ids
     }.getOrDefault(emptyList())
 
     private fun publicKey(serverId: String): ECPublicKey? =
-        runCatching { keyStore().getCertificate(alias(serverId))?.publicKey as? ECPublicKey }.getOrNull()
+        runCatching { keyStore().getCertificate(resolvedAlias(serverId))?.publicKey as? ECPublicKey }.getOrNull()
 
     /** Standard SSH SHA-256 fingerprint of the device PUBLIC key
      *  (`SHA256:<base64>`, same as `ssh-keygen -lf`). Shown in Settings so the
@@ -109,7 +140,7 @@ object EphemeralSshKey {
     }.getOrNull()
 
     private fun privateKey(serverId: String): PrivateKey? =
-        runCatching { keyStore().getKey(alias(serverId), null) as? PrivateKey }.getOrNull()
+        runCatching { keyStore().getKey(resolvedAlias(serverId), null) as? PrivateKey }.getOrNull()
 
     /** The bare `ecdsa-sha2-nistp256 <base64> sshai-ephemeral-<id>` portion
      *  (NO `expiry-time` — the server computes + prepends that against its own

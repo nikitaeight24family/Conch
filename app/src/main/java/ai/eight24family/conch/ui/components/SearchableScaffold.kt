@@ -77,8 +77,8 @@ import androidx.compose.ui.unit.dp
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.data.ChatSearch
 import ai.eight24family.conch.di.ServiceLocator
-import ai.eight24family.conch.ui.haptic.LocalSshAiHaptics
-import ai.eight24family.conch.ui.haptic.SshAiHaptic
+import ai.eight24family.conch.ui.haptic.LocalConchHaptics
+import ai.eight24family.conch.ui.haptic.ConchHaptic
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -246,7 +246,7 @@ private fun SearchableTopBar(
     onCloseSearch: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
 ) {
-    val haptic = LocalSshAiHaptics.current
+    val haptic = LocalConchHaptics.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focus = remember { FocusRequester() }
     // Auto-focus + raise the keyboard ONLY on the first open of a search
@@ -263,8 +263,8 @@ private fun SearchableTopBar(
             if (!autoFocusedOnce) {
                 autoFocusedOnce = true
                 delay(40)
-                SilentlyTry.fired("SshAi-Search", "request search field focus (open)") { focus.requestFocus() }
-                SilentlyTry.fired("SshAi-Search", "show soft keyboard for search") { keyboardController?.show() }
+                SilentlyTry.fired("Conch-Search", "request search field focus (open)") { focus.requestFocus() }
+                SilentlyTry.fired("Conch-Search", "show soft keyboard for search") { keyboardController?.show() }
             }
         } else {
             autoFocusedOnce = false
@@ -416,7 +416,7 @@ private fun SearchableTopBar(
             ) { variant ->
                 val isCross = variant == 2
                 IconButton(onClick = {
-                    haptic.perform(if (isCross) SshAiHaptic.Tick else SshAiHaptic.Tap)
+                    haptic.perform(if (isCross) ConchHaptic.Tick else ConchHaptic.Tap)
                     when (variant) {
                         0 -> onOpenSearch()
                         1 -> onCloseSearch()
@@ -424,7 +424,7 @@ private fun SearchableTopBar(
                             pendingClose.job?.cancel()
                             pendingClose.job = null
                             onSearchQueryChange("")
-                            SilentlyTry.fired("SshAi-Search", "request search field focus (clear)") { focus.requestFocus() }
+                            SilentlyTry.fired("Conch-Search", "request search field focus (clear)") { focus.requestFocus() }
                         }
                     }
                 }) {
@@ -703,7 +703,7 @@ private fun HitRow(
             .fillMaxWidth()
             .clickable {
                 android.util.Log.d(
-                    "SshAi-Hl",
+                    "Conch-Hl",
                     "HitRow tap: sid=${hit.sessionId.take(8)} mid=${hit.msgId} ord=${hit.ordinal} charOff=${hit.charOffset} snippet=${hit.snippet.filter { it.code >= 0x20 }.take(60)}"
                 )
                 onPickHit(hit.sessionId, hit.msgId, hit.ordinal, query, hit.charOffset)

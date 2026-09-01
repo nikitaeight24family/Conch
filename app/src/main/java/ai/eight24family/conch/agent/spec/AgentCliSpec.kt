@@ -147,6 +147,18 @@ interface AgentCliSpec {
     val supportsControlProtocol: Boolean get() = false
 
     /**
+     * Whether this CLI can drive a LOCAL on-device model — llama-server on
+     * loopback ([ai.eight24family.conch.linux.LocalLlmEngine], OpenAI-compatible
+     * `/v1`). True means [buildExecCommand] handles a `local:<id>` model by
+     * pointing the CLI at that endpoint (Codex via its custom provider; Qwen
+     * Code / opencode via `OPENAI_BASE_URL`). Gates whether "this phone" offers
+     * this agent as a harness for a downloaded model, and whether a downloaded
+     * model counts as this agent's authorization there (no cloud login needed).
+     * Default false — a cloud-only CLI must not appear as a local option.
+     */
+    val supportsLocalModel: Boolean get() = false
+
+    /**
      * Whether the CLI has a REAL plan/read-only permission mode we can pass
      * (Claude `--permission-mode plan`, Grok `--permission-mode plan`,
      * Copilot `--plan`). Gates the "Plan" row in the approval shield — a
@@ -636,5 +648,21 @@ data class ExecInput(
  */
 fun interface AgentExec {
     suspend fun exec(command: String): String?
+
+    /**
+     * Which server these commands land on, when the caller knows.
+     *
+     * ⚠ THE CLI'S DEFAULT MODEL IS A PROPERTY OF THE SERVER, NOT OF THE APP.
+     * It comes from that box's `~/.claude/settings.json`, so two servers
+     * legitimately start on two different models. Everything a probe learns
+     * about "the default" therefore has to be filed under the server it was
+     * learned from — a spec with one global slot shows the model of whichever
+     * server happened to answer last, and the chip then advertises Opus on a
+     * box whose CLI is about to run Sonnet.
+     *
+     * Null means "not attributable" — the probe result is used for this call
+     * and filed under nothing.
+     */
+    val serverId: String? get() = null
 }
 

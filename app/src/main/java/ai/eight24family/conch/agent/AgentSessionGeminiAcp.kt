@@ -69,7 +69,7 @@ internal class AgentSessionGeminiAcp(
     private val getAuthPrep: () -> String,
     private val onPromptUndelivered: (String) -> Unit,
 ) {
-    private val tag = "SshAi-GeminiAcp"
+    private val tag = "Conch-GeminiAcp"
 
     /** Launch params whose change forces a process restart. ACP has no
      *  per-turn overrides — model/approval ride the LAUNCH flags. */

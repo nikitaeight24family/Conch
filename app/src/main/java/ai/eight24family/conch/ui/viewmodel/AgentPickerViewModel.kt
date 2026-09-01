@@ -133,7 +133,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return null
         return ai.eight24family.conch.agent.CredentialVault(agent) { cmd ->
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                ai.eight24family.conch.util.SilentlyTry.logged("SshAi-AgentPicker", "vault exec") {
+                ai.eight24family.conch.util.SilentlyTry.logged("Conch-AgentPicker", "vault exec") {
                     val sess = client.startSession()
                     try {
                         val proc = sess.exec(ai.eight24family.conch.agent.RemoteEnv.portable(cmd))
@@ -147,7 +147,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         proc.join(30, java.util.concurrent.TimeUnit.SECONDS)
                         String(out.toByteArray(), Charsets.UTF_8)
                     } finally {
-                        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-AgentPicker", "close vault session") { sess.close() }
+                        ai.eight24family.conch.util.SilentlyTry.fired("Conch-AgentPicker", "close vault session") { sess.close() }
                     }
                 }
             }
@@ -764,7 +764,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             if (!force && now - lastSilentConnectMs < 15_000L) return
             lastSilentConnectMs = now
         }
-        ai.eight24family.conch.util.SilentlyTry.fired("SshAi-AgentPicker", "silent connect attempt") {
+        ai.eight24family.conch.util.SilentlyTry.fired("Conch-AgentPicker", "silent connect attempt") {
             ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
         }
         if (ServiceLocator.sshConnectionPool.peek(serverId) == null) {
@@ -991,7 +991,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * path: straight through.
      */
     private fun ensureConnectedThenRun(agent: Agent, what: String, action: () -> Unit) {
-        val tag = "SshAi-InstallTap"
+        val tag = "Conch-InstallTap"
         if (ServiceLocator.sshConnectionPool.peek(serverId) != null) {
             android.util.Log.d(tag, "$what(${agent.name}@$serverId) connected=true → run direct")
             action()

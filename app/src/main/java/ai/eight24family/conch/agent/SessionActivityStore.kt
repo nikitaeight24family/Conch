@@ -138,7 +138,7 @@ class SessionActivityStore(
     private fun key(serverId: String, sessionId: String) = "$serverId|$sessionId"
 
     companion object {
-        private const val TAG = "SshAi-Activity"
+        private const val TAG = "Conch-Activity"
         private const val FLUSH_DEBOUNCE_MS = 750L
     }
 }

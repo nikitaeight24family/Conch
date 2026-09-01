@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -27,7 +28,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import ai.eight24family.conch.util.TextWrap
 import kotlinx.coroutines.delay
 
 /**
@@ -55,10 +55,15 @@ fun CopyableCodeBlock(
     maxHeight: Dp = 320.dp,
 ) {
     val clipboard = LocalClipboardManager.current
-    // Soft-wrap pathologically long runs (a 2KB single-line arg, a 10000-char
-    // blob) so they wrap instead of overflowing the line and corrupting the
-    // column's vertical metric. Display-only — copy still uses the raw `text`.
-    val display = remember(text) { TextWrap.softWrapLongRuns(text) }
+    // ⛔ DO NOT WRAP. Command output is column-aligned by spaces (free -m, ls
+    // -la, ps, df) — soft-wrapping at the screen edge folds the columns into
+    // an unreadable stack. Terminal fidelity instead: keep every line intact
+    // and let the block scroll SIDEWAYS. A single pathologically long line
+    // is capped for DISPLAY only (copy still uses the raw `text`) so it
+    // can't blow the horizontal metric past Compose's draw limit.
+    val display = remember(text) {
+        text.lineSequence().joinToString("\n") { if (it.length > 4000) it.take(4000) + "…" else it }
+    }
     val cyan = MaterialTheme.colorScheme.primary
     var flashed by remember { mutableStateOf(false) }
     val animatedBg by animateColorAsState(
@@ -85,12 +90,18 @@ fun CopyableCodeBlock(
             }
             .heightIn(max = maxHeight)
             .verticalScroll(rememberScrollState())
-            .padding(contentPadding)
     ) {
+        // Horizontal scroll + softWrap=false lives on the TEXT, so wide lines
+        // keep their columns and pan sideways; the copied-badge stays pinned
+        // to the visible corner (outside the scrollers).
         Text(
             text = display,
             color = textColor,
-            style = style
+            style = style,
+            softWrap = false,
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(contentPadding),
         )
         if (flashed) {
             Text(

@@ -319,7 +319,7 @@ object ClaudeMessageParser {
         return ai.eight24family.conch.util.Tracing.section(
             ai.eight24family.conch.util.Tracing.Names.PARSER_SLOW_PATH
         ) {
-            val obj = SilentlyTry.logged("SshAi-ClaudeParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
+            val obj = SilentlyTry.logged("Conch-ClaudeParse", "parse jsonl line") { json.parseToJsonElement(trimmed).jsonObject }
                 ?: return@section listOf(AgentMessage.Raw(uuid(), trimmed))
             parseObject(obj, trimmed)
         }
@@ -339,7 +339,7 @@ object ClaudeMessageParser {
      * (session_id + model) and left chats mute (user, 2026-07-23).
      */
     private fun subagentActivity(line: String): AgentMessage.SubagentActivity? {
-        val obj = SilentlyTry.logged("SshAi-ClaudeParse", "parse subagent record") {
+        val obj = SilentlyTry.logged("Conch-ClaudeParse", "parse subagent record") {
             json.parseToJsonElement(line).jsonObject
         } ?: return null
 
@@ -363,12 +363,12 @@ object ClaudeMessageParser {
         // id were dropped on the floor. The roster then had nothing but the
         // spawn call to draw from, which is why twenty agents listed with no
         // tokens, no runtime and no idea whether they had finished.
-        val data = SilentlyTry.logged("SshAi-ClaudeParse", "subagent data") {
+        val data = SilentlyTry.logged("Conch-ClaudeParse", "subagent data") {
             obj["data"]?.jsonObject
         }
         val isProgress = firstString(obj, "type") == "agent_progress" ||
             (data != null && firstString(data, "type") == "agent_progress")
-        val isSidechain = SilentlyTry.loggedOrElse("SshAi-ClaudeParse", "read isSidechain", false) {
+        val isSidechain = SilentlyTry.loggedOrElse("Conch-ClaudeParse", "read isSidechain", false) {
             obj["isSidechain"]?.jsonPrimitive?.content == "true"
         } ?: false
         if (!isProgress && !isSidechain) return null
@@ -378,7 +378,7 @@ object ClaudeMessageParser {
         fun field(vararg keys: String): String? =
             fields.firstNotNullOfOrNull { o -> firstString(o, *keys) }
         val inner = fields.firstNotNullOfOrNull { o ->
-            SilentlyTry.logged("SshAi-ClaudeParse", "subagent inner message") {
+            SilentlyTry.logged("Conch-ClaudeParse", "subagent inner message") {
                 o["message"]?.jsonObject
             }
         }
@@ -405,7 +405,7 @@ object ClaudeMessageParser {
             model = field("resolvedModel", "resolved_model")
                 ?: inner?.let { firstString(it, "model") }?.takeIf { !it.startsWith("<") },
             elapsedSeconds = fields.firstNotNullOfOrNull { o ->
-                SilentlyTry.logged("SshAi-ClaudeParse", "subagent elapsed") {
+                SilentlyTry.logged("Conch-ClaudeParse", "subagent elapsed") {
                     o["elapsed_time_seconds"]?.jsonPrimitive?.content?.toLongOrNull()
                 }
             },
@@ -428,14 +428,14 @@ object ClaudeMessageParser {
      * exists and what rendering it as a chat row cost.
      */
     private fun subagentStreamTurn(line: String): AgentMessage.SubagentActivity? {
-        val obj = SilentlyTry.logged("SshAi-ClaudeParse", "parse subagent stream turn") {
+        val obj = SilentlyTry.logged("Conch-ClaudeParse", "parse subagent stream turn") {
             json.parseToJsonElement(line).jsonObject
         } ?: return null
         // Decision on the PARSED top-level field only.
         val parent = firstString(obj, "parent_tool_use_id", "parentToolUseID") ?: return null
         val type = firstString(obj, "type")
         if (type != "assistant" && type != "user") return null
-        val inner = SilentlyTry.logged("SshAi-ClaudeParse", "subagent stream message") {
+        val inner = SilentlyTry.logged("Conch-ClaudeParse", "subagent stream message") {
             obj["message"]?.jsonObject
         }
         return AgentMessage.SubagentActivity(
@@ -461,7 +461,7 @@ object ClaudeMessageParser {
      */
     private fun usageTokens(message: JsonObject?): Long {
         var tokens = 0L
-        SilentlyTry.fired("SshAi-ClaudeParse", "subagent usage") {
+        SilentlyTry.fired("Conch-ClaudeParse", "subagent usage") {
             val usage = message?.get("usage")?.jsonObject ?: return@fired
             for (k in listOf(
                 "input_tokens", "output_tokens",
@@ -475,7 +475,7 @@ object ClaudeMessageParser {
 
     /** Flatten a message's `content` (string, or array of blocks) to plain text. */
     private fun contentText(message: JsonObject?): String? =
-        SilentlyTry.logged("SshAi-ClaudeParse", "subagent text") {
+        SilentlyTry.logged("Conch-ClaudeParse", "subagent text") {
             when (val content = message?.get("content")) {
                 is kotlinx.serialization.json.JsonArray -> content.mapNotNull { blk ->
                     val o = blk as? JsonObject ?: return@mapNotNull null
@@ -530,7 +530,7 @@ object ClaudeMessageParser {
                                 "id" -> msgId = reader.nextString()
                                 // Session's actual model — see parseAssistant.
                                 // Skip synthetic markers ("<synthetic>" etc.).
-                                "model" -> model = SilentlyTry.logged("SshAi-ClaudeParse", "fast model") {
+                                "model" -> model = SilentlyTry.logged("Conch-ClaudeParse", "fast model") {
                                     if (reader.peek() == android.util.JsonToken.STRING)
                                         reader.nextString()?.takeIf { it.isNotBlank() && !it.startsWith("<") }
                                     else { reader.skipValue(); null }
@@ -563,7 +563,7 @@ object ClaudeMessageParser {
         } catch (_: Throwable) {
             return null
         } finally {
-            SilentlyTry.fired("SshAi-ClaudeParse", "close reader") { reader.close() }
+            SilentlyTry.fired("Conch-ClaudeParse", "close reader") { reader.close() }
         }
     }
 
@@ -779,14 +779,14 @@ object ClaudeMessageParser {
             // uses it to re-read the authoritative usage instead of synthesising
             // numbers from a partial event.
             "rate_limit_event" -> {
-                val info = SilentlyTry.logged("SshAi-ClaudeParse", "read rate limit info") {
+                val info = SilentlyTry.logged("Conch-ClaudeParse", "read rate limit info") {
                     obj["rate_limit_info"]?.jsonObject
                 }
                 val status = info?.let { firstString(it, "status") }.orEmpty()
                 val window = info?.let { firstString(it, "rateLimitType", "rate_limit_type") }
                     ?.let { limitWindowLabel(it) }
                 val pct = info?.let {
-                    SilentlyTry.logged("SshAi-ClaudeParse", "read utilization") {
+                    SilentlyTry.logged("Conch-ClaudeParse", "read utilization") {
                         it["utilization"]?.jsonPrimitive?.content?.toDoubleOrNull()
                     }
                 }?.let { raw ->
@@ -827,7 +827,7 @@ object ClaudeMessageParser {
             "tool_progress" -> {
                 val tool = firstString(obj, "tool_name")
                 val id = firstString(obj, "tool_use_id")
-                val secs = SilentlyTry.logged("SshAi-ClaudeParse", "tool_progress elapsed") {
+                val secs = SilentlyTry.logged("Conch-ClaudeParse", "tool_progress elapsed") {
                     obj["elapsed_time_seconds"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toLong()
                 }
                 // A subagent's tool is the subagent's business (the roster shows
@@ -900,7 +900,7 @@ object ClaudeMessageParser {
                     // Successful turn → ALSO emit a dim per-turn usage line:
                     // tokens in/out, cost and duration straight from the
                     // result event.
-                    val usage = SilentlyTry.logged("SshAi-ClaudeParse", "result usage") {
+                    val usage = SilentlyTry.logged("Conch-ClaudeParse", "result usage") {
                         obj["usage"]?.jsonObject
                     }
                     val inTok = usage?.get("input_tokens")?.jsonPrimitive?.contentOrNull?.toLongOrNull()
@@ -1017,7 +1017,7 @@ object ClaudeMessageParser {
             ) else emptyList() // other statuses: no UI yet, and never init-like rows
         }
         if (subtype == "compact_boundary") {
-            val meta = SilentlyTry.logged("SshAi-ClaudeParse", "read compact_metadata") {
+            val meta = SilentlyTry.logged("Conch-ClaudeParse", "read compact_metadata") {
                 obj["compact_metadata"]?.jsonObject
             }
             val trigger = meta?.string("trigger")
@@ -1037,7 +1037,7 @@ object ClaudeMessageParser {
         // swallow the whole subtype table below into init-like rows (caught
         // by the unknown-subtype test, 2026-06-12).
         if (subtype == "init" || (subtype.isBlank() && (obj.contains("model") || obj.contains("session_id")))) {
-            val toolsArr = SilentlyTry.logged("SshAi-ClaudeParse", "read tools array") { obj["tools"]?.jsonArray }
+            val toolsArr = SilentlyTry.logged("Conch-ClaudeParse", "read tools array") { obj["tools"]?.jsonArray }
             return listOf(
                 AgentMessage.System(
                     id = stableId(raw, "sys"),
@@ -1105,7 +1105,7 @@ object ClaudeMessageParser {
                 ))
             }
             "commands_changed" -> {
-                val entries = SilentlyTry.logged("SshAi-ClaudeParse", "read command list") {
+                val entries = SilentlyTry.logged("Conch-ClaudeParse", "read command list") {
                     obj["commands"]?.jsonArray?.mapNotNull { el ->
                         val o = el as? JsonObject ?: return@mapNotNull null
                         val name = firstString(o, "name") ?: return@mapNotNull null
@@ -1120,7 +1120,7 @@ object ClaudeMessageParser {
                 else listOf(AgentMessage.CommandsChanged(COMMANDS_CHANGED_ID, entries))
             }
             "background_tasks_changed" -> {
-                val entries = SilentlyTry.logged("SshAi-ClaudeParse", "read background task set") {
+                val entries = SilentlyTry.logged("Conch-ClaudeParse", "read background task set") {
                     obj["tasks"]?.jsonArray?.mapNotNull { el ->
                         val o = el as? JsonObject ?: return@mapNotNull null
                         val id = firstString(o, "task_id") ?: return@mapNotNull null
@@ -1173,7 +1173,7 @@ object ClaudeMessageParser {
 
             "task_started", "task_progress", "task_updated", "task_notification" -> {
                 val taskKey = firstString(obj, "task_id", "tool_use_id") ?: "task"
-                val patch = SilentlyTry.logged("SshAi-ClaudeParse", "task patch") { obj["patch"]?.jsonObject }
+                val patch = SilentlyTry.logged("Conch-ClaudeParse", "task patch") { obj["patch"]?.jsonObject }
                 val status = firstString(obj, "status")
                     ?: patch?.let { firstString(it, "status") }
                     ?: if (subtype == "task_started") "started" else "running"
@@ -1237,7 +1237,7 @@ object ClaudeMessageParser {
                 // extraction, prompt suggestion, "dream"), none of which the
                 // user asked for or can act on.
                 val taskType = firstString(obj, "task_type")
-                val skipTranscript = SilentlyTry.logged("SshAi-ClaudeParse", "task skip_transcript") {
+                val skipTranscript = SilentlyTry.logged("Conch-ClaudeParse", "task skip_transcript") {
                     obj["skip_transcript"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
                 } == true
                 val rows = if (skipTranscript) emptyList() else listOf(row)
@@ -1245,11 +1245,11 @@ object ClaudeMessageParser {
                 if (taskId == null) {
                     rows
                 } else {
-                    val usage = SilentlyTry.logged("SshAi-ClaudeParse", "task usage") {
+                    val usage = SilentlyTry.logged("Conch-ClaudeParse", "task usage") {
                         obj["usage"]?.jsonObject
                     }
                     fun num(o: JsonObject?, key: String): Long? = o?.let {
-                        SilentlyTry.logged("SshAi-ClaudeParse", "task usage num") {
+                        SilentlyTry.logged("Conch-ClaudeParse", "task usage num") {
                             it[key]?.jsonPrimitive?.content?.toLongOrNull()
                         }
                     }
@@ -1290,7 +1290,7 @@ object ClaudeMessageParser {
                             summary = firstString(obj, "summary"),
                             error = patch?.let { firstString(it, "error") },
                             backgrounded = patch?.let {
-                                SilentlyTry.logged("SshAi-ClaudeParse", "task backgrounded") {
+                                SilentlyTry.logged("Conch-ClaudeParse", "task backgrounded") {
                                     it["is_backgrounded"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
                                 }
                             },
@@ -1329,7 +1329,7 @@ object ClaudeMessageParser {
             }
             "stop_hook_summary" -> {
                 val count = firstString(obj, "hook_count") ?: "?"
-                val errors = SilentlyTry.logged("SshAi-ClaudeParse", "hook errors") {
+                val errors = SilentlyTry.logged("Conch-ClaudeParse", "hook errors") {
                     obj["hook_errors"]?.jsonArray
                 }?.size ?: 0
                 listOf(note(
@@ -1426,7 +1426,7 @@ object ClaudeMessageParser {
             ))
 
             "memory_recall" -> {
-                val n = SilentlyTry.logged("SshAi-ClaudeParse", "memories array") {
+                val n = SilentlyTry.logged("Conch-ClaudeParse", "memories array") {
                     obj["memories"]?.jsonArray
                 }?.size ?: 0
                 listOf(note(
@@ -1436,7 +1436,7 @@ object ClaudeMessageParser {
                 ))
             }
             "memory_saved" -> {
-                val paths = SilentlyTry.logged("SshAi-ClaudeParse", "written paths") {
+                val paths = SilentlyTry.logged("Conch-ClaudeParse", "written paths") {
                     obj["written_paths"]?.jsonArray
                 }
                 listOf(note(
@@ -1473,7 +1473,7 @@ object ClaudeMessageParser {
             // Claude takes to support undo. Not user-facing; hide (user, 2026-06-14).
             "file_snapshot" -> emptyList()
             "commands_changed" -> {
-                val n = SilentlyTry.logged("SshAi-ClaudeParse", "commands array") {
+                val n = SilentlyTry.logged("Conch-ClaudeParse", "commands array") {
                     obj["commands"]?.jsonArray
                 }?.size ?: 0
                 listOf(note("commands · $n available"))
@@ -1582,7 +1582,7 @@ object ClaudeMessageParser {
     ): AgentMessage = AgentMessage.EventNote(id = id, label = label, detail = detail, tone = tone)
 
     private fun parseAttachment(obj: JsonObject, raw: String): List<AgentMessage> {
-        val attachment = SilentlyTry.logged("SshAi-ClaudeParse", "read attachment obj") { obj["attachment"]?.jsonObject } ?: return emptyList()
+        val attachment = SilentlyTry.logged("Conch-ClaudeParse", "read attachment obj") { obj["attachment"]?.jsonObject } ?: return emptyList()
         return when (attachment.string("type")) {
             "task_reminder" -> {
                 val n = attachment["itemCount"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
@@ -1679,7 +1679,7 @@ object ClaudeMessageParser {
         // share a hash for the same block index.
         fun textId(blockIndex: Int, salt: String): String =
             if (msgIdHint != null) "$msgIdHint#$blockIndex" else stableId(rawLine, "${salt}_$blockIndex")
-        val arr = SilentlyTry.logged("SshAi-ClaudeParse", "cast content to JsonArray") { content.jsonArray }
+        val arr = SilentlyTry.logged("Conch-ClaudeParse", "cast content to JsonArray") { content.jsonArray }
         if (arr == null) {
             val txt = content.jsonPrimitive.contentOrNull.orEmpty()
             if (txt.isNotBlank()) {
@@ -1704,7 +1704,7 @@ object ClaudeMessageParser {
             return out
         }
         arr.forEachIndexed { idx, block ->
-            val o = SilentlyTry.logged("SshAi-ClaudeParse", "cast block to JsonObject") { block.jsonObject } ?: return@forEachIndexed
+            val o = SilentlyTry.logged("Conch-ClaudeParse", "cast block to JsonObject") { block.jsonObject } ?: return@forEachIndexed
             when (o.string("type")) {
                 "text" -> {
                     val text = o.string("text").orEmpty()
@@ -1730,7 +1730,7 @@ object ClaudeMessageParser {
                 }
                 "tool_use" -> {
                     val name = o.string("name") ?: "tool"
-                    val inputObj = SilentlyTry.logged("SshAi-ClaudeParse", "tool_use input obj") { o["input"]?.jsonObject }
+                    val inputObj = SilentlyTry.logged("Conch-ClaudeParse", "tool_use input obj") { o["input"]?.jsonObject }
                     // AskUserQuestion in a MIRRORED session lands as a plain tool_use
                     // in the file (the control_request path only exists when WE drive
                     // the turn). Render it as the same option card the CLI shows —
@@ -1759,7 +1759,7 @@ object ClaudeMessageParser {
                         outputElem is kotlinx.serialization.json.JsonPrimitive -> outputElem.contentOrNull.orEmpty()
                         outputElem is kotlinx.serialization.json.JsonArray -> {
                             outputElem.mapNotNull { b ->
-                                SilentlyTry.logged("SshAi-ClaudeParse", "extract tool_result text") {
+                                SilentlyTry.logged("Conch-ClaudeParse", "extract tool_result text") {
                                     b.jsonObject["text"]?.jsonPrimitive?.contentOrNull
                                 }
                             }.joinToString("\n").ifBlank { outputElem.toString() }
@@ -1794,7 +1794,7 @@ object ClaudeMessageParser {
     }
 
     private fun JsonObject.string(key: String): String? =
-        SilentlyTry.logged("SshAi-ClaudeParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
+        SilentlyTry.logged("Conch-ClaudeParse", "read string field '$key'") { this[key]?.jsonPrimitive?.contentOrNull }
 
     private fun uuid(): String = ParserHelpers.uuid()
 

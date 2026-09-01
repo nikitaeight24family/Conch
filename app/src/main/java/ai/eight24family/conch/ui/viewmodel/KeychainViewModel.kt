@@ -151,7 +151,7 @@ class KeychainViewModel : ViewModel() {
         op: (YubiKeyDevice, () -> CharArray?) -> SecurityKeyRegistrar.Outcome,
     ) {
         activeAddSkJob?.cancel()
-        android.util.Log.d("SshAi-SK-VM", "runOnDevice transport=$transport reason=$notifierReason")
+        android.util.Log.d("Conch-SK-VM", "runOnDevice transport=$transport reason=$notifierReason")
         _addSkState.value = AddSkState.AwaitingTap(transport)
         SecurityKeyNotifier.post(
             context = ServiceLocator.appContext,
@@ -219,11 +219,11 @@ class KeychainViewModel : ViewModel() {
                     }
                 }.getOrElse {
                     if (it is kotlinx.coroutines.CancellationException) throw it
-                    android.util.Log.e("SshAi-SK-VM", "import threw", it)
+                    android.util.Log.e("Conch-SK-VM", "import threw", it)
                     SecurityKeyRegistrar.Outcome.Failed(it.message ?: "import failed: ${it.javaClass.simpleName}")
                 }
             }
-            android.util.Log.d("SshAi-SK-VM", "outcome=${outcome::class.simpleName}")
+            android.util.Log.d("Conch-SK-VM", "outcome=${outcome::class.simpleName}")
             SecurityKeyNotifier.cancel(ServiceLocator.appContext)
             _addSkState.value = when (outcome) {
                 is SecurityKeyRegistrar.Outcome.Ok -> {

@@ -76,9 +76,9 @@ object LocalAdbShell {
 
     private fun loadOrCreate(): AdbKey {
         val store = ServiceLocator.secretsStore
-        val stored = SilentlyTry.logged("SshAi-LocalAdb", "load adb identity") { store.loadAdbPrivateKey() }
+        val stored = SilentlyTry.logged("Conch-LocalAdb", "load adb identity") { store.loadAdbPrivateKey() }
         if (stored != null) {
-            val recovered = SilentlyTry.logged("SshAi-LocalAdb", "rebuild adb identity") {
+            val recovered = SilentlyTry.logged("Conch-LocalAdb", "rebuild adb identity") {
                 val pk = KeyFactory.getInstance("RSA")
                     .generatePrivate(PKCS8EncodedKeySpec(stored)) as RSAPrivateKey
                 AdbKey.fromPrivateKey(pk)
@@ -87,10 +87,10 @@ object LocalAdbShell {
             // A stored key we cannot parse is worse than none: it would fail
             // every connection while looking like a paired device. Say so and
             // start over — the user pairs again, which is recoverable.
-            android.util.Log.w("SshAi-LocalAdb", "stored ADB identity is unreadable; generating a new one")
+            android.util.Log.w("Conch-LocalAdb", "stored ADB identity is unreadable; generating a new one")
         }
         val fresh = AdbKey.generate()
-        SilentlyTry.fired("SshAi-LocalAdb", "persist adb identity") {
+        SilentlyTry.fired("Conch-LocalAdb", "persist adb identity") {
             store.saveAdbPrivateKey(fresh.keyPair.private.encoded)
         }
         return fresh
@@ -111,11 +111,11 @@ object LocalAdbShell {
                 // dropped while we were idle, and reconnecting is cheap.
                 repeat(2) { attempt ->
                     val live = session ?: openLocked() ?: return@withContext null
-                    val result = SilentlyTry.logged("SshAi-LocalAdb", "exec over own adb") {
+                    val result = SilentlyTry.logged("Conch-LocalAdb", "exec over own adb") {
                         live.exec(command, limit)
                     }
                     if (result != null) return@withContext result
-                    android.util.Log.w("SshAi-LocalAdb", "session died (attempt ${attempt + 1}); reconnecting")
+                    android.util.Log.w("Conch-LocalAdb", "session died (attempt ${attempt + 1}); reconnecting")
                     closeLocked()
                 }
                 null
@@ -183,16 +183,16 @@ object LocalAdbShell {
         if (System.currentTimeMillis() < cooldownUntil) return null
         // Ask the Wi-Fi-independent listener FIRST. If it is up, nothing about
         // the network can take the shell away until the phone reboots.
-        val legacy = SilentlyTry.logged("SshAi-LocalAdb", "connect to adbd on the legacy port") {
+        val legacy = SilentlyTry.logged("Conch-LocalAdb", "connect to adbd on the legacy port") {
             AdbLocal.connect(LEGACY_TCPIP_PORT, identity(), "127.0.0.1", connectTimeoutMs = 1_500)
         }
         if (legacy != null) {
-            android.util.Log.i("SshAi-LocalAdb", "connected to own adbd on 127.0.0.1:$LEGACY_TCPIP_PORT (legacy, wifi-independent)")
+            android.util.Log.i("Conch-LocalAdb", "connected to own adbd on 127.0.0.1:$LEGACY_TCPIP_PORT (legacy, wifi-independent)")
             session = legacy
             return legacy
         }
         val endpoint = AdbDiscovery.find(ServiceLocator.appContext) ?: run {
-            android.util.Log.i("SshAi-LocalAdb", "no adbd advertised — wireless debugging is probably off")
+            android.util.Log.i("Conch-LocalAdb", "no adbd advertised — wireless debugging is probably off")
             return null
         }
         val local = AdbDiscovery.onLoopback(endpoint)
@@ -208,7 +208,7 @@ object LocalAdbShell {
         }
         cooldownUntil = 0L
         android.util.Log.i(
-            "SshAi-LocalAdb",
+            "Conch-LocalAdb",
             "connected to own adbd on ${local.host}:${local.port} — ${opened.deviceBanner}",
         )
         session = opened
@@ -240,7 +240,7 @@ object LocalAdbShell {
         // mDNS keeps advertising one after adbd has stopped listening.
         cooldownUntil = System.currentTimeMillis() + COOLDOWN_MS
         android.util.Log.i(
-            "SshAi-LocalAdb",
+            "Conch-LocalAdb",
             "adbd not reachable on $port (${t.javaClass.simpleName}) — backing off ${COOLDOWN_MS / 1000}s",
         )
     }
@@ -257,7 +257,7 @@ object LocalAdbShell {
     }
 
     private fun closeLocked() {
-        SilentlyTry.fired("SshAi-LocalAdb", "close own adb session") { session?.close() }
+        SilentlyTry.fired("Conch-LocalAdb", "close own adb session") { session?.close() }
         session = null
     }
 
