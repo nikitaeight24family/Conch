@@ -19,7 +19,7 @@ scores neither doesn't belong in this file.
 | Pri | Item | Notes |
 |---|---|---|
 | P0 | **Play Store launch** | Closed test in flight; Store listing + Data Safety form prepared. Privacy policy live. |
-| P0 | **Agent ↔ phone bridge (Shizuku + log capture)** | The category multiplier — turns Conch from "AI you talk to" into "AI that can also OBSERVE." Server CLI `conch-bridge logs / screenshot / dumpsys` writes requests through the existing pool SSH; phone polls inbox, captures via Shizuku (system-wide) or own-uid fallback, writes back. |
+| ✅ | **Agent ↔ phone bridge (log capture)** | Shipped. The category multiplier — turns Conch from "AI you talk to" into "AI that can also OBSERVE." Server CLI `conch-bridge logs / screenshot / dumpsys` writes requests through the existing pool SSH; the phone polls the inbox and captures at adb level over its own loopback (Conch obtains shell itself — no second app), with an own-uid fallback, then writes back. |
 | P0 | **Auto-install APK from chat** | FileProvider + `Intent.ACTION_VIEW` for `application/vnd.android.package-archive`. Closes the dogfooding loop: ship a release from a train without leaving the chat. |
 | P0 | **`debug` `applicationIdSuffix = ".debug"`** | Safety-net so a debug build can sit alongside release for self-update testing. Tiny. |
 
@@ -38,7 +38,7 @@ scores neither doesn't belong in this file.
 | Pri | Item | Notes |
 |---|---|---|
 | P1 | **Voice input** | Microphone → audio stream → Whisper running on the user's server → text into the chat input. No cloud transcription. |
-| P1 | **Logcat tier 2 via Shizuku** | Other-app logs without root. Productisable, no Play-policy risk. |
+| P1 | **Logcat tier 2 (adb level)** | Other-app logs without root, via the phone bridge's own loopback-ADB shell. |
 | P2 | **Clipboard bridge** | Phone clipboard ↔ `$CLIPBOARD` in agent commands. |
 | P2 | **PR review in chat** | GitHub API → diff view → accept/reject from phone. |
 | P2 | **Logcat tier 3 (root)** | Kernel / dmesg for users who already have root. Detect via `su -c id`. |

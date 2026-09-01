@@ -180,13 +180,13 @@ permission flags. A **memory editor** for `CLAUDE.md` / `AGENTS.md` /
 autocomplete, including your own from `~/.claude/commands/*.md`.
 
 ### Phone bridge — let the agent observe the device *(optional)*
-With [Shizuku](https://shizuku.rikka.app/) installed and a one-time grant, an
-agent on your server can — through the same SSH connection — **read your
-phone's logcat, take a screenshot, or run a shell command** at adb level, and
-debug what it is building without you copy-pasting. Defence in depth: per-chat
-opt-in, a warning on `root@`/shared hosts, an append-only audit log on your
-server, and a **run-shell-from-server kill-switch** in Settings → Security.
-Without Shizuku the bridge is simply unavailable.
+After a one-time on-device pairing, an agent on your server can — through the
+same SSH connection — **read your phone's logcat, take a screenshot, or run a
+shell command** at adb level, and debug what it is building without you
+copy-pasting. Conch obtains that shell access **itself**, over the device's own
+loopback — no second app to install. Defence in depth: per-chat opt-in, a
+warning on `root@`/shared hosts, an append-only audit log on your server, and a
+**run-shell-from-server kill-switch** in Settings → Security.
 
 `conch-bridge audio` records the phone's microphone for a fixed number of
 seconds and writes an `.m4a` alongside the other bridge files. It is the only
