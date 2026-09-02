@@ -1,0 +1,137 @@
+name: Bug report
+description: Something in the app is broken, crashes, or does not do what it says
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Conch has no telemetry, no crash reporting and no analytics — by design.
+        The honest cost is that we never find out about your crash unless you
+        tell us. Thank you for doing that.
+
+        **Security vulnerability? Stop here** and use
+        [private reporting](https://github.com/nikitaeight24family/Conch/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I tapped Send on a Claude Code chat while the agent was still working.
+        I expected the prompt to queue. The status line stayed on "working"
+        forever and the message was never sent.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from a fresh launch if you can.
+      placeholder: |
+        1. Open a chat on a server with Claude Code
+        2. Send a long prompt
+        3. While it is still streaming, send a second one
+    validations:
+      required: true
+
+  - type: input
+    id: frequency
+    attributes:
+      label: How often
+      description: Every time, sometimes, or once?
+      placeholder: Every time since 0.5.2
+    validations:
+      required: false
+
+  - type: input
+    id: conch-version
+    attributes:
+      label: Conch version
+      description: Settings → About. Include the -debug suffix if you built it yourself.
+      placeholder: "0.6.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-source
+    attributes:
+      label: Installed from
+      options:
+        - Google Play
+        - GitHub release APK
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Phone and Android version
+      placeholder: "Pixel 8, Android 15 — or: Galaxy Z Fold 5, One UI 7, in DeX"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent
+      description: If the bug is not agent-specific, pick the first option.
+      options:
+        - not agent-specific
+        - Claude Code
+        - OpenAI Codex
+        - Gemini CLI
+        - xAI Grok
+        - GitHub Copilot CLI
+        - a local model on the phone
+    validations:
+      required: true
+
+  - type: input
+    id: server
+    attributes:
+      label: Server, and the CLI version on it
+      description: OS, plus what the agent prints for its own version flag.
+      placeholder: "Ubuntu 24.04 VPS · claude 2.4.1"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: How you authenticate to that server
+      options:
+        - Password
+        - Software SSH key
+        - Hardware security key over NFC
+        - Hardware security key over USB
+        - not relevant
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error text, screenshot or logcat
+      description: |
+        Paste any on-screen error verbatim. A screenshot helps for layout bugs.
+        If you can run adb logcat, filter for ai.eight24family.conch.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before you post
+      options:
+        - label: I am on the latest release, or I have said above why I am not
+          required: true
+        - label: I searched existing issues and this is not one of them
+          required: true
+        - label: There are no passwords, private keys, tokens, real hostnames or IPs in what I pasted
+          required: true

@@ -1,0 +1,68 @@
+name: Feature request
+description: Something Conch should be able to do and cannot
+title: "[idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Conch is built around one question: **which moment made you reach for a
+        laptop?** Ideas that remove one of those moments get built first. Have a
+        look at [ROADMAP.md](https://github.com/nikitaeight24family/Conch/blob/main/ROADMAP.md)
+        first — it may already be queued.
+
+        Things that will not be built, so nobody spends an evening on them: a
+        general-purpose terminal emulator, a WebView IDE, our own AI inference or
+        proxy, a cloud sync or backup service, and multi-user collaboration.
+        Each of those either breaks the no-backend design or belongs to an app
+        that already does it well.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The moment this fixes
+      description: What were you trying to do, on the phone, when this stopped you? Describe the situation rather than the solution.
+      placeholder: |
+        I was reviewing a PR from the train and could see the diff, but there
+        was no way to leave a comment on a line without opening a browser.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: dropdown
+    id: laptop
+    attributes:
+      label: Without this, do you have to reach for a laptop?
+      options:
+        - Yes — this is exactly that moment
+        - No, but it would save real time
+        - No, it is a nicety
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: The workaround, however ugly. It often points at the cheaper fix.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Does it fit the design?
+      description: All three should hold. If one does not, the idea is still worth posting — just say which.
+      options:
+        - label: It needs no backend, account or service of ours
+          required: false
+        - label: It sends no user data anywhere except the server the user owns
+          required: false
+        - label: It works over a plain SSH connection to a machine the user owns
+          required: false

@@ -344,7 +344,9 @@ Flow throughout.
 ## known limitations
 
 - **You bring the compute.** No hosted backend by design — a server you can SSH into, and your own agent account.
-- **The phone bridge needs Shizuku**, and only polls while Conch is in the foreground; backgrounded it pauses (Android background-I/O limits) and surfaces a clear timeout.
+- **The phone bridge pauses when Conch is backgrounded.** It needs no second app — Conch
+  obtains the device shell itself over the phone's own loopback — but it polls only in the
+  foreground; backgrounded it stops (Android background-I/O limits) and surfaces a clear timeout.
 - **Crashes are invisible to us** since telemetry was removed. Play Console's Android vitals is the only signal, so please do write in.
 - **Solo-maintained.** Issues and PRs welcome; expect human-speed responses.
 
