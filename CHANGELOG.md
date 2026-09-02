@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+A version whose number is not a link has no tag here: the 1.0.x line predates
+this repository, and 0.2.10 and 0.4.6 went to Google Play with their changes
+riding into the next tagged release.
+
 ## [Unreleased]
 
 _Nothing yet — see ROADMAP for what's next._
@@ -253,7 +257,7 @@ The ones worth naming:
 
 ---
 
-## [0.4.6] — 2026-08-29
+## 0.4.6 — 2026-08-29
 
 ### Added
 - **Five more agents: Qwen Code, Cursor CLI, opencode, Crush and Continue CLI**
@@ -912,7 +916,7 @@ adversarial review of the shipped commit found them before a user did.
 
 ---
 
-## [0.2.10] — 2026-07-25
+## 0.2.10 — 2026-07-25
 
 ### Added
 - Subagents are visible in chat: type, elapsed time, tokens.
@@ -1128,7 +1132,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.9] — 2026-05-11
+## 1.0.9 — 2026-05-11
 
 ### Added
 - **One-tap, one-PIN security-key auth.** Touch the FIDO2 token once,
@@ -1189,7 +1193,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.7] — 2026-05-01
+## 1.0.7 — 2026-05-01
 
 ### Added
 - **Inline file downloads in agent replies.** When the agent mentions
@@ -1218,7 +1222,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.6] — 2026-05-01
+## 1.0.6 — 2026-05-01
 
 ### Added
 - **Mid-turn prompts** — type into the prompt bar while the agent is
@@ -1304,7 +1308,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.5] — 2026-05-01
+## 1.0.5 — 2026-05-01
 
 ### Fixed
 - **Send button silently dropped messages on a "zombie" session.** When
@@ -1421,7 +1425,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.4] — 2026-05-01
+## 1.0.4 — 2026-05-01
 
 ### Fixed
 - **`runOneShot` no longer silently returns when `sshClient` is null.**
@@ -1445,7 +1449,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.3] — 2026-05-01
+## 1.0.3 — 2026-05-01
 
 ### Fixed
 
@@ -1507,7 +1511,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.2] — 2026-04-30
+## 1.0.2 — 2026-04-30
 
 ### Added
 
@@ -1552,7 +1556,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.1] — 2026-04-29
+## 1.0.1 — 2026-04-29
 
 ### Added
 
@@ -1569,7 +1573,7 @@ Now live on Google Play.
 
 ---
 
-## [1.0.0] — 2026-04-29
+## 1.0.0 — 2026-04-29
 
 First public release.
 
@@ -1629,7 +1633,6 @@ First public release.
 [0.4.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.9
 [0.4.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.8
 [0.4.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.7
-[0.4.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.6
 [0.4.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.4
 [0.4.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.3
 [0.4.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.2
@@ -1655,17 +1658,7 @@ First public release.
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
 [0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12
 [0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11
-[0.2.10]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.10
 [0.2.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.9
 [0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
 [0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
 [0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta
-[1.0.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.9
-[1.0.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.7
-[1.0.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.6
-[1.0.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.5
-[1.0.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.4
-[1.0.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.3
-[1.0.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.2
-[1.0.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.1
-[1.0.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.0
