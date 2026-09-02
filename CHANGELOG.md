@@ -11,6 +11,66 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.0] — 2026-09-01
+
+### Added
+- **A model you downloaded is now an agent, and there is nothing to configure.**
+  Pick anything from the in-app store and it drives the shell: it runs commands,
+  reads files and inspects the device. Each model is served the chat template it
+  actually expects and routed to the CLI that suits it, so "does this one do
+  tools" stopped being a question you had to answer yourself.
+- **Every local model wears its own brand** across the app, and a filter chip
+  appears on the home screen for each model you have chatted with, beside the
+  ones for your servers.
+
+### Changed
+- The whole local path **runs entirely offline through the bundled llama.cpp
+  engine**, with GPU offload on devices that support it. Model *data* is the only
+  thing ever fetched.
+- Model rows print each model's real brand rather than a file name, and the
+  working indicator uses an en dash.
+
+### Fixed
+- **A local chat resumed after a restart no longer spins forever.** The ghost
+  "working" state survived the restart, and the same turn came back marked
+  unread when it had already finished.
+
+---
+
+## [0.5.2] — 2026-09-01
+
+### Added
+- **A model store that reads your device before it recommends anything.** RAM,
+  chip and GPU become a computed *fits* or *tight* verdict and a speed estimate
+  that recalibrates against your own hardware. Real download counts from Hugging
+  Face, and live search across all of it rather than a fixed shelf.
+- **One tap runs a model entirely offline** through llama.cpp, and a downloaded
+  model becomes a real **Codex** agent — its tools, its sessions, its sandbox,
+  with only the brain local. **GPU offload** via OpenCL where the device supports
+  it.
+- **19 curated models** to start from: Google **Gemma 3** at four sizes (with
+  vision on 4B and 12B), Qwen 3.5, Llama 3.1 and 3.2, SmolLM3, IBM Granite 4.0,
+  gpt-oss 20B and Qwen3-Coder 30B. Models proven to fire tools on-device wear an
+  **agent** badge; the rest are marked honestly as chat or vision, rather than
+  left to disappoint you. The catalogue is a live manifest, so the shelf keeps
+  growing without an app update.
+- **One-tap RAM reclaim**, and automatic reclaim when a model needs room to
+  launch. Downloads resume themselves on Wi-Fi.
+
+### Changed
+- Command output aligns properly, and the copy stops calling a tablet or an
+  Android desktop a phone.
+
+### Fixed
+- A local chat could answer twice.
+
+### Removed
+- **The experimental traffic-routing toggle, to comply with Google Play policy.**
+  It had shipped two days earlier in 0.5.0. **Port forwarding is unaffected** —
+  reaching the server's own ports from the phone works exactly as it did.
+
+---
+
 ## [0.5.0] — 2026-08-30
 
 ### Added
@@ -1562,7 +1622,12 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.0
+[0.5.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.2
+[0.5.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.0
+[0.4.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.9
+[0.4.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.8
 [0.4.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.7
 [0.4.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.6
 [0.4.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.4
@@ -1576,6 +1641,7 @@ First public release.
 [0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
 [0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
 [0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
+[0.3.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.9
 [0.3.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.8
 [0.3.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.7
 [0.3.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.6
