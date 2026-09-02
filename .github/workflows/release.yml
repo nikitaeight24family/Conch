@@ -36,7 +36,7 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.signing.outputs.have == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -80,9 +80,9 @@ jobs:
       - name: Rename APK
         if: steps.signing.outputs.have == 'true'
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          cp app/build/outputs/apk/release/app-release.apk "sshai-${VERSION}.apk"
-          ls -lh "sshai-${VERSION}.apk"
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cp app/build/outputs/apk/release/app-release.apk "Conch-${VERSION}.apk"
+          ls -lh "Conch-${VERSION}.apk"
 
       - name: Wipe keystore + properties (defense-in-depth)
         # always(): cleanup must run even when a step above failed. It is the
@@ -95,6 +95,6 @@ jobs:
         if: steps.signing.outputs.have == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: sshai-*.apk
+          files: Conch-*.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
