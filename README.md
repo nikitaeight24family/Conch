@@ -287,10 +287,10 @@ Google account.
 
 Anthropic's own remote control is Claude-only, relays through their cloud, and
 the session lives on a machine of yours that has to stay awake with a terminal
-open. Conch drives three different CLIs, runs against an always-on server with
-your laptop shut, and works with whatever account or API key that server
-already has — including hardware-key SSH auth. Different shape; both can be
-true at once.
+open. Conch drives five different CLIs — and a model running on the phone
+itself — against an always-on server with your laptop shut, and works with
+whatever account or API key that server already has, including hardware-key
+SSH auth. Different shape; both can be true at once.
 </details>
 
 <details>
@@ -324,13 +324,21 @@ Yes. One developer, one phone.
 git clone https://github.com/nikitaeight24family/Conch
 cd Conch
 ./gradlew assembleDebug          # debug APK — no signing setup needed
-./gradlew testDebugUnitTest      # 826 unit tests
+./gradlew testDebugUnitTest      # 1075 unit tests
 ```
 
 The debug APK installs alongside a release build (`applicationIdSuffix
 ".debug"`). Release builds expect your own `release.keystore` and
 `keystore.properties` at the repo root — both gitignored, never committed.
 Requires JDK 17 and the Android SDK (compileSdk 37, minSdk 26).
+
+**One thing is deliberately not in this mirror**: the prebuilt llama.cpp
+engine that runs models on the phone — 28 MB of arm64 `.so` files under
+`app/src/main/jniLibs/`, gitignored here and shipped inside the APK. A build
+from source is complete in every other respect; it simply has no local-model
+engine until you drop your own arm64 llama.cpp build in that folder. Every
+other feature — the servers, the five agent CLIs, the bridge — builds and
+runs from what is here.
 
 **Stack** — Kotlin · Jetpack Compose · Material 3 · [sshj](https://github.com/hierynomus/sshj)
 (SSH transport plus a custom SK auth method) · Room, with secrets at rest via
