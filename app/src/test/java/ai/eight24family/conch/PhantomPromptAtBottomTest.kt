@@ -173,7 +173,7 @@ class UnsyncedAssistantTextTest {
     @Test
     fun `a partial reply is superseded by its own completion, never doubled`() {
         val current = listOf(user("u1", "question"), assistant("a-live", "Got it. Turning it off"))
-        val incoming = listOf(user("u1", "question"), assistant("a-file", "Got it. Turning off the Google package over ADB."))
+        val incoming = listOf(user("u1", "question"), assistant("a-file", "Got it. Turning it off — the Google package, over ADB."))
         val merged = mergeUnsyncedUserText(current, incoming)
         assertEquals(incoming, merged)
         assertEquals(1, merged.count { it is AgentMessage.AssistantText })
