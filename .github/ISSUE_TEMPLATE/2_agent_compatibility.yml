@@ -1,0 +1,98 @@
+name: Agent CLI compatibility
+description: An agent CLI changed and Conch no longer parses, launches or resumes it
+title: "[agent] "
+labels: ["agent-compat"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The agent CLIs ship fast, and a renamed flag or a changed session-file
+        layout breaks Conch without anything changing on our side. These are the
+        highest-value reports in the project — they are usually fixed the same
+        week.
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which CLI
+      options:
+        - Claude Code
+        - OpenAI Codex
+        - Gemini CLI
+        - xAI Grok
+        - GitHub Copilot CLI
+    validations:
+      required: true
+
+  - type: input
+    id: cli-version
+    attributes:
+      label: Its version on the server
+      description: Whatever the CLI prints for its own version flag. This is the field that matters most.
+      placeholder: "claude 2.4.1"
+    validations:
+      required: true
+
+  - type: input
+    id: last-good
+    attributes:
+      label: Last version that worked
+      placeholder: "2.3.9 was fine"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What breaks
+      options:
+        - Agent is not detected, or shows as not installed
+        - Install or update from Conch fails
+        - Provider sign-in from the phone fails
+        - Sessions list is empty or missing chats
+        - An existing session will not resume
+        - Messages render wrong, truncated, or as raw JSON
+        - Tool calls, diffs or approvals render wrong
+        - Approval mode (SAFE / AUTO / YOLO) maps to the wrong flag
+        - Slash commands, subagents or memory files break
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: What you see
+      description: The behaviour in the app, and what the CLI does when you run the same thing in a terminal on that server.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Whatever you have: the CLI changelog entry, a diff of its help output,
+        or a redacted line from the session file it wrote.
+        Scrub paths, hostnames and anything from a real project first.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: conch-version
+    attributes:
+      label: Conch version
+      placeholder: "0.6.0"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before you post
+      options:
+        - label: The CLI itself works when I run it by hand over SSH on that server
+          required: false
+        - label: There are no credentials, real hostnames or private project content in what I pasted
+          required: true

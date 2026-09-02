@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/nikitaeight24family/Conch/security/advisories/new
+    about: Privately, never as a public issue. SECURITY.md has the scope and the response times.
+  - name: 💬 Question, or help getting connected
+    url: mailto:nikita@eight24family.ai
+    about: Setup trouble, or "is it supposed to work like that" — anything that is not a bug.
+  - name: 📖 Website, privacy policy and terms
+    url: https://conch-labs.com
+    about: What the app collects (nothing), where things are stored, and the full terms.
+  - name: 🏢 Commercial licence and security questionnaires
+    url: mailto:contact@eight24family.ai
+    about: Free for noncommercial use; company use is licensed by Eight 24 Family LLC.
+  - name: ⭐ Rate it on Google Play
+    url: https://play.google.com/store/apps/details?id=ai.eight24family.conch
+    about: Reviews are most of the signal we get, since the app has no telemetry.
