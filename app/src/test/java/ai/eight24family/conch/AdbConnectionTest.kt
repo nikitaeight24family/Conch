@@ -95,10 +95,21 @@ class AdbConnectionTest {
 
         val msgs = readAll(sent.toByteArray())
         // CNXN, OPEN, then one OKAY per WRTE — without those the device stops
-        // sending after the first chunk and the read hangs forever.
+        // sending after the first chunk and the read hangs forever — and finally
+        // a CLSE answering the device's own.
+        //
+        // ⛔ THAT LAST ONE IS NOT COSMETIC, which is why this expectation
+        // changed. Leaving the close unanswered let the daemon trail its `CLSE`
+        // into whatever was opened NEXT, and the following command died on
+        // "unexpected CLSE while opening 'shell,v2,raw:…'" — every second
+        // command on a working phone, measured 2026-09-03 mid-way through
+        // starting the phone's Linux.
         assertEquals(AdbProtocol.A_OPEN, msgs[1].command)
         assertEquals("shell,v2,raw:id" + Char(0), String(msgs[1].payload, Charsets.UTF_8))
-        assertEquals(listOf(AdbProtocol.A_OKAY, AdbProtocol.A_OKAY), msgs.drop(2).map { it.command })
+        assertEquals(
+            listOf(AdbProtocol.A_OKAY, AdbProtocol.A_OKAY, AdbProtocol.A_CLSE),
+            msgs.drop(2).map { it.command },
+        )
     }
 
     @Test

@@ -135,16 +135,32 @@ object AdbLocal {
         plain.acceptTls()
         val tls = AdbTls.connect(input, output, key.certificate, key.tlsPrivateKey)
         val secure = AdbConnection(tls.input, tls.output)
-        // ⛔ LISTEN FIRST. The daemon announces itself the moment the tunnel is
-        // up, and greeting it again takes the transport straight back offline —
-        // see [AdbConnection.awaitBanner], which carries the measurement.
-        val heard = try {
-            setReadTimeout?.invoke(BANNER_WAIT_MS)
-            secure.awaitBanner()
-        } catch (_: java.net.SocketTimeoutException) {
+        // ⛔ LISTEN FIRST — BUT ONLY WHERE THE WAIT CAN BE BOUNDED.
+        //
+        // The daemon announces itself the moment the tunnel is up, and greeting
+        // it again takes the transport straight back offline (see
+        // [AdbConnection.awaitBanner], which carries the measurement). That is
+        // true of a real adbd. It is NOT true of a peer that waits to be spoken
+        // to — and one of those is the in-process test peer, which reads the
+        // client's `CNXN` before writing its banner.
+        //
+        // With no socket there is no read timeout to set, so a listen there is
+        // not "a bounded wait that may find nothing", it is a DEADLOCK: both
+        // sides waiting for the other's first word. Shipped in 0.6.1, and it did
+        // not fail loudly — it hung the unit-test task, so CI sat in "Run unit
+        // tests" for an hour and a half instead of going red (2026-09-03).
+        // No knob, no listening: greet, exactly as before.
+        val heard = if (setReadTimeout == null) {
             false
-        } finally {
-            setReadTimeout?.invoke(restoreReadTimeoutMs)
+        } else {
+            try {
+                setReadTimeout(BANNER_WAIT_MS)
+                secure.awaitBanner()
+            } catch (_: java.net.SocketTimeoutException) {
+                false
+            } finally {
+                setReadTimeout(restoreReadTimeoutMs)
+            }
         }
         if (!heard) {
             // A daemon that waits to be spoken to (and the in-process test peer).
