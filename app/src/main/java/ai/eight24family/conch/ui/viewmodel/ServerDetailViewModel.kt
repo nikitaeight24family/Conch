@@ -530,8 +530,18 @@ class ServerDetailViewModel(
      *  retry a couple of times, and if we still can't read it while connected,
      *  fall back to "not installed" — the button then works, Install is
      *  idempotent, and a successful Install re-checks and corrects the state. */
+    /** The device's own row: nothing here is gated on a connection the owner
+     *  would have to make, because there is none to make. */
+    val isThisDevice: Boolean = serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+
     fun checkBridge() {
         viewModelScope.launch {
+            // ⛔ ON THE OWN DEVICE, LOOKING AT THE PAGE IS ENOUGH. The rule that
+            // a page must not dial protects someone's SERVER from a connection
+            // they didn't ask for; this machine is the phone in their hand, and
+            // leaving it down only produced "connect to this server to manage
+            // the bridge" about the device showing the sentence (2026-09-03).
+            if (isThisDevice) ServiceLocator.sshConnectionPool.ensureOwnDeviceUp()
             repeat(3) {
                 val s = ai.eight24family.conch.diagnostics.BridgeInstaller.status(serverId)
                 if (s != null) {

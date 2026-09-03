@@ -1,3 +1,4 @@
-• Lokale Modelle sind jetzt echte Agenten – sofort einsatzbereit. Lade ein Modell und es steuert den Agenten: führt Shell-Befehle aus, liest Dateien, prüft dein Gerät – mit der passenden Chat-Vorlage. Keine Einrichtung: die App wählt für jedes Modell die passende CLI.
-• Jedes lokale Modell zeigt sein eigenes Logo überall in der App, mit einem Filter-Chip pro Modell.
-• Stabiler nach einem Neustart: kein Geister-Spinner, keine falschen Ungelesen-Markierungen.
+• „Dieses Telefon“ ist nie mehr „nicht verbunden“: Conch startet das Linux des Telefons selbst; der Punkt zeigt den Start statt „offline“.
+• Die Shell des Telefons verbindet sich nach einem adbd-Neustart von allein wieder — der Handshake-Fehler ist behoben.
+• Die Telefonbrücke braucht kein python3 mehr; eine veraltete Brücke aktualisiert sich selbst.
+• Der Store bietet keine Modelle an, die dieses Gerät nicht ausführen kann.

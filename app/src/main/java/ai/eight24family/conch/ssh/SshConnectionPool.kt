@@ -9,6 +9,8 @@ import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
@@ -329,6 +331,84 @@ class SshConnectionPool {
 
     /** Lock-free alive count. Same caveats as [peek]. */
     fun aliveCount(): Int = pool.values.count { it.client.isConnected }
+
+    /** Outcome of [ensureConnected]: a live transport, or ONE sentence a screen
+     *  can print as it stands about why there isn't one. */
+    sealed interface Dialled {
+        data class Up(val client: SSHClient) : Dialled
+        data class Down(val why: String) : Dialled
+    }
+
+    /**
+     * The live transport for [serverId] — OPENING one when the pool has none.
+     *
+     * ⛔ "NO LIVE CONNECTION — CONNECT TO THE SERVER FIRST" IS NOT AN
+     * ANSWER TO A TAP. Every phone-bridge path [peek]ed and, finding nothing,
+     * said exactly that — asking a person to go and do by hand the one thing
+     * this class exists to do. A chat that has not sent its first message has no
+     * transport yet, so the sentence greeted an ordinary "connect the phone"
+     * tap; and on the device's own Linux row it was nonsense twice over, because
+     * there is nothing to connect TO but the machine in the owner's hand, and
+     * its daemon is started by [acquire] itself (owner, 2026-09-03).
+     *
+     * Dials with USER INTENT, deliberately: every caller is an explicit tap, and
+     * what those taps set up (the bridge) is polled over this transport for as
+     * long as it is used — a connection dropped the moment an install
+     * finished would leave the feature dead behind a success dialog. It ends the
+     * way any other connection the user opened does, via [userDisconnect].
+     *
+     * Never throws. A FIDO server can only be dialled here through an enrolled
+     * device key: the touch is the one thing we cannot do on the user's behalf,
+     * and [Dialled.Down] then says so instead of a generic refusal.
+     */
+    suspend fun ensureConnected(serverId: String): Dialled = withContext(Dispatchers.IO) {
+        peek(serverId)?.let { return@withContext Dialled.Up(it) }
+        val repo = ai.eight24family.conch.di.ServiceLocator.serverRepository
+        val server = SilentlyTry.logged(TAG, "load server row to dial") { repo.getById(serverId) }
+            ?: return@withContext Dialled.Down("this server is no longer saved in the app")
+        val secrets = SilentlyTry.logged(TAG, "load secrets to dial") { repo.getSecrets(serverId) }
+            ?: return@withContext Dialled.Down("couldn't read this server's saved credentials")
+        if (secrets.skKeys.isNotEmpty()) {
+            userConnectEphemeral(server)?.let { return@withContext Dialled.Up(it) }
+            return@withContext Dialled.Down(
+                "${server.name} opens with your security key — connect it from the " +
+                    "home screen (one tap), then try again",
+            )
+        }
+        try {
+            Dialled.Up(userConnect(server, secrets, null))
+        } catch (t: Throwable) {
+            android.util.Log.w(TAG, "ensureConnected($serverId) failed: ${t.javaClass.simpleName}: ${t.message}")
+            Dialled.Down(ai.eight24family.conch.util.ErrorMessages.humanize(t))
+        }
+    }
+
+    /** Guards the own-device start so a screen, a chat and a tap arriving at
+     *  once pay for ONE environment boot instead of three. */
+    private val ownDeviceGate = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Bring the device's OWN machine up. Idempotent; safe to call on sight.
+     *
+     * ⛔ THIS PHONE IS NEVER "NOT CONNECTED", AND MUST NEVER BE SHOWN OR
+     * TREATED AS SOMETHING THE OWNER HAS TO CONNECT. It is the same device the
+     * app is running on: there is no network in the path, no credential to
+     * choose, no host that could refuse us, and nothing a person could usefully
+     * do that the app cannot do itself. The loopback SSH into it is OUR
+     * plumbing — the owner never asked for a server and must never be told
+     * to dial one (2026-09-03, and he is right: the Linux runs ON the phone).
+     *
+     * So every screen that shows that row, or opens onto it, calls this instead
+     * of reading a connection flag: the machine starts when it is looked at.
+     * The one thing this cannot do for the owner is arm Android's own debugging
+     * switch — no app can — and that is the only sentence he should ever see
+     * about it (see LinuxSsh.ensureUp).
+     */
+    suspend fun ensureOwnDeviceUp(): Dialled = ownDeviceGate.withLock {
+        val id = ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+        peek(id)?.let { return@withLock Dialled.Up(it) }
+        ensureConnected(id)
+    }
 
     // ── User-intent connections (held until explicit disconnect) ──
     //
@@ -667,6 +747,10 @@ class SshConnectionPool {
     }
 
     private fun noteDialRefused(sid: String) {
+        // A refusal on loopback is a daemon that has not started yet, never a
+        // ban — and quieting reconnects to the owner's own device for minutes is
+        // exactly the "not connected" dead end this row must never have.
+        if (sid == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return
         val until = System.currentTimeMillis() + REFUSAL_QUIET_MS
         refusedUntil[hostKeyOf(sid)] = until
         android.util.Log.w(
@@ -694,6 +778,9 @@ class SshConnectionPool {
      *  no failure streak or its exponential cool-down (floor · 2^(n-1), capped
      *  15 min) has passed. The floor is the user's fail2ban knob. */
     private fun silentCooldownPassed(sid: String): Boolean {
+        // The own device is not "auto-connect to a server": there is no network,
+        // no cost and no host that could refuse. It is never held back.
+        if (sid == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return true
         if (!autoConnectAllowed()) return false
         val key = hostKeyOf(sid)
         // A refusal outranks the ladder: while it stands, nothing dials on its own.
@@ -742,8 +829,34 @@ class SshConnectionPool {
         // Connect every reachable server CONCURRENTLY — per-server locks make this
         // safe, so launch-time connect costs the SLOWEST single handshake, not the
         // SUM. The in-flight guard dedupes the onCreate+onStart double-fire.
+        // ⛔ THE DEVICE'S OWN MACHINE IS STARTED HERE, OUTSIDE EVERY GUARD BELOW.
+        //
+        // Each of those guards exists for a machine ACROSS A NETWORK: the
+        // auto-connect switch (someone's data plan and someone's server), the
+        // failure ladder and the refusal quiet period (fail2ban bans an IP after
+        // repeated dials). None of them describes a loopback socket to a daemon
+        // on this same device — nothing can ban us, nothing is spent, nobody
+        // else is touched. Leaving the row under them is how "this phone" ended
+        // up sitting there disconnected with the owner told to connect it: a
+        // person cannot connect it, only this app can, and every launch is the
+        // right moment (owner, 2026-09-03: this must work for every install, not
+        // be repaired by hand on one phone).
+        //
+        // Started here rather than lazily on a screen because the daemon then
+        // OUTLIVES its cause: once it is up it runs until the phone reboots and
+        // needs no shell, no Wi-Fi and no discovery ever again — so the one
+        // moment the app has shell access is worth spending immediately.
         kotlinx.coroutines.coroutineScope {
+            launch {
+                SilentlyTry.fired(TAG, "start the device's own machine") {
+                    val d = ensureOwnDeviceUp()
+                    if (d is Dialled.Down) {
+                        android.util.Log.i(TAG, "own device not up at launch: ${d.why}")
+                    }
+                }
+            }
             for (server in servers) {
+                if (server.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) continue // started above
                 if (peek(server.id) != null) continue              // already live
                 if (!silentCooldownPassed(server.id)) continue     // failing lately — let it cool down
                 if (!silentConnectInFlight.add(server.id)) continue // another run is bringing it up

@@ -3,6 +3,7 @@ package ai.eight24family.conch.adb
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -111,12 +112,30 @@ object LocalAdbShell {
                 // dropped while we were idle, and reconnecting is cheap.
                 repeat(2) { attempt ->
                     val live = session ?: openLocked() ?: return@withContext null
-                    val result = SilentlyTry.logged("Conch-LocalAdb", "exec over own adb") {
+                    val result = try {
                         live.exec(command, limit)
+                    } catch (e: AdbConnection.NeedsTls) {
+                        // Not a transport problem and not worth a retry: the
+                        // daemon is refusing our certificate. Remember it so the
+                        // screens can name the one fix (see [needsPairing]).
+                        unauthorized = true
+                        android.util.Log.w("Conch-LocalAdb", "adbd refuses our key on this device - pairing needed")
+                        null
+                    } catch (t: Throwable) {
+                        android.util.Log.w("Conch-LocalAdb", "exec over own adb - swallowed: ${t.javaClass.simpleName}: ${t.message}")
+                        null
                     }
                     if (result != null) return@withContext result
                     android.util.Log.w("Conch-LocalAdb", "session died (attempt ${attempt + 1}); reconnecting")
                     closeLocked()
+                    // A DEAD SESSION IS NOT AN UNREACHABLE DAEMON, so the
+                    // 20s backoff - which exists to stop the 2s pollers from
+                    // hammering a port with nothing behind it - must not veto
+                    // the one reconnect this command is owed. Without this a
+                    // stale cooldown, set by some poller seconds earlier, made
+                    // exec return null without dialling at all, and callers read
+                    // that as "this phone has no shell".
+                    retryNow()
                 }
                 null
             }
@@ -141,8 +160,56 @@ object LocalAdbShell {
      */
     suspend fun check(userInitiated: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         if (userInitiated) retryNow()
-        lock.withLock { session != null || openLocked() != null }
+        lock.withLock {
+            // A HELD session is trusted, never probed — that rule is above.
+            if (session != null) return@withLock true
+            val fresh = openLocked() ?: return@withLock false
+            // ⛔ AN OPEN SOCKET IS NOT SHELL ACCESS, AND SAYING SO IS THE LIE
+            // THAT COST A DAY. adbd completes the whole TLS handshake with a
+            // client certificate it does not know, sends its banner, and only
+            // refuses when a SERVICE is opened — so a connection that proves
+            // nothing looked identical to a working one (measured on the owner's
+            // phone, 2026-09-03: banner received, `shell,v2` answered with
+            // A_STLS). Every caller of this then walked past the pairing screen
+            // it exists to route them to, and the failure surfaced three layers
+            // later as "the Linux is not reachable".
+            //
+            // Only a session we JUST opened is probed, and only with `echo` —
+            // nothing that could disturb a connection the user relies on.
+            val proof = SilentlyTry.logged("Conch-LocalAdb", "prove the new session") {
+                fresh.exec("echo conch-shell-ok")
+            }
+            if (proof?.stdout?.contains("conch-shell-ok") == true) {
+                unauthorized = false
+                return@withLock true
+            }
+            android.util.Log.w(
+                "Conch-LocalAdb",
+                "adbd took the connection but not a command " +
+                    "(${if (unauthorized) "our key is not authorized" else "unknown"}) — dropping it",
+            )
+            closeLocked()
+            false
+        }
     }
+
+    /**
+     * The device answered a service open with `STLS` — adbd's way of saying our
+     * certificate is not one it has been paired with.
+     *
+     * ⛔ THIS IS OBSERVED, NOT INFERRED, which is what makes it safe to say out
+     * loud. The old NOT_PAIRED state was guessed from a connection that would
+     * not open, and that guess was wrong: an advertised-but-dead port refuses
+     * the same way a revoked pairing does, so a paired phone got told it was
+     * unpaired. This one comes from the daemon completing a TLS handshake and
+     * then refusing the service in a specific, documented way. Nothing else
+     * produces it.
+     */
+    @Volatile private var unauthorized = false
+
+    /** True when this phone has stopped honouring our key — the one thing here
+     *  that a pairing (and only a pairing) fixes. */
+    fun needsPairing(): Boolean = unauthorized
 
     /** Kept for callers that read as a question rather than a check. Same proof
      *  either way — there is only one implementation. */
@@ -167,6 +234,18 @@ object LocalAdbShell {
     suspend fun readiness(): Readiness =
         if (check()) Readiness.READY else Readiness.NOT_ARMED
 
+    /** One sentence naming what is actually in the way, for the screens that
+     *  have to tell someone. Only ever called when [check] came back false. */
+    fun whyNoShell(): String =
+        if (unauthorized) {
+            "This phone has stopped honouring Conch's shell key. Pair it once in " +
+                "Settings > Phone bridge - Android shows a six-digit code."
+        } else {
+            "Conch can't reach this phone's own shell, which is what starts the Linux. " +
+                "Set it up in Settings > Phone bridge; Android needs it armed once per " +
+                "boot, and after that this machine keeps working even if Wi-Fi drops."
+        }
+
     /**
      * The port `adb tcpip` leaves adbd listening on.
      *
@@ -179,6 +258,42 @@ object LocalAdbShell {
      */
     private const val LEGACY_TCPIP_PORT = 5555
 
+    /**
+     * The port this phone's adbd last let us in on.
+     *
+     * ⭐ TRIED BEFORE mDNS, AND IT IS WHAT KEEPS THE SHELL ACROSS A RESTART.
+     * mDNS is the only PUBLIC way to learn the port - and it is not dependable:
+     * adbd stops advertising long before it stops listening. Measured on the
+     * owner's phone, 2026-09-03: adbd answering every command on port 40377
+     * while `adb mdns services` returned an empty list and `service.adb.tls.port`
+     * was gone. Nobody noticed while a session was held, because a held session
+     * needs no discovery; the moment the process restarted, the app could not
+     * find a daemon that was RIGHT THERE, and every screen told the owner to go
+     * and set up a phone bridge that was already set up.
+     *
+     * A port that worked once costs 700ms on loopback to try. A live adbd
+     * answers in milliseconds; a stale port fails fast and we fall through to
+     * mDNS exactly as before, so this can only add ways in, never remove one.
+     */
+    @Volatile private var portMemo: Int = 0
+
+    private suspend fun rememberedAdbPort(): Int {
+        portMemo.takeIf { it > 0 }?.let { return it }
+        val stored = SilentlyTry.loggedOrElse("Conch-LocalAdb", "read remembered adb port", 0) {
+            ServiceLocator.preferences.lastAdbPort.first()
+        }
+        portMemo = stored
+        return stored
+    }
+
+    private suspend fun rememberAdbPort(port: Int) {
+        if (port <= 0 || port == portMemo) return
+        portMemo = port
+        SilentlyTry.fired("Conch-LocalAdb", "remember adb port") {
+            ServiceLocator.preferences.setLastAdbPort(port)
+        }
+    }
+
     private suspend fun openLocked(): AdbLocal.Session? {
         if (System.currentTimeMillis() < cooldownUntil) return null
         // Ask the Wi-Fi-independent listener FIRST. If it is up, nothing about
@@ -190,6 +305,24 @@ object LocalAdbShell {
             android.util.Log.i("Conch-LocalAdb", "connected to own adbd on 127.0.0.1:$LEGACY_TCPIP_PORT (legacy, wifi-independent)")
             session = legacy
             return legacy
+        }
+        // The port that worked last time, before we go looking - because
+        // looking is the part that stops working (see [rememberedAdbPort]).
+        val remembered = rememberedAdbPort()
+        if (remembered > 0) {
+            val reopened = SilentlyTry.logged("Conch-LocalAdb", "reconnect on the remembered adb port") {
+                AdbLocal.connect(remembered, identity(), "127.0.0.1", connectTimeoutMs = 700)
+            }
+            if (reopened != null) {
+                cooldownUntil = 0L
+                android.util.Log.i(
+                    "Conch-LocalAdb",
+                    "connected to own adbd on 127.0.0.1:$remembered (remembered port) - ${reopened.deviceBanner}",
+                )
+                session = reopened
+                return reopened
+            }
+            android.util.Log.i("Conch-LocalAdb", "remembered adb port $remembered no longer answers - asking mDNS")
         }
         val endpoint = AdbDiscovery.find(ServiceLocator.appContext) ?: run {
             android.util.Log.i("Conch-LocalAdb", "no adbd advertised — wireless debugging is probably off")
@@ -211,6 +344,9 @@ object LocalAdbShell {
             "Conch-LocalAdb",
             "connected to own adbd on ${local.host}:${local.port} — ${opened.deviceBanner}",
         )
+        // Learned the hard way, so learn it once: this port outlives the
+        // advertisement that named it.
+        rememberAdbPort(local.port)
         session = opened
         return opened
     }

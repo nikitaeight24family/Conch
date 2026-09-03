@@ -1,3 +1,4 @@
-• Local models now work as real agents, out of the box. Download any model and it drives the agent — running shell commands, reading files, inspecting your device — on the chat template that fits it. No setup: the app routes each model to the CLI that suits it.
-• Each local model shows its own brand across the app, with a sessions filter chip per model.
-• Steadier after a restart: no ghost "working" spinner, no false unread on finished local chats.
+• "This phone" is never "not connected" any more: Conch starts the phone's own Linux itself when you open it, and the dot shows it coming up instead of offline.
+• The phone's shell reconnects on its own after Android restarts adbd — the handshake bug that made a paired phone look unpaired is fixed.
+• The phone bridge no longer needs python3, so it also works inside the phone's own Linux; an out-of-date bridge now updates itself.
+• The store never offers a model this device cannot run.

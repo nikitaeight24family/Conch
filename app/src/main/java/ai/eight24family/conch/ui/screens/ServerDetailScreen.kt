@@ -445,7 +445,9 @@ fun ServerDetailScreen(
             // The gray line doubles as the install/remove LOG once an op ran;
             // otherwise it's the version-aware status.
             val grayLine = bridgeLog ?: when {
-                !connected -> "connect to this server to manage the bridge"
+                // The device's own machine is started by the app when this page
+                // is opened, so it never asks to be connected first.
+                !connected && !vm.isThisDevice -> "connect to this server to manage the bridge"
                 bridgeBusy -> "working…"
                 !bridgeChecked -> "checking…"
                 installedVersion == null -> "not installed · latest v$avail"
@@ -469,7 +471,7 @@ fun ServerDetailScreen(
                     vm.clearBridgeLog()
                     if (btnLabel == "Remove") vm.removeBridge() else vm.installBridge()
                 },
-                enabled = connected && !bridgeBusy && bridgeChecked,
+                enabled = (connected || vm.isThisDevice) && !bridgeBusy && bridgeChecked,
                 colors = if (btnLabel == "Remove")
                     ButtonDefaults.outlinedButtonColors(contentColor = err)
                 else ButtonDefaults.outlinedButtonColors(),

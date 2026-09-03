@@ -280,6 +280,8 @@ class AgentBridge(
         val outDir = "\$HOME/.conch-bridge/outbox"
         val resFinal = "$outDir/'$id.res.json'"
         val resPart = "$outDir/'$id.res.json.part'"
+        val kvFinal = "$outDir/'$id.res.kv'"
+        val kvPart = "$outDir/'$id.res.kv.part'"
         val dataFinal = "$outDir/'$id.data'"
         val dataPart = "$outDir/'$id.data.part'"
 
@@ -304,6 +306,31 @@ class AgentBridge(
             }
             append(",\"ts\":").append(System.currentTimeMillis())
             append('}')
+        }
+
+        // ⛔ THE SAME ANSWER IN A FORM A SHELL CAN READ WITHOUT A LANGUAGE.
+        //
+        // The CLI used python3 to pull five fields out of the JSON above. On the
+        // Linux inside the phone - an Alpine rootfs - there is no python3, so
+        // every bridge command died at exit 127 the moment the phone's own reply
+        // landed: the ping WORKED and the wrapper reported failure (owner,
+        // 2026-09-03). Hand-rolling a JSON parser in sh would only move the day
+        // it meets a quote it does not expect, so the fields come across
+        // pre-separated instead: `key=base64`, one per line. base64 keeps every
+        // byte - newlines, quotes, UTF-8 - out of the shell's way.
+        val b64 = { s: String ->
+            android.util.Base64.encodeToString(s.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        }
+        val kv = buildString {
+            append("ok=").append(if (resp.ok) "1" else "0").append('\n')
+            if (!inline && (resp.text != null || resp.binary != null)) append("data=1\n")
+            resp.error?.let { append("err=").append(b64(it)).append('\n') }
+            if (resp.metadata.isNotEmpty()) {
+                append("meta=")
+                    .append(b64(JSON.encodeToString(JsonObject.serializer(), JsonObject(resp.metadata))))
+                    .append('\n')
+            }
+            if (inline && resp.text != null) append("text=").append(b64(resp.text)).append('\n')
         }
 
         // ATOMIC writes (temp file + rename). The server-side bridge polls the
@@ -336,9 +363,16 @@ class AgentBridge(
                 resp.binary,
             )
         }
+        // BOTH files in ONE round trip: `head -c` takes exactly the first file's
+        // bytes off the stream and `cat` takes the rest, so the extra form costs
+        // no extra exec channel - and the kv lands BEFORE res.json, which is the
+        // name the CLI waits on.
+        val kvBytes = kv.toByteArray(Charsets.UTF_8)
+        val resBytes = resJson.toByteArray(Charsets.UTF_8)
         execOnServerWithStdin(
-            "cat > $resPart && chmod 600 $resPart && mv -f $resPart $resFinal",
-            resJson.toByteArray(Charsets.UTF_8),
+            "head -c ${kvBytes.size} > $kvPart && cat > $resPart && " +
+                "chmod 600 $kvPart $resPart && mv -f $kvPart $kvFinal && mv -f $resPart $resFinal",
+            kvBytes + resBytes,
         )
     }
 

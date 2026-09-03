@@ -203,6 +203,14 @@ private fun LocalModelRow(
     val err = MaterialTheme.colorScheme.error
     val need = LocalLlm.ramNeeded(m)
     val ready = status is LocalLlm.Status.Ready
+    // Is THIS model the one currently loaded + serving? Its row then offers to
+    // END it (stop the engine, free the RAM) instead of delete — you can't/
+    // shouldn't delete a running model, and stopping it is what frees memory for
+    // another model or a speed check. Delete returns once it's stopped (owner,
+    // 2026-09-01).
+    val engine by LocalLlmEngine.state.collectAsState()
+    val servingThis = (engine as? LocalLlmEngine.State.Up)?.modelId == m.id
+    val rowScope = rememberCoroutineScope()
     // Metered guard: gigabytes never start silently on mobile data — the
     // dialog names the exact bill first. bytes = what THIS tap costs.
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -245,10 +253,14 @@ private fun LocalModelRow(
             status.error?.let { append(" · ").append(it) }
         }
         is LocalLlm.Status.Ready ->
+            if (ai.eight24family.conch.linux.store.ModelRecords.of(m.id)?.failed == true)
+                // Tried to load here and crashed the engine — say so plainly and
+                // point at delete; never present it as usable (owner, 2026-09-01).
+                "✕ won't run on this device — delete it"
             // The app routes each model to the CLI that fits it (Qwen Code for
             // Qwen models, Codex otherwise) — no environment for the owner to
             // pick; the turn sets the CLI up on first use if it isn't yet.
-            "tap to work with ${
+            else "tap to work with ${
                 ai.eight24family.conch.agent.spec.AgentSpecRegistry[
                     ai.eight24family.conch.linux.LocalLlm.harnessFor(m.id)
                 ].displayName
@@ -337,7 +349,11 @@ private fun LocalModelRow(
                 // first time a chat actually sends an image (Wi-Fi silently,
                 // mobile data behind an in-chat consent dialog) — the panel
                 // stays one verb per row.
-                ModelAction("[ delete ]", dim) { LocalLlm.delete(m) }
+                if (servingThis) {
+                    ModelAction("[ end ]", cyan) { rowScope.launch { LocalLlmEngine.stop() } }
+                } else {
+                    ModelAction("[ delete ]", dim) { LocalLlm.delete(m) }
+                }
             }
             is LocalLlm.Status.Downloading -> ModelAction("[ cancel ]", err) { LocalLlm.cancelDownload(m) }
             is LocalLlm.Status.Paused -> ModelAction("[ resume ]", cyan) {

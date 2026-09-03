@@ -241,6 +241,9 @@ internal fun TerminalTopBar(
     /** Live transport state for [serverName]'s server — drives the ●/○ dot next
      *  to the name so the user can see online/offline at a glance. */
     connected: Boolean,
+    /** The app is bringing this machine up right now (the device's own Linux is
+     *  started on sight) — the dot shows that, never a bare "offline". */
+    connectionPending: Boolean = false,
     selectedModel: String?,
     observedModel: String?,
     availableModels: Map<String, String>,
@@ -844,7 +847,7 @@ internal fun TerminalTopBar(
                     // Online/offline at a glance, right after the server
                     // name. Same ●/◐/○ ConnectionDot the server list + agent
                     // picker use.
-                    ConnectionDot(connected = connected)
+                    ConnectionDot(connected = connected, pending = connectionPending)
                 }
             }
         },

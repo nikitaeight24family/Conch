@@ -162,9 +162,12 @@ fun ModelStoreScreen(
             )
         },
     ) { padding ->
-        val visible = remember(catalog, fitsOnly, query, res) {
+        val visible = remember(catalog, fitsOnly, query, res, records) {
             catalog.models.filter { e ->
-                (!fitsOnly || DeviceProfile.runsOnThisPhone(e, catalog, profile)) &&
+                // A model that already crashed the engine on this device can't
+                // run here — never re-offer it (owner, 2026-09-01).
+                records[e.id]?.failed != true &&
+                    (!fitsOnly || DeviceProfile.runsOnThisPhone(e, catalog, profile)) &&
                     (query.isBlank() || listOfNotNull(e.label, e.family, e.blurb, LocalLlm.byId(e.id)?.label)
                         .any { it.contains(query.trim(), ignoreCase = true) })
             }

@@ -1,9 +1,11 @@
 package ai.eight24family.conch.diagnostics
 
 import ai.eight24family.conch.di.ServiceLocator
+import ai.eight24family.conch.ssh.SshConnectionPool
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.schmizz.sshj.SSHClient
 import java.util.concurrent.TimeUnit
 
 /**
@@ -42,7 +44,12 @@ object BridgeInstaller {
             "cat > \$HOME/.local/bin/conch-bridge; " +
             "chmod +x \$HOME/.local/bin/conch-bridge; " +
             "echo \"wrote \$(wc -c < \$HOME/.local/bin/conch-bridge)B to ~/.local/bin/conch-bridge; dirs ~/.conch-bridge ready\""
-        val r = run(serverId, cmd, script) ?: return InstallResult(false, "no live connection — connect to the server first")
+        val client = when (val d = ServiceLocator.sshConnectionPool.ensureConnected(serverId)) {
+            is SshConnectionPool.Dialled.Down -> return InstallResult(false, d.why)
+            is SshConnectionPool.Dialled.Up -> d.client
+        }
+        val r = exec(client, cmd, script)
+            ?: return InstallResult(false, "the connection dropped while writing the bridge — try again")
         return InstallResult(r.first == 0, oneLine(r.second).ifBlank { if (r.first == 0) "installed" else "remote exit ${r.first}" })
     }
 
@@ -50,16 +57,31 @@ object BridgeInstaller {
     suspend fun uninstall(serverId: String): InstallResult {
         val cmd = "rm -rfv \$HOME/.conch-bridge \$HOME/.sshai-bridge " +
             "\$HOME/.local/bin/conch-bridge \$HOME/.local/bin/sshai-bridge 2>/dev/null; echo done"
-        val r = run(serverId, cmd, null) ?: return InstallResult(false, "no live connection — connect to the server first")
+        val client = when (val d = ServiceLocator.sshConnectionPool.ensureConnected(serverId)) {
+            is SshConnectionPool.Dialled.Down -> return InstallResult(false, d.why)
+            is SshConnectionPool.Dialled.Up -> d.client
+        }
+        val r = exec(client, cmd, null)
+            ?: return InstallResult(false, "the connection dropped before the bridge was removed — try again")
         return InstallResult(r.first == 0, oneLine(r.second).ifBlank { "nothing to remove" })
     }
 
-    /** Installed state + version on [serverId]. null = couldn't reach the server. */
+    /**
+     * Installed state + version on [serverId]. null = couldn't ask.
+     *
+     * ⛔ PASSIVE ON PURPOSE, unlike [install]: this one never dials. It runs
+     * on screen-open (the server page's bridge card), and a page you merely
+     * LOOKED at must not open a connection nobody asked for. The paths that ARE
+     * a tap bring the transport up themselves first — and then this answers
+     * the truth rather than null, which is what had the chat offering to install
+     * a bridge that was already sitting on the server (owner, 2026-09-03).
+     */
     suspend fun status(serverId: String): Status? {
         val cmd = "if [ -x \$HOME/.local/bin/conch-bridge ]; then " +
             "echo \"v:\$(grep -m1 '^CONCH_BRIDGE_VERSION=' \$HOME/.local/bin/conch-bridge 2>/dev/null | cut -d'\"' -f2)\"; " +
             "else echo absent; fi"
-        val r = run(serverId, cmd, null) ?: return null
+        val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return null
+        val r = exec(client, cmd, null) ?: return null
         val line = r.second.trim().lineSequence()
             .firstOrNull { it.startsWith("v:") || it == "absent" } ?: ""
         return when {
@@ -72,11 +94,10 @@ object BridgeInstaller {
     private fun oneLine(s: String): String =
         s.trim().replace(Regex("[\\r\\n]+"), " · ").take(300)
 
-    /** Run [cmd] on [serverId] over the pooled client; optional [stdin] piped in.
-     *  Returns (exitCode, stdout+stderr) or null if there's no live connection. */
-    private suspend fun run(serverId: String, cmd: String, stdin: ByteArray?): Pair<Int, String>? =
+    /** Run [cmd] on an already-open [client]; optional [stdin] piped in. Returns
+     *  (exitCode, stdout+stderr), or null if the exec itself failed. */
+    private suspend fun exec(client: SSHClient, cmd: String, stdin: ByteArray?): Pair<Int, String>? =
         withContext(Dispatchers.IO) {
-            val client = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@withContext null
             SilentlyTry.logged("Conch-BridgeInstall", "exec on server") {
                 val sess = client.startSession()
                 try {

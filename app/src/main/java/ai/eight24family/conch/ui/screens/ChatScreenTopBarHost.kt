@@ -69,6 +69,7 @@ internal fun ChatTopBarHost(
 ) {
     val server by vm.server.collectAsState()
     val connected by vm.connected.collectAsState()
+    val connectionPending by vm.connectionPending.collectAsState()
     val currentAgent by vm.currentAgent.collectAsState()
     val remoteSessions by vm.remoteSessions.collectAsState()
     val resumeId by vm.resumeId.collectAsState()
@@ -276,6 +277,7 @@ internal fun ChatTopBarHost(
         serverName = server?.name ?: vm.cachedServerName ?: "",
         serverId = server?.id,
         connected = connected,
+        connectionPending = connectionPending,
         selectedModel = selectedModel,
         observedModel = observedModel,
         availableModels = availableModels,

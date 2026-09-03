@@ -30,13 +30,34 @@ object BridgeSelfTest {
     }
 
     suspend fun run(serverId: String): Verdict = withContext(Dispatchers.IO) {
-        // Leg 1: transport.
+        // Leg 1: transport — OPENED here when the pool has none. The tap that
+        // got us here IS the request for a connection; answering it with
+        // "reconnect and try again" hands the person our own job (see
+        // SshConnectionPool.ensureConnected).
+        val dialled = ServiceLocator.sshConnectionPool.ensureConnected(serverId)
+        if (dialled is ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Down) {
+            return@withContext Verdict.Failed(dialled.why)
+        }
         exec(serverId, "echo up") ?: return@withContext Verdict.Failed(
-            "no ssh connection to this server — reconnect and try again",
+            "the server took the connection but not a command — try again",
         )
-        // Leg 2: the CLI. Missing → install it right now instead of reporting.
+        // Leg 2: the CLI — missing OR out of date. Repaired right now instead of
+        // reported, because the two failures are one job and the older one is
+        // the meaner: a CLI a version behind runs, answers, and fails in ways
+        // that read as a broken phone (v8 shelled out to python3 for its JSON
+        // and died at exit 127 on a phone whose own Linux has no python3 — the
+        // ping had already succeeded, owner 2026-09-03). Nobody should have to
+        // find an Update button for that.
         val bin = exec(serverId, "test -x \$HOME/.local/bin/conch-bridge && echo BIN_OK")
-        if (bin?.trim() != "BIN_OK") {
+        val installed = BridgeInstaller.status(serverId)?.takeIf { it.installed }?.version
+        val stale = installed != null && installed != BridgeInstaller.bundledVersion
+        if (bin?.trim() != "BIN_OK" || stale) {
+            if (stale) {
+                android.util.Log.i(
+                    "Conch-BridgeSelfTest",
+                    "bridge on $serverId is v$installed, this app ships v${BridgeInstaller.bundledVersion} - updating",
+                )
+            }
             val r = BridgeInstaller.install(serverId)
             if (!r.success) return@withContext Verdict.Failed(
                 "couldn't install the bridge CLI on the server: ${r.log}",

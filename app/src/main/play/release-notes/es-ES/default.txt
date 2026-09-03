@@ -1,3 +1,4 @@
-• Los modelos locales ahora funcionan como agentes reales, listos para usar. Descarga cualquier modelo y guiará al agente: ejecuta comandos de shell, lee archivos e inspecciona tu dispositivo, con la plantilla de chat adecuada. Sin configurar nada: la app elige la CLI que conviene a cada modelo.
-• Cada modelo local muestra su propia marca en toda la app, con un chip de filtro por modelo.
-• Más estable tras reiniciar: sin spinner fantasma ni falsos "no leídos".
+• «Este teléfono» ya nunca aparece como «no conectado»: Conch arranca solo el Linux del teléfono y el punto muestra el arranque.
+• La shell del teléfono se reconecta sola tras reiniciarse adbd: corregido el fallo de handshake.
+• El puente del teléfono ya no necesita python3; un puente obsoleto se actualiza solo.
+• La tienda no ofrece modelos que este dispositivo no pueda ejecutar.

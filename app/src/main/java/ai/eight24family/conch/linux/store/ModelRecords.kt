@@ -47,6 +47,11 @@ object ModelRecords {
          *  opt-in community sync would carry if that ever ships. */
         val reviewText: String? = null,
         val reviewAtMs: Long = 0L,
+        /** The engine tried to load this model on THIS device and it CRASHED /
+         * never came up (e.g. an arch llama.cpp can't parse, a draft/corrupt
+         * GGUF — the SIGSEGV in load_model). A model that can't run must not be
+         * offered. Cleared the moment it DOES run healthy. */
+        val failed: Boolean = false,
     )
 
     private val TAG = "Conch-ModelStore"
@@ -72,6 +77,7 @@ object ModelRecords {
                         rating = o["rating"]?.jsonPrimitive?.longOrNull?.toInt(),
                         reviewText = o["review"]?.jsonPrimitive?.contentOrNull,
                         reviewAtMs = o["reviewAtMs"]?.jsonPrimitive?.longOrNull ?: 0L,
+                        failed = o["failed"]?.jsonPrimitive?.booleanOrNull ?: false,
                     )
                 }
             }
@@ -97,6 +103,7 @@ object ModelRecords {
                         r.rating?.let { put("rating", kotlinx.serialization.json.JsonPrimitive(it)) }
                         r.reviewText?.let { put("review", kotlinx.serialization.json.JsonPrimitive(it)) }
                         if (r.reviewAtMs > 0) put("reviewAtMs", kotlinx.serialization.json.JsonPrimitive(r.reviewAtMs))
+                        if (r.failed) put("failed", kotlinx.serialization.json.JsonPrimitive(true))
                     },
                 )
             }
@@ -115,7 +122,15 @@ object ModelRecords {
     /** Called by the engine at every healthy Up — the passive "it runs" fact.
      *  Never downgrades: once seen on gpu, `ranGpu` stays. */
     fun markRan(id: String, gpu: Boolean) = runCatching {
-        update(id) { it.copy(ran = true, ranGpu = it.ranGpu || gpu) }
+        // A healthy Up clears any prior failure — it demonstrably runs now.
+        update(id) { it.copy(ran = true, ranGpu = it.ranGpu || gpu, failed = false) }
+    }.let { }
+
+    /** The engine could not load this model on THIS device (crashed / never came
+     *  up). Hides it from the store browse and marks it unusable in the library
+     *  so the owner is never offered a model that can't run. */
+    fun markFailed(id: String) = runCatching {
+        update(id) { it.copy(failed = true) }
     }.let { }
 
     fun rate(id: String, stars: Int) = update(id) { it.copy(rating = stars.coerceIn(1, 5)) }
