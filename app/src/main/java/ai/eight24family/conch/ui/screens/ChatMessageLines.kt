@@ -1274,9 +1274,23 @@ private fun BridgeConnectingRow() {
  *  no raw error, no spinner. English only (UI string). */
 @Composable
 private fun BridgeStatusRow(text: String) {
+    // ⛔ A FAILURE THE USER CAN FIX IS A DOOR, NOT A LABEL. Every sentence
+    // this row can carry about the shell names the same remedy - the phone
+    // bridge - and the app has a guided flow for exactly that. It just had no
+    // way in from here, so the row explained the problem and left the person
+    // to find Settings themselves (owner, 2026-09-03). Tapping it now goes
+    // straight to that flow.
+    val actionable = text.contains("Phone bridge", ignoreCase = true)
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (actionable) {
+                    Modifier.clickable { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() }
+                } else {
+                    Modifier
+                },
+            )
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -1289,9 +1303,10 @@ private fun BridgeStatusRow(text: String) {
         )
         Spacer(Modifier.size(6.dp))
         Text(
-            text = text,
+            text = if (actionable) "$text  [ set it up ]" else text,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (actionable) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

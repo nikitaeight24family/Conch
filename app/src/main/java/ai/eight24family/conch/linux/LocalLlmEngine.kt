@@ -56,6 +56,61 @@ object LocalLlmEngine {
      *  shift context itself (hybrid/recurrent models don't support it). */
     const val CTX_TOKENS = 16384
 
+    /**
+     * ⛔ 16K WAS A CONSTANT, AND A CONSTANT IS A DEVICE ASSUMPTION.
+     *
+     * Its KV is charged to every model at the store gate, so a 4 GB phone was
+     * shown ONE row out of eighteen and not a single agent-capable one: the
+     * phone was told it can run nothing, when what did not fit was a 16K window
+     * nobody had asked for. The window now shrinks with the ram budget, and the
+     * SAME arithmetic prices the shelf and starts the server - so a model the
+     * store offers is a model the engine can start.
+     *
+     * The floor is not zero. Codex's own system prompt is ~7K tokens, so an
+     * agent-capable model below 8K would answer with no room left to work; chat
+     * and vision models have no such need and stop at 4K. A model that cannot
+     * reach its own floor inside the budget genuinely does not run here, and
+     * the store says so instead of offering it.
+     */
+    const val CTX_MAX = 16384
+    const val CTX_AGENT_FLOOR = 8192
+    const val CTX_CHAT_FLOOR = 4096
+
+    /** Largest window whose resident cost still fits [budget], never below
+     *  [floor]. Shared by the engine and the store so they cannot disagree. */
+    fun ctxWithin(budget: Long, fixedBytes: Long, kvPerTok: Long, floor: Int): Int {
+        if (kvPerTok <= 0L || budget <= 0L) return CTX_MAX
+        var c = CTX_MAX
+        while (c > floor) {
+            if (fixedBytes + kvPerTok * c <= budget) return c
+            c /= 2
+        }
+        return floor
+    }
+
+    /** The window below which this model is not worth starting at all. */
+    fun ctxFloor(m: LocalLlm.Model): Int =
+        if (ai.eight24family.conch.linux.store.StoreCatalog.agentCapable(m.id)) CTX_AGENT_FLOOR
+        else CTX_CHAT_FLOOR
+
+    /** The window this model would really be launched with on this phone. */
+    fun ctxFor(m: LocalLlm.Model): Int {
+        val budget = ai.eight24family.conch.util.SilentlyTry.loggedOrElse(TAG, "read ram budget", 0L) {
+            ai.eight24family.conch.linux.store.DeviceProfile.capacityBytes(
+                ai.eight24family.conch.linux.store.StoreCatalog.catalog.value,
+            )
+        }
+        val fixed = m.bytes + m.mmprojBytes +
+            ai.eight24family.conch.linux.store.StoreCatalog.COMPUTE_BYTES
+        return ctxWithin(budget, fixed, m.kvPerTok, ctxFloor(m))
+    }
+
+    /** The window the RUNNING server was started with - what the agent must be
+     *  told, so its own plan never claims room llama.cpp did not give it. */
+    @Volatile
+    var activeCtx: Int = CTX_MAX
+        private set
+
     private const val TAG = "Conch-LocalLlmEngine"
 
     sealed interface State {
@@ -289,9 +344,10 @@ object LocalLlmEngine {
                 // --jinja: the model's own chat template, which is what makes
                 // TOOL CALLING work — Codex sends tools, and without it the
                 // server falls back to a template with no tool support.
-                // CTX_TOKENS (16K) fits Codex's ~7K system prompt + a real
-                // conversation; its KV share is priced into
-                // LocalLlm.RAM_OVERHEAD_BYTES.
+                // The window follows the phone (see [ctxFor]): 16K where the
+                // budget affords it, 8K or 4K where it does not, never below
+                // the model's own floor. The same arithmetic prices the store
+                // shelf, so a model offered there starts here.
                 val args = buildList {
                     add(bin.absolutePath)
                     add("-m"); add(model.absolutePath)
@@ -310,7 +366,7 @@ object LocalLlmEngine {
                     // batch threads get more cores.
                     add("-t"); add(if (tryGpu) "2" else "4")
                     add("-tb"); add(if (tryGpu) "2" else "6")
-                    add("-c"); add("$CTX_TOKENS")
+                    add("-c"); add("${ctxFor(m).also { activeCtx = it }}")
                     // ⛔ ONE SLOT. b10712's default is --parallel 4, which
                     // quietly provisioned FOUR 8K slots (`n_slots = 4` in the
                     // log) — a phone chat is one conversation, and the extra

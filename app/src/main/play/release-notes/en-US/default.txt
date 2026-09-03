@@ -1,4 +1,4 @@
-• "This phone" is never "not connected" any more: Conch starts the phone's own Linux itself when you open it, and the dot shows it coming up instead of offline.
-• The phone's shell reconnects on its own after Android restarts adbd — the handshake bug that made a paired phone look unpaired is fixed.
-• The phone bridge no longer needs python3, so it also works inside the phone's own Linux; an out-of-date bridge now updates itself.
-• The store never offers a model this device cannot run.
+• The store no longer hides models this phone can run: the context window follows the device, and the built-in models are priced by their real architecture. A 4 GB phone goes from 1 model to 4; an 8 GB one from 8 to 11.
+• Hugging Face results show an estimated size and hide what will not run; an over-budget download asks first.
+• Losing Wi-Fi no longer takes this phone's own Linux with it.
+• Every place that needs the phone bridge now leads to its setup.

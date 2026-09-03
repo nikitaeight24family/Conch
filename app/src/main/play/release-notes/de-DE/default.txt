@@ -1,4 +1,4 @@
-• „Dieses Telefon“ ist nie mehr „nicht verbunden“: Conch startet das Linux des Telefons selbst; der Punkt zeigt den Start statt „offline“.
-• Die Shell des Telefons verbindet sich nach einem adbd-Neustart von allein wieder — der Handshake-Fehler ist behoben.
-• Die Telefonbrücke braucht kein python3 mehr; eine veraltete Brücke aktualisiert sich selbst.
-• Der Store bietet keine Modelle an, die dieses Gerät nicht ausführen kann.
+• Der Store versteckt keine Modelle mehr, die dieses Telefon ausführen kann: das Kontextfenster folgt dem Gerät. Auf 4 GB: 1 Modell → 4; auf 8 GB: 8 → 11.
+• Hugging-Face-Ergebnisse zeigen eine Größenschätzung; was nicht läuft, wird ausgeblendet, und ein Download über Budget fragt nach.
+• Ein Wi-Fi-Abbruch nimmt das Linux auf diesem Telefon nicht mehr mit.
+• Wo die Telefonbrücke gebraucht wird, führt die App zu ihrer Einrichtung.

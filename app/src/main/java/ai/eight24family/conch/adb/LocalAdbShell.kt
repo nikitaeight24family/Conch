@@ -4,6 +4,7 @@ import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -236,15 +237,37 @@ object LocalAdbShell {
 
     /** One sentence naming what is actually in the way, for the screens that
      *  have to tell someone. Only ever called when [check] came back false. */
-    fun whyNoShell(): String =
-        if (unauthorized) {
+    fun whyNoShell(): String = when {
+        unauthorized ->
             "This phone has stopped honouring Conch's shell key. Pair it once in " +
                 "Settings > Phone bridge - Android shows a six-digit code."
-        } else {
+        // ⛔ NAME THE PLATFORM RULE, DO NOT IMPLY THE APP CHOSE THIS. Android
+        // switches wireless debugging off with the Wi-Fi it is tied to, and
+        // nothing on the device can switch it back on - not the app, not even
+        // the shell uid (SELinux refuses `service.adb.tcp.port`). Saying "set it
+        // up in Settings" to someone who set it up yesterday reads as a bug in
+        // the app (owner, 2026-09-03).
+        wifiIsOff() ->
+            "Wi-Fi is off, and Android switches its wireless-debugging switch off with it - " +
+                "no app can turn that back on. An already-running Linux is unaffected; " +
+                "starting one again needs the switch once (Wi-Fi on, Settings > Phone " +
+                "bridge), or one `adb tcpip 5555` from any computer, which then survives " +
+                "Wi-Fi going away until the phone reboots."
+        else ->
             "Conch can't reach this phone's own shell, which is what starts the Linux. " +
                 "Set it up in Settings > Phone bridge; Android needs it armed once per " +
                 "boot, and after that this machine keeps working even if Wi-Fi drops."
-        }
+    }
+
+    /** Wi-Fi association, the thing Android's wireless debugging is tied to. */
+    private fun wifiIsOff(): Boolean = SilentlyTry.loggedOrElse(
+        "Conch-LocalAdb", "read wifi state", false,
+    ) {
+        val wm = ServiceLocator.appContext
+            .applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
+            as? android.net.wifi.WifiManager
+        wm != null && !wm.isWifiEnabled
+    }
 
     /**
      * The port `adb tcpip` leaves adbd listening on.
@@ -348,6 +371,7 @@ object LocalAdbShell {
         // advertisement that named it.
         rememberAdbPort(local.port)
         session = opened
+        spendOnIndependence()
         return opened
     }
 
@@ -379,6 +403,40 @@ object LocalAdbShell {
             "Conch-LocalAdb",
             "adbd not reachable on $port (${t.javaClass.simpleName}) — backing off ${COOLDOWN_MS / 1000}s",
         )
+    }
+
+    /**
+     * ⭐ THE FIRST SHELL OF A SESSION IS SPENT ON NOT NEEDING ONE.
+     *
+     * Android ties wireless debugging to a Wi-Fi association and switches it
+     * OFF the moment Wi-Fi drops (measured: `adb_wifi_enabled` goes to 0, and
+     * no app can set it back — the shell uid cannot even write
+     * `service.adb.tcp.port`, SELinux refuses it). So shell access is a WINDOW,
+     * not a state, and the owner leaving his Wi-Fi took the phone's whole Linux
+     * with it (2026-09-03: "how does dropping Wi-Fi affect the Linux ON the
+     * phone?" — it should not, and now it does not).
+     *
+     * The environment needs the shell only to START. Once its sshd is up it is
+     * an ordinary process: no adb, no Wi-Fi, no discovery, alive until the phone
+     * reboots. So the instant a shell exists — whatever opened it, whichever
+     * screen — it is spent starting the machine, and Wi-Fi stops mattering for
+     * the rest of the boot. Fire-and-forget on purpose: this must never delay or
+     * fail the command the caller actually wanted, and the pool's own mutex
+     * makes concurrent callers pay for one boot.
+     */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun spendOnIndependence() {
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            SilentlyTry.fired("Conch-LocalAdb", "start the phone's Linux while a shell exists") {
+                val d = ServiceLocator.sshConnectionPool.ensureOwnDeviceUp()
+                if (d is ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Up) {
+                    android.util.Log.i(
+                        "Conch-LocalAdb",
+                        "shell window spent: the phone's Linux is up and no longer needs adb",
+                    )
+                }
+            }
+        }
     }
 
     /** How long to leave an unreachable adbd alone. */

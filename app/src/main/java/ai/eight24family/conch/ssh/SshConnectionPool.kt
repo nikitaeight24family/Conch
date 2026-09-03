@@ -920,6 +920,14 @@ class SshConnectionPool {
         resetSilentBackoff()
         // Snapshot — userConnect mutates userHeld while it re-acquires.
         for (sid in userHeld.toSet()) {
+            // ⛔ THE DEVICE'S OWN MACHINE IS NOT ON THE NETWORK THAT CHANGED.
+            // Its transport is a loopback socket; no handoff can break it and no
+            // new network can fix it. Re-dialling it here only meant asking for
+            // a shell that Wi-Fi had just taken away, and reporting the failure
+            // as though the phone's Linux depended on a radio (owner,
+            // 2026-09-03). It is brought up by [ensureOwnDeviceUp], which is
+            // called where it belongs: wherever a shell exists.
+            if (sid == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) continue
             if (peek(sid) != null) continue  // transport survived / already back
             val server = SilentlyTry.logged(TAG, "load server for net-reconnect") { repo.getById(sid) } ?: continue
             val secrets = SilentlyTry.logged(TAG, "load secrets for net-reconnect") { repo.getSecrets(sid) } ?: continue

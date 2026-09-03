@@ -1,4 +1,4 @@
-• «Este teléfono» ya nunca aparece como «no conectado»: Conch arranca solo el Linux del teléfono y el punto muestra el arranque.
-• La shell del teléfono se reconecta sola tras reiniciarse adbd: corregido el fallo de handshake.
-• El puente del teléfono ya no necesita python3; un puente obsoleto se actualiza solo.
-• La tienda no ofrece modelos que este dispositivo no pueda ejecutar.
+• La tienda ya no oculta modelos que este teléfono sí puede ejecutar: la ventana de contexto se adapta al dispositivo. En 4 GB: 1 modelo → 4; en 8 GB: 8 → 11.
+• Los resultados de Hugging Face muestran un tamaño estimado, se oculta lo que no funcionará y una descarga por encima del presupuesto pregunta antes.
+• Perder el Wi-Fi ya no se lleva el Linux del propio teléfono.
+• Donde se necesite el puente, la app lleva a su configuración.
