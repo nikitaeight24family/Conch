@@ -96,18 +96,38 @@ class ModelStoreTest {
     }
 
     @Test
-    fun `ram need is computed from the architecture for store models`() {
+    fun `ram need is computed from the architecture, at the context asked for`() {
         val m = LocalLlm.Model(
             id = "x", label = "x", file = "x.gguf", url = "https://huggingface.co/x",
             bytes = 2_000_000_000L, blurb = "", family = "llama", kvPerTok = 114_688L,
         )
+        // The ctx is a PARAMETER now: the window follows the phone, so a price
+        // quoted at a fixed 16K is a price for a device we were not asked about.
         assertEquals(
-            2_000_000_000L + 114_688L * LocalLlmEngine.CTX_TOKENS + StoreCatalog.COMPUTE_BYTES,
-            LocalLlm.ramNeeded(m),
+            2_000_000_000L + 114_688L * LocalLlmEngine.CTX_MAX + StoreCatalog.COMPUTE_BYTES,
+            LocalLlm.ramNeeded(m, LocalLlmEngine.CTX_MAX),
         )
-        // Builtins keep the tuned flat overhead — their verdicts must not move.
+        assertEquals(
+            2_000_000_000L + 114_688L * LocalLlmEngine.CTX_CHAT_FLOOR + StoreCatalog.COMPUTE_BYTES,
+            LocalLlm.ramNeeded(m, LocalLlmEngine.CTX_CHAT_FLOOR),
+        )
+    }
+
+    @Test
+    fun `a builtin is priced by the same formula, projector included`() {
+        // ⛔ THE FLAT OVERHEAD IS GONE, AND THAT IS THE POINT. It stood for
+        // KV+compute at a fixed 16K and was wrong twice over: it over-charged the
+        // smallest builtin by ~0.4 GB (hiding the app's own default pick from
+        // every 4 GB phone by 30 MB) and never counted the vision projector the
+        // engine loads with `--mmproj`, so the largest was offered to phones that
+        // cannot hold it (2026-09-03).
         val builtin = LocalLlm.BUILTIN.first()
-        assertEquals(builtin.bytes + LocalLlm.RAM_OVERHEAD_BYTES, LocalLlm.ramNeeded(builtin))
+        assertTrue("a builtin must carry its real architecture", builtin.kvPerTok > 0L)
+        assertEquals(
+            builtin.bytes + builtin.mmprojBytes +
+                builtin.kvPerTok * LocalLlmEngine.CTX_CHAT_FLOOR + StoreCatalog.COMPUTE_BYTES,
+            LocalLlm.ramNeeded(builtin, LocalLlmEngine.CTX_CHAT_FLOOR),
+        )
     }
 
     @Test
