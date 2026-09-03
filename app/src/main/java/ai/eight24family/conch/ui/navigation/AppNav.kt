@@ -254,6 +254,16 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
     // position. Pushing a second copy would look like the right screen and be a
     // different one. `navigate` is only for a stack that no longer has it — the
     // process was killed while the user was away in Developer options.
+    // ⛔ ANY SCREEN THAT NEEDS THE SHELL CAN NOW GET THE USER TO THE WIZARD.
+    // It existed all along and exactly one button could reach it; everywhere
+    // else printed a sentence and stopped (see [BridgeSetupRequest]).
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        BridgeSetupRequest.asked.collect { n ->
+            if (n == 0) return@collect
+            SettingsDeepLink.pendingCategory = "bridge"
+            ai.eight24family.conch.ui.window.navigateTab(nav, Routes.SETTINGS)
+        }
+    }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         PhoneBridgeReturn.pending.collect { req ->
             if (req == null || req.navigated) return@collect

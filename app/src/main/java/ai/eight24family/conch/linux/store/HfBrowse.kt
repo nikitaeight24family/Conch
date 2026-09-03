@@ -46,7 +46,50 @@ object HfBrowse {
          * */
         val family: String,
         val brandOrg: String?,
-    )
+    ) {
+        /** Rough resident cost, read off the NAME, before anything is fetched.
+         *  See [paramsB] for why an estimate is the right answer here. */
+        val estBytes: Long? get() = paramsB(repo)?.let {
+            (it * BYTES_PER_B).toLong() + StoreCatalog.COMPUTE_BYTES
+        }
+    }
+
+    /**
+     * Parameter count read off the repo name — "Qwen3-4B-GGUF" -> 4.0.
+     *
+     * ⛔ THE LONG TAIL CARRIED NO SIZE AT ALL, WHICH IS HOW A 4 GB PHONE GOT
+     * A FIRST PAGE OF 30-70 GB REPOSITORIES. A listing entry has no file sizes,
+     * and learning the real ones costs one request per repo — not something to
+     * do for a scrolling list. The name states the parameter count in every
+     * GGUF repo there is, and quantized weights land within a few percent of
+     * `params x 0.62 GB` at Q4: enough to tell a 1B from a 30B, which is the
+     * only question a list has to answer. It is labelled an estimate wherever
+     * it is shown, and the model's own page replaces it with the real file size
+     * the moment it resolves.
+     *
+     * MoE names ("30B-A3B") price on the TOTAL, never the active share: every
+     * expert is resident even when only some of them compute.
+     */
+    fun paramsB(repo: String): Double? {
+        val name = repo.substringAfter('/')
+        val billions = Regex("(?i)(?<![a-z0-9.])(\\d{1,3}(?:[._]\\d)?)\\s*b(?![a-z0-9])")
+            .findAll(name)
+            .mapNotNull { it.groupValues[1].replace('_', '.').toDoubleOrNull() }
+            .filter { it in 0.05..2000.0 }
+            .maxOrNull()
+        if (billions != null) return billions
+        // "gemma-3-270m", "SmolLM2-135M" - the sizes a small phone actually
+        // wants, and the ones a B-only pattern reads as no size at all.
+        return Regex("(?i)(?<![a-z0-9.])(\\d{2,4})\\s*m(?![a-z0-9])")
+            .findAll(name)
+            .mapNotNull { it.groupValues[1].toDoubleOrNull() }
+            .filter { it in 30.0..999.0 }
+            .maxOrNull()
+            ?.let { it / 1000.0 }
+    }
+
+    /** Bytes per billion parameters at Q4-ish quantization, weights only. */
+    private const val BYTES_PER_B = 620_000_000.0
 
     /** The real brand behind a repo, read off the model name (the part after
      *  '/'), NOT the uploader — quantizers (unsloth, bartowski, …) re-host

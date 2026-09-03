@@ -123,9 +123,16 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
                     "local network for wireless debugging, not an internet connection, and the " +
                     "hotspot is one. Once Conch is connected you can switch the hotspot back off; " +
                     "the connection stays.\n\n" +
-                    "Android turns the switch off at every restart — its rule, not Conch's. Chats " +
-                    "keep working either way; only reading this phone's logs and running commands " +
-                    "ON it wait for it.",
+                    "Android turns the switch off at every restart — and at every Wi-Fi drop, " +
+                    "because it ties the switch to the network. That is its rule, not Conch's: " +
+                    "nothing on the phone can turn it back on, not even shell-level access.\n\n" +
+                    "Plugged into a computer, `adb tcpip 5555` is the other way in, and the only " +
+                    "one that does not care about Wi-Fi at all — it survives the network going " +
+                    "away until the phone restarts, and Conch tries it before anything else.\n\n" +
+                    "Whichever way it is armed, Conch spends that moment starting this phone's " +
+                    "Linux. After that the machine runs on its own until the phone restarts — " +
+                    "no adb, no Wi-Fi, nothing to re-arm. Chats keep working either way; only " +
+                    "reading this phone's logs and running commands ON it wait for the switch.",
             )
             Button(
                 onClick = {

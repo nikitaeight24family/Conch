@@ -15,6 +15,45 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.2] — 2026-09-03
+
+### Fixed
+- **The model store stopped hiding models the phone can actually run.** Three
+  faults, all arithmetic. The built-in models were priced by a flat 1.8 GB
+  standing for KV+compute at a fixed 16K context: it over-charged the smallest
+  by ~0.4 GB, so the app hid its own default suggestion from every 4 GB phone
+  by 30 MB, and it under-charged the largest, whose vision projector that flat
+  number never counted — an 8 GB phone was offered a model needing ~4.7 GB.
+  They now carry their real architecture. And the 16K context was a constant,
+  which is a device assumption: the window now steps 16K → 8K → 4K with the ram
+  budget, never below the model's own floor (8K for tool-capable models, whose
+  agent needs room for a ~7K system prompt; 4K for chat), and the same
+  arithmetic prices the shelf and starts the engine, so a model the store
+  offers is one that can start. On a 4 GB phone the shelf goes from 1 model to
+  4; on 8 GB from 8 to 11, and the model that cannot fit correctly leaves it.
+- **Hugging Face results are gated like the shelf.** The long tail had no size
+  at all — a listing carries none — so a 4 GB phone's first page was 30-70 GB
+  repositories with nothing to say about it. Every GGUF repo states its
+  parameter count in its name, so an estimate (labelled as one, replaced by the
+  real file size on the model's page) hides what cannot run and marks it "over
+  budget" under "all". A download that cannot run now asks first, instead of a
+  page that said "over budget" beside a button that started it anyway.
+- **A shelf that filters to nothing explains itself** with the smallest rows and
+  what each would need, rather than rendering as a blank page.
+- **Losing Wi-Fi no longer takes the phone's own Linux with it.** Android ties
+  its wireless-debugging switch to a Wi-Fi association and turns it off with the
+  network; nothing on the device can turn it back on. But the environment needs
+  that access only to START — once its sshd is up it is an ordinary process,
+  alive until the phone restarts. So any moment of shell access is now spent
+  immediately on starting it, and a network change no longer touches that
+  loopback connection at all: it cannot be broken by a handoff and cannot be
+  fixed by a new network.
+- **Every place that needs the phone bridge leads to the flow that arms it.**
+  The guided setup existed and exactly one button could reach it; everywhere
+  else printed a sentence and stopped.
+
+---
+
 ## [0.6.1] — 2026-09-03
 
 ### Fixed
@@ -1687,6 +1726,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.6.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.2
 [0.6.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.1
 [0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13

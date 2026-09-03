@@ -134,6 +134,11 @@ object StoreCatalog {
     private val _catalog = MutableStateFlow(loadInitial())
     val catalog: StateFlow<Catalog> = _catalog.asStateFlow()
 
+    /** Is this id marked tool-capable on the shelf? Drives the context floor:
+     *  an agent needs room for its own system prompt, a chat model does not. */
+    fun agentCapable(id: String): Boolean =
+        _catalog.value.models.firstOrNull { it.id == id }?.agent == true
+
     /** Compute buffers + engine runtime on top of weights and KV for store
      *  models — sized from the 4B's real prefill OOM (compute spikes are the
      *  killer, not steady state). Builtins keep their tuned flat overhead. */

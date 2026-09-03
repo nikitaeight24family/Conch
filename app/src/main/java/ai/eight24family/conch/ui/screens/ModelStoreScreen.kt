@@ -162,7 +162,17 @@ fun ModelStoreScreen(
             )
         },
     ) { padding ->
-        val visible = remember(catalog, fitsOnly, query, res, records) {
+        val budget = DeviceProfile.capacityBytes(catalog, profile)
+        // A shelf that filters to nothing must still explain itself: on a small
+        // phone the honest answer is "these are the smallest, and here is what
+        // they need" - not a blank page that reads as a broken store.
+        val nearest = remember(catalog, profile) {
+            catalog.models.sortedBy { DeviceProfile.needAtFloor(it) }.take(3)
+        }
+        val noAgentFits = remember(catalog, profile) {
+            catalog.models.none { it.agent && DeviceProfile.runsOnThisPhone(it, catalog, profile) }
+        }
+        val matched = remember(catalog, fitsOnly, query, res, records) {
             catalog.models.filter { e ->
                 // A model that already crashed the engine on this device can't
                 // run here — never re-offer it (owner, 2026-09-01).
@@ -172,6 +182,8 @@ fun ModelStoreScreen(
                         .any { it.contains(query.trim(), ignoreCase = true) })
             }
         }
+        val shelfEmpty = fitsOnly && matched.isEmpty() && query.isBlank()
+        val visible = if (shelfEmpty) nearest else matched
         val hidden = catalog.models.size - catalog.models.count {
             DeviceProfile.runsOnThisPhone(it, catalog, profile)
         }
@@ -187,6 +199,26 @@ fun ModelStoreScreen(
                     PillToggle(if (hidden > 0) "all +$hidden" else "all", !fitsOnly) { fitsOnly = false }
                     Spacer(Modifier.width(10.dp))
                     SearchField(query, { query = it }, Modifier.weight(1f))
+                }
+            }
+            if (shelfEmpty || noAgentFits) {
+                item(key = "budget-note") {
+                    Text(
+                        buildString {
+                            if (shelfEmpty) {
+                                append("Nothing on the shelf fits this device's ~")
+                                append(PhoneResources.gb(budget))
+                                append("G budget. These are the smallest, with what each would need.")
+                            } else {
+                                append("No tool-capable model fits this device's ~")
+                                append(PhoneResources.gb(budget))
+                                append("G budget - the ones that fit can chat, not drive the agent.")
+                            }
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
+                    )
                 }
             }
             val cats = listOf(
@@ -238,7 +270,15 @@ fun ModelStoreScreen(
                 }
             }
             val shelfRepos = catalog.models.mapNotNull { it.hfRepo }.toSet()
-            val freshHits = hits.filter { it.repo !in shelfRepos }
+            // ⛔ THE TAIL OBEYS THE SAME GATE AS THE SHELF. It was ungated
+            // entirely: on a 4 GB phone the first page of "popular on Hugging
+            // Face" is 30-70 GB repositories, and the card said nothing about
+            // size because a listing carries none. The name does (HfBrowse
+            // .paramsB), so an estimate over budget is hidden under "fits this
+            // device" and shown, labelled, under "all".
+            val freshHits = hits
+                .filter { it.repo !in shelfRepos }
+                .filter { h -> !fitsOnly || (h.estBytes ?: 0L) <= budget }
             // The ecosystem, always — popular GGUF models from all of Hugging
             // Face when nothing's typed, search results when it is. The curated
             // shelf above leads; this is the long tail so the store is never a
@@ -270,6 +310,7 @@ fun ModelStoreScreen(
                         BrowseHitCard(
                             hit = hit,
                             brand = brands[hit.brandOrg],
+                            overBudget = (hit.estBytes ?: 0L) > budget,
                             onOpen = {
                                 onOpenModel(ai.eight24family.conch.linux.store.HfBrowse.register(hit))
                             },
@@ -369,6 +410,34 @@ private fun ModelCard(
     val ready = status is LocalLlm.Status.Ready
     val publisher = e.hfRepo?.substringBefore('/') ?: "community"
 
+    var overBudgetAsk by remember { mutableStateOf<StoreCatalog.Entry?>(null) }
+    overBudgetAsk?.let { e ->
+        val need = DeviceProfile.needAtFloor(e)
+        val budget = DeviceProfile.capacityBytes(catalog)
+        AlertDialog(
+            onDismissRequest = { overBudgetAsk = null },
+            title = { Text("Won't run on this device") },
+            text = {
+                Text(
+                    "${e.label ?: e.id} needs about ${PhoneResources.gb(need)}G of ram to start, " +
+                        "and this device's budget is ~${PhoneResources.gb(budget)}G. The download " +
+                        "will finish; the model will not run here.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    overBudgetAsk = null
+                    LocalLlm.byId(e.id)?.let { m ->
+                        LocalLlm.addFromStore(m)
+                        LocalLlm.startDownload(m)
+                    }
+                }) { Text("Download anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { overBudgetAsk = null }) { Text("Cancel") }
+            },
+        )
+    }
     var meteredAskBytes by remember { mutableStateOf<Long?>(null) }
     MeteredAsk(meteredAskBytes, onDismiss = { meteredAskBytes = null }) {
         meteredAskBytes = null
@@ -429,7 +498,13 @@ private fun ModelCard(
                     CardStatsLine(e, catalog, status, ramFree, rec, stat, model)
                 }
                 Spacer(Modifier.width(10.dp))
-                CardAction(model, status, onChat) { cost -> meteredAskBytes = cost }
+                CardAction(
+                    model = model,
+                    status = status,
+                    overBudget = !DeviceProfile.runsOnThisPhone(e, catalog),
+                    onChat = onChat,
+                    askOverBudget = { overBudgetAsk = e },
+                ) { cost -> meteredAskBytes = cost }
             }
             if (status is LocalLlm.Status.Downloading && model != null) {
                 val soFar = liveBytes ?: status.bytesSoFar
@@ -530,6 +605,7 @@ private fun CardStatsLine(
 private fun BrowseHitCard(
     hit: ai.eight24family.conch.linux.store.HfBrowse.Hit,
     brand: android.graphics.Bitmap?,
+    overBudget: Boolean,
     onOpen: () -> Unit,
 ) {
     val dim = MaterialTheme.colorScheme.outline
@@ -566,8 +642,17 @@ private fun BrowseHitCard(
                 )
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    "⤓︎ ${HfStats.fmt(hit.downloads)}/mo · ♥︎ ${HfStats.fmt(hit.likes)}",
-                    color = dim,
+                    buildString {
+                        append("⤓︎ "); append(HfStats.fmt(hit.downloads)); append("/mo")
+                        append(" · ♥︎ "); append(HfStats.fmt(hit.likes))
+                        // Labelled an estimate; the model's own page replaces it
+                        // with the real file size on resolve.
+                        hit.estBytes?.let {
+                            append(" · ~"); append(PhoneResources.gb(it)); append("G")
+                            if (overBudget) append(" over budget")
+                        }
+                    },
+                    color = if (overBudget) MaterialTheme.colorScheme.error.copy(alpha = 0.85f) else dim,
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
@@ -602,12 +687,20 @@ private fun FitChip(text: String, color: Color) {
 private fun CardAction(
     model: LocalLlm.Model?,
     status: LocalLlm.Status?,
+    overBudget: Boolean,
     onChat: () -> Unit,
+    askOverBudget: () -> Unit,
     askMetered: (Long) -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     fun start(cost: Long) {
         val m = model ?: return
+        // ⛔ OVER-BUDGET IS ASKED ABOUT, NEVER SILENTLY ALLOWED. The row
+        // already SAYS the model is over this device's budget, and the button
+        // beside that sentence still started a download that can never be run.
+        // Saying it and permitting it in one breath informs nobody
+        // (audit, 2026-09-03).
+        if (overBudget) { askOverBudget(); return }
         LocalLlm.addFromStore(m)
         if (NetGuard.isMetered(ctx)) askMetered(cost) else LocalLlm.startDownload(m)
     }

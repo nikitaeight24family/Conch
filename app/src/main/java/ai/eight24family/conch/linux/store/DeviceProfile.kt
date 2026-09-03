@@ -189,15 +189,45 @@ object DeviceProfile {
     fun capacityBytes(cat: StoreCatalog.Catalog, p: Profile = read()): Long =
         (p.ramTotalBytes * cat.capacityFraction).toLong()
 
+    /**
+     * Can this phone run it AT ALL - asked at the SMALLEST window the model is
+     * worth starting with, not at the ceiling.
+     *
+     * ⛔ THE GATE AND THE LAUNCH MUST AGREE, and now they are the same
+     * arithmetic: [LocalLlmEngine.ctxWithin] chooses the window in both places.
+     * Anything else and the store either hides a model that runs or offers one
+     * that cannot start.
+     */
     fun runsOnThisPhone(e: StoreCatalog.Entry, cat: StoreCatalog.Catalog, p: Profile = read()): Boolean =
-        needBytes(e) <= capacityBytes(cat, p)
+        needAtFloor(e) <= capacityBytes(cat, p)
+
+    /** The window this entry would be launched with on this phone. */
+    fun ctxFor(e: StoreCatalog.Entry, cat: StoreCatalog.Catalog, p: Profile = read()): Int {
+        LocalLlm.byId(e.id)?.let { return LocalLlmEngine.ctxFor(it) }
+        return LocalLlmEngine.ctxWithin(
+            capacityBytes(cat, p),
+            e.bytes + StoreCatalog.COMPUTE_BYTES,
+            e.kvPerTok,
+            floorOf(e),
+        )
+    }
+
+    private fun floorOf(e: StoreCatalog.Entry): Int =
+        if (e.agent) LocalLlmEngine.CTX_AGENT_FLOOR else LocalLlmEngine.CTX_CHAT_FLOOR
+
+    /** Resident cost at that floor - the cheapest this model can honestly be
+     *  run here, and therefore the only fair number for the capacity gate. */
+    fun needAtFloor(e: StoreCatalog.Entry): Long {
+        LocalLlm.byId(e.id)?.let { return LocalLlm.ramNeeded(it, LocalLlmEngine.ctxFloor(it)) }
+        return e.bytes + e.kvPerTok * floorOf(e) + StoreCatalog.COMPUTE_BYTES
+    }
 
     /** Total resident need: weights + KV at the engine's real context + the
      *  compute/runtime slice. Builtins defer to [LocalLlm.ramNeeded]'s tuned
      *  constant — same number the local-models rows show. */
-    fun needBytes(e: StoreCatalog.Entry): Long {
+    fun needBytes(e: StoreCatalog.Entry, cat: StoreCatalog.Catalog = StoreCatalog.catalog.value): Long {
         LocalLlm.byId(e.id)?.let { return LocalLlm.ramNeeded(it) }
-        return e.bytes + e.kvPerTok * LocalLlmEngine.CTX_TOKENS + StoreCatalog.COMPUTE_BYTES
+        return e.bytes + e.kvPerTok * ctxFor(e, cat) + StoreCatalog.COMPUTE_BYTES
     }
 
     // ── the speed estimate ──

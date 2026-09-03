@@ -108,8 +108,15 @@ fun LinuxEnvironmentPanel() {
                 )
                 LinuxAside(
                     "Turn Wireless debugging on once (Android only allows it on Wi-Fi) and it comes " +
-                        "back — nothing here has to be installed again.",
+                        "back — nothing here has to be installed again. Conch spends that " +
+                        "moment starting this Linux, and then it runs until the phone restarts.",
                 )
+                // The page said what to do and left the person to find it. The
+                // guided flow is one tap away; it should be one tap away.
+                Button(
+                    onClick = { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Set up the phone bridge") }
             }
 
             else -> {
@@ -137,6 +144,12 @@ fun LinuxEnvironmentPanel() {
                     "It needs the phone bridge armed once, because only the shell's own directory " +
                         "is allowed to hold something runnable.",
                 )
+                if (problem != null || presence == LinuxEnv.Presence.UNREACHABLE) {
+                    OutlinedButton(
+                        onClick = { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Set up the phone bridge") }
+                }
                 problem?.let {
                     Text(
                         it,

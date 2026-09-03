@@ -123,9 +123,10 @@ object LocalLlm {
         /** Model family for the store's mark and grouping — "qwen" for the
          *  builtins, whatever the store manifest says for added models. */
         val family: String = "qwen",
-        /** KV-cache bytes per context token (f16), precomputed from the real
-         *  architecture at curation time. 0 = builtin: its tuned flat
-         *  [RAM_OVERHEAD_BYTES] already prices KV+compute together. */
+        /** KV-cache bytes per context token (f16), computed from the real
+         *  architecture: 2 x full-attention-layers x kv-heads x head-dim x 2.
+         *  0 means the architecture was never read (a Hugging Face hit), and
+         *  only then does the flat [RAM_OVERHEAD_BYTES] stand in. */
         val kvPerTok: Long = 0L,
         /** The original publisher's HF org — where the REAL brand mark comes
          *  from (BrandIcons); null falls back to family art/monogram. */
@@ -168,6 +169,11 @@ object LocalLlm {
             bytes = 507_154_688,
             blurb = "smallest — instant replies, simple tasks",
             brandOrg = "Qwen",
+            // 2 x 6 full-attention layers x 2 kv heads x 256 head dim x 2 B (f16),
+            // from the published config. Qwen3.5 is hybrid - only every fourth
+            // layer keeps a per-token KV - which is why these are far below what
+            // a dense model of the same size would cost.
+            kvPerTok = 12_288,
             mmprojFile = "mmproj-Qwen3.5-0.8B-F16.gguf",
             mmprojUrl = "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf",
             mmprojBytes = 204_987_232,
@@ -180,6 +186,7 @@ object LocalLlm {
             bytes = 1_214_873_856,
             blurb = "fast and capable — the everyday pick",
             brandOrg = "Qwen",
+            kvPerTok = 12_288,
             mmprojFile = "mmproj-Qwen3.5-2B-F16.gguf",
             mmprojUrl = "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf",
             mmprojBytes = 668_227_264,
@@ -192,6 +199,8 @@ object LocalLlm {
             bytes = 2_583_221_408,
             blurb = "strongest here for agent work",
             brandOrg = "Qwen",
+            // 2 x 8 full-attention layers x 4 kv heads x 256 head dim x 2 B.
+            kvPerTok = 32_768,
             mmprojFile = "mmproj-Qwen3.5-4B-F16.gguf",
             mmprojUrl = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
             mmprojBytes = 672_423_616,
@@ -613,13 +622,29 @@ object LocalLlm {
 
     // ── the "fits" verdict, pure ──
 
-    fun ramNeeded(m: Model): Long =
+    /**
+     * What this model costs resident, at the context it will really run with
+     * on THIS device.
+     *
+     * ⛔ ONE FORMULA FOR EVERY MODEL, THE BUILT-IN ONES INCLUDED. They used to
+     * be priced by a flat 1.8 GB standing for KV+compute at a fixed 16K, and
+     * that was wrong in both directions: it over-charged the 0.8B by ~0.4 GB,
+     * so the app hid ITS OWN DEFAULT PICK from every 4 GB phone by 30 MB; and
+     * it under-charged the 4B, whose 0.67 GB vision projector the flat number
+     * never counted, so an 8 GB phone was offered a model that needs ~5 GB.
+     * The architecture in the table above comes from the published configs.
+     *
+     * The projector counts because the engine loads it (`--mmproj`) whenever
+     * the model has one: resident for the session, not on demand.
+     */
+    fun ramNeeded(m: Model, ctx: Int = LocalLlmEngine.ctxFor(m)): Long =
         if (m.kvPerTok > 0L) {
-            // Store models: computed from the model's real architecture — KV at
-            // the engine's actual context, plus the compute/runtime slice.
-            m.bytes + m.kvPerTok * LocalLlmEngine.CTX_TOKENS +
+            m.bytes + m.mmprojBytes + m.kvPerTok * ctx +
                 ai.eight24family.conch.linux.store.StoreCatalog.COMPUTE_BYTES
-        } else m.bytes + RAM_OVERHEAD_BYTES
+        } else {
+            // Architecture unknown - the flat number is the only honest guess.
+            m.bytes + m.mmprojBytes + RAM_OVERHEAD_BYTES
+        }
 
     enum class Fit { FITS, TIGHT, SHORT }
 
