@@ -120,6 +120,7 @@ class AppPreferences(private val context: Context) {
     private val customTextHexKey = stringPreferencesKey("custom_text_hex")
     private val fontFamilyIdKey = stringPreferencesKey("font_family_id")
     private val dataSaverEnabledKey = booleanPreferencesKey("data_saver_enabled")
+    private val lastAdbPortKey = intPreferencesKey("last_adb_port")
     private val sshConnectTimeoutKey = intPreferencesKey("ssh_connect_timeout_sec")
     private val sshKeepaliveIntervalKey = intPreferencesKey("ssh_keepalive_interval_sec")
     private val autoConnectKey = booleanPreferencesKey("auto_connect_enabled")
@@ -809,6 +810,15 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setSshConnectTimeoutSec(seconds: Int) {
         context.dataStore.edit { it[sshConnectTimeoutKey] = seconds.coerceIn(5, 60) }
+    }
+
+    /** The port this phone's own adbd last accepted us on; 0 = never. Kept
+     *  because mDNS stops advertising that port long before adbd stops
+     *  listening on it - see LocalAdbShell.rememberedAdbPort. */
+    val lastAdbPort: Flow<Int> = context.dataStore.data.map { p -> p[lastAdbPortKey] ?: 0 }
+
+    suspend fun setLastAdbPort(port: Int) {
+        context.dataStore.edit { it[lastAdbPortKey] = port }
     }
 
     /** SSH transport keep-alive interval, in seconds. Range 15..120, default 45. */

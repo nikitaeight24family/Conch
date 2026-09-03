@@ -239,7 +239,9 @@ fun ChatScreen(
             title = {
                 androidx.compose.material3.Text(
                     when (step) {
-                        ChatViewModel.BridgeStep.Confirm -> "Connect phone to this server?"
+                        ChatViewModel.BridgeStep.Confirm ->
+                            if (vm.isThisDevice) "Let the agent reach this device?"
+                            else "Connect phone to this server?"
                         ChatViewModel.BridgeStep.Installing -> "Installing…"
                         ChatViewModel.BridgeStep.Done -> "Phone connected ✓"
                         else -> "Install failed"
@@ -251,11 +253,19 @@ fun ChatScreen(
                     androidx.compose.material3.Text(
                         when (step) {
                             ChatViewModel.BridgeStep.Confirm ->
-                                "Conch installs a small helper (conch-bridge) on this server over your SSH " +
-                                    "connection. After that the agent can run shell commands and read logs on " +
-                                    "THIS phone at adb-shell level. Nothing leaves your device except to your own server."
+                                if (vm.isThisDevice) {
+                                    "Conch installs a small helper (conch-bridge) inside this device's own " +
+                                        "Linux. After that the agent can run shell commands and read logs on " +
+                                        "THIS device at adb-shell level. Nothing leaves the device — the " +
+                                        "link is loopback."
+                                } else {
+                                    "Conch installs a small helper (conch-bridge) on this server over your SSH " +
+                                        "connection. After that the agent can run shell commands and read logs on " +
+                                        "THIS phone at adb-shell level. Nothing leaves your device except to your own server."
+                                }
                             ChatViewModel.BridgeStep.Installing ->
-                                "Writing conch-bridge to the server over SSH…"
+                                if (vm.isThisDevice) "Writing conch-bridge into this device's Linux…"
+                                else "Writing conch-bridge to the server over SSH…"
                             ChatViewModel.BridgeStep.Done ->
                                 "$bridgeLog\n\n✓ Installed successfully — the agent has been told how to use it."
                             else ->

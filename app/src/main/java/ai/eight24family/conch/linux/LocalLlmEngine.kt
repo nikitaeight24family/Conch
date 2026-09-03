@@ -416,9 +416,15 @@ object LocalLlmEngine {
                 }
                 delay(400)
             }
+            val died = !p.isAlive
+            // The last MEANINGFUL log line. [clshim] priority-hint chatter is
+            // benign and was MASKING the real reason — it showed up verbatim as
+            // the verify result ("[clshim] queue priority LOW: refused …"). Skip
+            // it. A SIGSEGV in load_model leaves no error line at all, so a
+            // process that DIED during load is reported as an incompatible model.
             val tail = runCatching {
                 logFile().readText().lineSequence().map { it.trim() }
-                    .lastOrNull { it.isNotEmpty() }
+                    .lastOrNull { it.isNotEmpty() && !it.startsWith("[clshim]") }
             }.getOrNull()
             stopLocked()
             if (tryGpu) {
@@ -428,8 +434,15 @@ object LocalLlmEngine {
                 android.util.Log.w(TAG, "gpu launch failed for ${m.id} ($tail) — retrying on cpu")
                 return@withLock LaunchOutcome.RETRY_CPU
             }
-            _state.value = State.Failed(m.id, tail ?: "the engine did not come up")
-            android.util.Log.w(TAG, "engine failed for ${m.id}: $tail")
+            val reason = if (died)
+                "this model crashed the engine on load — it may be an unsupported or corrupt format"
+            else tail ?: "the engine did not come up"
+            _state.value = State.Failed(m.id, reason)
+            // It ran on CPU (no GPU excuse) and STILL would not load: this device
+            // cannot run it. Record it so the store stops offering the model and
+            // the library marks it — the owner is never sent to a dead end again.
+            ai.eight24family.conch.linux.store.ModelRecords.markFailed(m.id)
+            android.util.Log.w(TAG, "engine failed for ${m.id}: $reason (died=$died, tail=$tail)")
             LaunchOutcome.FAIL
         }
     }

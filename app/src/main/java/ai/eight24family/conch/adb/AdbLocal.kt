@@ -1,5 +1,6 @@
 package ai.eight24family.conch.adb
 
+import ai.eight24family.conch.util.SilentlyTry
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
@@ -29,6 +30,11 @@ import java.net.Socket
  */
 object AdbLocal {
 
+    /** How long to wait for the daemon's own banner after the TLS handshake
+     *  before falling back to greeting it. It arrives in milliseconds on
+     *  loopback; this is slack, and it is paid once per connection. */
+    private const val BANNER_WAIT_MS = 3_000
+
     /** The port `adbd` listens on is not fixed; see the discovery this pairs with. */
     class Session internal constructor(
         private val closeables: List<Closeable>,
@@ -49,6 +55,13 @@ object AdbLocal {
         fun exec(command: String, limit: Int = 4 * 1024 * 1024): AdbShellV2.Result {
             // `raw` because there is no terminal on this side; a pty would wrap
             // the output in escape sequences the caller would have to strip.
+            // ⛔ AN `A_STLS` HERE CANNOT BE ANSWERED, ONLY PREVENTED. By the time
+            // it arrives we have already written an `OPEN` into a socket where
+            // the daemon is waiting for a TLS ClientHello, and those bytes are
+            // not recoverable — the upgrade has to happen during the handshake,
+            // which is what [handshake]'s peek is for. Measured 2026-09-03: an
+            // upgrade attempted from here connected, greeted, and was refused
+            // all over again. So this stays a plain throw with a name on it.
             val stream = connection.open("shell,v2,raw:$command")
             return AdbShellV2.demux(stream.readAll(limit), limit)
         }
@@ -70,13 +83,22 @@ object AdbLocal {
         output: OutputStream,
         key: AdbKey,
         extraCloseables: List<Closeable> = emptyList(),
+        /** Sets the transport's read timeout in ms — used to bound the wait for
+         *  the daemon's banner. Null on a transport that cannot be timed out
+         *  (the in-process test peer); the wait is then unbounded, which is
+         *  correct there because the peer is scripted. */
+        setReadTimeout: ((Int) -> Unit)? = null,
+        /** What to put the read timeout back to afterwards. */
+        restoreReadTimeoutMs: Int = 30_000,
     ): Session {
         val plain = AdbConnection(input, output)
         when (val greeting = plain.greet()) {
             AdbConnection.Greeting.WANTS_TLS -> Unit
             AdbConnection.Greeting.CONNECTED ->
-                // Already inside TLS, or a device with no TLS at all: nothing to
-                // upgrade, so the connection we have is the one to use.
+                // Already inside TLS, or a device with no TLS at all. A daemon
+                // that still wants the upgrade says so on the first service
+                // open, and [AdbConnection.open] knows what to do with that —
+                // which is cheaper and surer than timing a peek here.
                 return Session(extraCloseables, plain)
             AdbConnection.Greeting.WANTS_RSA_AUTH -> {
                 // The `adb tcpip` listener. No TLS on this path: authenticate
@@ -92,17 +114,55 @@ object AdbLocal {
             else -> throw IllegalStateException("unexpected greeting: $greeting")
         }
 
+        val (secure, closers) = tlsUpgrade(input, output, key, plain, setReadTimeout, restoreReadTimeoutMs)
+        return Session(closers + extraCloseables, secure)
+    }
+
+    /**
+     * Answer `STLS`, hand the socket to TLS, and restart the ADB conversation
+     * inside it. Returns the encrypted connection and what has to be closed for
+     * it. Shared by both paths that reach TLS: the daemon that asks in its
+     * greeting, and the one that asks at the first service open.
+     */
+    private fun tlsUpgrade(
+        input: InputStream,
+        output: OutputStream,
+        key: AdbKey,
+        plain: AdbConnection,
+        setReadTimeout: ((Int) -> Unit)? = null,
+        restoreReadTimeoutMs: Int = 30_000,
+    ): Pair<AdbConnection, List<Closeable>> {
         plain.acceptTls()
         val tls = AdbTls.connect(input, output, key.certificate, key.tlsPrivateKey)
         val secure = AdbConnection(tls.input, tls.output)
-        val after = secure.greet()
-        if (after != AdbConnection.Greeting.CONNECTED) {
-            throw IllegalStateException(
-                "the device did not accept our certificate — it answered $after inside TLS. " +
-                    "The key is probably not paired with this device.",
-            )
+        // ⛔ LISTEN FIRST. The daemon announces itself the moment the tunnel is
+        // up, and greeting it again takes the transport straight back offline —
+        // see [AdbConnection.awaitBanner], which carries the measurement.
+        val heard = try {
+            setReadTimeout?.invoke(BANNER_WAIT_MS)
+            secure.awaitBanner()
+        } catch (_: java.net.SocketTimeoutException) {
+            false
+        } finally {
+            setReadTimeout?.invoke(restoreReadTimeoutMs)
         }
-        return Session(listOf(Closeable { tls.close() }) + extraCloseables, secure)
+        if (!heard) {
+            // A daemon that waits to be spoken to (and the in-process test peer).
+            // Only reached when nothing was announced, so no transport is
+            // disturbed by asking.
+            val after = secure.greet()
+            if (after != AdbConnection.Greeting.CONNECTED) {
+                throw IllegalStateException(
+                    "the device did not accept our certificate — it answered $after inside TLS. " +
+                        "The key is probably not paired with this device.",
+                )
+            }
+        }
+        android.util.Log.i(
+            "Conch-AdbLocal",
+            "inside TLS (${if (heard) "announced" else "greeted"}), banner=${secure.deviceBanner?.take(40)}",
+        )
+        return secure to listOf(Closeable { tls.close() })
     }
 
     /** Connect to `adbd` on this device and complete the handshake. */
@@ -123,6 +183,8 @@ object AdbLocal {
                 socket.getOutputStream(),
                 key,
                 extraCloseables = listOf(socket),
+                setReadTimeout = { ms -> socket.soTimeout = ms },
+                restoreReadTimeoutMs = readTimeoutMs,
             )
         } catch (t: Throwable) {
             runCatching { socket.close() }

@@ -46,6 +46,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     /** Optional remote (CLI-managed) session id to attach via `--resume`. */
     private val initialResumeId: String? = savedStateHandle.get<String>("resume")?.takeIf { it.isNotBlank() }
 
+    /** This chat's server is the device's own Linux row, not a machine across a
+     *  network — the bridge copy says so, rather than talking about "your
+     *  server" to someone holding it in their hand. */
+    val isThisDevice: Boolean = serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
+
     /**
      * Was this chat OPENED on an existing session, or started empty?
      *
@@ -699,7 +704,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 else -> false
             }
         }
-        val shown = hideBridgeHandshake(deNoised)
+        // ⛔ AND THEN TURN IT INTO THE ROW IT SHOULD HAVE BEEN — NOT NOTHING.
+        //
+        // [collapseBridgeHandshake] folds the injected prompt into one dim
+        // "connected" row ONLY when it can see the turn around it: it walks from
+        // a "turn started" note to a "turn complete" one. A prompt that arrives
+        // without those boundaries — replayed history, a resumed session, a turn
+        // whose notes have not landed yet — falls straight through the walk and
+        // is printed verbatim, which is how 1.5 KB of setup English the owner
+        // never typed was on his screen a third time (2026-09-03).
+        //
+        // Deleting it outright fixed that and broke something else in the same
+        // move: the "connecting phone" row stands down the moment the prompt is
+        // sent, so with nothing in its place the whole handshake vanished from
+        // the chat — and the phone indicator, which lights on a `bridge_connected`
+        // row existing, never lit. A state that ends must be REPLACED by the
+        // state that follows it, never by a hole. So: collapse first (the nice
+        // outcome, which also carries any real reply out of the turn), and
+        // whatever copy of the prompt survives that walk becomes the same
+        // `bridge_connected` row the collapse would have made.
+        val shown = hideBridgeHandshake(deNoised).map { m ->
+            if (m is AgentMessage.UserText && isAppInjectedPrompt(m.text)) {
+                AgentMessage.System(id = m.id, subtype = "bridge_connected", raw = "")
+            } else {
+                m
+            }
+        }
         // Pure reorder of the one header row; nothing else moves.
         val wi = shown.indexOfFirst { it is AgentMessage.System && it.subtype == "welcome" }
         val ordered = if (wi > 0) listOf(shown[wi]) + shown.filterIndexed { i, _ -> i != wi } else shown
@@ -1419,6 +1449,38 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // 2026-08-29). This block sits below every flow the watcher touches.
     init { watchBridgeHandshake() }
 
+    /** True while the device's own machine is being brought up, so the dot can
+     *  say "starting" instead of the "offline" it must never say about the
+     *  phone in the owner's hand. */
+    private val _ownDeviceStarting = MutableStateFlow(false)
+    val connectionPending: StateFlow<Boolean> = _ownDeviceStarting.asStateFlow()
+
+    /**
+     * ⛔ THE DEVICE'S OWN MACHINE COMES UP WHEN THE CHAT IS OPENED, not when
+     * the first message is sent and not when something is tapped.
+     *
+     * Everything else in this app waits for an intent because a connection
+     * costs a handshake on someone's network. This one costs a loopback socket
+     * to a daemon on the same device, and leaving it down is what put an
+     * "offline" dot and a "connect to the server first" on the row for the
+     * phone the owner is holding (2026-09-03). There is nothing to wait for.
+     */
+    init {
+        if (isThisDevice) {
+            viewModelScope.launch {
+                _ownDeviceStarting.value = true
+                try {
+                    val d = ServiceLocator.sshConnectionPool.ensureOwnDeviceUp()
+                    if (d is ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Down) {
+                        android.util.Log.w("Conch-Chat", "own device did not come up: ${d.why}")
+                    }
+                } finally {
+                    _ownDeviceStarting.value = false
+                }
+            }
+        }
+    }
+
     /** Paperclip → "Connect phone to server". Gated on this phone being
      *  reachable at all, then branches on whether the bridge is already on the
      *  server (see the section comment). */
@@ -1453,7 +1515,31 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 return@launch
             }
             _bridgeUnreachable.value = null
+            // ⛔ OPEN THE TRANSPORT, DON'T TELL HIM TO. Both probes below run
+            // over SSH, and a chat that has not sent its first message has no
+            // connection yet — so this whole flow ended in "no live connection
+            // — connect to the server first" about a row that is the owner's
+            // OWN DEVICE (2026-09-03). The tap is the request; the pool answers
+            // it, starting the phone's own sshd on the way when that is the row.
+            when (val d = ServiceLocator.sshConnectionPool.ensureConnected(serverId)) {
+                is ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Down -> {
+                    endBridgeConnecting()
+                    _bridgeUnreachable.value = d.why
+                    return@launch
+                }
+                is ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Up -> Unit
+            }
+            // With a transport up, a null status means the PROBE stumbled — not
+            // "not installed". Ask once more before offering to install a bridge
+            // that is very probably already there (owner, same report: it was).
+            // Still falls through to the install if it stays unreadable: the
+            // write is idempotent, and a dead end is worse than one extra
+            // confirm.
             val status = ai.eight24family.conch.diagnostics.BridgeInstaller.status(serverId)
+                ?: run {
+                    kotlinx.coroutines.delay(800)
+                    ai.eight24family.conch.diagnostics.BridgeInstaller.status(serverId)
+                }
             if (status == null || !status.installed) {
                 // Not installed (or couldn't probe) → confirm + install.
                 endBridgeConnecting()
@@ -1498,6 +1584,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  there = adb-level control of this phone). null for non-root sessions. */
     private suspend fun hostRiskWarning(): String? {
         val server = repo.getById(serverId) ?: return null
+        // The device's own Linux IS root@127.0.0.1, so every word of the remote
+        // warning below matched it and none of it was TRUE of it: no other host,
+        // nothing crossing a network, and "only connect on a host you fully
+        // control" as advice about the phone in his hand (owner, 2026-09-03).
+        // The real risk there is smaller, and worth exactly one sentence.
+        if (isThisDevice) {
+            return "The helper goes into this device's own Linux, over loopback. Anything " +
+                "running in there — an agent, a package it pulls in — can then drive " +
+                "Android at adb level. You can keep \"Run shell from server\" off in " +
+                "Settings > Security."
+        }
         return if (server.username.trim().equals("root", ignoreCase = true)) {
             "This is a root@ session on ${server.host}. Anything that can run code as " +
                 "root there — a buggy service, a malicious dependency, a prompt-injected " +
@@ -1640,9 +1737,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             `bash -x ~/.local/bin/conch-bridge ping` to find the failing line.
 
         Poll interval is 2 s while Conch is on screen, 10 s while it is pocketed.
-        Use the bridge whenever you need to inspect or act on my phone. Reply with a
-        one-line acknowledgement — this message is hidden behind a phone indicator in
-        the app, so keep it short.
+        Use the bridge whenever you need to inspect or act on my phone.
+
+        NOW, BEFORE YOU REPLY: run `conch-bridge ping` once, yourself. Do not take
+        this message's word for it and do not answer "acknowledged" — the only
+        thing worth saying is what the phone actually did. Then reply with ONE
+        short line: that the ping came back `pong` and adb-level access to the
+        phone is open, or, if it did not, the exit code and what it printed. One
+        attempt — no retry loops. This message is hidden behind a phone indicator in
+        the app, so keep the reply to that one line.
     """.trimIndent()
 
 
@@ -1744,7 +1847,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * queue and then slide into the chat is watching the app's bookkeeping. The
      * transcript hides that same prompt; */
     val queuedMessages: StateFlow<List<QueuedMessage>> =
-        _outbox.map { list -> list.filterNot { it.text.trimStart().startsWith(BRIDGE_HOWTO_MARKER) } }
+        _outbox.map { list -> list.filterNot { isAppInjectedPrompt(it.text) } }
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
@@ -6281,6 +6384,22 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
  * EVERY chat crashed on open (twice in one day, 2026-08-29). A compile-time
  * constant has no initialisation order to get wrong.
  */
+/**
+ * Text the APP put in the conversation, not the person.
+ *
+ * ⛔ ONE PREDICATE, USED EVERYWHERE, BECAUSE THE LIST GREW AND A COPY DID NOT.
+ * The queue filter was written against [BRIDGE_HOWTO_MARKER] alone; when the
+ * injected prompt was rewritten to open with [BRIDGE_LIVE_MARKER] the filter
+ * stopped matching, and 1.5 KB of setup English the owner never typed sat in
+ * his chat as a pending bubble for the length of the turn — the exact thing
+ * that filter exists to prevent, reported twice (2026-08-29, 2026-09-03).
+ * Anything that hides these prompts asks HERE.
+ */
+internal fun isAppInjectedPrompt(text: String): Boolean {
+    val t = text.trimStart()
+    return t.startsWith(BRIDGE_HOWTO_MARKER) || t.startsWith(BRIDGE_LIVE_MARKER)
+}
+
 internal const val BRIDGE_HOWTO_MARKER = "I've connected my phone to this server"
 
 /** First line of the CURRENT bridge prompt — sent only after [BridgeSelfTest]

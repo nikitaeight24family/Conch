@@ -15,6 +15,39 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.1] — 2026-09-03
+
+### Fixed
+- **The row for the phone you are holding is never "not connected".** Opening a
+  chat on it starts the phone's own Linux at once instead of waiting to be
+  tapped, the dot shows that start rather than an offline mark, and no screen
+  asks you to connect a machine only the app can reach. Loopback into your own
+  device is the app's plumbing; it was being presented as a server you had to
+  dial.
+- **The phone's own shell survives Android restarting `adbd`.** After the TLS
+  handshake the daemon announces itself, and Conch was greeting it a second
+  time — which this protocol reads as "the peer restarted", so the daemon took
+  the transport offline and ignored every command that followed. A paired phone
+  looked unpaired, and a chat could only report that its Linux was unreachable.
+  Conch now listens for that announcement, remembers the port the daemon
+  answered on (the mDNS advert stops long before the daemon does), and no longer
+  lets a background back-off veto something you just asked for.
+- **The phone bridge no longer needs `python3` on the machine running the
+  agent.** It shelled out to it to build and read its JSON, which is fine on a
+  server and fatal inside the phone's own Alpine Linux: every command died at
+  exit 127 in the instant the phone's real answer arrived. Requests are now
+  quoted with `sed`+`awk`, and responses are not parsed at all — the phone
+  writes the fields the shell needs beside the JSON. A bridge that is a version
+  behind updates itself instead of waiting to be noticed.
+- **The setup text the app injects when you connect a phone stays out of the
+  conversation**, whatever shape the surrounding turn has, and the agent now
+  proves the link with a real `conch-bridge ping` instead of answering
+  "acknowledged".
+- The store no longer offers a model this device cannot run, and a model that is
+  running offers to end it rather than delete it.
+
+---
+
 ## [0.6.0] — 2026-09-01
 
 ### Added
@@ -1654,6 +1687,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.6.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.1
 [0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
 [0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
 [0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12

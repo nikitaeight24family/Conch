@@ -59,6 +59,25 @@ class ConchApp : Application() {
                 ServiceLocator.sshConnectionPool.connectAllPossibleSilently()
             }
         }
+        // ⛔ AND KEEP TRYING FOR THE DEVICE'S OWN MACHINE.
+        //
+        // The one thing that can stop it is Android's debugging switch being
+        // unarmed at this instant — which is a state that ENDS, usually within
+        // seconds of a boot or of the owner walking back into Wi-Fi. Giving up
+        // after one attempt is what left a phone showing "not connected" about
+        // itself until something was tapped. Five slow tries cost nothing (each
+        // is a no-op once it is up) and cover the whole window; after that the
+        // screens that show the row ask again anyway.
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            repeat(5) { attempt ->
+                val up = SilentlyTry.loggedOrElse("Conch-App", "start own machine", false) {
+                    ServiceLocator.sshConnectionPool.ensureOwnDeviceUp() is
+                        ai.eight24family.conch.ssh.SshConnectionPool.Dialled.Up
+                }
+                if (up) return@launch
+                kotlinx.coroutines.delay(30_000L * (attempt + 1))
+            }
+        }
     }
 
     // ── Memory pressure ──────────────────────────────────────────────────

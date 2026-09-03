@@ -223,6 +223,10 @@ object HfBrowse {
             val candidates = files.filter { (p, s) ->
                 p.endsWith(".gguf", ignoreCase = true) && s > 0 &&
                     !p.contains("mmproj", ignoreCase = true) &&
+                    // A `-draft-` GGUF is a speculative-decoding companion, not a
+                    // standalone chat model — llama.cpp SIGSEGVs loading it as one
+                    // (owner's Qwen3.8-27B-draft, 2026-09-01). Never a runnable pick.
+                    !p.contains("draft", ignoreCase = true) &&
                     !Regex("-\\d{5}-of-\\d{5}", RegexOption.IGNORE_CASE).containsMatchIn(p)
             }
             val pick = candidates.firstOrNull { it.first.contains("Q4_0", true) }

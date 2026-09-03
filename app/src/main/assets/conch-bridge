@@ -43,7 +43,7 @@ trap 'rc=$?; echo "conch-bridge: internal error (exit $rc) near line $LINENO —
 
 # Bump whenever this script changes — the app compares installed-vs-bundled on
 # the server page and offers Update.
-CONCH_BRIDGE_VERSION="8"
+CONCH_BRIDGE_VERSION="9"
 
 BRIDGE_DIR=${CONCH_BRIDGE_DIR:-$HOME/.conch-bridge}
 TIMEOUT_S=${CONCH_BRIDGE_TIMEOUT_S:-30}
@@ -172,9 +172,23 @@ EOF
 }
 
 # Quote a string as a JSON value, or `null` if it's empty.
+#
+# NO python3, NO node, NO jq. This script runs wherever the agent runs, and
+# that includes the Linux INSIDE the phone - an Alpine rootfs with neither
+# interpreter installed, where `python3: command not found` killed every single
+# command at exit 127 while the phone itself was answering perfectly (owner,
+# 2026-09-03: a ping that should be ping-pong and nothing else). awk is in
+# busybox, toybox and coreutils alike; a wrapper that needs a language runtime
+# to quote a string does not deserve to be the thing standing between an agent
+# and a phone.
 jq_str() {
   if [ -z "${1:-}" ]; then echo null; return; fi
-  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+  # sed does the two literal replacements - its replacement rules are the
+  # same everywhere - and awk only JOINS lines, so nothing here depends on
+  # how a given awk build reads a backslash inside a gsub replacement.
+  printf '%s' "$1" \
+    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' \
+    | awk 'BEGIN { ORS = ""; print "\"" } { if (NR > 1) print "\\n"; print } END { print "\"" }'
 }
 
 case "$CMD" in
@@ -219,6 +233,10 @@ esac
 
 # Wait for a NON-EMPTY response (`-s`, not `-f`): the app writes the reply via temp-file + atomic rename, and `-s` also guards against ever catching a 0-byte file mid-write (that race used to make json.load die "Expecting value: line 1 column 1"). Phone polls inbox every ~2s.
 RES="$OUTBOX/$ID.res.json"
+# The same answer in a form a shell can read with no parser: `key=value`, one
+# per line, values base64. Written and renamed BEFORE res.json, so the file the
+# loop below waits on is still the completion marker.
+KV="$OUTBOX/$ID.res.kv"
 DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
 while [ ! -s "$RES" ]; do
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -231,22 +249,31 @@ while [ ! -s "$RES" ]; do
   sleep 0.5
 done
 
-# Parse the response. Print `text` (or `data_path` contents) on stdout;
-# print metadata on stderr in a single line for grepability.
-RES_JSON=$(cat "$RES")
-OK=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))')
-ERR=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error") or "")')
-META=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("metadata") or {}))')
-TEXT=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("text") or "")')
-DATA_PATH=$(printf '%s' "$RES_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("data_path") or "")')
+# Read the response. Nothing is parsed: the phone writes every field the shell
+# needs into `$KV` as `key=base64`, because JSON in a shell script is either an
+# interpreter dependency (the bug this replaced) or a hand-rolled parser that
+# will one day meet a quote it does not expect. `res.json` stays untouched for
+# anything else that reads the outbox.
+if [ ! -s "$KV" ]; then
+  echo "conch-bridge: the Conch app on the phone is older than this CLI (no .res.kv)." >&2
+  echo "  - Open the server page in Conch and press Update on the phone bridge." >&2
+  rm -f "$RES"
+  exit 4
+fi
+kv_get() { sed -n "s/^$1=//p" "$KV" | head -1; }
+kv_txt() { v=$(kv_get "$1"); [ -z "$v" ] && return 0; printf '%s' "$v" | base64 -d; }
+OK=$(kv_get ok)
+ERR=$(kv_txt err)
+META=$(kv_txt meta)
+HAS_DATA=$(kv_get data)
 
-if [ "$OK" != "True" ]; then
+if [ "$OK" != "1" ]; then
   echo "conch-bridge: phone reported error: $ERR" >&2
   rm -f "$RES"
   exit 3
 fi
 
-if [ -n "$DATA_PATH" ]; then
+if [ "$HAS_DATA" = "1" ]; then
   # SECURITY: the response carries a data_path, but we NEVER trust it as a
   # filesystem path. A compromised phone / MITM on the channel could return
   # "data_path":"~/.ssh/id_ed25519" (or any user-readable file) and this
@@ -272,7 +299,9 @@ if [ -n "$DATA_PATH" ]; then
     fi
   fi
 else
-  printf '%s' "$TEXT"
+  # Straight from the field to stdout: a command substitution would eat the
+  # trailing newlines of whatever ran on the phone.
+  kv_txt text
 fi
 [ -n "$META" ] && echo "[bridge] $META" >&2
-rm -f "$RES"
+rm -f "$RES" "$KV"

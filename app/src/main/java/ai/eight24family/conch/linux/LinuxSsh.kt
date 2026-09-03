@@ -168,6 +168,14 @@ object LinuxSsh {
         }
         // Nothing of ours is answering, so it has to be started — and only that
         // needs the shell.
+        //
+        // ⛔ CLEAR THE BACKOFF FIRST. Everything that reaches this line is a
+        // person's own action (a tap on the row, a message sent into its chat),
+        // and LocalAdbShell backs off for 20s after any failed open — a guard
+        // meant for the two-second pollers. Without this, one poller's miss made
+        // the owner's next tap fail without so much as trying, and the row then
+        // told him to go and set up a phone bridge he had already set up.
+        ai.eight24family.conch.adb.LocalAdbShell.retryNow()
         when (LinuxEnv.presence()) {
             LinuxEnv.Presence.INSTALLED -> Unit
             LinuxEnv.Presence.ABSENT -> {
@@ -185,12 +193,13 @@ object LinuxSsh {
             // Conch already implements — so that is what it points at, in the
             // app's own words, on the app's own screen.
             LinuxEnv.Presence.UNREACHABLE -> {
-                _state.value = State(
-                    Phase.OFF,
-                    "Conch can't reach this phone's own shell, which is what starts the Linux. " +
-                        "Set it up in Settings → Phone bridge; Android needs it armed once per " +
-                        "boot, and after that this machine keeps working even if Wi-Fi drops.",
-                )
+                // ⛔ NAME THE REAL OBSTACLE. "Arm wireless debugging" is the right
+                // advice for exactly one of the two ways in here, and it was
+                // given for both — so an owner whose phone had simply stopped
+                // honouring the app's key was sent to a switch that was already
+                // on (2026-09-03). The shell layer knows which it is, because
+                // adbd says so.
+                _state.value = State(Phase.OFF, ai.eight24family.conch.adb.LocalAdbShell.whyNoShell())
                 return@withLock null
             }
         }
