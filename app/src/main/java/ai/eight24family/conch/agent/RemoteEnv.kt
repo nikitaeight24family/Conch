@@ -109,4 +109,18 @@ internal object RemoteEnv {
             "if command -v timeout >/dev/null 2>&1; then timeout \"\$_t\" \"\$@\"; " +
             "else \"\$@\" & _c=\$!; ( sleep \"\$_t\"; kill \"\$_c\" 2>/dev/null ) & _w=\$!; " +
             "wait \"\$_c\"; _r=\$?; kill \"\$_w\" 2>/dev/null; return \$_r; fi; }; "
+
+    /** Where the Claude `/context` probe keeps its throwaway session copy: a
+     *  private cwd of its own, relative to `$HOME`. Its project slug is what the
+     *  session listing skips by name — see [CTX_PROBE_SLUG_MARK] and
+     *  `UsageProbe.CLAUDE_CONTEXT_CMD` for why the copy must never sit next to
+     *  the real session. */
+    const val CTX_PROBE_DIR_REL: String = ".conch/ctx-probe"
+
+    /** The tail of [CTX_PROBE_DIR_REL]'s project-directory slug (Claude maps
+     *  every non-alphanumeric character of the cwd to `-`, so
+     *  `/home/x/.conch/ctx-probe` → `-home-x--conch-ctx-probe`). Matched by
+     *  `ClaudeSpec.listSessionsScript` to keep the probe copy out of every
+     *  listing. Pinned by ContextProbeIsolationTest. */
+    const val CTX_PROBE_SLUG_MARK: String = "--conch-ctx-probe"
 }

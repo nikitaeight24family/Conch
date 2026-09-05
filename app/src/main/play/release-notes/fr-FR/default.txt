@@ -1,4 +1,2 @@
-• La boutique ne cache plus les modèles que ce téléphone peut exécuter : la fenêtre de contexte suit l'appareil et les modèles intégrés sont calculés sur leur vraie architecture. En 4 Go : 1 modèle → 4 ; en 8 Go : 8 → 11.
-• Les résultats Hugging Face affichent une taille estimée, ce qui ne tournera pas est masqué, et un téléchargement hors budget demande confirmation.
-• Perdre le Wi-Fi n'emporte plus le Linux du téléphone.
-• Partout où le pont est nécessaire, l'app mène à sa configuration.
+• Plus de doublons fantômes d'anciennes sessions. La sonde de contexte copiait une session sous un nouvel id à côté de l'original pendant quelques secondes ; la liste prenait la copie pour une seconde session au même titre, puis la copie disparaissait et un appui ouvrait un chat vide. La copie vit désormais dans un dossier que la liste ne lit jamais, et elle est toujours supprimée.
+• Après /clear ou un fork, la conversation précédente garde sa ligne.

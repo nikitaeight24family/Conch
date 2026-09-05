@@ -3911,18 +3911,24 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 // phantom-row guard below belongs to the LIST row
                                 // only — putting it around this too emptied a live
                                 // conversation on screen (2026-08-04).
-                                // A resume-announced id is not a file yet: keep
-                                // the owner (navigation must survive) but with a
-                                // ZERO timestamp — a fresh one made the phantom
-                                // sort to the top wearing a 90 s "working" ring.
-                                ServiceLocator.historyCache.recordOwner(
-                                    rid, serverId, agent,
-                                    sessionPathMap[localId],
-                                    if (initialResumeId == null) nowSec else 0L,
-                                )
+                                // A RESUMED chat's owner was written by the
+                                // listing that produced its row — leave it, and
+                                // its real recency, alone. Only an id with no
+                                // owner yet is recorded here: a brand-new chat's
+                                // first id, or the fresh id a `/clear` moved the
+                                // conversation to. (The 2026-08-31 zero-timestamp
+                                // write was aimed at "phantom ids the CLI
+                                // announced" — those were the /context probe's
+                                // throwaway copies, fixed in UsageProbe — and it
+                                // zeroed the REAL owner's recency on every
+                                // reopen of every chat.)
+                                if (ServiceLocator.historyCache.owner(rid) == null) {
+                                    ServiceLocator.historyCache.recordOwner(
+                                        rid, serverId, agent, sessionPathMap[localId], nowSec,
+                                    )
+                                }
                                 // Only a chat that started WITHOUT a session may
-                                // mint a list row: on a resume the CLI announces a
-                                // fresh id per launch that is not a file.
+                                // mint a list row: a resumed chat already has one.
                                 if (initialResumeId == null) {
                                     ServiceLocator.sessionsCache.upsert(serverId, agent, row)
                                 }

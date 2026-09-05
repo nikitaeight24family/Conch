@@ -355,6 +355,7 @@ object ClaudeSpec : AgentCliSpec {
 CONCH_INUSE=${'$'}(for l in /proc/[0-9]*/fd/*; do readlink "${'$'}l" 2>/dev/null; done | grep '\.jsonl${'$'}' | sort -u)
 for f in ~/.claude/projects/*/*.jsonl; do
   [ -f "${'$'}f" ] || continue
+  case "${'$'}f" in *${ai.eight24family.conch.agent.RemoteEnv.CTX_PROBE_SLUG_MARK}/*) continue;; esac
   case "${'$'}{f##*/}" in agent-*) continue;; esac
   head -n 40 "${'$'}f" 2>/dev/null | grep -q '"entrypoint":"sdk-cli"' || continue
   printf '%s\n' "${'$'}CONCH_INUSE" | grep -qxF "${'$'}f" && continue
@@ -385,6 +386,11 @@ for f in ~/.claude/projects/*/*.jsonl; do
 done
 for f in ~/.claude/projects/*/*.jsonl; do
   [ -f "${'$'}f" ] || continue
+  # The /context probe's throwaway copy of a session lives under this slug
+  # (UsageProbe.CLAUDE_CONTEXT_CMD). It is a full copy of a real session under
+  # a fresh uuid — listed, it IS a duplicate row with the same title that dies
+  # when the probe deletes it (the 2026-09-04 phantoms). Never a session.
+  case "${'$'}f" in *${ai.eight24family.conch.agent.RemoteEnv.CTX_PROBE_SLUG_MARK}/*) continue;; esac
   id="${'$'}{f##*/}"
   id="${'$'}{id%.jsonl}"
   # A rollout with no conversation in it is not a session. Claude leaves
