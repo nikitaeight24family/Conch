@@ -1,4 +1,2 @@
-• Der Store versteckt keine Modelle mehr, die dieses Telefon ausführen kann: das Kontextfenster folgt dem Gerät. Auf 4 GB: 1 Modell → 4; auf 8 GB: 8 → 11.
-• Hugging-Face-Ergebnisse zeigen eine Größenschätzung; was nicht läuft, wird ausgeblendet, und ein Download über Budget fragt nach.
-• Ein Wi-Fi-Abbruch nimmt das Linux auf diesem Telefon nicht mehr mit.
-• Wo die Telefonbrücke gebraucht wird, führt die App zu ihrer Einrichtung.
+• Keine Phantom-Duplikate alter Sitzungen mehr. Die Kontextmessung kopierte eine Sitzung für einige Sekunden unter neuer ID direkt neben das Original; die Liste nahm die Kopie als zweite Sitzung mit gleichem Titel auf, dann verschwand sie, und ein Tipp öffnete einen leeren Chat. Die Kopie liegt jetzt in einem Verzeichnis, das die Liste nie liest, und wird immer entfernt.
+• Nach /clear oder einem Fork behält das vorherige Gespräch seine Zeile.

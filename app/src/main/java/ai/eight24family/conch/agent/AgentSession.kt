@@ -519,28 +519,24 @@ class AgentSession(
      *  method (once) so future resumes keep using it even if the user later
      *  switches the active method. Then refresh [authPrep]. */
     private fun onResumeIdAssigned(newId: String?, previousId: String? = null) {
-        // The CLI moved this conversation to a NEW file. The old id is not a
-        // second chat — it is this one, under its former name — so it must
-        // leave the cached listing, or the list shows the same session twice
-        // (the ghost row's file is already gone from the server).
-        if (previousId != null && newId != null && previousId != newId) {
-            scope.launch {
-                SilentlyTry.fired("Conch-Chat", "retire superseded session id") {
-                    ai.eight24family.conch.di.ServiceLocator.sessionsCache
-                        .removeRow(server.id, server.agent, previousId)
-                }
-            }
-        }
+        // ⛔ A CHANGED ID NEVER RETIRES THE PREVIOUS ID'S ROW. This used to call
+        // sessionsCache.removeRow(previousId) on the theory that "the CLI moved
+        // this conversation to a new file" — but the CLI never renames a resumed
+        // session (proven on 2.1.220/.258/.260, every mode), so the only real
+        // id changes are `--fork-session` and `/clear`, and in BOTH the previous
+        // file stays a live, separate conversation whose row must remain. The
+        // "ghost row whose file was already gone" that motivated the removal was
+        // the /context probe's throwaway copy (UsageProbe.CLAUDE_CONTEXT_CMD),
+        // fixed at the source. Adopting the new id is still right: the CLI
+        // writes there from now on (2026-07-27).
+        //
         // A brand-new session just got its id — that's brand-new activity right
         // now. Stamp it so the new chat appears at the top of the list with
         // today's time immediately, instead of waiting for a listing sweep.
         // ⚠ ONLY FOR A CHAT THAT WAS BORN NEW. Stamping activity for whatever
         // id the CLI announces marks it "recently active", and SessionsCache
         // carries recently-active rows across a listing that doesn't mention
-        // them — which is exactly how ids that never became files stayed in the
-        // list. On a resume the CLI announces a fresh id per launch and writes a
-        // transient rollout our listing sometimes catches; the file is gone
-        // seconds later and the row was immortal (user, 2026-08-03, third time).
+        // them — so a resumed chat must not stamp ids it did not create.
         if (bornNew) newId?.let { rid ->
             ai.eight24family.conch.di.ServiceLocator.sessionActivity.observeLocal(server.id, rid)
         }

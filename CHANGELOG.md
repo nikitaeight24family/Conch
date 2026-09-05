@@ -15,6 +15,31 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.3] — 2026-09-05
+
+### Fixed
+- **Opening an old session no longer leaves a phantom duplicate behind.** The
+  context-usage probe measured a chat by copying its transcript under a fresh
+  id and asking the CLI about the copy — and wrote that copy right next to the
+  original, in the same project directory. For the 15-50 s a big transcript
+  takes to load, the 30 s session sweep saw a second file with the same title
+  and listed it as a second session; then the copy was deleted, the row stayed
+  behind pointing at nothing, and a tap opened an empty chat. Because the probe
+  runs on every open, an old session (no live process, so the copy path)
+  reproduced it on the tap itself. The copy now lives in a project directory of
+  its own that the listing skips by name, the CLI runs from that directory so
+  every version finds it there, and a trap removes the copy on every exit —
+  a cut connection used to leave a full-size orphan behind.
+- **A changed session id no longer removes the previous id's row.** The only
+  real id changes are `/clear` and a fork, and in both the previous file stays a
+  live conversation. The removal was built on the belief that the CLI renames a
+  resumed session; it does not (verified on 2.1.220, 2.1.258 and 2.1.260, in
+  print and stream-json mode, from the right and the wrong directory, even with
+  a second live process on the same session).
+- **Reopening a chat no longer resets its owner record's recency to zero.**
+
+---
+
 ## [0.6.2] — 2026-09-03
 
 ### Fixed
@@ -1698,7 +1723,7 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.3...HEAD
 [0.6.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.0
 [0.5.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.2
 [0.5.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.0
@@ -1726,6 +1751,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.6.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.3
 [0.6.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.2
 [0.6.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.1
 [0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14

@@ -603,11 +603,9 @@ class HomeSessionsViewModel : ViewModel() {
             val sess = ServiceLocator.agentSessions.get(info.serverId, info.agent, info.chatSessionId)
                 ?: continue
             // ⛔ ONLY A CHAT BORN NEW MAY MINT A SYNTHETIC ROW. A RESUMED chat
-            // already has its cached row — and on resume the CLI announces a
-            // fresh id that is not a file, so the id-dedup misses, and the
-            // preview-dedup is a string comparison between two different
-            // extractors, which is exactly what let a logged-out Claude resume
-            // paint a duplicate WORKING row on every open.
+            // already has its cached row, and the preview-dedup below is a string
+            // comparison between two different extractors, so it cannot be
+            // trusted to catch the resumed chat's own row.
             if (!sess.bornNew) continue
             val hist = sess.history.value
             val firstUser = hist.firstOrNull { it is ai.eight24family.conch.agent.AgentMessage.UserText }

@@ -748,7 +748,7 @@ object UsageProbe {
     suspend fun fetchContextBreakdown(serverId: String, resumeId: String): List<ContextSegment>? {
         // resumeId is injected into a shell command — accept only UUID shape.
         if (!Regex("^[a-fA-F0-9-]{16,40}$").matches(resumeId)) return null
-        val out = execOnServer(serverId, CLAUDE_CONTEXT_CMD.replace("__RID__", resumeId), timeoutSec = 60)
+        val out = execOnServer(serverId, contextProbeScript(resumeId), timeoutSec = 60)
             ?.takeIf { it.isNotBlank() } ?: return null
         val segs = parseClaudeContext(out).ifEmpty { return null }
         ctxCache[resumeId] = segs
@@ -1076,23 +1076,60 @@ object UsageProbe {
     """.trimIndent()
 
     // Claude /context breakdown — run on a THROWAWAY COPY of the chat's session
-    // jsonl so the REAL session is never polluted (verified on-device: copy →
-    // rewrite the session_id to a fresh uuid → `claude -p /context` appends to
-    // the COPY, which we delete; the real session + its token count stay
-    // untouched, 0 model tokens since /context is <synthetic>). __RID__ is
-    // replaced with the UUID-validated resume id by fetchContextBreakdown.
+    // jsonl so the REAL session is never polluted (copy → rewrite the
+    // session_id to a fresh uuid → `claude -p /context` appends to the COPY;
+    // the real session + its token count stay untouched, 0 model tokens since
+    // /context is <synthetic>). __RID__ is replaced with the UUID-validated
+    // resume id by fetchContextBreakdown.
+    //
+    // ⛔ THE COPY LIVES IN ITS OWN PROJECT DIRECTORY, NEVER NEXT TO THE REAL
+    // SESSION, AND IT IS REMOVED ON EVERY EXIT. It used to be written into the real
+    // session's project dir under a fresh uuid, and for the 15-50 s that `claude -p
+    // --resume` takes to load a big session the 30 s listing sweep saw a second
+    // <uuid>.jsonl carrying the SAME title and preview — and listed it as a second
+    // session. Then the copy was deleted and the row pointed at nothing:
+    // SessionsCache carried the id through its recent-activity window, the owner
+    // sidecar kept it for good, and a tap opened an EMPTY chat. That was every "the
+    // CLI announced a fresh id on resume" phantom (2026-07-27, 08-03, 08-31, 09-04
+    // — b0609ef4/41efb593 on the dev server: listed with mtimes 32 s and 3 min
+    // after the real session went idle, no body, no file). The CLI never renames a
+    // resumed session — proven on 2.1.220/.258/.260, print and stream-json, right
+    // and wrong cwd, even with a live twin process; this probe was the only thing
+    // on the box writing <uuid>.jsonl files. And since the chat prefetches the
+    // breakdown on EVERY open, opening an old session was exactly when the phantom
+    // appeared.
+    //
+    // So: the copy goes under the project slug of `$HOME/.conch/ctx-probe`,
+    // which ClaudeSpec.listSessionsScript skips by name
+    // (RemoteEnv.CTX_PROBE_SLUG_MARK), and the CLI runs FROM that directory so
+    // every version finds the copy there (before 2.1.223 the lookup stopped at
+    // the current project's dir). The trap removes the copy even when the exec
+    // is cut mid-run — a timeout used to orphan a full-size copy on the server.
     private val CLAUDE_CONTEXT_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         RID="__RID__"
         real=${'$'}(ls ${'$'}HOME/.claude/projects/*/${'$'}RID.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}real" ] && exit 0
-        dir=${'$'}(dirname "${'$'}real")
+        pdir="${'$'}HOME/${RemoteEnv.CTX_PROBE_DIR_REL}"
+        mkdir -p "${'$'}pdir" 2>/dev/null || exit 0
+        slug=${'$'}(printf '%s' "${'$'}pdir" | sed 's/[^A-Za-z0-9]/-/g')
+        ddir="${'$'}HOME/.claude/projects/${'$'}slug"
+        mkdir -p "${'$'}ddir" 2>/dev/null || exit 0
         newid=${'$'}(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null | tr 'A-Z' 'a-z')
         [ -z "${'$'}newid" ] && exit 0
-        cp "${'$'}real" "${'$'}dir/${'$'}newid.jsonl"
-        sed -i "s/${'$'}RID/${'$'}newid/g" "${'$'}dir/${'$'}newid.jsonl"
+        copy="${'$'}ddir/${'$'}newid.jsonl"
+        trap 'rm -f "${'$'}copy"' EXIT
+        trap 'rm -f "${'$'}copy"; exit 1' HUP INT TERM
+        cp "${'$'}real" "${'$'}copy" 2>/dev/null || exit 0
+        sed -i "s/${'$'}RID/${'$'}newid/g" "${'$'}copy"
+        cd "${'$'}pdir" || exit 0
         echo "/context" | conch_timeout 50 claude -p --resume "${'$'}newid" --output-format json --verbose 2>/dev/null | jq -r ".[1].message.content[0].text" 2>/dev/null
-        rm -f "${'$'}dir/${'$'}newid.jsonl"
     """.trimIndent()
+
+    /** The exact server-side script the `/context` probe runs for [resumeId].
+     *  Exposed for ContextProbeIsolationTest, which pins where the throwaway
+     *  copy lives and that it is always removed. */
+    internal fun contextProbeScript(resumeId: String): String =
+        CLAUDE_CONTEXT_CMD.replace("__RID__", resumeId)
 
     // FAST source: just the latest rollout snapshot line (instant grep). Paints
     // the bar the moment a chat opens; resets are projected forward so a stale

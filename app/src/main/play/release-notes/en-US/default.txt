@@ -1,4 +1,2 @@
-• The store no longer hides models this phone can run: the context window follows the device, and the built-in models are priced by their real architecture. A 4 GB phone goes from 1 model to 4; an 8 GB one from 8 to 11.
-• Hugging Face results show an estimated size and hide what will not run; an over-budget download asks first.
-• Losing Wi-Fi no longer takes this phone's own Linux with it.
-• Every place that needs the phone bridge now leads to its setup.
+• No more phantom duplicates of old sessions. The context-usage probe used to copy a session under a fresh id next to the original for a few seconds; the list picked the copy up as a second session with the same title, then the copy vanished and tapping it opened an empty chat. The copy now lives in a directory the list never reads, and is always removed.
+• After /clear or a fork, the previous conversation keeps its row in the list.

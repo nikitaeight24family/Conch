@@ -1,4 +1,2 @@
-• La tienda ya no oculta modelos que este teléfono sí puede ejecutar: la ventana de contexto se adapta al dispositivo. En 4 GB: 1 modelo → 4; en 8 GB: 8 → 11.
-• Los resultados de Hugging Face muestran un tamaño estimado, se oculta lo que no funcionará y una descarga por encima del presupuesto pregunta antes.
-• Perder el Wi-Fi ya no se lleva el Linux del propio teléfono.
-• Donde se necesite el puente, la app lleva a su configuración.
+• Se acabaron los duplicados fantasma de sesiones antiguas. La sonda de contexto copiaba una sesión con un id nuevo junto al original durante unos segundos; la lista tomaba la copia como una segunda sesión con el mismo título, luego la copia desaparecía y al tocarla se abría un chat vacío. Ahora la copia vive en un directorio que la lista nunca lee y siempre se elimina.
+• Tras /clear o una bifurcación, la conversación anterior conserva su fila.
