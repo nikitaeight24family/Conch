@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml"><img src="https://github.com/nikitaeight24family/Conch/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
-  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.6.3-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
+  <a href="https://github.com/nikitaeight24family/Conch/releases/latest"><img src="https://img.shields.io/badge/release-v0.6.4-a78bfa?style=flat-square&labelColor=0b0b0f" alt="release" /></a>
   <a href="https://play.google.com/store/apps/details?id=ai.eight24family.conch"><img src="https://img.shields.io/badge/Google%20Play-live-a78bfa?style=flat-square&logo=google-play&logoColor=white&labelColor=0b0b0f" alt="Google Play" /></a>
   <img src="https://img.shields.io/badge/telemetry-none-f39c6b?style=flat-square&labelColor=0b0b0f" alt="no telemetry" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial-7b7b8a?style=flat-square&labelColor=0b0b0f" alt="licence" /></a>

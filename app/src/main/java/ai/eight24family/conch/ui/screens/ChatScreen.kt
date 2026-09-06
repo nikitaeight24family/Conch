@@ -222,11 +222,15 @@ fun ChatScreen(
     androidx.compose.runtime.LaunchedEffect(bridgeStep) {
         if (bridgeStep == ChatViewModel.BridgeStep.NeedSettings) {
             vm.dismissBridge()
-            // Remember WHO asked, so the pairing can hand the user back here.
+            // Remember WHO asked, so the finished pairing resumes this connect.
             vm.rememberBridgeReturn()
-            // Land directly in the Phone-bridge section, not the Settings index.
-            ai.eight24family.conch.ui.navigation.SettingsDeepLink.pendingCategory = "bridge"
-            onOpenSettings()
+            // ⛔ THE CHAT STAYS ON SCREEN. This used to leave for the Settings
+            // tab: the transcript went away mid-thought, and coming back was
+            // the app's own machinery apologising for having left. The flow is
+            // a modal over this chat now — same steps, nothing lost behind it.
+            ai.eight24family.conch.adb.PhoneBridgeSetup.ask(
+                "The agent asked to reach this phone.",
+            )
         }
     }
     if (bridgeStep != ChatViewModel.BridgeStep.None &&

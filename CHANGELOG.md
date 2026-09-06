@@ -15,6 +15,40 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.4] — 2026-09-07
+
+### Changed
+- **A phone that needs a switch gets a wizard, not a sentence.** When this
+  phone's own Linux is not running, the machines list used to print the reason
+  in red — clipped mid-instruction at two lines, beside a retry that re-dialled
+  a port with nothing behind it. Every sentence about a missing shell is now one
+  observed fact in a few words, and every place that can print one opens a
+  guided flow instead: a modal over whatever is on screen, one step at a time,
+  each step advancing because the app observed it rather than because anyone
+  pressed next. The app does the rest itself — it watches for Android's pairing
+  dialog, spends the new shell starting the Linux, and says Ready only once the
+  endpoint answers. An agent that asks for the shell while nobody is holding the
+  phone leaves the request waiting with one line in the shade, and is told to
+  try again shortly instead of being handed instructions it cannot follow.
+- **Nothing in the app tells anyone to go and find a computer.** The phone-bridge
+  page offered `adb tcpip 5555` "plugged into a computer" as the better way in —
+  advice about a machine most readers do not own, inside an app whose premise is
+  that they do not need one. Measured from the shell Android hands out: the
+  properties behind that switch are refused by SELinux and writing the setting
+  arms nothing, so the guided flow is not a convenience — it is the only path,
+  and it needs nothing but the phone.
+
+### Fixed
+- **The Wi-Fi step was reporting a radio it had never looked at.** The app never
+  declared ACCESS_WIFI_STATE, so every read threw, was swallowed, and the flow
+  showed a tick over a radio it could not see. A phone sharing its own hotspot
+  satisfies Android's rule while still reading as Wi-Fi off, so that step now
+  carries a way past itself rather than becoming a step nobody can complete.
+- **A page Android refuses no longer leaves the flow silent.** The intent ladder
+  was missing its middle rung — the plain developer-options page — so an OEM that
+  rejects the highlighted deep link cost the user the page entirely. A second tap
+  now reveals where the switch lives on this phone and opens Settings.
+
 ## [0.6.3] — 2026-09-05
 
 ### Fixed
@@ -1751,6 +1785,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.6.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.4
 [0.6.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.3
 [0.6.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.2
 [0.6.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.1

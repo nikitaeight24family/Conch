@@ -4,6 +4,14 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Whether the Wi-Fi radio is on. Android hands an app shell access only
+         while the phone is associated with Wi-Fi, so this is the first thing
+         the phone-bridge wizard has to know — and without it every read threw
+         SecurityException, was swallowed to `false`, and the flow told the
+         owner "✓ wi-fi" over a radio it could not see (measured on the owner's
+         phone, 2026-09-06). Normal permission: granted at install, no prompt,
+         no data leaves the device. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

@@ -103,20 +103,17 @@ fun LinuxEnvironmentPanel() {
             presence == LinuxEnv.Presence.UNREACHABLE -> {
                 SettingsRow(
                     icon = Icons.Filled.Terminal,
-                    title = "Phone shell not connected",
-                    subtitle = "The environment is installed; Conch cannot reach it right now.",
+                    title = ai.eight24family.conch.adb.PhoneBridgeCopy.LINUX_ASLEEP,
+                    subtitle = "It is installed and switched off — the last restart did that.",
                 )
                 LinuxAside(
-                    "Turn Wireless debugging on once (Android only allows it on Wi-Fi) and it comes " +
-                        "back — nothing here has to be installed again. Conch spends that " +
-                        "moment starting this Linux, and then it runs until the phone restarts.",
+                    "Nothing here has to be installed again. Waking it takes two taps, and after " +
+                        "that it runs until the phone restarts.",
                 )
-                // The page said what to do and left the person to find it. The
-                // guided flow is one tap away; it should be one tap away.
                 Button(
-                    onClick = { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() },
+                    onClick = { ai.eight24family.conch.adb.PhoneBridgeSetup.ask() },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Set up the phone bridge") }
+                ) { Text("Wake it") }
             }
 
             else -> {
@@ -146,7 +143,7 @@ fun LinuxEnvironmentPanel() {
                 )
                 if (problem != null || presence == LinuxEnv.Presence.UNREACHABLE) {
                     OutlinedButton(
-                        onClick = { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() },
+                        onClick = { ai.eight24family.conch.adb.PhoneBridgeSetup.ask() },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Set up the phone bridge") }
                 }

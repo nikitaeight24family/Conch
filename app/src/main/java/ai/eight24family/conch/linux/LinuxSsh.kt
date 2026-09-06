@@ -220,7 +220,7 @@ object LinuxSsh {
         LinuxEnv.run("pkill dropbear")
         _state.value = State(Phase.STARTING)
         if (!LinuxEnv.launchScript(SCRIPT, daemonScript())) {
-            _state.value = State(Phase.FAILED, "the phone shell is not reachable")
+            _state.value = State(Phase.FAILED, ai.eight24family.conch.adb.PhoneBridgeCopy.SHELL_OFF)
             return@withLock null
         }
         // First run installs the daemon (a few seconds of apk over proot); later

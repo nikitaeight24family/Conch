@@ -66,13 +66,11 @@ object ServerDiagnostics {
          * offer the flow that fixes it.
          */
         object PhoneShellNotArmed : Diagnosis(
-            title = "This phone's shell isn't armed",
+            title = ai.eight24family.conch.adb.PhoneBridgeCopy.LINUX_ASLEEP,
             reasons = listOf(
-                "The Linux runs ON this phone, so there is nothing to check on the network — " +
-                    "what is missing is Android's own debugging switch, which is what lets Conch " +
-                    "start it.",
-                "One switch, and a six-digit code only the first time. Android turns the switch " +
-                    "off at every restart — its rule, not Conch's; the code is never asked twice.",
+                "It runs on the phone itself, so there is nothing wrong with any network — " +
+                    "the last restart simply switched off what starts it.",
+                "Two taps, and Conch does the rest.",
             ),
         ) {
             override val action = Action.PHONE_BRIDGE

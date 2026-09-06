@@ -1,2 +1,3 @@
-• No more phantom duplicates of old sessions. The context-usage probe used to copy a session under a fresh id next to the original for a few seconds; the list picked the copy up as a second session with the same title, then the copy vanished and tapping it opened an empty chat. The copy now lives in a directory the list never reads, and is always removed.
-• After /clear or a fork, the previous conversation keeps its row in the list.
+• The phone wakes with a guided popup, not an error. When this phone's own Linux needs a switch only you can flip, Conch now walks you through it over whatever you were doing — one step at a time, each moving on by itself the moment the phone is ready. Then it starts the Linux for you and closes.
+• If the phone refuses to open Android's page, the wizard says so and takes you to Settings instead.
+• It offers to install the phone's Linux when there isn't one yet.

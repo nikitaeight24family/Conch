@@ -235,38 +235,58 @@ object LocalAdbShell {
     suspend fun readiness(): Readiness =
         if (check()) Readiness.READY else Readiness.NOT_ARMED
 
-    /** One sentence naming what is actually in the way, for the screens that
-     *  have to tell someone. Only ever called when [check] came back false. */
+    /**
+     * The one observed fact in the way, for the screens that have to say
+     * something. Only ever called when [check] came back false.
+     *
+     * ⛔ A FEW WORDS, AND NO DIRECTIONS. These used to be three-clause
+     * instructions naming Settings, the boot cycle and `adb tcpip 5555` — a
+     * paragraph, printed into rows that clip at two lines, about a mechanism
+     * the user never asked to learn (owner, 2026-09-06). Every caller now
+     * carries [PhoneBridgeSetup.ask] beside the sentence, and the wizard is
+     * where the steps live. See [PhoneBridgeCopy].
+     */
     fun whyNoShell(): String = when {
-        unauthorized ->
-            "This phone has stopped honouring Conch's shell key. Pair it once in " +
-                "Settings > Phone bridge - Android shows a six-digit code."
+        unauthorized -> PhoneBridgeCopy.NOT_PAIRED
         // ⛔ NAME THE PLATFORM RULE, DO NOT IMPLY THE APP CHOSE THIS. Android
         // switches wireless debugging off with the Wi-Fi it is tied to, and
         // nothing on the device can switch it back on - not the app, not even
         // the shell uid (SELinux refuses `service.adb.tcp.port`). Saying "set it
         // up in Settings" to someone who set it up yesterday reads as a bug in
         // the app (owner, 2026-09-03).
-        wifiIsOff() ->
-            "Wi-Fi is off, and Android switches its wireless-debugging switch off with it - " +
-                "no app can turn that back on. An already-running Linux is unaffected; " +
-                "starting one again needs the switch once (Wi-Fi on, Settings > Phone " +
-                "bridge), or one `adb tcpip 5555` from any computer, which then survives " +
-                "Wi-Fi going away until the phone reboots."
-        else ->
-            "Conch can't reach this phone's own shell, which is what starts the Linux. " +
-                "Set it up in Settings > Phone bridge; Android needs it armed once per " +
-                "boot, and after that this machine keeps working even if Wi-Fi drops."
+        wifiIsOff() -> PhoneBridgeCopy.WIFI_OFF
+        else -> PhoneBridgeCopy.SHELL_OFF
     }
 
-    /** Wi-Fi association, the thing Android's wireless debugging is tied to. */
-    private fun wifiIsOff(): Boolean = SilentlyTry.loggedOrElse(
+    /**
+     * Wi-Fi association, the thing Android's wireless debugging is tied to.
+     * Public because the wizard's first step is exactly this question.
+     *
+     * ⛔ TWO SOURCES, BECAUSE ONE OF THEM CAN BE ABSENT. The radio flag needs
+     * ACCESS_WIFI_STATE — which the app did not declare, so every read threw,
+     * was swallowed to "not off", and the wizard printed a ✓ beside a radio it
+     * had never managed to look at (measured 2026-09-06). The permission is
+     * declared now, and the connectivity answer stands behind it anyway: a
+     * phone whose ACTIVE network is Wi-Fi is associated by definition, whatever
+     * a flag says, and that is the condition Android actually gates on.
+     *
+     * ⚠ A phone sharing its own hotspot reads as "off" here and is not: the AP
+     * state is hidden API. The wizard's Wi-Fi step carries a way past itself
+     * for exactly that case rather than pretending this is complete.
+     */
+    fun wifiIsOff(): Boolean = SilentlyTry.loggedOrElse(
         "Conch-LocalAdb", "read wifi state", false,
     ) {
-        val wm = ServiceLocator.appContext
-            .applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
+        val ctx = ServiceLocator.appContext.applicationContext
+        val wm = ctx.getSystemService(android.content.Context.WIFI_SERVICE)
             as? android.net.wifi.WifiManager
-        wm != null && !wm.isWifiEnabled
+        if (wm?.isWifiEnabled == true) return@loggedOrElse false
+        val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager
+        val onWifi = cm?.activeNetwork
+            ?.let { cm.getNetworkCapabilities(it) }
+            ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) == true
+        !onWifi
     }
 
     /**

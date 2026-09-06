@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -45,15 +44,14 @@ import kotlinx.coroutines.delay
  * hand: not a fix for one user, let alone everyone (owner, 2026-08-29).
  *
  * So this screen shows what it can see: either a command can run right now, or
- * it cannot. The remedy is one flow either way, because both halves of it live
- * behind the same Android switch — arm Wireless debugging, and if the phone does
- * not recognise Conch, open its pairing dialog. Conch notices that dialog by
- * itself and asks for the six digits in a notification.
+ * it cannot — and when it cannot, it renders [PhoneBridgeSteps], the same live
+ * flow the modal shows. This page used to carry its own second copy of those
+ * steps, written as a page of prose: two implementations of one flow, drifting
+ * apart, and the only one anybody read was whichever came up first.
  *
- * ⚠ The Wi-Fi sentence is a fact about Android, not about Conch: the platform
- * refuses to arm wireless debugging unless the phone is associated with a Wi-Fi
- * network, and reverts the setting within milliseconds otherwise (measured).
- * Nothing on the device gets around it without root, so never promise softer.
+ * What is left here that the modal does not have is the part that is not a
+ * step: what this permission IS, and what it costs, for someone who came to
+ * Settings to find out rather than because something failed.
  */
 @Composable
 internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsViewModel) {
@@ -64,7 +62,6 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
     // on "Ready ✓" and corrected itself two seconds later. A moment of "checking"
     // is honest; a moment of "Ready" is not.
     var connected by remember { mutableStateOf<Boolean?>(null) }
-    var waitingForDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         // Landing here usually means the user just did the thing that fixes it.
@@ -72,7 +69,6 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
         while (true) {
             connected = LocalAdbShell.check()
             if (connected == true) {
-                waitingForDialog = false
                 PairingWatcher.stop()
                 PairingNotifier.clear(ctx)
             }
@@ -108,55 +104,35 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
         }
 
         Step("Not connected", "One switch, and a code the first time.") {
-            Body("The button opens Android's Developer options. There:")
-            Instruction(1, "Turn on “Wireless debugging”.")
-            Instruction(
-                2,
-                "If this phone does not recognise Conch yet, tap “Pair device with pairing code”. " +
-                    "Conch sends you a notification with a box for the code — swipe the shade down " +
-                    "over Android's dialog and type the six digits into it.",
-            )
+            // The steps, live, exactly as the modal runs them — including the
+            // watcher that catches Android's pairing dialog by itself.
+            PhoneBridgeSteps()
+            // ⛔ NOTHING HERE MAY NAME A COMPUTER. This paragraph used to offer
+            // `adb tcpip 5555` "plugged into a computer" as the better way in —
+            // advice about a machine most of the people reading it do not own,
+            // inside the app whose whole premise is that they do not need one
+            // (owner, 2026-09-06). The steps above are the entire path, and
+            // they need nothing but this phone.
+            //
+            // ⚠ AND THE APP MUST NOT ISSUE `tcpip` FOR THEM EITHER, though it
+            // could: adbd runs it for any client on an existing connection, so
+            // one service open during a live session would buy a listener that
+            // outlives every Wi-Fi drop. It also puts adb on 0.0.0.0 — a debug
+            // port on the LAN of a phone whose owner asked for none of that,
+            // against a store listing, a landing page, an About screen and a
+            // privacy policy that all say this app opens nothing but the
+            // servers the user adds. Measured cost of NOT doing it: one switch
+            // per restart, which is what the wizard is for.
             Aside(
-                "Leave Android's dialog open while you type — it cancels the pairing the moment it " +
-                    "closes. That is why the box is in a notification instead of on this page.\n\n" +
-                    "No Wi-Fi? Turn on this phone's own hotspot for a moment — Android needs a " +
-                    "local network for wireless debugging, not an internet connection, and the " +
-                    "hotspot is one. Once Conch is connected you can switch the hotspot back off; " +
-                    "the connection stays.\n\n" +
-                    "Android turns the switch off at every restart — and at every Wi-Fi drop, " +
-                    "because it ties the switch to the network. That is its rule, not Conch's: " +
-                    "nothing on the phone can turn it back on, not even shell-level access.\n\n" +
-                    "Plugged into a computer, `adb tcpip 5555` is the other way in, and the only " +
-                    "one that does not care about Wi-Fi at all — it survives the network going " +
-                    "away until the phone restarts, and Conch tries it before anything else.\n\n" +
-                    "Whichever way it is armed, Conch spends that moment starting this phone's " +
-                    "Linux. After that the machine runs on its own until the phone restarts — " +
-                    "no adb, no Wi-Fi, nothing to re-arm. Chats keep working either way; only " +
-                    "reading this phone's logs and running commands ON it wait for the switch.",
+                "Android turns the switch off at every restart, and at every Wi-Fi drop, because " +
+                    "it ties the switch to the network. That is its rule, not Conch's: nothing " +
+                    "on the phone can turn it back on — not the app, and not shell-level access " +
+                    "either (measured: Android refuses both, from the same shell it hands out).\n\n" +
+                    "Conch spends that moment starting this phone's Linux. After that the " +
+                    "machine runs on its own until the phone restarts — no adb, no Wi-Fi, " +
+                    "nothing to re-arm. Chats keep working either way; only reading this " +
+                    "phone's logs and running commands ON it wait for the switch.",
             )
-            Button(
-                onClick = {
-                    // ORDER MATTERS: arm the watcher BEFORE leaving, because the
-                    // dialog can be open before we are asked again, and the code
-                    // only exists while it is.
-                    waitingForDialog = true
-                    PairingWatcher.start(ctx)
-                    openWirelessDebugging(ctx)
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Open Developer options")
-            }
-            if (waitingForDialog) {
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
-                    Text(
-                        "Waiting for Android's pairing dialog…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
         }
     }
 }
@@ -176,25 +152,6 @@ private fun Body(text: String) {
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurface,
     )
-}
-
-/** A numbered step. The number is a separate column so a wrapped step lines up
- *  under itself instead of under the digit. */
-@Composable
-private fun Instruction(number: Int, text: String) {
-    Row(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            "$number.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(end = 8.dp),
-        )
-        Text(
-            text,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-    }
 }
 
 @Composable
@@ -225,8 +182,8 @@ private fun Step(
  * ⚠ The highlight is an AOSP convention (`:settings:fragment_args_key` =
  * `toggle_adb_wireless`) that OEM skins may ignore, and ColorOS does: it lands
  * on plain Developer options with nothing highlighted (owner, 2026-08-29). The
- * button therefore says "opens Developer options" and the text beside it NAMES
- * the row to look for — promising a highlight that never appears is worse than
+ * button therefore says "opens the page" and the text beside it NAMES the row
+ * to look for — promising a highlight that never appears is worse than
  * promising nothing. Falls back to plain Developer options, then all Settings,
  * if the dev-options action cannot resolve at all.
  */
@@ -243,7 +200,19 @@ internal fun openWirelessDebugging(ctx: Context) {
         )
         true
     }
-    if (!opened) {
+    // ⚠ THE SAME PAGE WITHOUT THE EXTRAS IS ITS OWN RUNG, and it was missing:
+    // the ladder went from "the highlighted row" straight to "all of Settings",
+    // so an OEM that rejects the fragment-args deep link (they validate the
+    // caller, and the strict ones just finish with a toast) cost the user the
+    // dev-options page entirely — over an argument that is only ever a nicety.
+    val plain = opened || SilentlyTry.loggedOrElse("Conch-Settings", "open developer options", false) {
+        ctx.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        true
+    }
+    if (!plain) {
         SilentlyTry.fired("Conch-Settings", "open settings fallback") {
             ctx.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }

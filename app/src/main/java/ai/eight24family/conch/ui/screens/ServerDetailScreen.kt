@@ -451,15 +451,27 @@ fun ServerDetailScreen(
                 bridgeBusy -> "working…"
                 !bridgeChecked -> "checking…"
                 installedVersion == null -> "not installed · latest v$avail"
-                installedVersion == avail -> "installed · v$installedVersion · pair this phone in Settings → Phone bridge to use it"
+                installedVersion == avail -> "installed · v$installedVersion · this phone's shell is off"
                 else -> "v$installedVersion → v$avail · update available"
             }
+            // The one state on this line the app can act on gets a door, in
+            // place — a status line that names a problem and offers nothing is
+            // the pattern this whole change exists to remove.
+            val shellOff = grayLine.contains("this phone's shell is off")
             Text(
-                grayLine,
-                color = dim,
+                if (shellOff) "$grayLine  [ wake it ]" else grayLine,
+                color = if (shellOff) MaterialTheme.colorScheme.primary else dim,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+                modifier = Modifier
+                    .then(
+                        if (shellOff) {
+                            Modifier.clickable { ai.eight24family.conch.adb.PhoneBridgeSetup.ask() }
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .padding(top = 4.dp, bottom = 8.dp),
             )
             val btnLabel = when {
                 installedVersion == null -> "Install"

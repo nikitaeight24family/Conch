@@ -1136,8 +1136,14 @@ private fun OnThisPhoneCard(
                                         val msg = when (val o = ai.eight24family.conch.linux.RamReclaim.freeUp()) {
                                             is ai.eight24family.conch.linux.RamReclaim.Outcome.Freed ->
                                                 "freed ${PhoneResources.gb(o.freedBytes)}G · ${PhoneResources.gb(o.availAfter)}G free now"
-                                            ai.eight24family.conch.linux.RamReclaim.Outcome.BridgeDown ->
-                                                "needs the phone bridge — Settings → Phone bridge"
+                                            ai.eight24family.conch.linux.RamReclaim.Outcome.BridgeDown -> {
+                                                // Freeing RAM runs through the phone's shell. No
+                                                // shell, no directions: open the flow that gets one.
+                                                ai.eight24family.conch.adb.PhoneBridgeSetup.ask(
+                                                    "Freeing memory runs on the phone itself.",
+                                                )
+                                                "this phone's shell is off"
+                                            }
                                         }
                                         ramMsg = msg
                                         freeing = false

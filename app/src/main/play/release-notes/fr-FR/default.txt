@@ -1,2 +1,3 @@
-• Plus de doublons fantômes d'anciennes sessions. La sonde de contexte copiait une session sous un nouvel id à côté de l'original pendant quelques secondes ; la liste prenait la copie pour une seconde session au même titre, puis la copie disparaissait et un appui ouvrait un chat vide. La copie vit désormais dans un dossier que la liste ne lit jamais, et elle est toujours supprimée.
-• Après /clear ou un fork, la conversation précédente garde sa ligne.
+• Le téléphone se réveille avec un assistant, pas avec une erreur. Quand le Linux de ce téléphone attend un interrupteur que vous seul pouvez activer, Conch vous guide pas à pas par-dessus ce que vous faisiez ; chaque étape avance dès que le téléphone est prêt. L'app démarre ensuite le Linux.
+• Si le téléphone refuse d'ouvrir la page Android, l'assistant le dit et ouvre les Paramètres.
+• S'il n'y a pas encore de Linux, il propose de l'installer.

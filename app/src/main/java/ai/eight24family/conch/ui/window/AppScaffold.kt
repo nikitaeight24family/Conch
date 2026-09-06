@@ -106,6 +106,12 @@ fun AppScaffold() {
         // The whole nav content is the blur SOURCE; the floating glass bar
         // samples it so the sessions show through, blurred ("liquid glass").
         AppNavGraph(nav, modifier = Modifier.fillMaxSize().hazeSource(hazeState))
+        // ⛔ HOISTED SO EVERY ROUTE HAS IT. The phone-bridge flow is raised from
+        // the shell layer, the connection pool, a chat line, an agent's request
+        // at three in the morning — none of which know what is on screen. One
+        // host at the top means the answer is always "a modal, right here",
+        // never "navigate the user somewhere else first" (owner, 2026-09-06).
+        ai.eight24family.conch.ui.screens.PhoneBridgeWizardHost()
         if (template in TAB_ROUTES) {
             FloatingTabBar(
                 hazeState = hazeState,

@@ -74,7 +74,10 @@ object LinuxInstaller {
      */
     suspend fun install(onStep: (String) -> Unit): String? = withContext(Dispatchers.IO) {
         val arch = LocalAdbShell.exec("uname -m")?.stdout?.trim()
-            ?: return@withContext "No shell access on this phone yet — set it up in Settings › Phone bridge."
+            // The sentence names the state and nothing else: the panel that
+            // prints it carries the wizard button beside it, and directions to
+            // a Settings page are not this layer's to give.
+            ?: return@withContext ai.eight24family.conch.adb.PhoneBridgeCopy.SHELL_OFF
         if (arch != "aarch64") {
             return@withContext "This phone is $arch; the bundled Linux is built for aarch64 only so far."
         }
