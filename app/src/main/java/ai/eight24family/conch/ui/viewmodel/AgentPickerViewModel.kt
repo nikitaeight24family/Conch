@@ -821,8 +821,22 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     _connectLog.value = "Connected ✓"
                 }
             } catch (t: Throwable) {
-                _connectLog.value = "Failed: " +
-                    ai.eight24family.conch.util.ErrorMessages.humanize(t, context = "connect")
+                val why = ai.eight24family.conch.util.ErrorMessages.humanize(t, context = "connect")
+                // ⛔ NEVER PRINT A FAILURE THIS ROW CANNOT ACT ON. The phone's
+                // own machine fails for exactly one reason — Android dropped
+                // the shell at the last restart — and the row's answer to that
+                // used to be a clipped paragraph of directions next to a
+                // [ retry ] that re-dialled a port nothing was listening on
+                // (owner, 2026-09-06). The remedy is two taps and the app knows
+                // them, so it opens the flow instead of describing the problem.
+                if (ai.eight24family.conch.adb.PhoneBridgeCopy.isShellProblem(why)) {
+                    _connectLog.value = null
+                    ai.eight24family.conch.adb.PhoneBridgeSetup.ask(
+                        "This phone's own Linux is not running yet.",
+                    )
+                } else {
+                    _connectLog.value = "Failed: $why"
+                }
             }
         }
     }

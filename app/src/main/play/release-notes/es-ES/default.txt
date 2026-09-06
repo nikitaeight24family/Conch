@@ -1,2 +1,3 @@
-• Se acabaron los duplicados fantasma de sesiones antiguas. La sonda de contexto copiaba una sesión con un id nuevo junto al original durante unos segundos; la lista tomaba la copia como una segunda sesión con el mismo título, luego la copia desaparecía y al tocarla se abría un chat vacío. Ahora la copia vive en un directorio que la lista nunca lee y siempre se elimina.
-• Tras /clear o una bifurcación, la conversación anterior conserva su fila.
+• El teléfono se despierta con un asistente, no con un error. Cuando el Linux de este teléfono necesita un interruptor que solo usted puede activar, Conch le guía paso a paso sobre lo que esté haciendo; cada paso avanza solo en cuanto el teléfono está listo. Después la app inicia el Linux y cierra la ventana.
+• Si el teléfono no abre la página de Android, el asistente lo dice y abre los Ajustes.
+• Si aún no hay Linux en el teléfono, ofrece instalarlo.

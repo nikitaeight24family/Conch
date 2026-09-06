@@ -254,16 +254,14 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
     // position. Pushing a second copy would look like the right screen and be a
     // different one. `navigate` is only for a stack that no longer has it — the
     // process was killed while the user was away in Developer options.
-    // ⛔ ANY SCREEN THAT NEEDS THE SHELL CAN NOW GET THE USER TO THE WIZARD.
-    // It existed all along and exactly one button could reach it; everywhere
-    // else printed a sentence and stopped (see [BridgeSetupRequest]).
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        BridgeSetupRequest.asked.collect { n ->
-            if (n == 0) return@collect
-            SettingsDeepLink.pendingCategory = "bridge"
-            ai.eight24family.conch.ui.window.navigateTab(nav, Routes.SETTINGS)
-        }
-    }
+    // ⛔ THE WIZARD NO LONGER MOVES ANYONE. This used to answer a request for
+    // the phone-bridge flow by switching to the Settings tab with that category
+    // pre-selected — an improvement over a dead sentence, and still the app
+    // walking away from its own problem: the screen the user was on is gone,
+    // what they asked for is forgotten, and finding the way back is theirs. The
+    // flow now opens as a modal over whatever is on screen
+    // (`PhoneBridgeWizardHost`, hoisted in AppScaffold so every route has it),
+    // so there is nothing to navigate here (owner, 2026-09-06).
     androidx.compose.runtime.LaunchedEffect(Unit) {
         PhoneBridgeReturn.pending.collect { req ->
             if (req == null || req.navigated) return@collect

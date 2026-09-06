@@ -544,10 +544,7 @@ class DefaultBridgeHandler(
         val r = ai.eight24family.conch.adb.LocalAdbShell.exec(
             "screencap -p | base64 2>/dev/null",
             limit = 24 * 1024 * 1024,
-        ) ?: return BridgeResponse.err(
-            "No shell access yet: pair Conch with this phone once in " +
-                "Settings → Phone bridge, then turn Wireless debugging on.",
-        )
+        ) ?: return noShell("A screenshot of this phone was asked for.")
         val encoded = r.stdout.filterNot { it.isWhitespace() }
         if (encoded.isEmpty()) {
             return BridgeResponse.err(
@@ -637,10 +634,7 @@ class DefaultBridgeHandler(
             )
         }
         val r = ai.eight24family.conch.linux.LinuxEnv.run(command)
-            ?: return BridgeResponse.err(
-                "No shell access yet: pair Conch with this phone once in " +
-                    "Settings → Phone bridge, then turn Wireless debugging on.",
-            )
+            ?: return noShell("An agent wants to run something in this phone's Linux.")
         val meta = mapOf(
             "exit" to JsonPrimitive(r.exitCode),
             "truncated" to JsonPrimitive(r.truncated),
@@ -657,17 +651,7 @@ class DefaultBridgeHandler(
         // It speaks ADB to this device over its own loopback with a key the
         // device was paired with; no helper app is involved at any point.
         val r = ai.eight24family.conch.adb.LocalAdbShell.exec(command)
-            ?: return BridgeResponse.err(
-                // Say what is missing, and say it in the order the user has to
-                // do it. Android hands out this privilege only through Wireless
-                // Debugging, and the platform itself refuses to arm that unless
-                // the phone is associated with a Wi-Fi network — so the second
-                // sentence is a fact about Android, not about Conch.
-                "No shell access yet: pair Conch with this phone once in " +
-                    "Settings → Phone bridge, then turn Wireless debugging on. " +
-                    "Android only allows that while connected to Wi-Fi; after the " +
-                    "first pairing no code is ever needed again.",
-            )
+            ?: return noShell("An agent wants to run a command on this phone.")
         // stdout is the primary payload (clean for the agent to parse).
         // exit code, a stderr snippet, and flags ride in metadata — the
         // CLI prints metadata to its own stderr.
@@ -678,5 +662,28 @@ class DefaultBridgeHandler(
             "stderr" to JsonPrimitive(r.stderr.take(4000)),
         )
         return BridgeResponse.ok(r.stdout, meta)
+    }
+
+    /**
+     * The answer when this phone has no shell to lend — and the ask that goes
+     * with it.
+     *
+     * ⛔ THE AGENT IS NOT WHO CAN FIX THIS, so a paragraph of instructions in
+     * the reply is words nobody who can act will read. It used to say "pair
+     * Conch with this phone once in Settings → Phone bridge, then turn Wireless
+     * debugging on" — to a model, on a server, about two switches on a device
+     * in someone's pocket (owner, 2026-09-06).
+     *
+     * So the owner gets the guided flow, on the phone, right now — as a modal
+     * if Conch is open and as one line in the shade if it is not — and the
+     * agent gets the one fact that changes what IT should do next: not yet, ask
+     * again shortly.
+     */
+    private fun noShell(why: String): BridgeResponse {
+        ai.eight24family.conch.adb.PhoneBridgeSetup.askAndNotify(appContext, why)
+        return BridgeResponse.err(
+            "This phone's shell is off right now. Conch has just asked its owner for the " +
+                "two taps that bring it back; try again in a moment.",
+        )
     }
 }

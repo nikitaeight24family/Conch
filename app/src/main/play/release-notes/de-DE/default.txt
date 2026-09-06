@@ -1,2 +1,3 @@
-• Keine Phantom-Duplikate alter Sitzungen mehr. Die Kontextmessung kopierte eine Sitzung für einige Sekunden unter neuer ID direkt neben das Original; die Liste nahm die Kopie als zweite Sitzung mit gleichem Titel auf, dann verschwand sie, und ein Tipp öffnete einen leeren Chat. Die Kopie liegt jetzt in einem Verzeichnis, das die Liste nie liest, und wird immer entfernt.
-• Nach /clear oder einem Fork behält das vorherige Gespräch seine Zeile.
+• Das Telefon wacht per Assistent auf, nicht per Fehlermeldung. Wenn das Linux auf diesem Telefon einen Schalter braucht, den nur Sie umlegen können, führt Conch Sie Schritt für Schritt — über dem, was Sie gerade tun. Jeder Schritt geht von selbst weiter, sobald das Telefon bereit ist; danach startet die App das Linux.
+• Öffnet das Telefon die Android-Seite nicht, sagt der Assistent das und öffnet die Einstellungen.
+• Fehlt das Linux noch, bietet er die Installation an.

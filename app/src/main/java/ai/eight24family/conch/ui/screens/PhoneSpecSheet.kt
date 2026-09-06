@@ -168,8 +168,12 @@ internal fun PhoneSpecSheet(
                                         val msg = when (val o = RamReclaim.freeUp()) {
                                             is RamReclaim.Outcome.Freed ->
                                                 "freed ${PhoneResources.gb(o.freedBytes)}G · ${PhoneResources.gb(o.availAfter)}G free now"
-                                            RamReclaim.Outcome.BridgeDown ->
-                                                "needs the phone bridge — Settings → Phone bridge"
+                                            RamReclaim.Outcome.BridgeDown -> {
+                                                ai.eight24family.conch.adb.PhoneBridgeSetup.ask(
+                                                    "Freeing memory runs on the phone itself.",
+                                                )
+                                                "this phone's shell is off"
+                                            }
                                         }
                                         ramMsg = msg
                                         res = withContext(Dispatchers.IO) { PhoneResources.read() }

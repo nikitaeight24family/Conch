@@ -1280,13 +1280,21 @@ private fun BridgeStatusRow(text: String) {
     // way in from here, so the row explained the problem and left the person
     // to find Settings themselves (owner, 2026-09-03). Tapping it now goes
     // straight to that flow.
-    val actionable = text.contains("Phone bridge", ignoreCase = true)
+    // ⚠ MATCHED AGAINST THE COPY ITSELF, not against the words "Phone bridge".
+    // The old test was the phrase in the sentence — so the day those sentences
+    // stopped naming a Settings page (which is the whole point of the wizard),
+    // this row would have quietly gone back to being a label with no door.
+    val actionable = ai.eight24family.conch.adb.PhoneBridgeCopy.isShellProblem(text)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .then(
                 if (actionable) {
-                    Modifier.clickable { ai.eight24family.conch.ui.navigation.BridgeSetupRequest.ask() }
+                    Modifier.clickable {
+                        ai.eight24family.conch.adb.PhoneBridgeSetup.ask(
+                            "This chat runs on the phone itself.",
+                        )
+                    }
                 } else {
                     Modifier
                 },

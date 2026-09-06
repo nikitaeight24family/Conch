@@ -231,8 +231,13 @@ private fun ServerSection(
                         modifier = Modifier.weight(1f, fill = false).padding(end = 6.dp),
                     )
                 }
+                // ⛔ THE PHONE IS NOT "RETRIED". Its machine is not refusing
+                // us and no dialling will change anything: it is off, and the
+                // word for that is wake. Same tap either way — the view model
+                // opens the guided flow when the shell is what is missing.
+                val ownDevice = entry.server.id == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID
                 Text(
-                    "[ retry ]",
+                    if (ownDevice) "[ wake ]" else "[ retry ]",
                     color = cyan,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier

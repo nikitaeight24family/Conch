@@ -176,6 +176,18 @@ object PairingWatcher {
 
     @Volatile private var lastPort: Int? = null
 
+    /**
+     * The port Android's pairing dialog is advertising right now, or null.
+     *
+     * ⭐ PUBLISHED SO NOBODY ASKS mDNS TWICE. The wizard needs the same fact
+     * this loop already learns every 1.5 s, and a second lookup of its own
+     * would pay the full 6 s discovery timeout on every tick where no dialog
+     * is open — which is nearly all of them. One asker, one answer, and the
+     * screen advances the instant the notification does.
+     */
+    private val _livePort = kotlinx.coroutines.flow.MutableStateFlow<Int?>(null)
+    val livePort: kotlinx.coroutines.flow.StateFlow<Int?> = _livePort
+
     fun start(context: Context) {
         if (job?.isActive == true) return
         val app = context.applicationContext
@@ -183,6 +195,7 @@ object PairingWatcher {
             val until = System.currentTimeMillis() + WINDOW_MS
             while (isActive && System.currentTimeMillis() < until) {
                 val port = PhoneBridgePairing.findPairingPort(app)
+                _livePort.value = port
                 if (port != null && port != lastPort) {
                     lastPort = port
                     android.util.Log.i("Conch-Pairing", "pairing dialog is open on port $port")
@@ -190,6 +203,7 @@ object PairingWatcher {
                 }
                 delay(1_500)
             }
+            _livePort.value = null
             android.util.Log.i("Conch-Pairing", "pairing window closed")
         }
     }
@@ -198,6 +212,7 @@ object PairingWatcher {
         job?.cancel()
         job = null
         lastPort = null
+        _livePort.value = null
     }
 }
 

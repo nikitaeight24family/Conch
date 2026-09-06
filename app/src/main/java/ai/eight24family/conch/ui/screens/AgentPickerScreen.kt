@@ -1427,7 +1427,6 @@ private fun DiagnosisCard(
     diagnosis: ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis,
     onRetry: () -> Unit,
 ) {
-    val ctx = androidx.compose.ui.platform.LocalContext.current
     val errorColor = MaterialTheme.colorScheme.error
     val onSurface = MaterialTheme.colorScheme.onSurface
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1464,30 +1463,28 @@ private fun DiagnosisCard(
         }
         Spacer(modifier = Modifier.padding(top = 4.dp))
         // ⛔ WHERE THE APP CAN FIX IT, THE CARD OFFERS THE FIX — not a paragraph
-        // about it. This is the phone's own shell: the flow that arms it already
-        // exists (Settings → Phone bridge opens Android's Developer options and
-        // watches for the pairing dialog), so the card starts that same flow
-        // rather than sending the owner off to find it (2026-08-31).
+        // about it. This is the phone's own shell, and the guided flow for it
+        // opens right here as a modal: the card must not walk the owner to
+        // Android's Developer options unaccompanied, which is what it did, and
+        // then leave him to work out when to come back (2026-09-06).
         if (diagnosis.action == ai.eight24family.conch.ssh.ServerDiagnostics.Diagnosis.Action.PHONE_BRIDGE) {
             OutlinedButton(
-                onClick = {
-                    // ORDER MATTERS, same as on the bridge screen: arm the
-                    // watcher BEFORE leaving, because Android's dialog can be
-                    // open before we are asked again, and the code only exists
-                    // while it is.
-                    ai.eight24family.conch.adb.PairingWatcher.start(ctx)
-                    openWirelessDebugging(ctx)
-                },
+                onClick = { ai.eight24family.conch.adb.PhoneBridgeSetup.ask() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("[ set it up ]", style = MaterialTheme.typography.labelLarge)
+                Text("[ wake this phone ]", style = MaterialTheme.typography.labelLarge)
             }
-        }
-        OutlinedButton(
-            onClick = onRetry,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("[ retry ]", style = MaterialTheme.typography.labelLarge)
+        } else {
+            // ⛔ NO [ retry ] UNDER A DIAGNOSIS RETRYING CANNOT CHANGE. Dialling
+            // the phone's own port again while Android holds the shell shut
+            // fails identically every time; a button that is certain to do
+            // nothing is worse than no button.
+            OutlinedButton(
+                onClick = onRetry,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("[ retry ]", style = MaterialTheme.typography.labelLarge)
+            }
         }
     }
 }
