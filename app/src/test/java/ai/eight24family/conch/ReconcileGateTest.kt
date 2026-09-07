@@ -22,6 +22,7 @@ class ReconcileGateTest {
         pendingCtl: Boolean = false,
         waitingForUser: Boolean = false,
         stuckSinceMs: Long = 10_000L,
+        writerProvenDead: Boolean = false,
     ) = ChatViewModelTailPoll.shouldReconcileStuckTurn(
         curWorking = curWorking,
         sawGrowthThisTurn = sawGrowth,
@@ -29,6 +30,7 @@ class ReconcileGateTest {
         pendingCtl = pendingCtl,
         waitingForUser = waitingForUser,
         stuckSinceMs = stuckSinceMs,
+        writerProvenDead = writerProvenDead,
     )
 
     @Test
@@ -51,6 +53,56 @@ class ReconcileGateTest {
     @Test
     fun `growth alone is not enough - the file must also be terminal`() {
         assertFalse(gate(turnComplete = false))
+    }
+
+    // ── the second way a turn can be over: the writer is PROVABLY gone ───────
+    //
+    // `turnComplete` left one state permanently unreachable — a CLI that dies or
+    // wedges WITHOUT writing its terminal record. The file then never goes
+    // terminal, `inFlight` drops on the heartbeat, `curWorking` stays true, and
+    // the spinner ran forever off `curWorking` alone with Stop unable to touch
+    // it (measured 2026-09-07: complete=false, inFlight=false, frozenMs=190000).
+
+    @Test
+    fun `a turn whose writer is proven gone is reconciled without a terminal record`() {
+        assertTrue(gate(turnComplete = false, writerProvenDead = true))
+    }
+
+    /**
+     * ⚠ AND IT IS STILL NOT THE BANNED `!inFlight` GATE (2026-06-28). That gate
+     * is a STALENESS GUESS and trips on a long SILENT research turn — subagents,
+     * a 47-minute hash, file frozen 15+ minutes — force-completing it loses real
+     * work. `writerProvenDead` is server-side proof (pgrep found no agent
+     * process whose cwd maps to this session's project), and a running research
+     * turn HAS one. Unknown liveness is not proof and arrives here as false.
+     */
+    @Test
+    fun `a silent research turn with a live writer is never reconciled`() {
+        assertFalse(
+            "frozen 20 minutes, writer alive — this is the turn the turnComplete gate protects",
+            gate(turnComplete = false, writerProvenDead = false, stuckSinceMs = 20 * 60_000L),
+        )
+    }
+
+    /** Proof of death does not excuse the other guards: a turn we have not seen
+     *  write yet may simply not have started, and pgrep cannot see a process the
+     *  CLI has not spawned. The growth latch stays load-bearing on this branch. */
+    @Test
+    fun `a proven-dead writer still needs the growth latch and the grace`() {
+        assertFalse(gate(turnComplete = false, writerProvenDead = true, sawGrowth = false))
+        assertFalse(
+            gate(
+                turnComplete = false,
+                writerProvenDead = true,
+                stuckSinceMs = ChatViewModelTailPoll.RECONCILE_STUCK_GRACE_MS - 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `a proven-dead writer never overrides a turn blocked on the user`() {
+        assertFalse(gate(turnComplete = false, writerProvenDead = true, pendingCtl = true))
+        assertFalse(gate(turnComplete = false, writerProvenDead = true, waitingForUser = true))
     }
 
     @Test

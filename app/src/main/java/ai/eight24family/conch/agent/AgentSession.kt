@@ -593,6 +593,12 @@ class AgentSession(
         val tag = "Conch-Turn"
         // A new turn supersedes any rewind: the mirror may speak freely again.
         rewindSuppressed = emptySet()
+        // …and it retires the standing Stop. One Stop must never become a
+        // permanent block on the chat (2026-08-18): the queue is deliberately
+        // NOT cleared by Stop, so the very next prompt is expected to start a
+        // turn, and the latch that keeps the mirror honest has to get out of its
+        // way the moment it does.
+        stoppedAtMs = null
         android.util.Log.d(
             tag,
             "send text=${text.length}B images=${imagePaths.size} agent=${server.agent} resume=$resumeId " +
@@ -692,6 +698,9 @@ class AgentSession(
      */
     fun redeliver(text: String, imagePaths: List<String> = emptyList()) {
         android.util.Log.d("Conch-Turn", "redeliver (echo-free) text=${text.length} images=${imagePaths.size} resume=$resumeId")
+        // A redelivered prompt starts a real turn, same as [send] — retire the
+        // stop latch or the mirror would keep that turn invisible.
+        stoppedAtMs = null
         promptQueue.markSent(text, resumeId)
         // emitOnStart=false: the row is already on screen (carried across a
         // reconnect, OR shown optimistically by the ViewModel for a mid-turn
@@ -746,6 +755,30 @@ class AgentSession(
         if (usePersistent()) persistentStream.cancelIdleLoop() else cancelCurrent()
     }
 
+    /**
+     * Epoch-ms of the last user Stop on this session, or null when none stands.
+     * **The mirror poll reads this** — see the stop latch in
+     * `ChatViewModelTailPoll.tailPoll`.
+     *
+     * ⚠ WHY A LATCH AND NOT JUST A STATE FLIP. Every earlier Stop fix worked on
+     * DELIVERY (the protocol interrupt, the escalation ladder, the pgrep kill by
+     * resume id, the persisted order) and every one of them can be perfectly
+     * correct while the button still looks dead — because the tail poll
+     * RE-DERIVES "a turn is in flight" from `state == Working` every ~5 s and
+     * republishes `remoteFileOpen`, the exact flag the spinner and the Stop
+     * button read. Stop's own two writes are erased within one tick. Measured on
+     * the owner's phone 2026-09-07: eight presses, `frozenMs` climbing 155s→190s
+     * on an unchanged 146 KB file, and the spinner never dropped once.
+     *
+     * So Stop is a LATCH the mirror must obey, not a one-shot write it can
+     * overwrite. Two things lift it, both of them positive events rather than
+     * timeouts: a NEW prompt ([send] / [redeliver] — otherwise one Stop would
+     * permanently pin the chat idle, which the 2026-08-18 invariant bans), or
+     * the file GROWING after the stop timestamp, which is proof the turn
+     * outlived the halt and is honestly working again.
+     */
+    @Volatile var stoppedAtMs: Long? = null
+
     /** [force] — Stop is aimed at a turn running in OUR OWN persistent process
      *  that the app's turn tracking has lost (reopened mid-turn: procAlive but
      *  state desynced off Working). Escalates to tearing our process down on
@@ -753,6 +786,10 @@ class AgentSession(
      *  redelivers). See [ChatViewModel.stopCurrent]. */
     fun cancelCurrent(force: Boolean = false) {
         clearLoop()
+        // Raised BEFORE any channel work. Everything below this line can block,
+        // fail, or decide there is nothing to kill — the latch has to already be
+        // up when the next poll tick runs, whichever of those happens.
+        stoppedAtMs = System.currentTimeMillis()
         // Stop = "cancel current turn AND drop everything queued behind
         // it". Cancelling just the in-flight turn while letting the
         // drainer roll to the next queued prompt would feel weird —

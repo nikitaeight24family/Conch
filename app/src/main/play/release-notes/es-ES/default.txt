@@ -1,3 +1,2 @@
-• El teléfono se despierta con un asistente, no con un error. Cuando el Linux de este teléfono necesita un interruptor que solo usted puede activar, Conch le guía paso a paso sobre lo que esté haciendo; cada paso avanza solo en cuanto el teléfono está listo. Después la app inicia el Linux y cierra la ventana.
-• Si el teléfono no abre la página de Android, el asistente lo dice y abre los Ajustes.
-• Si aún no hay Linux en el teléfono, ofrece instalarlo.
+• Detener siempre detiene. Un toque termina el turno, incluso si se cortó la conexión, el proceso del agente ya había muerto o la app había perdido el rastro del turno. Antes podías pulsar Detener y no pasaba nada.
+• Un turno terminado ya no gira para siempre. Conch comprueba si algo sigue trabajando en el servidor, así que el indicador y el cronómetro muestran lo que ocurre de verdad.

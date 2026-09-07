@@ -1,3 +1,2 @@
-• Das Telefon wacht per Assistent auf, nicht per Fehlermeldung. Wenn das Linux auf diesem Telefon einen Schalter braucht, den nur Sie umlegen können, führt Conch Sie Schritt für Schritt — über dem, was Sie gerade tun. Jeder Schritt geht von selbst weiter, sobald das Telefon bereit ist; danach startet die App das Linux.
-• Öffnet das Telefon die Android-Seite nicht, sagt der Assistent das und öffnet die Einstellungen.
-• Fehlt das Linux noch, bietet er die Installation an.
+• Stop stoppt jetzt immer. Ein Tippen beendet den Durchlauf — auch wenn die Verbindung abbrach, der Prozess des Agenten längst beendet war oder die App den Durchlauf aus den Augen verloren hatte. Bisher konnte ein Tippen auf Stop völlig wirkungslos bleiben.
+• Ein beendeter Durchlauf dreht sich nicht mehr endlos. Conch prüft jetzt, ob auf dem Server überhaupt noch etwas arbeitet, damit Spinner und Timer zeigen, was wirklich passiert.

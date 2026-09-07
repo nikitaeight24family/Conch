@@ -404,6 +404,11 @@ internal class ChatViewModelTailPoll(
         // another client's RAM.
         var fileTailIsOurs = false
         var idleTicks = 0
+        // Epoch-ms the file last GREW. Only meaningful against
+        // [AgentSession.stoppedAtMs] — growth after a Stop is the one proof that
+        // lifts the stop latch below. 0 = nothing has grown while this poller
+        // has been alive, so a Stop pressed now stands.
+        var lastGrowthAtMs = 0L
         // Consecutive stat failures (transport down) — drives the extra
         // backoff sleep in the size==null branch; reset on any success.
         var statFailStreak = 0
@@ -615,6 +620,12 @@ internal class ChatViewModelTailPoll(
                     }
                 }
                 idleTicks = 0  // growth → poll fast
+                // The ONE thing that lifts a standing Stop from the mirror's
+                // side: bytes that landed AFTER the halt. Ours or external —
+                // either way something is writing this session again, and a
+                // spinner is then the truth rather than the lie Stop was
+                // pressed to end. See [AgentSession.stoppedAtMs].
+                lastGrowthAtMs = System.currentTimeMillis()
             } else {
                 idleTicks++
             }
@@ -641,6 +652,12 @@ internal class ChatViewModelTailPoll(
             ai.eight24family.conch.util.Logx.d("Conch-Tail") {
                 "turn sid=${sessionId.take(8)} agent=$agent recs=${recWindow.size} " +
                     "inFlight=$inFlight complete=${probe.turnComplete} thinking=$thinking " +
+                    // `writer` is the signal that was computed and dropped for
+                    // its whole life (see [parseProbeOutput]); print it, or the
+                    // next person reading this line to diagnose a stuck spinner
+                    // has no way to tell proof from the mtime guess. `stopped`
+                    // says whether a user Stop is standing over the mirror.
+                    "writer=${stat.writerAlive ?: '?'} stopped=${s.stoppedAtMs != null} " +
                     "tokens=${probe.tokens} frozenMs=${stat.frozenForMs} size=$size"
             }
 
@@ -677,11 +694,31 @@ internal class ChatViewModelTailPoll(
                 val first = terminalSeenAtMs ?: System.currentTimeMillis().also { terminalSeenAtMs = it }
                 System.currentTimeMillis() - first
             }
-            if (!probe.turnComplete) terminalSeenAtMs = null
+            // THE WRITER IS GONE — the second way a turn can be over. `turnComplete`
+            // alone left one state permanently unreachable: a CLI that dies (or
+            // wedges) WITHOUT writing its terminal record. The file then has no
+            // `stop_reason` ever, so the reconcile above could not fire, `inFlight`
+            // went false on the heartbeat, `curWorking` stayed true — and
+            // `fileWorking` published "working" forever off `curWorking` alone.
+            // Measured on the owner's phone 2026-09-07: `complete=false`
+            // `inFlight=false` `frozenMs` climbing past three minutes on an
+            // unchanged file, spinner unkillable.
+            //
+            // ⚠ THIS IS NOT THE BANNED `!inFlight` GATE (2026-06-28). `!inFlight`
+            // is a STALENESS GUESS — it trips on a long SILENT research turn whose
+            // file is frozen 15+ minutes, and force-completing that loses real
+            // work. `writerAlive == false` is server-side PROOF: pgrep found no
+            // agent process whose cwd maps to this session's project. A running
+            // research turn HAS such a process, so this branch cannot fire on it,
+            // whatever the clock says. Unknown liveness (`null` — no pgrep, no
+            // /proc, unreadable cwds) is NOT proof and reconciles nothing.
+            val writerProvenDead = stat.writerAlive == false
+            if (!probe.turnComplete && !writerProvenDead) terminalSeenAtMs = null
             val liveStuck = shouldReconcileStuckTurn(
                 curWorking = curWorking,
                 sawGrowthThisTurn = sawGrowthThisTurn,
                 turnComplete = probe.turnComplete,
+                writerProvenDead = writerProvenDead,
                 pendingCtl = pendingCtl,
                 waitingForUser = probe.waitingForUser,
                 stuckSinceMs = stuckSinceMs,
@@ -689,9 +726,37 @@ internal class ChatViewModelTailPoll(
             if (liveStuck) {
                 android.util.Log.w(
                     "Conch-Tail",
-                    "live turn stuck: file done + ${stuckSinceMs}ms " +
+                    "live turn stuck: ${if (probe.turnComplete) "file done" else "writer gone"} " +
+                        "+ ${stuckSinceMs}ms " +
                         "(frozen=${probe.frozenForMs ?: "n/a"}, growth=$sawGrowthThisTurn) " +
                         "but state=Working — reconciling",
+                )
+                s.reconcileStuckTurn()
+            }
+            // ⛔ STOP IS A LAW — AND THIS POLL IS THE LAST THING THAT CAN BREAK IT.
+            //
+            // `stopCurrent` clears the state map and `remoteFileOpen` in its first
+            // statements, and five seconds later THIS loop republishes
+            // `remoteFileOpen = working` derived from `s.state` — so a Stop that
+            // could not reach its turn (dead transport, dead process, wedged
+            // reader: every case where `cancelTurn`'s escalation logs "nothing to
+            // kill" and leaves the state on Working) was undone by the very next
+            // tick. Eight presses, eight no-ops, the spinner never dropped
+            // (2026-09-07). No amount of work on the DELIVERY side fixes that;
+            // the mirror has to obey the stop.
+            //
+            // It obeys until the file GROWS again — proof the turn outlived the
+            // halt — and the latch is retired by the next send, so the queue
+            // still starts the next turn (2026-08-18: Stop must not block the
+            // chat). And because every send gate, queue release edge and the
+            // haptics read the SESSION state rather than this flag, a stop that
+            // stands also reconciles the session itself, instead of leaving the
+            // spinner off and the state stuck on Working underneath it.
+            val stopStands = stopStandsOver(s.stoppedAtMs, lastGrowthAtMs)
+            if (stopStands && curWorking && !liveStuck) {
+                android.util.Log.w(
+                    "Conch-Tail",
+                    "stop stands (no growth since ${s.stoppedAtMs}) but state=Working — reconciling",
                 )
                 s.reconcileStuckTurn()
             }
@@ -705,7 +770,7 @@ internal class ChatViewModelTailPoll(
             // (user, 2026-06-28). inFlight already covers the streaming phase, so the
             // supplement was redundant AND the source of the flicker. A reconciled
             // stuck turn also drops curWorking THIS tick so the spinner clears at once.
-            val working = fileWorking(curWorking, liveStuck, inFlight) && !pendingCtl
+            val working = fileWorking(curWorking, liveStuck, inFlight) && !pendingCtl && !stopStands
             // Keep polling fast while a turn is in flight OR a question is pending
             // (the user might answer on the PC), so we notice the change within ~5s.
             if (inFlight || pendingCtl) idleTicks = 0
@@ -1029,47 +1094,50 @@ internal class ChatViewModelTailPoll(
         //     every project under it, keeping foreign spinners alive;
         //   · Codex/Gemini paths encode no cwd, so a "no match" there would be a
         //     FALSE "the turn is over" — they report `?` and keep the mtime rule.
+        // ⚠ "NO MATCH" AND "COULD NOT LOOK" MUST NOT PRINT THE SAME THING.
+        // `readlink /proc/<pid>/cwd` fails with EACCES for a process owned by
+        // ANOTHER user, and the old loop `continue`d past that with W still 0 —
+        // so a host where the agent runs as a different uid reported a
+        // PROVEN-DEAD writer for a perfectly live turn. Harmless while the
+        // signal was dropped on the floor (see the PollProbe below); a
+        // false "the writer is gone" now drops a live spinner and, past the
+        // grace, force-completes a running turn. So count what we actually
+        // learned: `1` = proven alive; `0` = we read at least one candidate's
+        // cwd and none matched, or pgrep found no agent process AT ALL; `?` =
+        // candidates exist but not one cwd was readable ⇒ we know nothing.
+        // ⚠ AND IT MUST NOT VOUCH FOR ITSELF. `pgrep -f claude` matches THIS
+        // PROBE: the session path in its own argv contains `.claude/projects/…`.
+        // Its cwd is the login shell's, so the exact `case` below normally
+        // rejects it — but for a session whose project IS the login home
+        // (`~/.claude/projects/-home-user/…`) the mangled cwd matches
+        // EXACTLY, and the probe would report a live writer on every tick
+        // forever. With `writerAlive` now actually reaching its consumers that
+        // is not a cosmetic bug: `heartbeatInFlight` trusts this proof over the
+        // clock, so a dead turn there would spin for good — worse than the
+        // 2026-09-07 bug it is part of the fix for. Skipped by the one marker
+        // only our own command line can carry, BEFORE the candidate is counted,
+        // so a table holding nothing but this probe reads as "no writer" rather
+        // than "unknown".
         val liveness = "if command -v pgrep >/dev/null 2>&1 && [ -d /proc ] && " +
             "case $q in */projects/*) true;; *) false;; esac; then " +
-            "W=0; for pid in \$(pgrep -f $binPattern 2>/dev/null); do " +
+            "W=0; CAND=0; SEEN=0; for pid in \$(pgrep -f $binPattern 2>/dev/null); do " +
+            "[ \"\$pid\" = \"\$\$\" ] && continue; " +
+            "A=\$(tr '\\0' ' ' < /proc/\$pid/cmdline 2>/dev/null); " +
+            "case \$A in *CONCH_WRITER*) continue;; esac; " +
+            "CAND=1; " +
             "C=\$(readlink /proc/\$pid/cwd 2>/dev/null); [ -n \"\$C\" ] || continue; " +
-            "M=\$(printf '%s' \"\$C\" | tr '/' '-'); " +
+            "SEEN=1; M=\$(printf '%s' \"\$C\" | tr '/' '-'); " +
             "case $q in */projects/\"\$M\"/*) W=1; break;; esac; " +
-            "done; echo CONCH_WRITER=\$W; " +
+            "done; " +
+            "if [ \"\$W\" = 1 ]; then echo CONCH_WRITER=1; " +
+            "elif [ \"\$CAND\" = 0 ] || [ \"\$SEEN\" = 1 ]; then echo CONCH_WRITER=0; " +
+            "else echo 'CONCH_WRITER=?'; fi; " +
             "else echo 'CONCH_WRITER=?'; fi"
         val inner = "if [ -r $q ]; then stat -c %s,%Y $q 2>/dev/null || " +
             "stat -f %z,%m $q 2>/dev/null; else echo CONCH_NOFILE; fi; date +%s; " +
             liveness + "; echo ---;"
         val out = s.execOnLive("bash -lc " + shQuote(inner)) ?: return PollProbe(size = null)
-        val statPart = out.substringBefore("---")
-        val statLines = statPart.lineSequence().filter { it.isNotBlank() }.toList()
-        // Accept ONLY a real "<size>,<mtime>" pair. `date +%s` carries no comma,
-        // so it can never be mistaken for a stat result again — belt and braces
-        // next to the sentinel, since a BSD/BusyBox host could still surprise us.
-        val statFields = statLines.firstOrNull()
-            ?.takeIf { it != "CONCH_NOFILE" }
-            ?.split(',')
-            ?.takeIf { it.size == 2 && it[0].trim().toLongOrNull() != null && it[1].trim().toLongOrNull() != null }
-        val size = statFields?.getOrNull(0)?.trim()?.toLongOrNull()
-        val mtimeSec = statFields?.getOrNull(1)?.trim()?.toLongOrNull()
-        val mtimeMs = mtimeSec?.let { it * 1000 }
-        val serverNowSec = statLines.getOrNull(1)?.trim()?.toLongOrNull()
-        val writerAlive = statLines.firstOrNull { it.startsWith("CONCH_WRITER=") }
-            ?.removePrefix("CONCH_WRITER=")?.trim()
-            ?.let { if (it == "1") true else if (it == "0") false else null }
-        // Both ends are the server's own clock → skew-proof, and still correct on
-        // open (real frozen time, not "since the app noticed").
-        val frozenForMs = if (mtimeSec != null && serverNowSec != null)
-            ((serverNowSec - mtimeSec) * 1000).coerceAtLeast(0L) else null
-        // Turn signals are filled in by the poll loop from the LOCAL record
-        // window; this probe answers only "how big is it and when did it last
-        // change". A caller that just wants the size gets it without paying for
-        // any projection at all.
-        return PollProbe(
-            size = size,
-            mtimeMs = mtimeMs,
-            frozenForMs = frozenForMs,
-        )
+        return parseProbeOutput(out)
     }
 
     suspend fun fetchTail(s: AgentSession, path: String, fromOffset: Long): ByteArray? {
@@ -1319,8 +1387,88 @@ internal class ChatViewModelTailPoll(
             pendingCtl: Boolean,
             waitingForUser: Boolean,
             stuckSinceMs: Long,
-        ): Boolean = curWorking && sawGrowthThisTurn && turnComplete &&
+            /** Server-side PROOF that no agent process is writing this session's
+             *  project any more — the second way a turn can be over, for a CLI
+             *  that died without writing its terminal record. Never a guess:
+             *  `null` liveness arrives here as false. See the call site. */
+            writerProvenDead: Boolean = false,
+        ): Boolean = curWorking && sawGrowthThisTurn && (turnComplete || writerProvenDead) &&
             !pendingCtl && !waitingForUser && stuckSinceMs >= RECONCILE_STUCK_GRACE_MS
+
+        /**
+         * Does a user Stop still stand, as far as the FILE is concerned?
+         *
+         * The mirror poll re-derives "a turn is in flight" from the session state
+         * every few seconds and republishes the flag the spinner and the Stop
+         * button read — so without this, Stop's own writes survive at most one
+         * tick and the button reads as broken however well the halt was
+         * delivered — eight presses, no effect (owner, 2026-09-07).
+         *
+         * Lifted only by GROWTH after the stop: bytes landing in the session file
+         * are proof the turn outlived the halt, and a spinner is then honest.
+         * `>=`, not `>`, on purpose — a write in the same millisecond as the stop
+         * is the dying CLI's final flush, not a live turn.
+         *
+         * Extracted pure for the same reason as [shouldReconcileStuckTurn].
+         */
+        internal fun stopStandsOver(stoppedAtMs: Long?, lastGrowthAtMs: Long): Boolean =
+            stoppedAtMs != null && stoppedAtMs >= lastGrowthAtMs
+
+        /**
+         * Parse the three-line probe reply into a [PollProbe] — size+mtime,
+         * the server's own clock, and the writer-liveness verdict.
+         *
+         * ⚠ PURE AND TESTED BECAUSE THE WIRING IS WHAT BROKE. `writerAlive` was
+         * produced by the shell, parsed into a local — and then simply not passed
+         * to the returned probe, so `probe.writerAlive` was `null` on every tick
+         * of every session for as long as the signal existed. Every consumer
+         * silently fell back to the mtime clock: `heartbeatInFlight`'s "PROOF
+         * BEATS THE CLOCK" branches were green in [FileWorkingGateTest] and
+         * unreachable in the app, and the stuck-turn reconcile had no way to tell
+         * a long silent research turn from a writer that had died without
+         * writing a terminal record — the state behind the unkillable spinner of
+         * 2026-09-07. Dropping a field on the floor is a compiler WARNING, and a
+         * warning in a four-minute Android build is invisible. Parsing lives here
+         * now so `ProbeParseTest` fails the build instead.
+         */
+        internal fun parseProbeOutput(out: String): PollProbe {
+            val statLines = out.substringBefore("---").lineSequence()
+                .filter { it.isNotBlank() }.toList()
+            // Accept ONLY a real "<size>,<mtime>" pair. `date +%s` carries no comma,
+            // so it can never be mistaken for a stat result again — belt and braces
+            // next to the sentinel, since a BSD/BusyBox host could still surprise us.
+            val statFields = statLines.firstOrNull()
+                ?.takeIf { it != "CONCH_NOFILE" }
+                ?.split(',')
+                ?.takeIf {
+                    it.size == 2 &&
+                        it[0].trim().toLongOrNull() != null &&
+                        it[1].trim().toLongOrNull() != null
+                }
+            val size = statFields?.getOrNull(0)?.trim()?.toLongOrNull()
+            val mtimeSec = statFields?.getOrNull(1)?.trim()?.toLongOrNull()
+            val serverNowSec = statLines.getOrNull(1)?.trim()?.toLongOrNull()
+            // 1 = a live agent process in this session's project, 0 = proven
+            // none, anything else (`?`, missing line) = unknown. Unknown must
+            // stay null: it is the value that keeps the mtime rule in charge
+            // instead of guessing a turn alive or dead.
+            val writerAlive = statLines.firstOrNull { it.startsWith("CONCH_WRITER=") }
+                ?.removePrefix("CONCH_WRITER=")?.trim()
+                ?.let { if (it == "1") true else if (it == "0") false else null }
+            // Both ends are the server's own clock → skew-proof, and still correct
+            // on open (real frozen time, not "since the app noticed").
+            val frozenForMs = if (mtimeSec != null && serverNowSec != null)
+                ((serverNowSec - mtimeSec) * 1000).coerceAtLeast(0L) else null
+            // Turn signals are filled in by the poll loop from the LOCAL record
+            // window; this probe answers only "how big is it, when did it last
+            // change, and is anything still writing it".
+            return PollProbe(
+                size = size,
+                mtimeMs = mtimeSec?.let { it * 1000 },
+                frozenForMs = frozenForMs,
+                writerAlive = writerAlive,
+            )
+        }
 
         /**
          * The HEARTBEAT rule, extracted pure so it can be pinned: a projected

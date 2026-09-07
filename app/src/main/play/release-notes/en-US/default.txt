@@ -1,3 +1,2 @@
-• The phone wakes with a guided popup, not an error. When this phone's own Linux needs a switch only you can flip, Conch now walks you through it over whatever you were doing — one step at a time, each moving on by itself the moment the phone is ready. Then it starts the Linux for you and closes.
-• If the phone refuses to open Android's page, the wizard says so and takes you to Settings instead.
-• It offers to install the phone's Linux when there isn't one yet.
+• Stop always stops. One tap ends the turn — even when the connection dropped, the agent's process had already died, or the app had lost track of the turn. It used to be possible to tap Stop and have nothing happen at all.
+• A turn that has ended no longer spins forever. Conch now checks whether anything is still working on the server, so the spinner and the timer show what is really happening.

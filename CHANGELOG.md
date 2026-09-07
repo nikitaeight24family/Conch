@@ -15,6 +15,34 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.6.5] — 2026-09-07
+
+### Fixed
+- **Stop always stops.** The button was never the problem — the mirror undid it.
+  Stop clears the working state in its first statements, and a few seconds later
+  the poll that watches the session file re-derived "a turn is in flight" and
+  put the flag back: the same flag that draws the spinner and the Stop button.
+  So every case where the halt cannot reach its turn — the connection dropped,
+  the agent's process had already died, the reader wedged — survived exactly one
+  poll tick, and pressing Stop again changed nothing. Stop is now a latch the
+  mirror obeys, lifted only by the session file growing again (proof the turn
+  outlived the halt, so the spinner is honest) or by the next message, which
+  still goes out and starts the next turn.
+- **A turn nobody is working on no longer spins forever.** The probe that asks
+  the server "is anything still writing this session" computed its answer on
+  every tick and then dropped it, so every reader silently fell back to the
+  file's timestamp instead. Wired through, a finished turn clears at once and a
+  long silent one — a build, a big hash, a research turn whose subagents write
+  nothing for a quarter of an hour — keeps its spinner. The probe also no longer
+  counts itself as the writer, and it now distinguishes "nothing is running"
+  from "could not tell", which used to look identical.
+- **A turn whose agent died without a closing record is recognised as over.**
+  The net that clears a wedged turn needed a real end-of-turn record in the
+  session file. An agent killed before writing one left the net unable to fire
+  at all — the state the unstoppable spinner came from. It now also accepts
+  proof that no process is working on the session, which a running turn can
+  never produce.
+
 ## [0.6.4] — 2026-09-07
 
 ### Changed
@@ -1757,7 +1785,7 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.5...HEAD
 [0.6.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.0
 [0.5.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.2
 [0.5.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.0
@@ -1785,6 +1813,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.6.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.5
 [0.6.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.4
 [0.6.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.3
 [0.6.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.2
