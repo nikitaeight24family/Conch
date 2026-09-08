@@ -25,7 +25,7 @@ Shipping now: **0.6.0**, live on Google Play.
 | P0 | **Screen capture → chat** | One-tap MediaProjection grab attached to the current chat as a PNG. The bridge already screenshots the phone when the *server* asks; this is the same picture, taken by the person holding it. |
 | P0 | **Live preview loop** | Agent edits → rebuild → auto-install → auto-screenshot → image back in chat. The AI sees the result of its own change. Bridge + auto-install + screen capture composed. |
 | P0 | **Phone-side code editor** | Compose editor for in-place edits when delegating to the agent is overkill. `/edit <path>`, syntax highlight, saves over SSH. The built-in viewers — diff, PDF, Markdown, images, text — are read-only today. |
-| P1 | **Voice input transcribed on your server** | Whisper on the user's own machine, speech becoming chat text. Voice *messages* already ship (record in the composer, review, send as audio); this is the transcription half, and it stays off anyone else's infrastructure. |
+| — | ~~**Voice input transcribed on your server**~~ | **Done in 0.7, and better than planned: on the PHONE.** Whisper is cross-built into the app, so dictation in a local chat needs no server and no network at all. Voice *messages* (record, review, send as audio) still ship separately. |
 | P1 | **Per-agent model selection persistence** | `selectedModel` is one string in prefs and leaks across agents. Make it `Map<Agent, String>`. |
 | P1 | **Codex preview parser fix** | Filter session previews by `payload.type == "message"` **and** `role == "user"`; shell function-call output leaks into the previews. |
 | P2 | **Clipboard bridge** | Phone clipboard ↔ `$CLIPBOARD` in agent commands. Pasting an image into the composer already works; this is the shell-side half. |
@@ -122,3 +122,20 @@ These come up; the answer stays **no** until the thesis changes:
 - **Subscriptions, ads or in-app purchases.** Conch is free on Play and stays
   that way; the only money in this project is the commercial licence a company
   buys to use it at work.
+- **A Vulkan GPU backend for the phone's engine.** Proposed as the fix for
+  phones with no vendor OpenCL stack, then built and measured instead of
+  argued about (2026-09-08). On Adreno 830 it loses to the CPU on both axes
+  (83 vs 286 t/s prefill, 51.5 vs 62.4 generation) and crashes inside the
+  vendor driver on a 512-token prompt, while costing +37 MB — four times the
+  app. The premise was wrong too: a phone with no OpenCL is not crawling, its
+  CPU backend is the fastest thing it has.
+- **An NPU backend (Hexagon / QNN / LiteRT).** The one path that promised ×10
+  and cold, measured and turned down for a reason no permission fixes: **the
+  NPU does not run GGUF.** Every shipping NPU LLM path executes a graph
+  compiled ahead of time on a PC for one SoC generation, one context length and
+  one batch shape, so "NPU support" means shipping a per-model per-chip model
+  catalogue — a different product than "any GGUF you like". And on the phone we
+  can test, the DSP device node is not open to an ordinary app at all: a
+  FastRPC session needs read-write on `/dev/fastrpc-cdsp`, which that OEM ships
+  `0664 system:system`. Re-checkable on any phone in one line:
+  `adb shell ls -lZ /dev/fastrpc-cdsp`.

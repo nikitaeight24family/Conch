@@ -185,7 +185,13 @@ internal class AgentSessionCodexAppServer(
                     ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
                     ?.let { ai.eight24family.conch.linux.LocalLlm.byId(it) }
                     ?: ai.eight24family.conch.linux.LocalLlm.CATALOG.firstOrNull {
-                        ai.eight24family.conch.linux.LocalLlm.status(it) is ai.eight24family.conch.linux.LocalLlm.Status.Ready
+                        // ⛔ NOT AN EMBEDDER. "No pick yet, so serve the first
+                        // ready model" would hand codex a model with no chat
+                        // head the moment the search model is downloaded, and
+                        // the turn would answer nothing at all.
+                        it.isBrain &&
+                            ai.eight24family.conch.linux.LocalLlm.status(it) is
+                            ai.eight24family.conch.linux.LocalLlm.Status.Ready
                     }
                 m?.let {
                     SilentlyTry.logged(tag, "start local engine") {
@@ -430,9 +436,17 @@ internal class AgentSessionCodexAppServer(
             val wantsLocal = wantsLocalProvider()
             val localProvider =
                 if (wantsLocal) ai.eight24family.conch.agent.codex.CodexSpec.localProviderArgs() else ""
+            // The engine authenticates its port now (it is reachable by every
+            // app on the device — see LocalApiAccess). The provider config
+            // names OPENAI_API_KEY as its `env_key`; without this prefix the
+            // whole local-agent path would 401 on its first turn.
+            val localKey =
+                if (wantsLocal) ai.eight24family.conch.agent.codex.CodexSpec.localKeyEnv() else ""
             // stderr DROPPED — app-server logs there and any line would
             // corrupt the stdout JSONL framing.
-            val cmd = sess.exec(loginShell(authPrep + "codex app-server$localProvider 2>/dev/null"))
+            val cmd = sess.exec(
+                loginShell(authPrep + localKey + "codex app-server$localProvider 2>/dev/null"),
+            )
             procSession = sess
             procCmd = cmd
             procAlive = true

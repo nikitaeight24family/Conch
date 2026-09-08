@@ -135,6 +135,25 @@ object ModelRecords {
 
     fun rate(id: String, stars: Int) = update(id) { it.copy(rating = stars.coerceIn(1, 5)) }
 
+    /**
+     * A speed observed while the model was doing REAL work — the local chat
+     * reads it off the engine's own timings on every answer and hands it
+     * here (see LocalChatViewModel).
+     *
+     * ⛔ THE BUTTON WAS THE ONLY SOURCE, AND MOST ROWS NEVER GOT PRESSED. A
+     * `tokS` a whole shelf of estimates recalibrates from (DeviceProfile.bwGbps)
+     * cannot depend on the owner remembering to run a 32-token probe: every
+     * answer already measures the same quantity under a heavier, more honest
+     * load. Passive, free, and it never asks.
+     *
+     * Ignores nonsense (a first-token-dominated burst, a clock hiccup) so one
+     * bad sample cannot poison every estimate on the shelf.
+     */
+    fun noteMeasured(id: String, tokS: Double) = runCatching {
+        if (tokS !in 0.1..500.0) return@runCatching
+        update(id) { it.copy(tokS = tokS, tokSAtMs = System.currentTimeMillis()) }
+    }.let { }
+
     /** Save the written review (blank clears it). */
     fun review(id: String, text: String) = update(id) {
         val t = text.trim().take(2000)
@@ -194,6 +213,7 @@ object ModelRecords {
 
     private fun bench(): Double? {
         val conn = (URL("${LocalLlmEngine.BASE_URL}/completion").openConnection() as HttpURLConnection).apply {
+            ai.eight24family.conch.linux.chat.LocalApiAccess.authorize(this)
             connectTimeout = 5_000
             readTimeout = 180_000 // 32 tokens on a big cpu model is real time
             requestMethod = "POST"

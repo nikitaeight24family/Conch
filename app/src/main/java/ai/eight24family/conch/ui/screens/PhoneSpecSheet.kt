@@ -1,5 +1,14 @@
 package ai.eight24family.conch.ui.screens
 
+import ai.eight24family.conch.linux.LocalLlm
+import ai.eight24family.conch.linux.LocalLlmEngine
+import ai.eight24family.conch.linux.PhoneResources
+import ai.eight24family.conch.linux.RamReclaim
+import ai.eight24family.conch.linux.store.DeviceProfile
+import ai.eight24family.conch.linux.store.ModelRecords
+import ai.eight24family.conch.linux.store.ShareMeasurements
+import ai.eight24family.conch.linux.store.StoreCatalog
+import ai.eight24family.conch.ui.window.handCursor
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -8,10 +17,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -27,16 +39,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import ai.eight24family.conch.linux.LocalLlm
-import ai.eight24family.conch.linux.LocalLlmEngine
-import ai.eight24family.conch.linux.PhoneResources
-import ai.eight24family.conch.linux.RamReclaim
-import ai.eight24family.conch.linux.store.DeviceProfile
-import ai.eight24family.conch.linux.store.StoreCatalog
-import ai.eight24family.conch.ui.window.handCursor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -105,7 +111,53 @@ internal fun PhoneSpecSheet(
     val dim = MaterialTheme.colorScheme.outline
     val fg = MaterialTheme.colorScheme.onSurfaceVariant
     val accent = MaterialTheme.colorScheme.primary
-    val (bw, bwMeasured) = DeviceProfile.bwInfo(catalog, profile)
+    val (bw, bwSource) = DeviceProfile.bwInfo(catalog, profile)
+    // Recomputed when a measurement lands (records flow), so the verb appears
+    // the moment this phone has something to contribute.
+    val records by ModelRecords.flow.collectAsState()
+    val shareable = remember(records, catalog) { ShareMeasurements.samples(records, catalog) }
+    var showShare by remember { mutableStateOf(false) }
+    if (showShare) {
+        val ctx = LocalContext.current
+        val payload = remember(shareable, bw, profile) {
+            ShareMeasurements.render(
+                p = profile,
+                gpu = DeviceProfile.gpu(),
+                samples = shareable,
+                bwGbps = bw,
+                appVersion = ai.eight24family.conch.BuildConfig.VERSION_NAME,
+            )
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showShare = false },
+            title = { Text("Share these measurements") },
+            text = {
+                Column {
+                    Text(
+                        "This is everything that would leave your phone. Nothing " +
+                            "is sent by the app — you pick where it goes.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        payload,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState()),
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    showShare = false
+                    ShareMeasurements.share(ctx, payload)
+                }) { Text("Share") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showShare = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -296,7 +348,26 @@ internal fun PhoneSpecSheet(
                 val onDisk = LocalLlm.CATALOG.filter { LocalLlm.isReady(it) }
                 if (onDisk.isEmpty()) DetailLine("no models stored yet")
                 else DetailLine("models here: " + onDisk.joinToString(", ") { "${it.label} ${PhoneResources.gb(it.bytes)}G" })
-                DetailLine("bandwidth ~${String.format(java.util.Locale.US, "%.0f", bw)} GB/s ${if (bwMeasured) "measured on this device" else "SoC-class estimate"} — sets the speed guesses", dim)
+                // ⛔ SAY WHERE THE NUMBER CAME FROM. It prices every shelf
+                // row, and "measured here" / "measured on 12 phones like this"
+                // / "SoC-class guess" are worth wildly different amounts of
+                // trust. The store must not launder a bucket into a fact.
+                DetailLine(
+                    "bandwidth ~${String.format(java.util.Locale.US, "%.0f", bw)} GB/s " +
+                        when (val src = bwSource) {
+                            DeviceProfile.BwSource.Own -> "measured on this device"
+                            is DeviceProfile.BwSource.Community ->
+                                "measured on ${src.n} phone${if (src.n == 1) "" else "s"} like this one"
+                            DeviceProfile.BwSource.SocClass -> "SoC-class estimate"
+                            DeviceProfile.BwSource.Default -> "generic estimate — this chip is unknown to us"
+                        } + " — sets the speed guesses",
+                    dim,
+                )
+                // Contributing is a deliberate act, and the owner reads the
+                // payload first. The app never posts anything itself.
+                if (shareable.isNotEmpty()) {
+                    LinkAction("share these measurements") { showShare = true }
+                }
             }
         }
     }

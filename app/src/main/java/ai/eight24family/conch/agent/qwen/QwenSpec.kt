@@ -96,7 +96,11 @@ object QwenSpec : AgentCliSpec {
         val localEnv = if (localId != null) {
             "OPENAI_BASE_URL=" +
                 shellEscape(ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL + "/v1") +
-                " OPENAI_API_KEY=local OPENAI_MODEL=" + shellEscape(localId) + " "
+                // Real key, not a placeholder: the engine's port is shared
+                // with every app on the device (see LocalApiAccess).
+                " OPENAI_API_KEY=" +
+                shellEscape(ai.eight24family.conch.linux.chat.LocalApiAccess.ownKey) +
+                " OPENAI_MODEL=" + shellEscape(localId) + " "
         } else ""
         val realModel = localId ?: input.model
         val modelArg = realModel?.takeIf { it.isNotBlank() }

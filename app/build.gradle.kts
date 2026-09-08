@@ -96,7 +96,7 @@ android {
         // NEVER claims the same version string as the published store build.
         // Per-build the nightly is still distinguishable by its git-derived
         // versionCode, shown in About as "build N".
-        val baseVersionName = "0.6.5"
+        val baseVersionName = "0.7.0"
         versionName = baseVersionName + if (project.hasProperty("fastRelease")) "-nightly" else ""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -112,7 +112,10 @@ android {
     signingConfigs {
         if (keystoreProps.isNotEmpty()) {
             create("release") {
-                storeFile = file(keystoreProps.getProperty("storeFile"))
+                // rootProject.file so a RELATIVE storeFile (e.g. "release.keystore")
+                // resolves from the repo root — survives a directory rename, unlike
+                // the old absolute path that broke when sshai/ became conch/.
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
@@ -209,6 +212,16 @@ android {
         buildConfig = true
     }
     packaging {
+        // The local-inference engine (llama.cpp's own Android arm64 release
+        // binaries, stripped, in src/main/jniLibs) is EXECUTED as a process
+        // from nativeLibraryDir — the one place an app may run native code it
+        // shipped. That requires the libraries extracted to disk, not mmapped
+        // out of the APK. Play policy is the reason the engine rides in the
+        // APK at all: an app may not download executable code, so only the
+        // MODELS (data) are fetched at runtime.
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += setOf(
                 "/META-INF/{AL2.0,LGPL2.1}",

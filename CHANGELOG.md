@@ -15,6 +15,107 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.7.0] — 2026-09-08
+
+The local-models release: the store you could already browse became something
+you can talk to, dictate to, search, and lend to other apps.
+
+### Added
+- **A model on this phone answers straight away — no Linux, no bridge, no CLI.**
+  Tapping a downloaded model opens a chat with it inside the app. Getting a
+  model was already one tap; TALKING to one used to go through a CLI inside the
+  phone's Linux, which meant wireless debugging and developer options first.
+  The chat shows what a local turn actually costs — the engine's live cpu / ram
+  / heat where a cloud chat shows a quota — plus the window it really got and
+  the measured speed of the last answer. Pictures go to models whose vision
+  pack is installed; thinking is a switch in the top bar; Stop stops, and keeps
+  whatever the model already said. Conversations are kept on the phone and
+  listed under the models. The real agent — a genuine CLI with its tools, shell
+  and sessions on the same local model — is one tap further.
+- **The model on this phone is now behind a key — and other apps can ask for
+  one.** The engine's port was reachable by every app on the device (Android
+  does not isolate 127.0.0.1), and it answered anyone. It now requires a key,
+  and Conch holds its own. Another app can ask for access with a single intent:
+  you see who is asking and what it will be able to do, and if you allow it, it
+  gets a key of its own — prompts and answers from a model that runs on your
+  phone, nothing else, nothing leaving the device. Every grant is listed under
+  `local models → api access` with one tap to revoke, effective immediately.
+  For whoever writes the other app: `docs/local-model-api.md`.
+- **Dictate to a local model.** `[ dictate ]` in a local chat records you and
+  turns it into text ON the phone (Whisper, 99 languages), then drops the words
+  in the composer so you can fix them before sending. Nothing is uploaded, no
+  Google speech service is involved, and the recording is deleted the moment it
+  has become text.
+- **Search your local chats by meaning.** Local models now come with an
+  optional search model (0.6 GB, 100+ languages): tap index once and the
+  conversations on your phone become searchable by what they were ABOUT — ask
+  in one language and still find the answer written in another. It runs as its
+  own small engine on this device, never touches the network, and nothing is
+  indexed until you ask for it.
+- **Downloaded models are checked against their published checksum.** Every
+  model file arrives with the SHA-256 its repository publishes, and Conch
+  hashes what it downloaded before the file counts as ready — a transfer that
+  ends the right length with the wrong bytes is deleted and says so, instead of
+  becoming a model that quietly misbehaves.
+- **Your own Hugging Face account, if you want one.** Connect a read token in
+  the model store and the gated weights — Llama, Gemma and the rest that need a
+  licence click-through — become ordinary one-tap downloads. The token is stored
+  encrypted on the phone, sent only to huggingface.co (never to the download
+  CDN), shown only as "connected", and forgotten on one tap.
+- **Import a model you already have.** `[ import ]` takes a `.gguf` off this
+  phone, an SD card or a USB stick and makes it a model like any other — it
+  reads the file's own header for its name and its memory cost, so the "fits /
+  tight / short" verdict is as honest for your file as for the store's.
+- **Models the store did not curate are sized from their own header.** A model
+  found by search used to be priced by a flat guess, which on a small phone is
+  the difference between being offered and being hidden. Its real architecture
+  is read from the file after the first download.
+- **A loaded model stays loaded while you are away — and says so.** While a
+  model is in memory Conch keeps a quiet notification with its name and one
+  button to unload it, which also stops Android from killing the model the
+  moment you switch apps. It still frees itself after two minutes idle unless
+  you tap "keep" — the memory is yours, and the choice is visible either way.
+- **A hot phone gets a gentler launch.** Conch asks the system how close the
+  phone is to throttling and starts the model with fewer threads when it is
+  already warm: a slightly slower answer instead of the "device is too hot"
+  overlay.
+- **The store says where its speed number came from.** "measured on this
+  device", "measured on N phones like this one", "SoC-class estimate", or
+  "generic estimate — this chip is unknown to us". A guess and a measurement
+  used to look identical, and the guess prices every Snapdragon 8 alike — an
+  8 Gen 1 and an 8 Elite — so it can now be replaced per chip by real
+  measurements as they come in.
+- **Share your measurements, by hand, reading them first.** The device sheet
+  can show exactly what a contribution would say and hand it to an app you
+  pick. Conch itself still sends nothing anywhere.
+- **The store learns this phone's speed from ordinary use.** Every answer
+  carries the engine's own timings, so a model's measured tok/s — and every
+  estimate re-derived from it — comes from real work instead of waiting for
+  someone to press a verify button.
+
+### Fixed
+- **A model's real context, not the one Conch asked for.** Some models are
+  trained on a smaller window than the app requests, and the engine quietly
+  caps it — so a chat could trim its history to twice the room it really had,
+  and an agent could plan for space that did not exist (and then fail every
+  send). The number now comes back from the engine, and the chat header shows
+  what you actually have.
+- **A model in the library since before checksums is still verified.** The
+  published hash is asked of the live catalog at the one moment it matters, and
+  falls back to the copy inside the signed app when the catalog lags a release
+  — a store download stays hash-checked either way.
+
+### Not shipped, and written down instead
+- **A Vulkan GPU backend.** Built and measured rather than argued about: on
+  Adreno 830 it loses to the CPU on both axes and crashes inside the vendor
+  driver on a 512-token prompt, while costing +37 MB.
+- **An NPU backend (Hexagon / QNN / LiteRT).** The NPU does not run GGUF — every
+  shipping NPU path runs a graph compiled ahead of time for one chip, one
+  context length and one batch shape — and on the phone we can test, the DSP
+  device node is not open to ordinary apps at all.
+
+---
+
 ## [0.6.5] — 2026-09-07
 
 ### Fixed
@@ -1813,6 +1914,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.7.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.0
 [0.6.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.5
 [0.6.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.4
 [0.6.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.3

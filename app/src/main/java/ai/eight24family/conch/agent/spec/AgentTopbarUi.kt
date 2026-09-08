@@ -243,9 +243,11 @@ object LocalTopbar {
     /** Downloaded local models as picker rows — ONLY on the phone's own server
      *  row; everywhere else 127.0.0.1:8317 is some other machine's loopback. */
     fun localModelItems(state: TopbarModelState): List<ModelMenuItem> {
+        // An embedding model has no chat head - it must not appear in a
+        // model picker (see LocalLlm.Model.embedder).
         if (state.serverId != ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) return emptyList()
         return ai.eight24family.conch.linux.LocalLlm.CATALOG
-            .filter { ai.eight24family.conch.linux.LocalLlm.isReady(it) }
+            .filter { ai.eight24family.conch.linux.LocalLlm.isReady(it) && it.isBrain }
             .map { m ->
                 ModelMenuItem(
                     display = m.label,

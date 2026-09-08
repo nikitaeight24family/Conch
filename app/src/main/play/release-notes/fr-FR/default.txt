@@ -1,2 +1,8 @@
-• Arrêter arrête toujours. Une seule pression met fin au tour, même si la connexion est tombée, si le processus de l'agent était déjà mort ou si l'app avait perdu le tour de vue. Avant, on pouvait appuyer sur Arrêter sans que rien ne se passe.
-• Un tour terminé ne tourne plus indéfiniment. Conch vérifie si quelque chose travaille encore sur le serveur, pour que l'indicateur et le chrono montrent la réalité.
+Les modèles locaux ont grandi.
+
+• Discutez avec un modèle sur votre téléphone dans l'app - sans options développeur.
+• Dictée : la voix devient du texte SUR le téléphone (Whisper), rien n'est envoyé.
+• Cherchez dans vos discussions locales par sens, dans toute langue, hors ligne.
+• D'autres apps peuvent demander un modèle local - vous voyez qui, et pouvez révoquer.
+• Les téléchargements sont vérifiés par leur SHA-256.
+• Votre compte Hugging Face, ou importez votre propre .gguf.

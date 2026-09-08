@@ -242,19 +242,53 @@ object DeviceProfile {
      */
     fun bwGbps(cat: StoreCatalog.Catalog, p: Profile = read()): Double = bwInfo(cat, p).first
 
-    /** (effective GB/s, measured?) — measured=true when the number came from
-     *  a real generation on this phone, false when it's the SoC-class guess. */
-    fun bwInfo(cat: StoreCatalog.Catalog, p: Profile = read()): Pair<Double, Boolean> {
+    /**
+     * Where a bandwidth number came from. The store shows a speed on the FIRST
+     * screen a user sees, so it must be able to say how much that number is
+     * worth.
+     */
+    sealed interface BwSource {
+        /** Measured on THIS phone, doing real work. Nothing beats it. */
+        data object Own : BwSource
+        /** Measured on [n] phones with this exact SoC, off the manifest. */
+        data class Community(val n: Int) : BwSource
+        /** The three-bucket prefix table — `sm8` prices an 8 Gen 1 and an
+         *  8 Elite the same. A guess, and labeled one. */
+        data object SocClass : BwSource
+        /** Nothing matched this silicon at all. */
+        data object Default : BwSource
+    }
+
+    /**
+     * The SoC id reduced to a matchable key: lowercase, marketing suffix off.
+     * `Build.SOC_MODEL` is "SM8750" on the owner's phone but "SM8550-AC" on
+     * others, and the same silicon must not miss the table over a bin code.
+     */
+    fun socKey(p: Profile = read()): String =
+        p.soc.lowercase().trim().replace(Regex("-[a-z0-9]{1,3}$"), "")
+
+    /** (effective GB/s, where it came from). */
+    fun bwInfo(cat: StoreCatalog.Catalog, p: Profile = read()): Pair<Double, BwSource> {
+        // 1. This phone, measured. A fact about the device in hand outranks
+        //    every table — including a community row from the same SoC, which
+        //    cannot know about this phone's thermal state or storage.
         val measured = ModelRecords.all().mapNotNull { (id, rec) ->
             val tokS = rec.tokS ?: return@mapNotNull null
             val active = cat.models.firstOrNull { it.id == id }?.activeBytes
                 ?: LocalLlm.byId(id)?.bytes ?: return@mapNotNull null
             tokS * active / 1e9
         }.maxOrNull()
-        if (measured != null && measured > 0.5) return measured to true
+        if (measured != null && measured > 0.5) return measured to BwSource.Own
+        // 2. Measured by other people on this exact silicon — the whole point
+        //    of the community table: a new install on a known SoC gets a fact
+        //    instead of a bucket, BEFORE downloading gigabytes.
+        val key = socKey(p)
+        cat.socs.firstOrNull { it.soc == key }?.let { return it.gbps to BwSource.Community(it.n) }
+        // 3. The coarse prefix bucket, then the flat default.
         val soc = p.soc.lowercase()
-        return (cat.bw.firstOrNull { c -> c.match.any { soc.contains(it) } }?.gbps
-            ?: cat.defaultGbps).toDouble() to false
+        cat.bw.firstOrNull { c -> c.match.any { soc.contains(it) } }
+            ?.let { return it.gbps.toDouble() to BwSource.SocClass }
+        return cat.defaultGbps.toDouble() to BwSource.Default
     }
 
     /** "~12 tok/s" until this phone has measured itself. */

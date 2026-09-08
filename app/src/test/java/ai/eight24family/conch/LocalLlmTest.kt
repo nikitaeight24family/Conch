@@ -51,6 +51,19 @@ class LocalLlmTest {
             ),
         )
         assertTrue(cmd.contains("model_provider=\"conchlocal\""))
+        // ⛔ THE ENGINE AUTHENTICATES NOW, AND CODEX SENDS NO Authorization AT
+        // ALL WITHOUT `env_key`. These two must agree: the provider names the
+        // variable, the command exports it. Rename one and the whole
+        // local-agent path 401s on its first turn — which is what would have
+        // shipped on 2026-09-08 had the app-server launch not been fixed with
+        // the exec one (it builds its own command line, in
+        // AgentSessionCodexAppServer).
+        assertTrue(cmd, cmd.contains("model_providers.conchlocal.env_key=\"OPENAI_API_KEY\""))
+        assertTrue(cmd, cmd.contains("OPENAI_API_KEY="))
+        assertTrue(
+            "the key must be exported for CODEX, not for the printf feeding it",
+            cmd.contains("| OPENAI_API_KEY="),
+        )
         assertTrue(cmd.contains("--model 'qwen3_5-2b'") || cmd.contains("--model qwen3_5-2b"))
         // The prefix is plumbing, not a model name codex should ever see.
         assertTrue(!cmd.contains("local:"))
@@ -73,13 +86,72 @@ class LocalLlmTest {
 
     @Test
     fun `catalog stays open, q4, and honestly sized`() {
-        assertEquals(3, LocalLlm.CATALOG.size)
+        // Three chat models. The search and voice models are counted
+        // separately below, because none of the chat rules apply to them -
+        // which is exactly what `isBrain` exists to say.
+        assertEquals(3, LocalLlm.CATALOG.count { it.isBrain })
         assertTrue(LocalLlm.CATALOG.all { it.url.startsWith("https://huggingface.co/") })
-        assertTrue(LocalLlm.CATALOG.all { it.file.endsWith(".gguf") })
+        // Only the chat models are GGUF: the voice model is whisper's own
+        // format (see the voice test below).
+        assertTrue(LocalLlm.CATALOG.filter { it.isBrain }.all { it.file.endsWith(".gguf") })
         // A drift here means a URL now serves a different file — re-verify
         // with a HEAD request before shipping the new number.
-        assertTrue(LocalLlm.CATALOG.all { it.bytes > 300_000_000L && it.bytes < 3_000_000_000L })
+        assertTrue(
+            LocalLlm.CATALOG.filter { it.isBrain }
+                .all { it.bytes > 300_000_000L && it.bytes < 3_000_000_000L },
+        )
         // Ids are filesystem- and script-safe.
         assertTrue(LocalLlm.CATALOG.all { it.id.matches(Regex("[a-z0-9_-]+")) })
+    }
+
+    @Test
+    fun `a model that is not a brain is never offered as one`() {
+        // ⛔ ONE QUESTION, ASKED EVERYWHERE. There are three kinds of model on
+        // the phone now - chat, embed, voice - and only the first has a chat
+        // head. `isBrain` is the single place that decides, so a fourth kind
+        // (a reranker, a TTS voice) cannot slip into a picker by default.
+        LocalLlm.CATALOG.forEach { m ->
+            assertEquals(
+                "isBrain must be exactly 'neither embedder nor voice' for ${m.id}",
+                !m.embedder && !m.voice,
+                m.isBrain,
+            )
+        }
+        val roles = LocalLlm.CATALOG.filterNot { it.isBrain }
+        assertEquals("one search model and one voice model", 2, roles.size)
+        assertTrue("both are verified downloads", roles.all { it.sha256 != null })
+        // Neither may sit at the head of the list: "the first ready model" is
+        // a default-brain idiom in more than one place.
+        assertTrue(LocalLlm.BUILTIN.take(3).all { it.isBrain })
+    }
+
+    @Test
+    fun `the voice model is whisper's own format, priced as a one-shot`() {
+        val v = LocalLlm.CATALOG.single { it.voice }
+        // NOT a gguf: whisper.cpp has its own ggml format, and nothing but
+        // LocalVoice ever opens this file.
+        assertTrue(v.file.endsWith(".bin"))
+        assertTrue(v.url.startsWith("https://huggingface.co/ggerganov/whisper.cpp/"))
+        // Weights plus a small fixed overhead: it runs, answers and exits.
+        assertEquals(v.bytes + 250_000_000L, LocalLlm.ramNeeded(v))
+    }
+
+    @Test
+    fun `the search model is exactly one, and is never a brain`() {
+        // ⛔ AN EMBEDDER HAS NO CHAT HEAD. Offered as a model it would come up
+        // healthy and answer nothing, so every "pick a model" path filters it
+        // (the picker, the codex default-brain fallback, the library row's
+        // tap) and the engine refuses to launch it outright.
+        val embedders = LocalLlm.CATALOG.filter { it.embedder }
+        assertEquals(1, embedders.size)
+        val e = embedders.single()
+        assertTrue("its size is the price of good ranking", e.bytes > 500_000_000L)
+        assertTrue(e.url.startsWith("https://huggingface.co/"))
+        assertTrue("verified like every other download", e.sha256 != null)
+        // It must be LAST: "the first ready model" is a default-brain idiom in
+        // more than one place, and an embedder at the head of the list would
+        // silently become that default.
+        assertTrue(LocalLlm.BUILTIN.last().embedder)
+        assertTrue(LocalLlm.BUILTIN.take(3).none { it.embedder })
     }
 }

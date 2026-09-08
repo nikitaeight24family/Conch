@@ -114,6 +114,12 @@ object CodexSpec : AgentCliSpec {
         "model_providers.conchlocal.name=\"local\"",
         "model_providers.conchlocal.base_url=\"${ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL}/v1\"",
         "model_providers.conchlocal.wire_api=\"responses\"",
+        // ⛔ WITHOUT env_key CODEX SENDS NO Authorization AT ALL, and the
+        // engine now requires one (its loopback port is reachable by every
+        // app on the device — see LocalApiAccess). `env_key` names the
+        // variable codex reads the bearer token from; buildExecCommand
+        // exports it on the same line.
+        "model_providers.conchlocal.env_key=\"OPENAI_API_KEY\"",
         "model_provider=\"conchlocal\"",
         // Tell codex the engine's REAL context so it compacts before the
         // wall instead of hitting it: without this it assumes a cloud-sized
@@ -121,7 +127,16 @@ object CodexSpec : AgentCliSpec {
         // `400 request (8257 tokens) exceeds context` on resume, twice per
         // send, forever (owner's screenshot, 2026-09-01). Slightly under the
         // engine's -c so the reply has room to stream.
-        "model_context_window=${ai.eight24family.conch.linux.LocalLlmEngine.CTX_TOKENS - 1024}",
+        // ⛔ THE WINDOW THE ENGINE REALLY SERVES, not our ceiling. `-c` is
+        // capped at the model's trained context (Qwen3.5-0.8B: asked 16384,
+        // got 8192), and codex plans compaction from this number - hand it
+        // 15360 for an 8K model and every later send dies on a raw
+        // `400 ... exceeds context`, which is the 2026-09-01 bug all over
+        // again. Read at command-build time, which is after the engine is up.
+        "model_context_window=${
+            (ai.eight24family.conch.linux.LocalLlmEngine.activeCtx - 1024)
+                .coerceAtLeast(2048)
+        }",
         // No view_image tool against the local engine: codex puts the image
         // INSIDE the tool-call output, and llama-server's /v1/responses
         // requires tool output to be plain text — every view_image call died
@@ -131,12 +146,28 @@ object CodexSpec : AgentCliSpec {
         "features.view_image=false",
     ).joinToString("") { " -c ${shellEscape(it)}" }
 
+    /**
+     * The bearer token for [localProviderArgs]'s provider, as a shell env
+     * prefix. Named by `env_key` there; codex reads it from the environment
+     * of its own process, so it is exported per invocation rather than
+     * written into `config.toml` — a secret belongs in the environment of the
+     * process that needs it, not in a file on the phone's Linux.
+     *
+     * Used by BOTH codex launch paths: the app-server channel (primary) and
+     * the one-shot exec fallback. Miss either and that path 401s against the
+     * phone's own engine.
+     */
+    internal fun localKeyEnv(): String =
+        "OPENAI_API_KEY=" +
+            shellEscape(ai.eight24family.conch.linux.chat.LocalApiAccess.ownKey) + " "
+
     override fun buildExecCommand(input: ExecInput): String {
         val escapedText = shellEscape(input.text)
         val localModel = input.model
             ?.takeIf { it.startsWith(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX) }
             ?.removePrefix(ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX)
         val providerArg = if (localModel != null) localProviderArgs() else ""
+        val keyEnv = if (localModel != null) localKeyEnv() else ""
         val modelArg = (localModel ?: input.model)?.takeIf { it.isNotBlank() }
             ?.let { " --model ${shellEscape(it)}" } ?: ""
         // Codex's reasoning effort lives behind the generic `-c key=value`
@@ -195,10 +226,10 @@ object CodexSpec : AgentCliSpec {
         // decorative (openai/codex discussion #3827).
         return if (input.resumeId != null) {
             val rid = shellEscape(input.resumeId)
-            "printf '%s' $escapedText | codex exec resume $rid - " +
+            "printf '%s' $escapedText | ${keyEnv}codex exec resume $rid - " +
                 "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
         } else {
-            "printf '%s' $escapedText | codex exec - " +
+            "printf '%s' $escapedText | ${keyEnv}codex exec - " +
                 "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
         }
     }

@@ -61,6 +61,23 @@ object StoreCatalog {
 
     data class BwClass(val match: List<String>, val gbps: Int)
 
+    /**
+     * A MEASURED effective bandwidth for one exact SoC — the community table.
+     *
+     * ⛔ WHY THIS EXISTS AND [BwClass] IS NOT ENOUGH. The class table has three
+     * buckets and matches by prefix: `sm8` covers every Snapdragon 8 ever made,
+     * from an 8 Gen 1 to an 8 Elite, and prices them all at 20 GB/s. On the
+     * owner's SM8750 the real number is 31.6 (507 MB model, 62.4 tok/s
+     * measured — `docs/local-engine-benchmarks.md`), so a fresh install told a
+     * flagship owner "~39 tok/s" for a model that does 62. A guess that wrong
+     * on the FIRST screen a user sees is the store lying about the only thing
+     * it is for.
+     *
+     * [n] is how many phones the number came from. One is still a fact — it
+     * just says so, and the UI wears it ("measured on 1 phone like yours").
+     */
+    data class SocSpeed(val soc: String, val gbps: Double, val n: Int)
+
     data class Entry(
         val id: String,
         /** Present on builtin rows too (label etc. resolve via [LocalLlm]). */
@@ -102,6 +119,11 @@ object StoreCatalog {
         val visionUrl: String? = null,
         val visionFile: String? = null,
         val visionBytes: Long = 0L,
+        /** SHA-256 the downloaded weights must hash to (Hugging Face's
+         *  `lfs.oid`). Absent on older manifest entries: then the size check
+         *  stands alone, which is what shipped before. See LocalLlm.Model. */
+        val sha256: String? = null,
+        val visionSha256: String? = null,
     )
 
     data class Catalog(
@@ -111,6 +133,9 @@ object StoreCatalog {
          *  "runs on this phone at all" gate (availMem is the live one). */
         val capacityFraction: Double,
         val bw: List<BwClass>,
+        /** Measured per-SoC speeds, exact-key. Beats [bw] when this phone's
+         *  silicon is in it; loses to a measurement taken on this phone. */
+        val socs: List<SocSpeed>,
         val defaultGbps: Int,
         val models: List<Entry>,
         /** Where the GPU-driver spec row links OUT to (never an in-app
@@ -128,6 +153,10 @@ object StoreCatalog {
     // unit tests stayed green because they call parse() after full init
     // (2026-09-01).
     private val ID_RE = Regex("^[a-z0-9_\\-]{2,64}$")
+    /** A checksum is 64 hex characters or it is not a checksum. Anything else
+     *  in the manifest is dropped rather than half-trusted — a malformed hash
+     *  must not turn into "verification passed". */
+    private val SHA_RE = Regex("^[0-9a-fA-F]{64}$")
     private val FILE_RE = Regex("^[A-Za-z0-9._\\-]{4,200}\\.gguf$")
     private val REPO_RE = Regex("^[\\w.\\-]+/[\\w.\\-]+$")
 
@@ -161,6 +190,21 @@ object StoreCatalog {
                 )
             }.getOrNull()
         } ?: emptyList()
+        // Measured per-SoC rows. Bounded like everything else the manifest
+        // carries: a remote file is an instruction, so a nonsense gbps must not
+        // reprice the whole shelf.
+        val socs = root["socs"]?.jsonArray?.mapNotNull { el ->
+            runCatching {
+                val o = el.jsonObject
+                val key = o["soc"]!!.jsonPrimitive.content.lowercase().trim()
+                require(key.isNotEmpty() && key.length <= 40)
+                SocSpeed(
+                    soc = key,
+                    gbps = o["gbps"]!!.jsonPrimitive.doubleOrNull!!.coerceIn(0.5, 2000.0),
+                    n = (o["n"]?.jsonPrimitive?.longOrNull ?: 1L).toInt().coerceIn(1, 1_000_000),
+                )
+            }.getOrNull()
+        } ?: emptyList()
         val defaultGbps = root["defaultGbps"]?.jsonPrimitive?.longOrNull?.toInt() ?: 6
         val models = root["models"]?.jsonArray?.mapNotNull { el ->
             runCatching { sanitize(el.jsonObject) }.getOrNull()
@@ -170,7 +214,7 @@ object StoreCatalog {
         // fetched into the app.
         val driversUrl = root["driversUrl"]?.jsonPrimitive?.contentOrNull
             ?.takeIf { runCatching { java.net.URI(it).scheme == "https" }.getOrDefault(false) }
-        return Catalog(v, frac.coerceIn(0.3, 0.9), bw, defaultGbps, models, driversUrl)
+        return Catalog(v, frac.coerceIn(0.3, 0.9), bw, socs, defaultGbps, models, driversUrl)
     }
 
     private fun sanitize(o: kotlinx.serialization.json.JsonObject): Entry? {
@@ -214,6 +258,8 @@ object StoreCatalog {
             },
             visionFile = str("visionFile")?.takeIf { FILE_RE.matches(it) },
             visionBytes = (lng("visionBytes") ?: 0L).coerceAtLeast(0L),
+            sha256 = str("sha256")?.takeIf { SHA_RE.matches(it) }?.lowercase(),
+            visionSha256 = str("visionSha256")?.takeIf { SHA_RE.matches(it) }?.lowercase(),
         )
     }
 
@@ -236,9 +282,28 @@ object StoreCatalog {
                 .also { android.util.Log.i(TAG, "shelf loaded: ${it.models.size} models (seed, v${it.v})") }
         }.getOrElse {
             android.util.Log.w(TAG, "seed manifest unreadable: ${it.message}")
-            Catalog(0, 0.62, emptyList(), 6, emptyList())
+            Catalog(0, 0.62, emptyList(), emptyList(), 6, emptyList())
         }
     }
+
+    /**
+     * The manifest baked into the APK, parsed on demand.
+     *
+     * ⛔ WHY THIS IS REACHABLE AT ALL. [refresh] replaces the shelf with the
+     * remote file and does NOT compare versions, so the live catalog can be
+     * OLDER than the one this build shipped with — measured 2026-09-08: the
+     * live manifest was v2 and carried `sha256` on zero of eighteen entries
+     * while the seed in the APK carried it on fifteen. A published checksum
+     * that lives inside a signed APK is the most trustworthy source there is,
+     * and losing it to manifest lag silently downgrades a download from
+     * verified to length-checked. See [ai.eight24family.conch.linux.LocalLlm]'s
+     * hash resolution, which falls back here.
+     */
+    fun seed(): Catalog? = seedCached ?: runCatching {
+        ServiceLocator.appContext.assets.open(ASSET).use { parse(it.reader().readText()) }
+    }.getOrNull()?.also { seedCached = it }
+
+    @Volatile private var seedCached: Catalog? = null
 
     @Volatile private var lastRefreshMs = 0L
 
@@ -275,7 +340,12 @@ object StoreCatalog {
      *  with zero special cases. */
     fun toModel(e: Entry): LocalLlm.Model? {
         if (e.builtin) return LocalLlm.BUILTIN.firstOrNull { it.id == e.id }
-        if (e.gated || e.bytes <= 0L) return null
+        // A gated repo answers 401 to an ANONYMOUS pull — which is why it used
+        // to be shown and never offered. With the owner's own Hugging Face
+        // token connected it is an ordinary download, so the gate now asks
+        // whether we can actually fetch it rather than whether it is gated.
+        if (e.gated && !HfAuth.isConnected()) return null
+        if (e.bytes <= 0L) return null
         return LocalLlm.Model(
             id = e.id,
             label = e.label ?: e.id,
@@ -289,6 +359,8 @@ object StoreCatalog {
             mmprojFile = e.visionFile,
             mmprojUrl = e.visionUrl,
             mmprojBytes = e.visionBytes,
+            sha256 = e.sha256,
+            mmprojSha256 = e.visionSha256,
         )
     }
 }

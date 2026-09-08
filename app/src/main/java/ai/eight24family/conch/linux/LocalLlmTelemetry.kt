@@ -90,6 +90,8 @@ object LocalLlmTelemetry {
     private fun readPrefillPct(): Int? = runCatching {
         val c = java.net.URL("${LocalLlmEngine.BASE_URL}/slots")
             .openConnection() as java.net.HttpURLConnection
+        // /slots is not one of the endpoints llama-server leaves public.
+        ai.eight24family.conch.linux.chat.LocalApiAccess.authorize(c)
         c.connectTimeout = 1_000; c.readTimeout = 1_000
         val body = c.inputStream.bufferedReader().readText().also { c.disconnect() }
         val arr = org.json.JSONArray(body)

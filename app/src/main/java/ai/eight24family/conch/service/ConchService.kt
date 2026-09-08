@@ -80,8 +80,8 @@ class ConchService : Service() {
         // If we got here on stale signals (caller bumped a count then
         // dropped it before onCreate ran), self-stop immediately rather
         // than sitting on a "Disconnected" notification.
-        if (initActive == 0 && initHeld == 0) {
-            Log.d("ConchService", "onCreate with no active/held — stopping immediately")
+        if (initActive == 0 && initHeld == 0 && !modelLoaded()) {
+            Log.d("ConchService", "onCreate with no active/held/model — stopping immediately")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -118,15 +118,24 @@ class ConchService : Service() {
         // happens only after every chat is closed AND every userDisconnect
         // has fired.
         observerJob = scope.launch {
+            // ⛔ THREE REASONS TO RUN NOW, NOT TWO. The third is a LOADED
+            // MODEL: the engine is a child of this process, so when Android
+            // reaps the app the weights die with it — and the in-app local
+            // chat has no ssh session and no agent session, which left
+            // nothing at all holding the process once the screen went away.
+            // A model resident in ram is exactly the kind of thing a
+            // foreground notification exists to disclose.
             combine(
                 ServiceLocator.agentSessions.activeCount,
                 ServiceLocator.sshConnectionPool.userHeldIds,
-            ) { active, ids -> active to ids }
+                ai.eight24family.conch.linux.LocalLlmEngine.state,
+                ai.eight24family.conch.linux.LocalLlmEngine.keepLoaded,
+            ) { active, ids, _, _ -> active to ids }
                 .collect { (active, ids) ->
                     lastActive = active
                     lastHeld = ids.size
-                    if (active == 0 && ids.isEmpty()) {
-                        Log.d("ConchService", "active=0 held=0 — stopping self")
+                    if (active == 0 && ids.isEmpty() && !modelLoaded()) {
+                        Log.d("ConchService", "active=0 held=0 model=none — stopping self")
                         // Pull the notification BEFORE stopSelf so the
                         // user never sees the "Disconnected" placeholder
                         // briefly — stopSelf takes a few hundred ms to
@@ -259,7 +268,30 @@ class ConchService : Service() {
         // "Clear all" that ignores FLAG_NO_CLEAR). Re-post AT ONCE instead of
         // waiting for the 20 s ticker — the persistent connection indicator must
         // reappear immediately. Idempotent: if the connection is genuinely gone
-        // (0/0) we stop rather than flash a stale row.
+        // (0/0) we stop rather than flash a stale row. ACTION_UNLOAD_MODEL /
+        // ACTION_KEEP_MODEL — the loaded model's own buttons. Unload frees the
+        // weights now; Keep suspends the idle reclaim so a chat you come back to
+        // (or another app granted the local API) does not pay a cold weight load.
+        // Both are one tap, and the notification always says which way the pin is
+        // set.
+        if (intent?.action == ACTION_UNLOAD_MODEL) {
+            Log.d("ConchService", "ACTION_UNLOAD_MODEL from notification")
+            ai.eight24family.conch.linux.LocalLlmEngine.setKeepLoaded(false)
+            scope.launch {
+                SilentlyTry.fired("Conch-Service", "unload model from notification") {
+                    ai.eight24family.conch.linux.LocalLlmEngine.stop()
+                }
+                refreshNotifications(lastActive, ServiceLocator.sshConnectionPool.userHeldIds.value)
+            }
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_KEEP_MODEL) {
+            val on = !ai.eight24family.conch.linux.LocalLlmEngine.keepLoaded.value
+            Log.d("ConchService", "ACTION_KEEP_MODEL -> $on")
+            ai.eight24family.conch.linux.LocalLlmEngine.setKeepLoaded(on)
+            refreshNotifications(lastActive, ServiceLocator.sshConnectionPool.userHeldIds.value)
+            return START_STICKY
+        }
         if (intent?.action == ACTION_REPOST) {
             Log.d("ConchService", "ACTION_REPOST — notification dismissed, re-posting now")
             SilentlyTry.fired("Conch-Service", "repost on dismiss") {
@@ -373,6 +405,28 @@ class ConchService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+    /** Service-targeted PendingIntent for one of the model actions — same
+     *  shape as the End button's, no BroadcastReceiver needed. */
+    private fun modelActionPending(action: String, code: Int): PendingIntent {
+        val i = Intent(this, ConchService::class.java).setAction(action)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(
+                this, code, i,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+        } else {
+            PendingIntent.getService(
+                this, code, i,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+        }
+    }
+
+    /** Is a model resident in ram right now? */
+    private fun modelLoaded(): Boolean =
+        ai.eight24family.conch.linux.LocalLlmEngine.state.value is
+            ai.eight24family.conch.linux.LocalLlmEngine.State.Up
+
     private fun buildNotification(activeCount: Int, heldCount: Int, heldNames: List<String> = emptyList()): Notification {
         // Tap the body → open the app at whatever screen it was last on
         // (singleTask on MainActivity in the manifest, so this reuses the one
@@ -416,8 +470,15 @@ class ConchService : Service() {
         //               explicitly objected to that summary text)
         //   N servers → comma-separated names if short, else count
         //   0         → "Disconnected"
+        val loaded = ai.eight24family.conch.linux.LocalLlmEngine.state.value
+            as? ai.eight24family.conch.linux.LocalLlmEngine.State.Up
+        val loadedLabel = loaded?.let {
+            ai.eight24family.conch.linux.LocalLlm.byId(it.modelId)?.label ?: it.modelId
+        }
+        val pinned = ai.eight24family.conch.linux.LocalLlmEngine.keepLoaded.value
         val joinedNames = heldNames.joinToString(", ").take(60)
         val title = when {
+            connected == 0 && loadedLabel != null -> "Model loaded on this phone"
             connected == 0 -> "Disconnected"
             connected == 1 && joinedNames.isNotBlank() -> joinedNames
             joinedNames.isNotBlank() && joinedNames.length < 50 -> joinedNames
@@ -425,6 +486,11 @@ class ConchService : Service() {
             else -> "Disconnected"
         }
         val text = when {
+            // The model line wins the body when it is the only reason the
+            // service is up: gigabytes of ram is the thing worth saying.
+            loadedLabel != null && connected == 0 ->
+                loadedLabel + (if (pinned) " · kept loaded" else " · loaded, frees itself when idle")
+            loadedLabel != null -> "$loadedLabel loaded · End to disconnect"
             connected > 1 -> "End to disconnect all"
             connected > 0 -> "End to disconnect"
             else -> "Open app to reconnect"
@@ -439,7 +505,21 @@ class ConchService : Service() {
         val collapsed = android.widget.RemoteViews(packageName, R.layout.notif_session).apply {
             setTextViewText(R.id.notif_title, title)
             setTextViewText(R.id.notif_text, text)
-            setOnClickPendingIntent(R.id.notif_end, endPending)
+            // ⛔ THE CUSTOM VIEW IS THE WHOLE NOTIFICATION, so an addAction
+            // button below never renders (setCustomBigContentView replaces the
+            // expanded template too - measured: the Keep/Unload actions were
+            // invisible until this line existed). The one inline verb
+            // therefore has to BE the right verb: when a loaded model is the
+            // only reason this service is up, the urgent thing is freeing
+            // gigabytes of ram, not disconnecting an ssh session there isn't.
+            if (loadedLabel != null && connected == 0) {
+                setTextViewText(R.id.notif_end, "Unload")
+                setOnClickPendingIntent(
+                    R.id.notif_end, modelActionPending(ACTION_UNLOAD_MODEL, 3),
+                )
+            } else {
+                setOnClickPendingIntent(R.id.notif_end, endPending)
+            }
         }
 
         val notif = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -464,6 +544,22 @@ class ConchService : Service() {
                     /* intent*/ endPending,
                 ).build()
             )
+            // The model's own two verbs, present only while one is resident.
+            .also { b ->
+                if (loadedLabel == null) return@also
+                b.addAction(
+                    NotificationCompat.Action.Builder(
+                        0,
+                        if (pinned) "Let it idle" else "Keep loaded",
+                        modelActionPending(ACTION_KEEP_MODEL, 2),
+                    ).build(),
+                )
+                b.addAction(
+                    NotificationCompat.Action.Builder(
+                        0, "Unload", modelActionPending(ACTION_UNLOAD_MODEL, 3),
+                    ).build(),
+                )
+            }
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
@@ -629,6 +725,12 @@ class ConchService : Service() {
          *  OEM "Clear all"). Triggers an IMMEDIATE re-post — no waiting for the
          *  20 s ticker. */
         const val ACTION_REPOST = "ai.eight24family.conch.action.REPOST"
+
+        /** Free the loaded model's ram now. */
+        const val ACTION_UNLOAD_MODEL = "ai.eight24family.conch.action.UNLOAD_MODEL"
+
+        /** Toggle the idle-reclaim pin on the loaded model. */
+        const val ACTION_KEEP_MODEL = "ai.eight24family.conch.action.KEEP_MODEL"
         /** Distinct PendingIntent request code for the repost deleteIntent (END_ALL
          *  uses 1, tap uses 0, per-server uses serverId.hashCode()). */
         private const val REPOST_REQUEST_CODE = 2

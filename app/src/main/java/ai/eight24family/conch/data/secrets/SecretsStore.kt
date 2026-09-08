@@ -58,6 +58,8 @@ class SecretsStore(
         /** Deliberately unprefixed: there is exactly one, and [getAllKeyIds]
          *  filters on "keypem:" so it can never mistake this for an SSH key. */
         private const val ADB_KEY = "adb-identity-pkcs8"
+        private const val HF_TOKEN = "hf-token"
+        private const val HF_USER = "hf-user"
         private const val PREFS_FILE = "encrypted_servers"
         private const val RETRY_DELAY_MS = 150L
 
@@ -142,6 +144,39 @@ class SecretsStore(
     fun deleteAdbPrivateKey() {
         prefs.edit().remove(ADB_KEY).apply()
     }
+
+    /**
+     * The owner's Hugging Face access token — what makes GATED repos (the
+     * official Llama and Gemma weights among them) downloadable at all.
+     *
+     * ⛔ IT LIVES HERE AND NOWHERE ELSE. The obvious home, the settings
+     * DataStore, is on the BACKUP WHITELIST (`data_extraction_rules.xml`), so
+     * a token put there would ride into a cloud backup — the SEC-7 hole this
+     * store exists to close. Here it is Keystore-wrapped, device-bound and
+     * excluded from backup by the same whitelist that keeps the ssh keys out.
+     *
+     * Presence is the only thing any UI is allowed to read back
+     * ([hasHfToken]); the value goes to huggingface.co and nowhere else.
+     */
+    fun saveHfToken(token: String) {
+        prefs.edit().putString(HF_TOKEN, token).apply()
+    }
+
+    fun loadHfToken(): String? = prefs.getString(HF_TOKEN, null)?.takeIf { it.isNotBlank() }
+
+    fun hasHfToken(): Boolean = loadHfToken() != null
+
+    fun deleteHfToken() {
+        prefs.edit().remove(HF_TOKEN).apply()
+    }
+
+    /** The account name the token resolved to, for the row that says whose
+     *  it is. Not a secret — and never a substitute for asking HF again. */
+    fun saveHfUser(name: String) {
+        prefs.edit().putString(HF_USER, name).apply()
+    }
+
+    fun loadHfUser(): String? = prefs.getString(HF_USER, null)?.takeIf { it.isNotBlank() }
 
     private fun passwordKey(id: String) = "pwd:$id"
     private fun keyPemKey(id: String) = "keypem:$id"

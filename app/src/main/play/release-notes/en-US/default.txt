@@ -1,2 +1,8 @@
-• Stop always stops. One tap ends the turn — even when the connection dropped, the agent's process had already died, or the app had lost track of the turn. It used to be possible to tap Stop and have nothing happen at all.
-• A turn that has ended no longer spins forever. Conch now checks whether anything is still working on the server, so the spinner and the timer show what is really happening.
+Local models grew up.
+
+• Talk to a model on your phone right in the app - no developer options, no CLI first.
+• Dictate: your voice becomes text ON the phone (Whisper), never uploaded.
+• Search your local chats by meaning, in any language, offline.
+• Other apps can ask Conch for a local model - you see who asks, and can revoke it.
+• Downloads are checked against their published SHA-256.
+• Your own Hugging Face account for gated weights, or import your own .gguf.

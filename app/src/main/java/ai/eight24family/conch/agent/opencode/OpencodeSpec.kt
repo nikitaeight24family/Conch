@@ -104,7 +104,11 @@ object OpencodeSpec : AgentCliSpec {
         val localEnv = if (localId != null) {
             "OPENAI_BASE_URL=" +
                 shellEscape(ai.eight24family.conch.linux.LocalLlmEngine.BASE_URL + "/v1") +
-                " OPENAI_API_KEY=local "
+                // The engine authenticates now (its port is shared with every
+                // app on the device — see LocalApiAccess). "local" was a
+                // placeholder; the real key is Conch's own.
+                " OPENAI_API_KEY=" +
+                shellEscape(ai.eight24family.conch.linux.chat.LocalApiAccess.ownKey) + " "
         } else ""
         val modelRef = if (localId != null) "openai/$localId" else input.model
         val modelArg = modelRef?.takeIf { it.isNotBlank() }

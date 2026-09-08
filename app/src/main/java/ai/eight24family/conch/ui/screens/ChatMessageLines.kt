@@ -634,7 +634,16 @@ internal fun UserLine(text: String) {
 //   pass per task constraints), or hoisting the existing "Reconnecting…"
 //   dialog signal down to AssistantLine. Skipping pending API decision.
 @Composable
-internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStreaming: Boolean = false) {
+internal fun AssistantLine(
+    text: String,
+    /** The chat this line belongs to, when it belongs to one. Its ONLY job
+     *  here is the inline download-disk affordance: probing whether a path the
+     *  agent mentioned exists ON THE SERVER. A local-model chat has no server
+     *  to probe, so it passes null and paths stay plain text — see
+     *  [LocalChatScreen]. */
+    vm: ChatViewModel? = null,
+    isStreaming: Boolean = false,
+) {
     // While the agent is streaming, this composable redraws every few
     // hundred ms with a slightly longer `text`. The previous Markdown
     // implementation re-parsed the entire string from scratch on every
@@ -772,7 +781,7 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
     // and re-build the AnnotatedString when the existence map changes,
     // so the icon only appears AFTER existence is confirmed. Missing
     // paths render as plain text without any download affordance.
-    val fileExists by vm.fileExists.collectAsState()
+    val fileExists = vm?.fileExists?.collectAsState()?.value ?: emptyMap()
     val detectedPaths = remember(linkedBase) {
         PathDetector.detect(linkedBase.text)
     }
@@ -789,11 +798,11 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
     // resolve. Without it, paths rendered from cached JSONL stay
     // forever without a disk icon if the first probe fired before
     // `activeSessions[sid]` was populated.
-    val localSessionId by vm.localSessionId.collectAsState()
+    val localSessionId = vm?.localSessionId?.collectAsState()?.value
     androidx.compose.runtime.LaunchedEffect(detectedPaths, localSessionId) {
         if (detectedPaths.isEmpty()) return@LaunchedEffect
         kotlinx.coroutines.delay(600L)
-        detectedPaths.forEach { vm.checkFileExists(it.path) }
+        detectedPaths.forEach { p -> vm?.checkFileExists(p.path) }
     }
     val pathSplice = remember(linkedBase, fileExists, detectedPaths) {
         val matches = detectedPaths
@@ -873,7 +882,7 @@ internal fun AssistantLine(text: String, vm: ChatViewModel = viewModel(), isStre
                     height = 1.4.em,
                     placeholderVerticalAlign = PlaceholderVerticalAlign.Center,
                 ),
-            ) { _ -> DownloadDisk(path = p, vm = vm) }
+            ) { _ -> vm?.let { DownloadDisk(path = p, vm = it) } }
         }
     }
 

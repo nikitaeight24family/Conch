@@ -103,7 +103,7 @@ Crush runs every tool unprompted in headless mode and Continue picks its toolset
 up front, and both state that on the shield rather than showing an approval
 prompt that will never appear.
 
-### Local models — on the device itself *(new in 0.5 · real agents out of the box in 0.6)*
+### Local models — on the device itself *(new in 0.5 · real agents in 0.6 · a chat, a voice and an API in 0.7)*
 A built-in **model store that knows your device.** It reads your RAM, chip and
 GPU and shows what will actually run — with a computed *fits / tight* verdict, a
 bandwidth-based speed estimate that self-calibrates from real measurements on
@@ -122,6 +122,37 @@ launch), vision add-ons for multimodal families, and download that resumes itsel
 on Wi-Fi. Models proven to drive the shell wear an **agent** badge; the rest are
 honestly marked chat-only. Everything the store learns about your device stays on
 the device.
+
+**0.7 turned that store into something you can actually use without a terminal.**
+Tapping a downloaded model opens a **chat with it inside the app** — no developer
+options, no CLI, no wireless debugging first — and the chat shows what a local
+turn really costs: live CPU, RAM and heat where a cloud chat would show a quota,
+the context window the engine actually granted, and the measured speed of the
+last answer. **Dictation** turns your voice into text *on the phone* (Whisper,
+99 languages, no Google speech service, and the recording is deleted the moment
+it becomes words). An optional **search model** makes the conversations on your
+phone searchable **by meaning, across languages** — ask in one language, find the
+answer written in another — indexed only when you ask, never leaving the device.
+
+And the engine is no longer only ours to use. Android does not isolate
+`127.0.0.1`, so the inference port used to answer **any** app on the phone; it
+now requires a key, and **another app can ask for one with a single intent**
+(`ai.eight24family.conch.action.REQUEST_LOCAL_MODEL`). You see who is asking,
+you decide, and every grant is listed with one tap to revoke — an
+OpenAI-compatible endpoint backed by a model that runs on your own phone. The
+contract is [`docs/local-model-api.md`](docs/local-model-api.md).
+
+Weights are now **verified against the SHA-256 their repository publishes**
+before a download counts as ready, gated families (Llama, Gemma) work if you
+connect **your own Hugging Face token** — stored encrypted, sent only to
+huggingface.co, never to the CDN it redirects to — and you can **import a
+`.gguf` you already have**, priced from its own header like any curated row. A
+loaded model **stays loaded while you are away** behind a quiet notification
+with one button to unload it, frees itself after two minutes idle unless you
+pin it, and starts with fewer threads when the phone is already hot. Speeds the
+store shows now say **where they came from** — measured here, measured on phones
+with your exact chip, or a class estimate — and you can hand your own
+measurements over by hand, reading them first, if you want to.
 
 ### Sessions that survive
 Chats are the CLI's own session files on your disk, so you can resume days

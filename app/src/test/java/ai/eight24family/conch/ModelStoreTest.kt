@@ -40,6 +40,13 @@ class ModelStoreTest {
             assertTrue("${e.id}: url must be pinned to huggingface", e.url!!.startsWith("https://huggingface.co/"))
             assertTrue("${e.id}: bytes must be real", e.bytes > 100_000_000L)
             assertTrue("${e.id}: kvPerTok expected for store models", e.kvPerTok > 0L)
+            // ⛔ EVERY DOWNLOAD IS HASH-VERIFIED. A curated row without a
+            // published checksum silently downgrades its download to a
+            // length check — and the seed is the LAST line of defence there,
+            // because the live manifest can lag a release and arrive with no
+            // hashes at all (measured 2026-09-08: v2, zero of eighteen). See
+            // LocalLlm.publishedSha.
+            assertTrue("${e.id}: needs a published sha256", e.sha256 != null)
             val m = StoreCatalog.toModel(e)!!
             assertEquals(e.bytes, m.bytes)
             assertEquals(e.kvPerTok, m.kvPerTok)
@@ -121,12 +128,32 @@ class ModelStoreTest {
         // every 4 GB phone by 30 MB) and never counted the vision projector the
         // engine loads with `--mmproj`, so the largest was offered to phones that
         // cannot hold it (2026-09-03).
-        val builtin = LocalLlm.BUILTIN.first()
+        // The first CHAT builtin: the search model is priced by a different,
+        // deliberately smaller rule (no prefill spike, 1K window), and mixing
+        // the two formulas is how a model gets hidden from a phone that could
+        // run it.
+        val builtin = LocalLlm.BUILTIN.first { !it.embedder }
         assertTrue("a builtin must carry its real architecture", builtin.kvPerTok > 0L)
         assertEquals(
             builtin.bytes + builtin.mmprojBytes +
                 builtin.kvPerTok * LocalLlmEngine.CTX_CHAT_FLOOR + StoreCatalog.COMPUTE_BYTES,
             LocalLlm.ramNeeded(builtin, LocalLlmEngine.CTX_CHAT_FLOOR),
+        )
+    }
+
+    @Test
+    fun `the search model is priced without a chat model's compute budget`() {
+        val e = LocalLlm.BUILTIN.single { it.embedder }
+        // Weights plus a fixed, small overhead - the chat formula's 1.2 GB
+        // compute budget would over-charge this by twice the weights and hide
+        // it from the phones that want it most.
+        assertEquals(
+            e.bytes + 300_000_000L,
+            LocalLlm.ramNeeded(e, LocalLlmEngine.CTX_CHAT_FLOOR),
+        )
+        assertTrue(
+            "an embedder must cost less than the same bytes of chat model",
+            LocalLlm.ramNeeded(e) < e.bytes + StoreCatalog.COMPUTE_BYTES,
         )
     }
 
@@ -156,10 +183,13 @@ class ModelStoreTest {
             diskFreeBytes = 0, cores = 8, fp16 = true, dotprod = true, i8mm = true,
             sve = false, gpuFront = true,
         )
-        // SoC class table puts sm8 at 20 GB/s (no measurements in a JVM test).
-        val (bw, measured) = DeviceProfile.bwInfo(cat, flagship)
+        // No measured row for this chip yet, so the class bucket stands — and
+        // it is well calibrated for a DENSE model in-app (20 GB/s predicts
+        // 39.4 tok/s for the 507 MB Qwen; the phone does 41.8). The order and
+        // the bounds live in SpeedDatabaseTest.
+        val (bw, src) = DeviceProfile.bwInfo(cat, flagship)
         assertEquals(20.0, bw, 0.01)
-        assertFalse(measured)
+        assertEquals(DeviceProfile.BwSource.SocClass, src)
         // MoE beats a dense model of the same file size, because activeBytes.
         val hTiny = cat.models.first { it.id == "granite4-h-tiny" }     // 4.0G file, ~0.85G active
         val lfm8b = cat.models.first { it.id == "lfm2-8b-a1b" }         // 4.7G file, ~1.2G active

@@ -215,6 +215,28 @@
         </activity>
 
         <!--
+            The ONE door another app on this device may knock on: a request to
+            use the model running on this phone. Exported on purpose, and safe
+            to be: it grants nothing by itself — it identifies the caller from
+            the framework's own `callingPackage` (which exists only for a
+            for-result start), shows the owner who is asking, and mints a key
+            only if he allows it. See LocalModelAccessActivity + LocalApiAccess.
+
+            excludeFromRecents: a consent prompt is not a place to come back
+            to; the decision lives in local models -> api access.
+        -->
+        <activity
+            android:name=".ui.screens.LocalModelAccessActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Conch">
+            <intent-filter>
+                <action android:name="ai.eight24family.conch.action.REQUEST_LOCAL_MODEL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!--
             The pairing code arrives through a notification's direct-reply field,
             because Android shows that code in a dialog that cancels the pairing
             the moment it is left. The shade draws over that dialog; our own

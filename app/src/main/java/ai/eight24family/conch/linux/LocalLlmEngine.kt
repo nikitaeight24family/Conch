@@ -88,6 +88,34 @@ object LocalLlmEngine {
         return floor
     }
 
+    /**
+     * How much RAM the engine's prompt cache may hold, in MiB.
+     *
+     * The slack left after this model's weights, its KV at the window it will
+     * really run, and the compute buffers - capped, because a cache is worth
+     * one idle conversation and nothing more. Zero when there is no slack:
+     * then it is switched OFF explicitly rather than left at an 8 GiB default
+     * the phone cannot honour.
+     */
+    fun cacheRamMib(m: LocalLlm.Model): Int {
+        val budget = ai.eight24family.conch.util.SilentlyTry.loggedOrElse(TAG, "read ram budget", 0L) {
+            ai.eight24family.conch.linux.store.DeviceProfile.capacityBytes(
+                ai.eight24family.conch.linux.store.StoreCatalog.catalog.value,
+            )
+        }
+        if (budget <= 0L) return 0
+        val fixed = m.bytes + m.mmprojBytes +
+            ai.eight24family.conch.linux.store.StoreCatalog.COMPUTE_BYTES +
+            m.kvPerTok * ctxFor(m)
+        val slack = budget - fixed
+        if (slack <= 0L) return 0
+        return (slack / (1024L * 1024L)).coerceAtMost(CACHE_RAM_CAP_MIB.toLong()).toInt()
+    }
+
+    /** One idle conversation's worth is the whole point; past that a cache on a
+     *  phone is just ram nobody asked to spend. */
+    private const val CACHE_RAM_CAP_MIB = 512
+
     /** The window below which this model is not worth starting at all. */
     fun ctxFloor(m: LocalLlm.Model): Int =
         if (ai.eight24family.conch.linux.store.StoreCatalog.agentCapable(m.id)) CTX_AGENT_FLOOR
@@ -105,13 +133,82 @@ object LocalLlmEngine {
         return ctxWithin(budget, fixed, m.kvPerTok, ctxFloor(m))
     }
 
-    /** The window the RUNNING server was started with - what the agent must be
-     *  told, so its own plan never claims room llama.cpp did not give it. */
+    /**
+     * The window the RUNNING server actually serves - what the agent and the
+     * chat must both be told, so neither plans for room llama.cpp did not
+     * give it.
+     *
+     * ⛔ IT IS READ BACK FROM THE ENGINE, NOT REMEMBERED FROM THE REQUEST.
+     * `-c` is a ceiling, not a promise: llama-server CAPS it at the model's
+     * trained context and says so only in its log — measured on the owner's
+     * phone, Qwen3.5-0.8B (2026-09-08):
+     *
+     *     load_model: the slot context (16384) exceeds the training context
+     *     of the model (8192) - capping
+     *
+     * So we asked 16K, got 8K, and told everyone 16K: the chat trimmed its
+     * history to a window twice the real one, and codex was handed
+     * `model_context_window` = 15360 for a model that 400s past 8192 - the
+     * exact "every send bounces off a context error" failure the 2026-09-01
+     * invariant is about, resurfacing for every model whose training context
+     * is under our ceiling. The number now comes from `/props`.
+     */
     @Volatile
     var activeCtx: Int = CTX_MAX
         private set
 
     private const val TAG = "Conch-LocalLlmEngine"
+
+    /**
+     * The owner asked for the weights to STAY.
+     *
+     * The idle watchdog frees a 2-5 GB model after two minutes of silence,
+     * which is right by default - a phone that stopped using a model should
+     * get its ram back. But it is wrong for the two cases that matter most:
+     * a chat you come back to between messages, and another app that was
+     * granted the local API and finds the port closed (see LocalApiAccess).
+     * So it can be pinned - and the pin is visible in the foreground
+     * notification, next to the ram it costs, with one tap to undo.
+     *
+     * PROCESS-SCOPED ON PURPOSE. A pin that survived a reboot would hold
+     * gigabytes on a phone whose owner never asked again.
+     */
+    private val _keepLoaded = MutableStateFlow(false)
+    val keepLoaded: StateFlow<Boolean> = _keepLoaded.asStateFlow()
+
+    fun setKeepLoaded(on: Boolean) {
+        if (_keepLoaded.value == on) return
+        _keepLoaded.value = on
+        android.util.Log.i(TAG, if (on) "model pinned loaded by the owner" else "model may idle out again")
+    }
+
+    /**
+     * How hot the phone is, as the platform sees it: 0.0 = cold, 1.0 = at the
+     * throttling limit, above 1.0 = already being throttled. Null when the
+     * device does not report it (the API is optional and some OEMs return
+     * nothing).
+     *
+     * ⛔ INFERENCE IS THE HOTTEST THING THIS APP CAN DO, and the thread and
+     * batch numbers were tuned on a COOL phone (the owner's hit the system's
+     * "device too hot" overlay at 4+6 threads under GPU load, which is why
+     * they are 2/2 there). Starting a model on a phone that is ALREADY at the
+     * limit with those same numbers is how a launch turns into a thermal
+     * event; asking first costs one binder call.
+     */
+    fun thermalHeadroom(): Float? = runCatching {
+        val pm = ServiceLocator.appContext
+            .getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return null
+        pm.getThermalHeadroom(FORECAST_SECONDS).takeIf { !it.isNaN() }
+    }.getOrNull()
+
+    /** Ten seconds ahead: long enough to see a launch's own heat coming, short
+     *  enough that the platform still answers with a real number. */
+    private const val FORECAST_SECONDS = 10
+
+    /** Headroom past which we launch deliberately cooler. 0.85 = within 15 %
+     *  of the throttling point. */
+    private const val HOT_HEADROOM = 0.85f
 
     sealed interface State {
         data object Off : State
@@ -288,6 +385,14 @@ object LocalLlmEngine {
                 _state.value = State.Failed(m.id, "no engine for this cpu (arm64 only)")
                 return@withLock LaunchOutcome.FAIL
             }
+            // ⛔ AN EMBEDDER IS NOT A BRAIN. Started here it would come up
+            // healthy and then answer every chat with nothing, because its
+            // head produces vectors - see LocalLlm.Model.embedder and
+            // LocalEmbedEngine, which is where it belongs.
+            if (!m.isBrain) {
+                _state.value = State.Failed(m.id, "this model is not a chat model")
+                return@withLock LaunchOutcome.FAIL
+            }
             val model = LocalLlm.fileOf(m)
             if (!LocalLlm.isReady(m)) {
                 // Wrong-sized weights would kill the server wordlessly mid-mmap
@@ -364,8 +469,21 @@ object LocalLlmEngine {
                     // and Codex's ~7K-token system prompt is all prefill on
                     // the first turn (measured: 40 s/2048 tokens at -t 4), so
                     // batch threads get more cores.
-                    add("-t"); add(if (tryGpu) "2" else "4")
-                    add("-tb"); add(if (tryGpu) "2" else "6")
+                    // A phone already near its throttling point gets the
+                    // cooler configuration on purpose: fewer batch threads is
+                    // a slower prefill, and a slower prefill is what keeps the
+                    // SoC out of the "device too hot" overlay - and the
+                    // overlay is a stopped answer, not a slow one.
+                    val hot = (thermalHeadroom() ?: 0f) >= HOT_HEADROOM
+                    if (hot) {
+                        android.util.Log.i(
+                            TAG,
+                            "phone is near its thermal limit (headroom ${thermalHeadroom()}) - " +
+                                "launching ${m.id} with fewer threads",
+                        )
+                    }
+                    add("-t"); add(if (tryGpu) "2" else if (hot) "2" else "4")
+                    add("-tb"); add(if (tryGpu) "2" else if (hot) "3" else "6")
                     add("-c"); add("${ctxFor(m).also { activeCtx = it }}")
                     // ⛔ ONE SLOT. b10712's default is --parallel 4, which
                     // quietly provisioned FOUR 8K slots (`n_slots = 4` in the
@@ -393,6 +511,34 @@ object LocalLlmEngine {
                     if (tryGpu) { add("-ngl"); add("99") }
                     add("--jinja")
                     add("--no-webui")
+                    // ⛔ THE PROMPT CACHE IS 8 GiB BY DEFAULT, AND OUR RAM MATH
+                    // KNEW NOTHING ABOUT IT. b10712 dropped the old
+                    // `--slot-save-path` disk cache for an in-RAM one
+                    // (`--cache-ram`, default 8192 MiB, `--cache-idle-slots`
+                    // enabled): the engine stashes an idle slot's KV on every
+                    // new task, so switching between two local chats can hold a
+                    // SECOND full KV - hundreds of megabytes on a 4B - on a
+                    // phone whose free ram the store measured to the megabyte
+                    // before offering the model. Bounded here to the slack that
+                    // actually exists after weights + KV + compute, so the
+                    // cache is a comfort, never the reason the engine is
+                    // OOM-killed.
+                    add("--cache-ram"); add("${cacheRamMib(m)}")
+                    // The closest thing this build has to "do not pay for the
+                    // same prefix twice": reuse cached chunks across a CHANGED
+                    // prefix by KV-shifting. Off by default (0). 256 is the
+                    // upstream-suggested floor - smaller chunks cost more in
+                    // shifting than they save.
+                    add("--cache-reuse"); add("256")
+                    // ⛔ THE PORT IS NOT PRIVATE JUST BECAUSE IT IS LOOPBACK.
+                    // Android does not isolate 127.0.0.1 between apps, so
+                    // every neighbouring app holding INTERNET could POST to
+                    // /v1/chat/completions for as long as a model was loaded.
+                    // The key file is rewritten on every launch from the
+                    // current grant set (Conch's own key, plus one line per
+                    // app the owner has allowed) — see [LocalApiAccess].
+                    add("--api-key-file")
+                    add(ai.eight24family.conch.linux.chat.LocalApiAccess.writeKeyFile().absolutePath)
                     // ⛔ ANSWER, DON'T MEDITATE — unless asked. Qwen's chat
                     // template defaults hybrid models into reasoning: "say hi"
                     // burned a wall of hidden think-tokens before one visible
@@ -455,6 +601,18 @@ object LocalLlmEngine {
                         stopLocked()
                         return@withLock LaunchOutcome.RETRY_CPU
                     }
+                    // The FACT, straight from the server, before anything
+                    // is told the window it has to live in.
+                    readServedCtx()?.let { real ->
+                        if (real != activeCtx) {
+                            android.util.Log.i(
+                                TAG,
+                                "engine serves ${real} tokens, not the ${activeCtx} we asked for " +
+                                    "(model's trained context) - everything downstream follows the fact",
+                            )
+                            activeCtx = real
+                        }
+                    }
                     servingGpu = tryGpu
                     servingThinking = thinking
                     servingVision = LocalLlm.hasVision(m)
@@ -462,10 +620,20 @@ object LocalLlmEngine {
                     // The store's passive trust fact: this model DID come up
                     // on this phone, in this mode. Free — it just happened.
                     ai.eight24family.conch.linux.store.ModelRecords.markRan(m.id, tryGpu)
+                    // ⛔ A RESIDENT MODEL NEEDS A REASON FOR THE PROCESS TO
+                    // LIVE. The engine is a CHILD of this process: when
+                    // Android reaps the app, the weights go with it - and with
+                    // the in-app chat there is no ssh session and no agent
+                    // session, so nothing was holding the process at all once
+                    // the screen went away. ConchService now counts a loaded
+                    // model among its reasons to run, which also makes the
+                    // notification say what those gigabytes are for.
+                    ai.eight24family.conch.service.ConchService.start(ServiceLocator.appContext)
                     android.util.Log.i(
                         TAG,
                         "serving ${m.id} on $BASE_URL (${if (tryGpu) "gpu" else "cpu"}" +
-                            "${if (thinking) ", thinking" else ""})",
+                            "${if (thinking) ", thinking" else ""}, ctx $activeCtx, " +
+                            "cache ${cacheRamMib(m)}MiB, thermal ${thermalHeadroom() ?: -1f})",
                     )
                     startWatch(m, thinking)
                     return@withLock LaunchOutcome.UP
@@ -540,10 +708,14 @@ object LocalLlmEngine {
      * turn pays one cold weight-reload. */
     private const val IDLE_STOP_MS = 120_000L
 
+    /** Whether the idle watchdog may free the weights right now. */
+    private fun mayIdleOut(): Boolean = !_keepLoaded.value
+
     /** Is the engine mid-generation right now? /slots is_processing. On any
      *  error we assume BUSY, so a transient blip never kills a live turn. */
     private fun isProcessing(): Boolean = runCatching {
         val c = URL("$BASE_URL/slots").openConnection() as HttpURLConnection
+        ai.eight24family.conch.linux.chat.LocalApiAccess.authorize(c)
         c.connectTimeout = 1_000; c.readTimeout = 1_000
         val body = c.inputStream.bufferedReader().readText().also { c.disconnect() }
         val arr = org.json.JSONArray(body)
@@ -564,7 +736,9 @@ object LocalLlmEngine {
                 if (p.isAlive) {
                     if (isProcessing()) {
                         lastActiveMs = System.currentTimeMillis()
-                    } else if (System.currentTimeMillis() - lastActiveMs > IDLE_STOP_MS) {
+                    } else if (
+                        System.currentTimeMillis() - lastActiveMs > IDLE_STOP_MS && mayIdleOut()
+                    ) {
                         android.util.Log.i(TAG, "engine idle ${IDLE_STOP_MS / 1000}s serving ${m.id} — stopping to free ram")
                         stop()
                         return@launch
@@ -598,6 +772,75 @@ object LocalLlmEngine {
             }
         }
     }
+
+    /**
+     * Re-launch the serving model so the engine re-reads its key file.
+     *
+     * ⛔ THE KEYS ARE READ ONCE, AT STARTUP. Granting an app access or
+     * revoking it rewrites the file, and until the process restarts the port
+     * still answers to exactly the keys it was born with — a revoke that
+     * changes nothing, or a grant that 401s. Called by the consent screen and
+     * the revoke row; a no-op when nothing is serving, because the next launch
+     * reads the file anyway.
+     *
+     * Costs the warm KV cache of whatever chat was open. That is the right
+     * price for an access change, and it happens only when the owner makes
+     * one.
+     */
+    suspend fun restartForKeys(): Boolean {
+        val id = (_state.value as? State.Up)?.modelId ?: return false
+        val m = LocalLlm.byId(id) ?: return false
+        val thinking = servingThinking
+        val cpu = lastForcedCpu
+        stop()
+        return start(m, thinking = thinking, forceCpu = cpu)
+    }
+
+    /**
+     * The slot context the server really came up with, off `/props`.
+     *
+     * Null when the endpoint says nothing we can use - then the requested
+     * number stands, which is the old behaviour and never worse than it.
+     */
+    private fun readServedCtx(): Int? = ctxFromLog() ?: ctxFromProps()
+
+    /**
+     * The slot context out of the engine's OWN startup log.
+     *
+     * ⛔ THE HTTP SURFACE LIES HERE, MEASURED (2026-09-08). Both `/props` and
+     * `/slots` report `n_ctx: 16384` — the value we ASKED for — while the same
+     * process wrote, two lines apart:
+     *
+     *     the slot context (16384) exceeds the training context of the
+     *         model (8192) - capping
+     *     initializing, n_slots = 1, n_ctx_slot = 8192
+     *
+     * A request past 8192 then fails, so 8192 is the number the chat must trim
+     * to and the number codex must plan with. The log is the only place this
+     * build states it — which is the same reason the GPU verdict is read from
+     * the log rather than from our own intent.
+     */
+    private fun ctxFromLog(): Int? = runCatching {
+        val re = Regex("""n_ctx_slot\s*=\s*(\d+)""")
+        logFile().useLines { lines ->
+            lines.mapNotNull { re.find(it)?.groupValues?.get(1)?.toIntOrNull() }
+                .lastOrNull()
+        }
+    }.getOrNull()?.takeIf { it in 256..1_000_000 }
+
+    private fun ctxFromProps(): Int? = runCatching {
+        val c = URL("$BASE_URL/props").openConnection() as HttpURLConnection
+        ai.eight24family.conch.linux.chat.LocalApiAccess.authorize(c)
+        c.connectTimeout = 2_000
+        c.readTimeout = 3_000
+        if (c.responseCode != 200) { c.disconnect(); return null }
+        val body = c.inputStream.bufferedReader().use { it.readText() }
+        c.disconnect()
+        val root = org.json.JSONObject(body)
+        val fromSlot = root.optJSONObject("default_generation_settings")?.optInt("n_ctx", 0) ?: 0
+        val flat = root.optInt("n_ctx", 0)
+        listOf(fromSlot, flat).firstOrNull { it in 256..1_000_000 }
+    }.getOrNull()
 
     private fun healthOk(): Boolean = runCatching {
         val c = URL("$BASE_URL/health").openConnection() as HttpURLConnection

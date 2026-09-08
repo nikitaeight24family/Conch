@@ -189,6 +189,10 @@ fun ModelStoreScreen(
         }
         LazyColumn(Modifier.fillMaxWidth().padding(padding)) {
             item(key = "device") { PhoneSpecSheet() }
+            // One line, above the shelf: whose Hugging Face account this is,
+            // because that is what decides whether the gated half of the
+            // catalog is downloadable at all.
+            item(key = "hf") { HfAccountBlock() }
             item(key = "controls") {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
@@ -875,19 +879,28 @@ fun ModelPageScreen(
                     StatCell(stat?.let { HfStats.fmt(it.downloads) } ?: "—", "pulls")
                     StatCell(stat?.let { HfStats.fmt(it.likes) } ?: "—", "likes")
                     StatCell(if (e.bytes > 0) "${PhoneResources.gb(e.bytes)}G" else "…", "download")
+                    // The label says where the speed came from: this phone,
+                    // phones with this exact chip, or a bucket. A store that
+                    // shows a guess as a fact is the one thing this page
+                    // cannot do.
                     StatCell(
                         rec?.tokS?.let { String.format(java.util.Locale.US, "%.1f", it) }
                             ?: if (e.bytes > 0) "~${DeviceProfile.estTokS(e, catalog)}" else "…",
-                        if (rec?.tokS != null) "tok/s here" else "tok/s est",
+                        when {
+                            rec?.tokS != null -> "tok/s here"
+                            DeviceProfile.bwInfo(catalog).second is DeviceProfile.BwSource.Community ->
+                                "tok/s on this chip"
+                            else -> "tok/s est"
+                        },
                     )
                 }
             }
             item {
                 // Full-width action — the page's one big verb.
                 Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
-                    if (e.gated) {
+                    if (e.gated && !ai.eight24family.conch.linux.store.HfAuth.isConnected()) {
                         Text(
-                            "gated repo — needs a Hugging Face sign-in; the store only shelves what downloads anonymously",
+                            "gated repo — connect your Hugging Face account at the top of the store and open this page again",
                             color = dim,
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,

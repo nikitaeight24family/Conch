@@ -64,6 +64,11 @@ object Routes {
     /** One model's store page (Play's "app page" shape). */
     const val MODEL_PAGE = "model_page/{modelId}"
     fun modelPage(modelId: String) = "model_page/$modelId"
+    /** Chat with a model that is ON this phone — no Linux, no bridge, no CLI.
+     *  `chat` empty = a new conversation; an id reopens a stored one. */
+    const val LOCAL_CHAT = "local_chat/{modelId}?chat={chat}"
+    fun localChat(modelId: String, chatId: String? = null) =
+        "local_chat/$modelId?chat=" + (chatId ?: "")
     /** Agents bottom-tab: overview of ALL servers + their agents (cached, no
      *  key). Tapping a server drills into its per-server [AGENTS] picker. */
     const val AGENTS_OVERVIEW = "agents_overview"
@@ -444,14 +449,14 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
         composable(Routes.localModels) {
             ai.eight24family.conch.ui.screens.LocalModelsScreen(
                 onBack = { nav.popBackStack() },
-                onPickModel = { modelId ->
-                    nav.navigate(
-                        Routes.chat(
-                            ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
-                            ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
-                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
-                        ),
-                    )
+                // Tapping a downloaded model CHATS with it, in the app, at
+                // once — the agent path (Alpine + a real CLI) is one tap
+                // further, from that chat's top bar. It used to be the only
+                // door, which put wireless debugging and an `apk add` between
+                // a model on disk and its first token.
+                onPickModel = { modelId -> nav.navigate(Routes.localChat(modelId)) },
+                onOpenChat = { modelId, chatId ->
+                    nav.navigate(Routes.localChat(modelId, chatId))
                 },
                 onOpenStore = { nav.navigate(Routes.modelStore) },
             )
@@ -460,15 +465,12 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             ai.eight24family.conch.ui.screens.ModelStoreScreen(
                 onBack = { nav.popBackStack() },
                 onOpenModel = { modelId -> nav.navigate(Routes.modelPage(modelId)) },
-                onPickModel = { modelId ->
-                    nav.navigate(
-                        Routes.chat(
-                            ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
-                            ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
-                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
-                        ),
-                    )
-                },
+                // Tapping a downloaded model CHATS with it, in the app, at
+                // once — the agent path (Alpine + a real CLI) is one tap
+                // further, from that chat's top bar. It used to be the only
+                // door, which put wireless debugging and an `apk add` between
+                // a model on disk and its first token.
+                onPickModel = { modelId -> nav.navigate(Routes.localChat(modelId)) },
             )
         }
         composable(
@@ -479,12 +481,27 @@ fun AppNavGraph(nav: NavHostController, modifier: Modifier = Modifier) {
             ai.eight24family.conch.ui.screens.ModelPageScreen(
                 modelId = modelId,
                 onBack = { nav.popBackStack() },
-                onPickModel = { id ->
+                onPickModel = { id -> nav.navigate(Routes.localChat(id)) },
+            )
+        }
+        composable(
+            Routes.LOCAL_CHAT,
+            arguments = listOf(
+                navArgument("modelId") { type = NavType.StringType },
+                navArgument("chat") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) {
+            ai.eight24family.conch.ui.screens.LocalChatScreen(
+                onBack = { nav.popBackStack() },
+                // The SAME model under the real CLI: its tools, its shell, its
+                // sessions. This is the path that needs the phone's Linux, so
+                // it is a deliberate tap and never the entry.
+                onOpenAgent = { modelId ->
                     nav.navigate(
                         Routes.chat(
                             ai.eight24family.conch.linux.LinuxSsh.SERVER_ID,
-                            ai.eight24family.conch.linux.LocalLlm.harnessFor(id),
-                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + id,
+                            ai.eight24family.conch.linux.LocalLlm.harnessFor(modelId),
+                            sessionModel = ai.eight24family.conch.linux.LocalLlm.MODEL_ARG_PREFIX + modelId,
                         ),
                     )
                 },

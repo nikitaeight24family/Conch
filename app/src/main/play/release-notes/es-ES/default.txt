@@ -1,2 +1,8 @@
-• Detener siempre detiene. Un toque termina el turno, incluso si se cortó la conexión, el proceso del agente ya había muerto o la app había perdido el rastro del turno. Antes podías pulsar Detener y no pasaba nada.
-• Un turno terminado ya no gira para siempre. Conch comprueba si algo sigue trabajando en el servidor, así que el indicador y el cronómetro muestran lo que ocurre de verdad.
+Los modelos locales han crecido.
+
+• Habla con un modelo en tu teléfono dentro de la app: sin opciones de desarrollador.
+• Dictado: tu voz se convierte en texto EN el teléfono (Whisper), nada se sube.
+• Busca en tus chats locales por significado, en cualquier idioma, sin conexión.
+• Otras apps pueden pedir un modelo local: ves quién lo pide y puedes revocarlo.
+• Las descargas se verifican con su SHA-256 publicado.
+• Tu cuenta de Hugging Face, o importa tu propio .gguf.

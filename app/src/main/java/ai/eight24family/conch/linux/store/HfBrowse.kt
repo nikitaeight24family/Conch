@@ -133,6 +133,19 @@ object HfBrowse {
 
     fun entryOf(id: String): StoreCatalog.Entry? = _resolved.value[id]
 
+    /**
+     * Forget what was resolved anonymously.
+     *
+     * A repo resolved WITHOUT a token is remembered as `gated = true` and
+     * never asked about again — so connecting an account would leave every
+     * page still saying "gated" until the app restarted. Connecting (and
+     * forgetting) clears the cache instead, and the next page view resolves
+     * with whatever credential now exists.
+     */
+    fun clearResolved() {
+        _resolved.value = emptyMap()
+    }
+
     /** A hit becomes an addressable (routable) entry the moment it's tapped. */
     fun register(hit: Hit): String {
         val id = browseId(hit.repo)
@@ -191,6 +204,7 @@ object HfBrowse {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000; readTimeout = 12_000
         }
+        HfAuth.authorize(conn)
         if (conn.responseCode != 200) { conn.disconnect(); return@runCatching emptyList() }
         val body = conn.inputStream.use { it.reader().readText() }
         conn.disconnect()
@@ -202,7 +216,12 @@ object HfBrowse {
                 val gated = o["gated"]?.jsonPrimitive?.let {
                     it.booleanOrNull ?: (it.contentOrNull != "false")
                 } ?: false
-                if (gated) return@runCatching null
+                // Gated repos were dropped from the listing outright,
+                // because the anonymous downloader could not fetch them. With
+                // a token they are ordinary models — and the licence
+                // click-through the owner did on huggingface.co is what the
+                // token carries.
+                if (gated && !HfAuth.isConnected()) return@runCatching null
                 // The repo id rides into URL paths and the synthetic id —
                 // anything outside org/name shape is not a hit, it's noise.
                 val repo = o["id"]!!.jsonPrimitive.content
@@ -227,12 +246,14 @@ object HfBrowse {
      *  entry unresolved and the page saying so. */
     suspend fun resolve(id: String) = withContext(Dispatchers.IO) {
         val e = _resolved.value[id] ?: return@withContext
-        if (e.bytes > 0L || e.gated) return@withContext
+        if (e.bytes > 0L) return@withContext
+        if (e.gated && !HfAuth.isConnected()) return@withContext
         val repo = e.hfRepo ?: return@withContext
         runCatching {
             val info = (URL(
                 "https://huggingface.co/api/models/$repo?expand[]=downloadsAllTime&expand[]=likes&expand[]=gated",
             ).openConnection() as HttpURLConnection).apply { connectTimeout = 8_000; readTimeout = 10_000 }
+                .also { HfAuth.authorize(it) }
             var gated = false
             if (info.responseCode == 200) {
                 val o = Json.parseToJsonElement(info.inputStream.use { it.reader().readText() }).jsonObject
@@ -246,12 +267,13 @@ object HfBrowse {
                 )
             }
             info.disconnect()
-            if (gated) {
+            if (gated && !HfAuth.isConnected()) {
                 _resolved.value += (id to e.copy(gated = true))
                 return@runCatching
             }
             val tree = (URL("https://huggingface.co/api/models/$repo/tree/main?recursive=1")
                 .openConnection() as HttpURLConnection).apply { connectTimeout = 8_000; readTimeout = 15_000 }
+                .also { HfAuth.authorize(it) }
             require(tree.responseCode == 200) { "tree ${tree.responseCode}" }
             val files = Json.parseToJsonElement(tree.inputStream.use { it.reader().readText() })
                 .jsonArray.mapNotNull { el ->
@@ -259,7 +281,15 @@ object HfBrowse {
                         val o = el.jsonObject
                         val path = o["path"]!!.jsonPrimitive.content
                         val size = o["size"]?.jsonPrimitive?.longOrNull ?: 0L
-                        path to size
+                        // Every LFS file in the tree carries its SHA-256 as
+                        // `lfs.oid` — the one number that makes a gigabyte
+                        // download verifiable instead of merely the right
+                        // length. Plain (non-LFS) files have no lfs block;
+                        // a gguf worth downloading always does.
+                        val oid = o["lfs"]?.jsonObject?.get("oid")
+                            ?.jsonPrimitive?.contentOrNull
+                            ?.takeIf { Regex("^[0-9a-f]{64}$").matches(it) }
+                        Triple(path, size, oid)
                     }.getOrNull()
                 }
             tree.disconnect()
@@ -287,6 +317,9 @@ object HfBrowse {
                 // Dense assumption for an unknown architecture — estimates
                 // stay conservative, and honest ones arrive via [ verify ].
                 activeBytes = pick.second,
+                // From the tree's lfs.oid — a browse model is now verified on
+                // download exactly like a curated one.
+                sha256 = pick.third,
                 quant = Regex("(?i)(Q\\d[_A-Z0-9]*|IQ\\d[_A-Z0-9]*|MXFP4|F16|BF16)")
                     .find(fileName)?.value?.uppercase(),
                 // The real "About this model" — the model card's own words from

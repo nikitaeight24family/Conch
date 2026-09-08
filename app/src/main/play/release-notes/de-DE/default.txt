@@ -1,2 +1,8 @@
-• Stop stoppt jetzt immer. Ein Tippen beendet den Durchlauf — auch wenn die Verbindung abbrach, der Prozess des Agenten längst beendet war oder die App den Durchlauf aus den Augen verloren hatte. Bisher konnte ein Tippen auf Stop völlig wirkungslos bleiben.
-• Ein beendeter Durchlauf dreht sich nicht mehr endlos. Conch prüft jetzt, ob auf dem Server überhaupt noch etwas arbeitet, damit Spinner und Timer zeigen, was wirklich passiert.
+Lokale Modelle sind erwachsen geworden.
+
+• Chatte direkt in der App mit einem Modell auf deinem Telefon - ohne Entwickleroptionen.
+• Diktieren: Sprache wird AUF dem Gerät zu Text (Whisper), nichts wird hochgeladen.
+• Durchsuche lokale Chats nach Bedeutung, in jeder Sprache, offline.
+• Andere Apps können ein lokales Modell anfragen - du siehst wer, und kannst widerrufen.
+• Downloads werden gegen ihre SHA-256 geprüft.
+• Eigenes Hugging-Face-Konto oder eigene .gguf importieren.
