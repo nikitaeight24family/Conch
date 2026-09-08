@@ -48,7 +48,7 @@ class SshClientIntegrationTest {
     private var port: Int = -1
 
     private val hostKeyFile: File by lazy {
-        File.createTempFile("sshai-test-hostkey", ".ser").apply { deleteOnExit() }
+        File.createTempFile("conch-test-hostkey", ".ser").apply { deleteOnExit() }
     }
     /**
      * What the running SSHD will accept:

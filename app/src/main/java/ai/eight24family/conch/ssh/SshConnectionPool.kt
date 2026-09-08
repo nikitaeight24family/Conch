@@ -1181,8 +1181,9 @@ class SshConnectionPool {
      * After a FIDO connect — and ONLY when "Seamless reconnect" is on — mint +
      * enroll the hardware device key so later reconnects are silent. The SERVER
      * computes the `expiry-time` against its OWN clock (no client/server TZ
-     * skew). SAFE: it strips only our own `sshai-ephemeral-<id>` marker line
-     * (the user's FIDO line never matches that comment) via a temp file with a
+     * skew). SAFE: it strips only our own `-ephemeral-<id>` marker line — the
+     * match is brand-free on purpose, so a pre-rename `sshai-ephemeral-` line
+     * goes with it (the user's FIDO line never matches) — via a temp file with a
      * non-empty guard, then appends the fresh line — it can never clobber other
      * keys. Best-effort; failure just means "reconnect needs a tap".
      */
@@ -1259,7 +1260,7 @@ class SshConnectionPool {
         }
     }
 
-    /** Strip OUR `sshai-ephemeral-<id>` marker line from the server's
+    /** Strip OUR `-ephemeral-<id>` marker line from the server's
      *  authorized_keys via a guarded temp-file rewrite. Touches ONLY our own
      *  line (the user's FIDO line never carries that comment), so it can never
      *  clobber other keys. */
@@ -1283,7 +1284,7 @@ class SshConnectionPool {
     fun revokeDeviceKey(server: Server) = userDisconnect(server.id)
 
     /**
-     * Strip OUR `sshai-ephemeral-<id>` line from the server's authorized_keys,
+     * Strip OUR `-ephemeral-<id>` line from the server's authorized_keys,
      * delete the local hardware key, and clear the expiry — the full key
      * teardown with NO connection/refcount side effects (the caller,
      * [userDisconnect], handles those). Uses the live pooled client if

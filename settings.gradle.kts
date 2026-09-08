@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "sshai"
+rootProject.name = "conch"
 include(":app")

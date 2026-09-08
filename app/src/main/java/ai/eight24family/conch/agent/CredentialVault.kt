@@ -5,7 +5,7 @@ import ai.eight24family.conch.util.SilentlyTry
 /**
  * Multi-account credential juggling, server-side. Each agent has one "live"
  * credential; this vault keeps any number of **named slots** under
- * `~/.sshai-auth/<agent>/slots/<id>/` and makes the chosen slot live on demand.
+ * `~/.conch-auth/<agent>/slots/<id>/` and makes the chosen slot live on demand.
  * Hold several accounts (ChatGPT / Google logins OR API keys) and flip the
  * active one when limits run out — without re-logging-in.
  *

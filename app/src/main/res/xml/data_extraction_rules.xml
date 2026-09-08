@@ -7,7 +7,7 @@
     deliberately listed here (mirror of DataEraser's explicit-list policy).
 
     What transfers and why:
-      - sshai.db (+ -wal)      Room: server rows, key METADATA (public half,
+      - conch.db (+ -wal)      Room: server rows, key METADATA (public half,
                                fingerprint), chat bookkeeping. The user's
                                actual belongings. The -wal file rides along so
                                a restore sees the last committed state, not a

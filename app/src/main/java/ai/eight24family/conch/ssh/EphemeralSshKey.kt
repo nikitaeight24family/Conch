@@ -29,12 +29,14 @@ import java.security.spec.ECGenParameterSpec
  *     hardware — the app never handles the key VALUE).
  *  3. Its public half is added to `~/.ssh/authorized_keys` with a server-side
  *     **`expiry-time`** so it self-destructs after N days even if the app never
- *     cleans up. The line carries a unique `sshai-ephemeral-<serverId>` comment.
+ *     cleans up. The line carries a unique `conch-ephemeral-<serverId>` comment.
  *  4. Reconnects (network change / cold start) authenticate with this key via
  *     standard `ecdsa-sha2-nistp256` publickey auth — no tap.
  *
  * Revoke = toggle the setting off (deletes the local keys) or strip the
- * `sshai-ephemeral` line from the server. Everything here is best-effort.
+ * `conch-ephemeral` line from the server — [markerMatch] is deliberately
+ * brand-free, so a `sshai-ephemeral` line left by a pre-rename version is
+ * stripped by the same pass. Everything here is best-effort.
  */
 object EphemeralSshKey {
     private const val TAG = "Conch-EphKey"
@@ -142,7 +144,7 @@ object EphemeralSshKey {
     private fun privateKey(serverId: String): PrivateKey? =
         runCatching { keyStore().getKey(resolvedAlias(serverId), null) as? PrivateKey }.getOrNull()
 
-    /** The bare `ecdsa-sha2-nistp256 <base64> sshai-ephemeral-<id>` portion
+    /** The bare `ecdsa-sha2-nistp256 <base64> conch-ephemeral-<id>` portion
      *  (NO `expiry-time` — the server computes + prepends that against its own
      *  clock, see SshConnectionPool.installEphemeralAsync). */
     fun keyPart(serverId: String): String? {

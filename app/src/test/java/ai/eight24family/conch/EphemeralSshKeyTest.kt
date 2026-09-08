@@ -40,7 +40,7 @@ class EphemeralSshKeyTest {
         val kp = kpg.generateKeyPair()
 
         // Production encoder.
-        val line = EphemeralSshKey.authorizedKeyLineFor(kp.public, "sshai-ephemeral-test")
+        val line = EphemeralSshKey.authorizedKeyLineFor(kp.public, "conch-ephemeral-test")
         assertNotNull("encoder returned null", line)
         assertTrue("not an ecdsa-sha2-nistp256 line: $line", line!!.startsWith("ecdsa-sha2-nistp256 "))
 

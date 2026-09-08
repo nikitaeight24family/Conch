@@ -132,7 +132,7 @@ android {
             // own package row so the two coexist.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            // Verbose diagnostic logging (SshAi-* Logx.d/w) — always ON for
+            // Verbose diagnostic logging (Conch-* Logx.d/w) — always ON for
             // debug builds.
             buildConfigField("boolean", "VERBOSE_LOGS", "true")
         }
@@ -140,7 +140,7 @@ android {
             // Verbose diagnostic logging is OFF in release by default — the
             // Play Store / GitHub artifact ships QUIET. Flip it on for a
             // dev-iteration build with `-PverboseLogs` when you need the
-            // SshAi-* traces (e.g. `assembleRelease -PfastRelease
+            // Conch-* traces (e.g. `assembleRelease -PfastRelease
             // -PverboseLogs`). CI / `bundleRelease` never pass it → quiet.
             // R8 sees the `false` const and strips the gated calls + their
             // string-building entirely. Routed through [util.Logx]. NOT a
