@@ -1,8 +1,6 @@
-Lokale Modelle sind erwachsen geworden.
+Eine Sitzung, wo immer du bist.
 
-• Chatte direkt in der App mit einem Modell auf deinem Telefon - ohne Entwickleroptionen.
-• Diktieren: Sprache wird AUF dem Gerät zu Text (Whisper), nichts wird hochgeladen.
-• Durchsuche lokale Chats nach Bedeutung, in jeder Sprache, offline.
-• Andere Apps können ein lokales Modell anfragen - du siehst wer, und kannst widerrufen.
-• Downloads werden gegen ihre SHA-256 geprüft.
-• Eigenes Hugging-Face-Konto oder eigene .gguf importieren.
+• Ein Codex-Chat wird jetzt wirklich fortgesetzt - keine neue, leere Sitzung mehr, wenn die alte belegt ist.
+• Sitzungen wechseln frei zwischen Handy und Server: das Handy gibt sie frei, sobald es untaetig ist.
+• Haelt ein Terminal am Server die Sitzung, tippe auf die Zeile, um sie zu uebernehmen.
+• Das eingebaute Terminal ist bei langer Ausgabe viel schneller, scrollt richtig und hat einen Sprung-nach-unten-Knopf.

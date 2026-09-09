@@ -67,7 +67,32 @@ internal object RemoteTurnKiller {
             // $pids, so without this flatten the verdict line would carry only
             // the first pid and the rest would arrive as bare-number lines.
             "pids=\$(echo \$pids); " +
-            "if [ -z \"\$pids\" ]; then echo $MARK_NONE; exit 0; fi; " +
+            ladder()
+    }
+
+    /**
+     * The SAME ladder, entered with the pids already known.
+     *
+     * Discovery by argv above is blind to a `codex app-server` and to a
+     * console REPL — neither carries a session id in its command line — which
+     * is why this file's kdoc has to end with "tell the user the truth instead
+     * of showing a button that silently does nothing".
+     * [ai.eight24family.conch.agent.codex.CodexThreadLock] closes that gap by
+     * finding the holder through `/proc/<pid>/fd` (the process that has the
+     * rollout OPEN, whatever its argv says) and hands the pids here, so the
+     * INT→TERM→KILL rungs, the per-rung `kill -0` re-check and the sentinel
+     * protocol stay in ONE place — the whole point of this object.
+     */
+    fun killPidsScript(pids: List<Long>): String {
+        require(pids.isNotEmpty()) { "no pids" }
+        // Longs only — nothing here can carry shell metacharacters.
+        return "pids='" + pids.joinToString(" ") + "'; " + ladder()
+    }
+
+    /** INT → TERM → KILL, every rung gated on a fresh `kill -0`, then a final
+     *  liveness verdict. Reads the shell var `pids`; prints one sentinel. */
+    private fun ladder(): String =
+        "if [ -z \"\$pids\" ]; then echo $MARK_NONE; exit 0; fi; " +
             "kill -INT \$pids 2>/dev/null; sleep 1; " +
             "alive=''; for p in \$pids; do kill -0 \"\$p\" 2>/dev/null && alive=\"\$alive \$p\"; done; " +
             "if [ -n \"\$alive\" ]; then kill -TERM \$alive 2>/dev/null; sleep 1; fi; " +
@@ -76,7 +101,6 @@ internal object RemoteTurnKiller {
             "left=''; for p in \$pids; do kill -0 \"\$p\" 2>/dev/null && left=\"\$left \$p\"; done; " +
             "if [ -n \"\$left\" ]; then echo \"$MARK_SURVIVED\$left\"; " +
             "else echo \"$MARK_DONE\$pids\"; fi"
-    }
 
     sealed interface Outcome {
         /** Every discovered process is confirmed dead (`kill -0` says gone). */

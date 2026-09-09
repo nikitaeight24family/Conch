@@ -15,6 +15,56 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.7.1] — 2026-09-09
+
+One session, wherever you are. Codex 0.153 gives a thread a single writer and
+no way to hand it over politely, so continuing a chat on the phone, then on the
+server, then on the phone again came down to who was holding it — and the app
+was answering that question wrongly.
+
+### Fixed
+- **Continuing a Codex chat continues it.** A thread whose writer is held
+  elsewhere is refused with `already has an active writer`. That was read as
+  "this session is gone": the app dropped the session id and re-sent the prompt
+  into a brand-new empty thread, which looked exactly like the chat doubling
+  itself with no context. Busy and gone are now separate answers, and no path
+  starts a blank thread because of a lock.
+- **Resuming on the fallback path never parsed its own arguments.** Options
+  placed after the `resume` subcommand are rejected outright, on every codex
+  build tested — so every continued chat on that path died before codex ran,
+  except in the most permissive approval tier, whose single flag happens to be
+  accepted there. Options now precede the subcommand, verified across all
+  three tiers.
+- **The flag audit only ever checked the new-chat shape**, which is why the
+  above shipped green. It checks the resume shape too, and a mode counts as
+  accepted only when every shape parses.
+- **The built-in terminal paid for its whole scrollback on every frame, twice.**
+  Each frame deep-copied the entire scrollback — four array allocations per
+  line, inside the lock the reader thread needs back — although those rows are
+  already copied on the way in and never change afterwards; and the viewport
+  was a single text block re-laid-out in full, so one chunk of output cost as
+  much as everything ever printed. Frames now share the rows, and the viewport
+  renders one line per item.
+- **The terminal can be scrolled.** Pinch-zoom claimed one-finger drags past
+  touch slop, and the transparent input overlay covered the viewport and got
+  the events first. Zoom now only consumes while two fingers are down, and the
+  input sink no longer sits on top of the output.
+
+### Added
+- **A session moves between the phone and the server on its own.** The
+  app-server process is kept only while it is earning its keep: a turn holds
+  the thread, and once idle — or as soon as you leave the app — it is handed
+  back, so the same session can be continued anywhere. A running turn is never
+  released: sending a task and pocketing the phone still works.
+- **Taking a session back from a terminal.** A codex terminal never releases a
+  thread while it lives, so the "session open elsewhere" row is now the action:
+  it names the process holding it and a tap ends it, after which the same
+  session resumes with its history intact.
+- **A jump-to-newest button in the terminal**, shown when there is somewhere to
+  jump to.
+
+---
+
 ## [0.7.0] — 2026-09-08
 
 The local-models release: the store you could already browse became something
@@ -1886,7 +1936,7 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.6.5...HEAD
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.7.1...HEAD
 [0.6.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.0
 [0.5.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.2
 [0.5.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.0
@@ -1914,6 +1964,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.7.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.1
 [0.7.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.0
 [0.6.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.5
 [0.6.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.4

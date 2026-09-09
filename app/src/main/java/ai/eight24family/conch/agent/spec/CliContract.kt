@@ -104,7 +104,11 @@ object CliContracts {
 
     private val codex = CliContract(
         agent = Agent.CODEX,
-        testedVersion = "0.149.1",
+        // Re-verified 2026-09-09 against 0.153.4 AND 0.142.2, in BOTH the
+        // new-chat and the `resume` shapes (the audit probes both now). The
+        // flags themselves were never the problem this time — their POSITION
+        // was: after `resume` they are rejected on every binary tested.
+        testedVersion = "0.153.4",
         pinnedVersion = "0.149.1",
         modes = listOf(
             // ⚠ NO `--ask-for-approval` HERE. `codex exec` rejects it as an

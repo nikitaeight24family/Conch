@@ -6042,6 +6042,26 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * so the live collector keeps the full list (the marker drops out, no
      * duplicate).
      */
+    /**
+     * Tap on the "session open elsewhere" row: end whatever process holds the
+     * Codex thread's writer so THIS chat can continue the SAME session.
+     *
+     * Deliberate and rare on purpose — the holder may be a terminal someone
+     * is looking at, and codex has no polite way to ask for the writer back
+     * (there is no thread-level release; only ending the process frees it).
+     * The user's text is already back in the composer, so the flow is: tap,
+     * then send.
+     */
+    fun takeOverSession() {
+        val sid = _localSessionId.value ?: return
+        val s = activeSessions[sid] ?: return
+        viewModelScope.launch {
+            SilentlyTry.fired("Conch-Chat", "take over locked agent session") {
+                s.takeOverAgentSession()
+            }
+        }
+    }
+
     fun loadFullHistory() {
         val localId = _localSessionId.value ?: return
         val resumeId = _resumeId.value ?: return

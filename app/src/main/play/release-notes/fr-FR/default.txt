@@ -1,8 +1,6 @@
-Les modèles locaux ont grandi.
+Une session, ou que vous soyez.
 
-• Discutez avec un modèle sur votre téléphone dans l'app - sans options développeur.
-• Dictée : la voix devient du texte SUR le téléphone (Whisper), rien n'est envoyé.
-• Cherchez dans vos discussions locales par sens, dans toute langue, hors ligne.
-• D'autres apps peuvent demander un modèle local - vous voyez qui, et pouvez révoquer.
-• Les téléchargements sont vérifiés par leur SHA-256.
-• Votre compte Hugging Face, ou importez votre propre .gguf.
+• Reprendre un chat Codex le reprend vraiment : plus de nouvelle session vide quand la session est occupee.
+• La session passe librement du telephone au serveur : le telephone la rend des qu'il est inactif ou quitte.
+• Si un terminal du serveur la detient, touchez la ligne pour la reprendre.
+• Le terminal integre est bien plus rapide sur les longues sorties, defile correctement et a un bouton bas de page.

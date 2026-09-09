@@ -224,13 +224,43 @@ object CodexSpec : AgentCliSpec {
         // `thread.started` in the new schema (or `payload.id` from
         // `session_meta` in the old schema) — the FILENAME UUID is
         // decorative (openai/codex discussion #3827).
+        val flags = "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg"
         return if (input.resumeId != null) {
             val rid = shellEscape(input.resumeId)
-            "printf '%s' $escapedText | ${keyEnv}codex exec resume $rid - " +
-                "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
+            // ⛔ OPTIONS GO BEFORE THE SUBCOMMAND.
+            //
+            // `resume` is a subcommand of `exec`, and options placed after it
+            // die at argv parse — measured on the owner's server 2026-09-09,
+            // on BOTH installed binaries (0.142.2 and 0.153.4), so this was
+            // never a new regression:
+            //
+            //   codex exec resume <ID> - --json --skip-git-repo-check \
+            //       --sandbox read-only
+            //   -> error: unexpected argument '--sandbox' found        (rc=2)
+            //      Usage: codex exec resume --json --skip-git-repo-check \
+            //             <SESSION_ID> <PROMPT>
+            //
+            // So EVERY resume on this line failed before codex ran — except
+            // YOLO, whose lone `--dangerously-bypass-approvals-and-sandbox`
+            // happens to be accepted in that position. The one mode that
+            // grants everything was the only one that could continue a chat,
+            // which is the same shape of defect as the 0.149.1 one this file
+            // already documents, one subcommand deeper.
+            //
+            // The documented layout is `codex exec [OPTIONS] <COMMAND>`, and
+            // flags-before-`resume` was verified accepted on 0.142.2 AND
+            // 0.153.4 across all three tiers, and verified to resume FOR REAL
+            // (`codex exec --json --skip-git-repo-check --sandbox read-only
+            // resume <ID> -` answered out of the thread's own history, 18k
+            // input tokens of it). CliFlagAudit now probes this shape too —
+            // it only ever probed the new-chat one, which is how the breakage
+            // stayed green.
+            //
+            // `-` stays the PROMPT positional: codex's own help says "If `-`
+            // is used, read from stdin".
+            "printf '%s' $escapedText | ${keyEnv}codex exec $flags resume $rid - 2>&1"
         } else {
-            "printf '%s' $escapedText | ${keyEnv}codex exec - " +
-                "--json --skip-git-repo-check$providerArg$approvalArg$modelArg$reasoningArg 2>&1"
+            "printf '%s' $escapedText | ${keyEnv}codex exec $flags - 2>&1"
         }
     }
 

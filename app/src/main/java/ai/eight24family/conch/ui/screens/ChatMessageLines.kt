@@ -250,6 +250,9 @@ internal fun TerminalLine(
     onAnswerQuestion: (Map<Int, List<String>>) -> Unit = {},
     /** Tap on the "earlier history hidden" marker → load the full session. */
     onLoadEarlier: () -> Unit = {},
+    /** Tap on the "session open elsewhere" marker → end the process holding
+     *  the Codex thread so THIS chat can continue it. */
+    onTakeOverSession: () -> Unit = {},
     /** "Always allow" on a permission card — only wired where the agent
      *  supports a session-scoped grant (Codex/Gemini). */
     onAllowSession: () -> Unit = {},
@@ -277,9 +280,15 @@ internal fun TerminalLine(
                 AgentMessage.EventNote.Tone.INFO -> MaterialTheme.colorScheme.tertiary
                 AgentMessage.EventNote.Tone.DIM -> MaterialTheme.colorScheme.outline
             },
-            // The history-window marker is tappable — load the full session.
-            onClick = if (msg.id == ai.eight24family.conch.ui.viewmodel.ChatViewModel.HISTORY_WINDOW_MARKER_ID)
-                onLoadEarlier else null,
+            // Two markers are tappable, both dispatched by stable id: load
+            // the full session, and take a locked Codex thread back.
+            onClick = when (msg.id) {
+                ai.eight24family.conch.ui.viewmodel.ChatViewModel.HISTORY_WINDOW_MARKER_ID ->
+                    onLoadEarlier
+                ai.eight24family.conch.agent.codex.CodexThreadLock.TAKEOVER_MARKER_ID ->
+                    onTakeOverSession
+                else -> null
+            },
         )
         is AgentMessage.UserText -> {
             // Chat exchanges image PATHS, not bytes. Show the picture inline,

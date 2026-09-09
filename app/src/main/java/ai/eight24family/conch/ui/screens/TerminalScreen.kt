@@ -2,9 +2,17 @@ package ai.eight24family.conch.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowDown
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -250,35 +258,132 @@ fun TerminalScreen(
                 // the user is at the bottom, and stays put the moment they scroll
                 // up — output arriving must never yank the page out from under
                 // someone reading it.
-                val vScroll = rememberScrollState()
-                var pinned by remember { mutableStateOf(true) }
-                LaunchedEffect(vScroll.value, vScroll.maxValue) {
-                    pinned = vScroll.value >= vScroll.maxValue - lineHpx.toInt()
+                //
+                // ⛔ ONE LINE PER ITEM, NOT ONE Text FOR THE WHOLE BUFFER.
+                //
+                // This was a single `Text` holding scrollback + screen as one
+                // AnnotatedString, rebuilt and re-laid-out on every frame. Text
+                // layout is O(total lines), so the cost of one chunk of output
+                // grew with everything that had ever been printed — the second
+                // half of the terminal's (owner, 2026-09-09; the first half was
+                // the per-frame deep copy of the scrollback, fixed in
+                // VtEmulator.snapshot). A LazyColumn measures only the ~40 rows
+                // on screen, so the cost stops depending on history.
+                val listState = rememberLazyListState()
+                val histCount = screen.history.size
+                val total = histCount + screen.rows
+                // "At the bottom" straight off the layout, so it cannot drift
+                // out of step with a pixel arithmetic of its own.
+                val pinned by remember {
+                    derivedStateOf {
+                        val vis = listState.layoutInfo.visibleItemsInfo
+                        vis.isEmpty() || vis.last().index >= total - 1
+                    }
                 }
                 LaunchedEffect(screen.version) {
-                    if (pinned) vScroll.scrollTo(vScroll.maxValue)
+                    if (pinned && total > 0) listState.scrollToItem(total - 1)
                 }
-                Text(
-                    text = renderScreen(screen, defFg, defBg),
-                    style = termStyle,
-                    softWrap = false,
-                    maxLines = screen.history.size + screen.rows,
-                    color = defFg,
+
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(vScroll)
+                        .fillMaxSize()
+                        // ⛔ PINCH-ZOOM MUST NOT EAT A ONE-FINGER DRAG.
+                        //
+                        // `detectTransformGestures` claims the gesture as soon
+                        // as it passes touch slop — with ONE finger too — so it
+                        // swallowed every scroll drag before it could reach the
+                        // scroll container. Together with the full-size input
+                        // overlay below (which was drawn last and therefore got
+                        // the events first) that is why the terminal could not
+                        // be scrolled at all. Here the pointers are consumed
+                        // ONLY while two are down; a single finger is left
+                        // untouched and the list scrolls it.
                         .pointerInput(Unit) {
-                            detectTransformGestures { _, _, zoom, _ ->
-                                if (zoom != 1f) {
-                                    termScale = (termScale * zoom).coerceIn(0.5f, 2.5f)
-                                    TerminalPrefs.scale = termScale
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var prev = 0f
+                                while (true) {
+                                    val ev = awaitPointerEvent()
+                                    val down = ev.changes.filter { it.pressed }
+                                    if (down.size >= 2) {
+                                        val d = (down[0].position - down[1].position).getDistance()
+                                        if (prev > 0f && d > 0f) {
+                                            val z = d / prev
+                                            if (z != 1f) {
+                                                termScale = (termScale * z).coerceIn(0.5f, 2.5f)
+                                                TerminalPrefs.scale = termScale
+                                            }
+                                        }
+                                        prev = d
+                                        ev.changes.forEach { it.consume() }
+                                    } else {
+                                        prev = 0f
+                                    }
+                                    if (down.isEmpty()) break
                                 }
                             }
                         }
-                        .padding(horizontal = 3.dp),
-                )
+                        // Tap anywhere = focus the terminal and raise the
+                        // keyboard. A tap is what the full-size overlay used to
+                        // be for; it does not need to cover the viewport to do
+                        // it, and covering the viewport is what broke scrolling.
+                        .pointerInput(Unit) {
+                            detectTapGestures { runCatching { focus.requestFocus() } }
+                        },
+                ) {
+                    items(total) { i ->
+                        val row = if (i < histCount) {
+                            screen.history[i]
+                        } else {
+                            screen.lines.getOrNull(i - histCount)
+                        }
+                        // Keyed on the ROW, so a scrollback line — a stable
+                        // shared instance now — is styled once and then reused
+                        // on every later frame; only the live rows, which are
+                        // fresh objects per snapshot, are rebuilt. The cursor
+                        // sits in the live area, hence row = -1 above it.
+                        val liveY = if (i >= histCount) i - histCount else -1
+                        val cursorHere = screen.cursorVisible && liveY == screen.cursorRow
+                        val line = remember(row, cursorHere, screen.cursorCol, defFg, defBg) {
+                            buildAnnotatedString {
+                                if (row != null) appendRow(row, liveY, screen, defFg, defBg)
+                            }
+                        }
+                        Text(
+                            text = line,
+                            style = termStyle,
+                            softWrap = false,
+                            maxLines = 1,
+                            color = defFg,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 3.dp),
+                        )
+                    }
+                }
 
-                // Transparent input overlay: captures focus + keystrokes.
+                // ── jump to bottom ── Scrolling up in a terminal is how you
+                // read the thing; the way back was a manual drag through the
+                // whole scrollback, with no control anywhere on screen.
+                if (!pinned) {
+                    val scope = rememberCoroutineScope()
+                    FilledIconButton(
+                        onClick = { scope.launch { listState.scrollToItem((total - 1).coerceAtLeast(0)) } },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp)
+                            .size(40.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardDoubleArrowDown,
+                            contentDescription = "jump to newest output",
+                        )
+                    }
+                }
+
+                // Transparent input sink: holds focus, IME and hardware keys.
+                // Deliberately NOT full-size — see the pointer comment above.
                 BasicTextField(
                     value = imeField,
                     onValueChange = { nv ->
@@ -299,7 +404,7 @@ fun TerminalScreen(
                         capitalization = KeyboardCapitalization.None,
                     ),
                     modifier = Modifier
-                        .fillMaxSize()
+                        .size(1.dp)
                         .focusRequester(focus)
                         .onPreviewKeyEvent { sendKey(it) },
                     decorationBox = { inner -> inner() },

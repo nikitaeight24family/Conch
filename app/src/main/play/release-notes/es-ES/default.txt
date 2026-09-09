@@ -1,8 +1,6 @@
-Los modelos locales han crecido.
+Una sesion, donde sea.
 
-• Habla con un modelo en tu teléfono dentro de la app: sin opciones de desarrollador.
-• Dictado: tu voz se convierte en texto EN el teléfono (Whisper), nada se sube.
-• Busca en tus chats locales por significado, en cualquier idioma, sin conexión.
-• Otras apps pueden pedir un modelo local: ves quién lo pide y puedes revocarlo.
-• Las descargas se verifican con su SHA-256 publicado.
-• Tu cuenta de Hugging Face, o importa tu propio .gguf.
+• Continuar un chat de Codex lo continua de verdad: ya no crea otro vacio cuando la sesion esta ocupada.
+• La sesion pasa libremente entre telefono y servidor: el telefono la libera al quedar inactivo o al salir.
+• Si una terminal del servidor la retiene, toca la fila para tomarla.
+• La terminal integrada es mucho mas rapida con salidas largas, se desplaza bien y tiene boton para ir al final.

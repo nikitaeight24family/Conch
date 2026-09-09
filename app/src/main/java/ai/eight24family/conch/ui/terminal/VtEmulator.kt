@@ -508,9 +508,24 @@ class VtEmulator(cols: Int, rows: Int) {
         // History travels WITH the frame: the UI renders one continuous block
         // (scrollback first, live screen last) so the user scrolls a single
         // list instead of two views that can disagree.
-        val hist = if (altScreen) emptyList() else scrollback.map {
-            VtRow(it.ch.copyOf(), it.fg.copyOf(), it.bg.copyOf(), it.fl.copyOf())
-        }
+        //
+        // ⛔ THE ROWS ARE SHARED, NOT RE-COPIED, AND THAT IS THE WHOLE POINT.
+        //
+        // This used to deep-copy the ENTIRE scrollback on every frame — four
+        // array allocations per line, per snapshot, per chunk of output, all
+        // inside this @Synchronized block that the reader thread needs back.
+        // At MAX_SCROLLBACK × cols that is millions of elements copied and
+        // thrown away per second of output: the terminal's (owner,
+        // 2026-09-09), and a lock the producer keeps queueing behind.
+        //
+        // It was never needed. A row entering the scrollback is ALREADY
+        // defensively copied at the push site (see scrollUp) and nothing
+        // mutates it afterwards — the live screen reuses the raw arrays for
+        // its new bottom line, not the copy. So a frame can share the rows;
+        // only the DEQUE itself must not be handed out live, because
+        // MAX_SCROLLBACK trimming mutates it. `ArrayList(...)` copies
+        // references only: O(n) pointers instead of O(n × cols) chars.
+        val hist: List<VtRow> = if (altScreen) emptyList() else ArrayList(scrollback)
         return VtScreen(cols, rows, out, curRow, curCol, cursorVisible, version, hist)
     }
 }

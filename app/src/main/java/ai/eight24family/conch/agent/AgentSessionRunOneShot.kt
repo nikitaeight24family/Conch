@@ -474,6 +474,17 @@ internal class AgentSessionRunOneShot(
      */
     private fun looksLikeDeadSession(tail: String): Boolean {
         val t = tail.lowercase()
+        // BUSY IS NOT DEAD, AND THIS IS THE LINE THAT USED TO CONFUSE THEM.
+        //
+        // codex 0.153 locks a thread to one writer and refuses a second
+        // opener with "thread/resume failed: thread <id> already has an
+        // active writer". The generic "thread/resume failed" below matched
+        // it, so the app dropped the resume id and re-sent the prompt into a
+        // new empty session - the owner's report of a contextless duplicate
+        // instead of a continuation (2026-09-09). The session is alive and
+        // someone else simply has it open; the only correct move is to leave
+        // the chat on it and let the next send retry.
+        if (ai.eight24family.conch.agent.codex.CodexThreadLock.isWriterConflict(t)) return false
         return "thread/resume failed" in t ||
             "thread/resume:" in t ||
             "no such thread" in t ||

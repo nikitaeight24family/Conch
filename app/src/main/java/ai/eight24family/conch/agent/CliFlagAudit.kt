@@ -164,7 +164,35 @@ object CliFlagAudit {
             // the `exec` subcommand, the others take them at top level.
             val invocation = if (agent == Agent.CODEX) "$cli exec" else cli
             val args = m.args.joinToString(" ")
-            sb.append("out=\$($invocation $args --help 2>&1); rc=\$?; ")
+            // ⛔ AUDIT BOTH SHAPES A TURN CAN TAKE — A NEW CHAT *AND* A RESUME.
+            //
+            // This loop used to probe only the new-session shape, and that is
+            // exactly how the 0.153 breakage shipped green: `codex exec
+            // <flags> --help` parsed perfectly while `codex exec resume <ID> -
+            // <flags>` — the shape EVERY continued chat uses — died at parse
+            // with "unexpected argument '--sandbox' found", on SAFE and AUTO,
+            // leaving YOLO as the only mode that could resume at all. Same
+            // class of drift the kdoc above was written for, one subcommand
+            // deeper, and the audit was blind to it because it never asked
+            // about the subcommand.
+            //
+            // The id is a syntactically valid UUID that resolves to nothing;
+            // `--help` still short-circuits before any lookup, so this stays
+            // free of tokens and side effects.
+            val shapes = if (agent == Agent.CODEX) {
+                listOf(
+                    "$invocation $args",
+                    "$invocation $args resume 00000000-0000-0000-0000-000000000000",
+                )
+            } else {
+                listOf("$invocation $args")
+            }
+            // A mode is accepted only when EVERY shape parses. First failure
+            // wins the verdict, so the reported complaint is a real one.
+            sb.append("rc=0; out=''; ")
+            for (shape in shapes) {
+                sb.append("if [ \$rc -eq 0 ]; then out=\$($shape --help 2>&1); rc=\$?; fi; ")
+            }
             sb.append("echo \"MODE:${m.mode.name}:\$rc\"; ")
             // Only the complaint matters; a successful --help dump is noise and
             // would push a real error out of a bounded read.

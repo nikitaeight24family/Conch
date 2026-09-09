@@ -306,6 +306,15 @@ class AgentSession(
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
     )
 
+    /**
+     * End whatever process is holding this Codex thread's writer, so this
+     * chat can continue the SAME session instead of starting a new one.
+     * Only meaningful for Codex (no other CLI here locks a thread); false
+     * when there was nothing to take.
+     */
+    suspend fun takeOverAgentSession(): Boolean =
+        if (server.agent == Agent.CODEX) codexAppServer.takeOverThread() else false
+
     /** True while this session's turns ride the persistent control
      *  channel (spec supports it AND it hasn't broken at launch). */
     private fun usePersistent(): Boolean =
@@ -768,7 +777,7 @@ class AgentSession(
      * republishes `remoteFileOpen`, the exact flag the spinner and the Stop
      * button read. Stop's own two writes are erased within one tick. Measured on
      * the owner's phone 2026-09-07: eight presses, `frozenMs` climbing 155s→190s
-     * on an unchanged 146 KB file, and the spinner never dropped once.
+     * on an unchanged 146 KB file, spinner never dropped.
      *
      * So Stop is a LATCH the mirror must obey, not a one-shot write it can
      * overwrite. Two things lift it, both of them positive events rather than

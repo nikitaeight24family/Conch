@@ -133,6 +133,7 @@ internal fun ChatMessageList(
                             isStreaming = msg.id == streamingId,
                             onAnswerQuestion = onAnswerQuestion,
                             onLoadEarlier = { vm.loadFullHistory() },
+                            onTakeOverSession = { vm.takeOverSession() },
                             onAllowSession = onAllowSession,
                         )
                     }

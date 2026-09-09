@@ -6,6 +6,7 @@ import ai.eight24family.conch.agent.codex.CodexAppServerEvents
 import ai.eight24family.conch.agent.codex.CodexAppServerWire
 import ai.eight24family.conch.agent.codex.CodexAppServerWire.str
 import ai.eight24family.conch.agent.codex.CodexMessageParser
+import ai.eight24family.conch.agent.codex.CodexThreadLock
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -78,6 +79,26 @@ internal class AgentSessionCodexAppServer(
     /** authPrep the live process was launched with — the ONLY launch
      *  param that still forces a restart (everything else is per-turn). */
     @Volatile private var launchedAuthPrep: String? = null
+    /**
+     * Set when [ensureReady] found the thread REFUSED because another process
+     * holds codex's writer lock, and could not clear it (the holder is a
+     * person's terminal). Read and cleared by the turn entry points.
+     *
+     * It deliberately does NOT set [broken]. `broken` means "this codex is
+     * too old for app-server, ride `codex exec` forever", and the exec path
+     * reads any resume refusal as a DEAD session: it drops the resume id and
+     * re-sends the prompt into a brand-new empty thread. A busy thread going
+     * down that road is exactly the doubling bug (2026-09-09). Busy is
+     * temporary - the next send must try the SAME thread again.
+     */
+    @Volatile private var threadBusy: List<CodexThreadLock.Holder>? = null
+
+    /**
+     * Pending "hand the thread back" timer. Cancelled when a turn starts,
+     * re-armed when one finishes. See [armIdleRelease].
+     */
+    private var idleReleaseJob: Job? = null
+
     /** Thread the live process has open (start/resume completed). */
     @Volatile private var threadId: String? = null
     @Volatile private var activeTurnId: String? = null
@@ -90,6 +111,14 @@ internal class AgentSessionCodexAppServer(
      *  (`result` on success; `{__rpc_error__:…}` wrapper on error). */
     private val pendingResponses =
         java.util.concurrent.ConcurrentHashMap<Long, CompletableDeferred<JsonObject?>>()
+
+    /** The JSON-RPC `error` a request came back with, kept until its own
+     *  [rpcDetailed] collects it. A refusal used to be logged and thrown away
+     *  (`complete(null)`), so the code deciding what to do next could not tell
+     *  "someone else has this thread open" from "this thread is gone" — and
+     *  guessed the destructive one. Keyed by request id, never a shared field:
+     *  a turn and an interrupt are in flight concurrently. */
+    private val rpcErrors = java.util.concurrent.ConcurrentHashMap<Long, String>()
 
     /** Server request key → pending card bookkeeping. */
     private data class PendingServerReq(
@@ -204,7 +233,38 @@ internal class AgentSessionCodexAppServer(
                     }
                 }
             }
-            if (!ensureReady()) return@withContext false
+            // This turn owns the thread until it ends; the release timer is
+            // re-armed from the `finally` below.
+            idleReleaseJob?.cancel()
+            if (!ensureReady()) {
+                // Returning false here reruns the prompt through the one-shot
+                // `codex exec` path, and THAT path reads a resume refusal as a
+                // dead session: it drops the resume id and answers in a new
+                // empty thread. For a thread that is merely BUSY that is the
+                // doubling bug, so this branch stops before it.
+                //
+                // The prompt is handed back undelivered (the ViewModel
+                // re-buffers it, so freeing the lock and sending again costs
+                // the user nothing) and the chat keeps its resume id, so the
+                // next attempt resumes the REAL session.
+                threadBusy?.let { holders ->
+                    threadBusy = null
+                    // Stable id: the row IS the take-over button (see
+                    // CodexThreadLock.TAKEOVER_MARKER_ID), and hitting the
+                    // lock twice cannot stack two of them.
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = CodexThreadLock.TAKEOVER_MARKER_ID,
+                            label = CodexThreadLock.ttyHolderNote(holders),
+                            tone = AgentMessage.EventNote.Tone.WARN,
+                        ),
+                    )
+                    onPromptUndelivered(text)
+                    onStateChange(SessionState.Failed("session open elsewhere"))
+                    return@withContext true
+                }
+                return@withContext false
+            }
             val tid = threadId ?: run { broken = true; return@withContext false }
             val done = CompletableDeferred<Boolean>()
             turnDone = done
@@ -288,6 +348,9 @@ internal class AgentSessionCodexAppServer(
             onThinkingTokens(null)
             history.flushStreamingBuffer()
             if (getState() == SessionState.Working) onStateChange(SessionState.Running)
+            // The operation is over: start counting down to handing the
+            // thread back, so the next client anywhere can take it.
+            armIdleRelease()
         }
     }
 
@@ -308,7 +371,21 @@ internal class AgentSessionCodexAppServer(
         // Same stale-cancel re-arm as runTurn.
         sshLifecycle.userCancelled = false
         try {
-            if (!ensureReady()) return@withContext false
+            if (!ensureReady()) {
+                threadBusy?.let { holders ->
+                    threadBusy = null
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = CodexThreadLock.TAKEOVER_MARKER_ID,
+                            label = CodexThreadLock.ttyHolderNote(holders),
+                            tone = AgentMessage.EventNote.Tone.WARN,
+                        ),
+                    )
+                    onStateChange(SessionState.Failed("session open elsewhere"))
+                    return@withContext true
+                }
+                return@withContext false
+            }
             val tid = threadId ?: run { broken = true; return@withContext false }
             val done = CompletableDeferred<Boolean>()
             turnDone = done
@@ -347,6 +424,9 @@ internal class AgentSessionCodexAppServer(
             onThinkingTokens(null)
             history.flushStreamingBuffer()
             if (getState() == SessionState.Working) onStateChange(SessionState.Running)
+            // The operation is over: start counting down to handing the
+            // thread back, so the next client anywhere can take it.
+            armIdleRelease()
         }
     }
 
@@ -477,12 +557,73 @@ internal class AgentSessionCodexAppServer(
 
         // thread/start | thread/resume
         val rid = getResumeId()
-        val threadReqId = reqCounter.incrementAndGet()
-        val resp = rpc(
-            threadReqId,
+        threadBusy = null
+        var newThreadId: String?
+        var openErr: String?
+        openThread(rid).let { newThreadId = it.first; openErr = it.second }
+
+        // "ALREADY HAS AN ACTIVE WRITER" IS BUSY, NOT GONE.
+        //
+        // codex 0.153 locks a thread to one writer. Read as a dead session,
+        // that refusal made the app abandon the real thread and answer in a
+        // fresh empty one - the owner's report of a new contextless session
+        // instead of a continuation, reproduced on his server 2026-09-09
+        // (refusal 18:33:11, ghost rollout 18:33:18). So: find out WHO holds
+        // it before deciding anything, and never start a blank thread as a
+        // consequence of a lock.
+        if (newThreadId.isNullOrBlank() && rid != null &&
+            CodexThreadLock.isWriterConflict(openErr)
+        ) {
+            val holders = probeThreadLock(rid)
+            val ours = holders.filter { it.kind == CodexThreadLock.Kind.HEADLESS }
+            if (holders.isNotEmpty() && ours.size == holders.size) {
+                // Every holder is headless - an app-server of OURS that
+                // outlived its SSH channel. Our garbage, our cleanup: reap it
+                // and resume for real, with nothing on screen (the app fixes
+                // what it can fix by itself).
+                android.util.Log.i(
+                    tag,
+                    "thread $rid held by our own orphan(s) ${ours.map { it.pid }} - reaping, retrying resume",
+                )
+                reapHolders(ours.map { it.pid })
+                openThread(rid).let { newThreadId = it.first; openErr = it.second }
+            }
+            if (newThreadId.isNullOrBlank()) {
+                // A person is sitting in it (or we could not prove otherwise).
+                // Hands off, and the chat STAYS on this thread.
+                android.util.Log.w(tag, "thread $rid busy: holders=$holders")
+                threadBusy = holders
+                teardownProcess()
+                return false
+            }
+        }
+
+        if (newThreadId.isNullOrBlank()) {
+            android.util.Log.w(
+                tag,
+                "thread/${if (rid != null) "resume" else "start"} failed " +
+                    "(rid=$rid, err=${openErr?.take(200)}) - falling back to exec",
+            )
+            broken = true
+            teardownProcess()
+            return false
+        }
+        threadId = newThreadId
+        if (rid == null) setResumeId(newThreadId!!)
+        android.util.Log.d(tag, "thread ready id=$newThreadId resumed=${rid != null}")
+        return true
+    }
+
+    /** One `thread/resume` (or `thread/start` when there is nothing to
+     *  resume) -> (thread id, refusal text). Split out so the writer-lock
+     *  recovery can run it a second time after clearing the holder. */
+    private suspend fun openThread(rid: String?): Pair<String?, String?> {
+        val reqId = reqCounter.incrementAndGet()
+        val (resp, err) = rpcDetailed(
+            reqId,
             if (rid != null) {
                 CodexAppServerWire.encodeThreadResume(
-                    threadReqId, rid,
+                    reqId, rid,
                     model = getModelOverride()?.takeIf { it.isNotBlank() }
                         ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
                     cwd = cwdSnapshot(),
@@ -490,7 +631,7 @@ internal class AgentSessionCodexAppServer(
                 )
             } else {
                 CodexAppServerWire.encodeThreadStart(
-                    threadReqId,
+                    reqId,
                     model = getModelOverride()?.takeIf { it.isNotBlank() }
                         ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
                     cwd = cwdSnapshot(),
@@ -499,38 +640,98 @@ internal class AgentSessionCodexAppServer(
             },
             timeoutMs = 30_000,
         )
-        val newThreadId = resp?.let {
+        val id = resp?.let {
             SilentlyTry.logged(tag, "read thread id") { it["thread"]?.jsonObject?.str("id") }
         }
-        if (newThreadId.isNullOrBlank()) {
-            android.util.Log.w(
-                tag,
-                "thread/${if (rid != null) "resume" else "start"} failed (rid=$rid) — falling back to exec",
+        return id to err
+    }
+
+    /** Who has this thread's rollout open, over the live SSH channel.
+     *  Empty when nobody does, or when the probe itself could not run - the
+     *  caller treats both as "cannot prove it is ours", which keeps the
+     *  destructive branch closed. */
+    private suspend fun probeThreadLock(rid: String): List<CodexThreadLock.Holder> {
+        if (!CodexThreadLock.isSafeThreadId(rid)) return emptyList()
+        val raw = sshLifecycle.execOnLive(loginShell(CodexThreadLock.probeScript(rid)))
+        val parsed = CodexThreadLock.parseProbe(raw)
+        return (parsed as? CodexThreadLock.Probe.Held)?.holders ?: emptyList()
+    }
+
+    /**
+     * TAKE THE THREAD BACK — the one thing the app cannot do by itself.
+     *
+     * The automatic recovery in [ensureReady] only ever reaps HEADLESS
+     * holders, because those are orphans of ours. A terminal someone may be
+     * sitting in is not ours to end on a timer, and codex offers no polite
+     * ask: there is no thread-level release (`thread/unsubscribe` leaves the
+     * writer exactly where it was, measured on 0.153.4), so the writer moves
+     * only when a process ends. Hence a deliberate tap, and hence this is the
+     * ONLY path that will end a tty holder.
+     *
+     * Nothing is lost by it: the thread's content is its rollout file on
+     * disk, and the next resume reads it back in full.
+     */
+    suspend fun takeOverThread(): Boolean {
+        val rid = getResumeId() ?: return false
+        val holders = probeThreadLock(rid)
+        if (holders.isEmpty()) {
+            // Already free — the holder closed while the row sat on screen.
+            history.emitMsg(
+                AgentMessage.EventNote(
+                    id = CodexThreadLock.TAKEOVER_MARKER_ID,
+                    label = "session is free again — send to continue it",
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                ),
             )
-            broken = true
-            teardownProcess()
-            return false
+            return true
         }
-        threadId = newThreadId
-        if (rid == null) setResumeId(newThreadId)
-        android.util.Log.d(tag, "thread ready id=$newThreadId resumed=${rid != null}")
-        return true
+        val pids = holders.map { it.pid }
+        reapHolders(pids)
+        val left = probeThreadLock(rid)
+        val ok = left.isEmpty()
+        history.emitMsg(
+            AgentMessage.EventNote(
+                id = CodexThreadLock.TAKEOVER_MARKER_ID,
+                label = if (ok) CodexThreadLock.takenOverNote(pids)
+                else CodexThreadLock.takeoverFailedNote(),
+                tone = if (ok) AgentMessage.EventNote.Tone.INFO
+                else AgentMessage.EventNote.Tone.WARN,
+            ),
+        )
+        return ok
+    }
+
+    /** INT->TERM->KILL a headless holder through the one ladder the app has. */
+    private suspend fun reapHolders(pids: List<Long>) {
+        if (pids.isEmpty()) return
+        val out = sshLifecycle.execOnLive(loginShell(RemoteTurnKiller.killPidsScript(pids)))
+        android.util.Log.d(tag, "reapHolders $pids -> ${RemoteTurnKiller.parseOutcome(out)}")
     }
 
     /** Send one request and await its JSON-RPC response. Null on write
      *  failure, timeout, or an error response (logged). [id] MUST be the
      *  exact id stamped into [line] — passed explicitly, a counter read
      *  here would race a concurrent interrupt's increment. */
-    private suspend fun rpc(id: Long, line: String, timeoutMs: Long): JsonObject? {
+    private suspend fun rpc(id: Long, line: String, timeoutMs: Long): JsonObject? =
+        rpcDetailed(id, line, timeoutMs).first
+
+    /** [rpc], plus the server's `error` text when it refused. Callers that
+     *  must ACT on the reason (thread open — busy vs. gone) use this one. */
+    private suspend fun rpcDetailed(
+        id: Long,
+        line: String,
+        timeoutMs: Long,
+    ): Pair<JsonObject?, String?> {
         val deferred = CompletableDeferred<JsonObject?>()
         pendingResponses[id] = deferred
         if (!writeLine(line)) {
             pendingResponses.remove(id)
-            return null
+            rpcErrors.remove(id)
+            return null to null
         }
         val resp = withTimeoutOrNull(timeoutMs) { deferred.await() }
         pendingResponses.remove(id)
-        return resp
+        return resp to rpcErrors.remove(id)
     }
 
     private fun startReader(cmd: Session.Command) {
@@ -546,6 +747,8 @@ internal class AgentSessionCodexAppServer(
                                 if (id != null) {
                                     if (msg.error != null) {
                                         android.util.Log.w(tag, "rpc error for #$id: ${msg.error.toString().take(200)}")
+                                        // KEEP the text — see [rpcErrors].
+                                        rpcErrors[id] = msg.error.toString()
                                         pendingResponses.remove(id)?.complete(null)
                                     } else {
                                         pendingResponses.remove(id)?.complete(msg.result ?: JsonObject(emptyMap()))
@@ -567,6 +770,7 @@ internal class AgentSessionCodexAppServer(
                 pendingServerReqs.keys.toList().forEach { retireServerReq(it) }
                 pendingResponses.values.forEach { it.complete(null) }
                 pendingResponses.clear()
+                rpcErrors.clear()
                 turnDone?.complete(false)
             }
         }
@@ -990,7 +1194,98 @@ internal class AgentSessionCodexAppServer(
         }
     }
 
+    /**
+     * HAND THE THREAD BACK WHEN NOBODY HERE IS USING IT.
+     *
+     * codex allows ONE writer per thread and offers no way to give it up
+     * short of ending the process — measured 2026-09-09 on 0.153.4:
+     * `thread/unsubscribe` answers `"unsubscribed"` and the thread STAYS in
+     * `thread/loaded/list`, with a second opener still refused; closing the
+     * process releases it instantly (app-server exits on stdin EOF). So the
+     * lock is a consequence of how long we keep the process parked, and
+     * nothing else.
+     *
+     * Which means a chat left open on the phone used to lock the owner out of
+     * his own session everywhere else, for as long as the app felt like
+     * holding it. Continuing on the server, then back on the phone, has to
+     * work without anyone recreating anything — so the process is kept only
+     * while it is EARNING its keep.
+     *
+     * The arithmetic, measured on the owner's server:
+     *   • resume inside a live process ....... 12–86 ms
+     *   • cold: launch + initialize + resume .. 1.8–2.3 s
+     *     plus the MCP servers coming back up . +2–4 s (they restart with it)
+     *   • holding it costs every other client .. 100% of the time
+     * A burst of turns has gaps of seconds, so parking the process across a
+     * burst is worth ~5 s per turn; the gaps BETWEEN bursts are minutes to
+     * hours, where the same parking buys nothing and blocks everything.
+     * [IDLE_RELEASE_MS] is where those two facts meet.
+     *
+     * ⚠ A RUNNING TURN IS NEVER RELEASED, foreground or not. "Send a task,
+     * pocket the phone, the agent keeps working" is a shipped promise (see
+     * AppForeground's own warning); the writer is exactly what a running turn
+     * needs. Backgrounding only shortens the wait for an IDLE thread — the
+     * user walking to their desk is the clearest possible signal that the
+     * phone is done with it.
+     */
+    private fun armIdleRelease() {
+        idleReleaseJob?.cancel()
+        if (getResumeId() == null) return
+        idleReleaseJob = scope.launch {
+            var waited = 0L
+            while (waited < IDLE_RELEASE_MS) {
+                kotlinx.coroutines.delay(IDLE_TICK_MS)
+                // Someone else already tore it down, or a new turn claimed it
+                // — that turn's own completion re-arms this.
+                if (!procAlive) return@launch
+                if (turnDone != null) return@launch
+                // Left the phone: hand it over now, don't sit out the timer.
+                if (!ai.eight24family.conch.util.AppForeground.isForeground) break
+                waited += IDLE_TICK_MS
+            }
+            if (turnDone == null && procAlive) releaseForHandoff()
+        }
+    }
+
+    /**
+     * Close the process and PROVE the thread came free.
+     *
+     * [teardownProcess] closes stdin and the channel, and app-server exits on
+     * EOF — but a channel that dies without a clean close (a phone changing
+     * networks) leaves the remote process alive and still holding the writer:
+     * that is where the orphans this class reaps in [ensureReady] come from.
+     * A release that only HOPES is worse than none, because the owner would
+     * find the session locked with nothing on screen saying why. So the same
+     * probe answers the question, and anything of ours still standing is
+     * reaped.
+     */
+    private suspend fun releaseForHandoff() {
+        val rid = getResumeId()
+        android.util.Log.d(tag, "releasing thread $rid for handoff")
+        teardownProcess()
+        if (rid == null) return
+        val leftovers = probeThreadLock(rid).filter { it.kind == CodexThreadLock.Kind.HEADLESS }
+        if (leftovers.isEmpty()) return
+        // ⛔ DO NOT REAP A PROCESS THE USER JUST STARTED.
+        //
+        // The probe is a round trip to the server, and a send landing inside
+        // it relaunches the channel — whose app-server is HEADLESS and holds
+        // this very thread, so it matches the filter above perfectly. Killing
+        // it would break the turn we were trying to protect. Cancelling this
+        // job (runTurn does) already unwinds at the probe's suspension point;
+        // this is the explicit belt: if the channel is alive again, the thread
+        // is legitimately claimed and there is nothing here to clean up.
+        if (procAlive || turnDone != null) {
+            android.util.Log.d(tag, "handoff release overtaken by a new turn — leaving $rid claimed")
+            return
+        }
+        android.util.Log.w(tag, "channel closed but ${leftovers.map { it.pid }} still hold $rid — reaping")
+        reapHolders(leftovers.map { it.pid })
+    }
+
     fun teardownProcess() {
+        idleReleaseJob?.cancel()
+        idleReleaseJob = null
         readerJob?.cancel()
         readerJob = null
         // A login can happen between launches — never trust a stale verdict.
@@ -1021,5 +1316,15 @@ internal class AgentSessionCodexAppServer(
 
     companion object {
         private const val TURN_TIMEOUT_MS = 15L * 60 * 1000
+
+        /**
+         * How long an IDLE thread stays parked here before the writer is
+         * handed back. See [armIdleRelease] for the measured numbers behind
+         * the choice: a burst of turns (gaps of seconds) keeps its ~5 s-a-turn
+         * warm path, and the long gaps between bursts stop locking every other
+         * client out. Backgrounding the app cuts the wait short.
+         */
+        private const val IDLE_RELEASE_MS = 120_000L
+        private const val IDLE_TICK_MS = 5_000L
     }
 }

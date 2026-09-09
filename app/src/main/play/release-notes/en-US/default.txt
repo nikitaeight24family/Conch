@@ -1,8 +1,6 @@
-Local models grew up.
+One session, wherever you are.
 
-• Talk to a model on your phone right in the app - no developer options, no CLI first.
-• Dictate: your voice becomes text ON the phone (Whisper), never uploaded.
-• Search your local chats by meaning, in any language, offline.
-• Other apps can ask Conch for a local model - you see who asks, and can revoke it.
-• Downloads are checked against their published SHA-256.
-• Your own Hugging Face account for gated weights, or import your own .gguf.
+• Continuing a Codex chat continues it - it no longer starts a fresh, empty one when the session is busy.
+• Move a session between phone and server freely: the phone hands it back when it goes idle or you leave the app.
+• If a terminal on the server is holding the session, tap the row to take it over.
+• The built-in terminal is far faster with long output, scrolls properly, and has a jump-to-newest button.
