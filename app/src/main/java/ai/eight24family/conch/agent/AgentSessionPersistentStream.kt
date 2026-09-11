@@ -1,6 +1,7 @@
 package ai.eight24family.conch.agent
 
 import ai.eight24family.conch.agent.claude.ClaudeControlWire
+import ai.eight24family.conch.agent.claude.ClaudeSessionLock
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.spec.ParserHelpers
@@ -118,6 +119,10 @@ internal class AgentSessionPersistentStream(
     @Volatile private var launched: LaunchParams? = null
     private var readerJob: Job? = null
 
+    /** Armed when the app goes to background, cancelled if it comes back —
+     *  see [armHandoffRelease]. */
+    private var handoffReleaseJob: Job? = null
+
     /** Wall-clock of the last stdout line the reader saw. Drives the
      *  INACTIVITY turn timeout: a research turn that is actively streaming
      *  (Agent/Task/Workflow subagents) must NEVER be killed on a wall-clock
@@ -135,6 +140,19 @@ internal class AgentSessionPersistentStream(
     @Volatile private var armedThisTurn = false
     /** Was this turn the dispatch of a `/loop …` line? */
     @Volatile private var loopRequestedThisTurn = false
+
+    /** A `/loop` wakeup is armed INSIDE the current process, so the process is
+     *  not idle even when no turn is running — it is the thing that will wake
+     *  up. Distinct from [armedThisTurn], which is a per-turn check; this
+     *  outlives the turn and is what stops [releaseForHandoff] from ending a
+     *  night's work because the phone went into a pocket. */
+    @Volatile private var loopArmed = false
+
+    /** Set by [ensureProcess] when it declined to launch because a person's
+     *  terminal holds this session, so [runTurn] can say so instead of routing
+     *  into the one-shot fallback (which would resume the same session and do
+     *  the very forking the decline avoided). Null on every other outcome. */
+    @Volatile private var heldByTty: List<SessionHolder.Holder>? = null
 
     /** True after a launch-level failure — the session permanently falls
      *  back to the one-shot path (checked by AgentSession's router). */
@@ -198,6 +216,25 @@ internal class AgentSessionPersistentStream(
         try {
             backfillCwdIfNeeded()
             if (!ensureProcess()) {
+                // A terminal holds this session. The one-shot fallback would
+                // resume the SAME session and become the second writer the
+                // launch just declined to be, so this outcome must never fall
+                // through to it. Keep the chat bound to the real session, put
+                // the text back in the composer, and offer the way out — the
+                // tap is deliberate and rare on purpose, because the holder can
+                // be a window someone is looking at.
+                heldByTty?.let { holders ->
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = ClaudeSessionLock.TAKEOVER_MARKER_ID,
+                            label = ClaudeSessionLock.ttyHolderNote(holders),
+                            tone = AgentMessage.EventNote.Tone.WARN,
+                        )
+                    )
+                    onPromptUndelivered(text)
+                    onStateChange(SessionState.Running)
+                    return@withContext true
+                }
                 // Launch failed — hand the prompt back for the one-shot
                 // fallback. broken is already set.
                 return@withContext false
@@ -415,8 +452,12 @@ internal class AgentSessionPersistentStream(
     }
 
     /** Start (or reuse) the persistent process. Restarts when launch
-     *  params changed (model/effort/approval pick mid-chat). */
-    private fun ensureProcess(): Boolean {
+     *  params changed (model/effort/approval pick mid-chat).
+     *
+     *  Suspending because a launch now ASKS the server who else has this
+     *  session open before becoming a second writer on it — see the holder
+     *  probe below and [ClaudeSessionLock]. */
+    private suspend fun ensureProcess(): Boolean {
         val params = LaunchParams(
             model = getModelOverride()?.takeIf { it.isNotBlank() },
             reasoning = getReasoningOverride()?.takeIf { it.isNotBlank() },
@@ -446,6 +487,54 @@ internal class AgentSessionPersistentStream(
         teardownProcess()
 
         val client = sshLifecycle.liveClient() ?: return false
+
+        // ⛔ NEVER BE THE SECOND WRITER ON A SESSION SOMEONE ELSE HAS OPEN.
+        //
+        // Claude ships no writer lock, so `claude --resume <uuid>` against a
+        // session a terminal already holds does not fail — it succeeds, and the
+        // two processes then append to one rollout. Upstream
+        // (anthropics/claude-code#48270) reports the result: concurrent resumes
+        // anchor to a STALE branch of the conversation tree and every further
+        // resume extends the stale branch, so the history degrades quietly and
+        // compounds. codex at least refuses out loud; Claude lets us do the
+        // damage. Declining is the whole feature.
+        //
+        // Cost is paid exactly once per PROCESS, not per turn: we only get here
+        // when there is no live process of ours, i.e. at chat open or after a
+        // drop — the same moment that already pays for a cold launch. A brand
+        // new session (no resume id) has no file for anyone to hold.
+        heldByTty = null
+        val rid = getResumeId()
+        if (rid != null && ClaudeSessionLock.isSafeSessionId(rid)) {
+            when (val probe = probeSessionHolders(rid)) {
+                is SessionHolder.Probe.Held -> {
+                    val tty = probe.holders.filter { it.kind == SessionHolder.Kind.TTY }
+                    if (tty.isNotEmpty()) {
+                        // A person may be looking at it. Do not launch, do not
+                        // kill; the chat stays bound to the REAL session and the
+                        // caller shows a row with a way out.
+                        android.util.Log.w(tag, "session $rid held by a terminal: $tty — not launching a second writer")
+                        heldByTty = tty
+                        return false
+                    }
+                    // Headless holders are ours: a persistent channel whose
+                    // transport died while the remote CLI lived on. Nothing else
+                    // reaped these — the app just launched a second process
+                    // beside each one, which is the same corruption arriving by
+                    // our own hand. Silent, because it is our mess
+                    // (feedback_auto_fix_errors).
+                    android.util.Log.w(
+                        tag,
+                        "reaping ${probe.holders.map { it.pid }} — our own orphaned holders of $rid",
+                    )
+                    reapHolders(probe.holders.map { it.pid })
+                }
+                // Free, or the probe could not run. Either way carry on exactly
+                // as before — acting on a guess here is what made the phantom
+                // sessions, and a probe that failed is not evidence of anything.
+                else -> Unit
+            }
+        }
         val spec = AgentSpecRegistry[server.agent]
         val inner = spec.buildPersistentCommand(
             ExecInput(
@@ -673,11 +762,11 @@ internal class AgentSessionPersistentStream(
                             for (tu in parsedMsgs.filterIsInstance<AgentMessage.ToolUse>()) {
                                 when (tu.toolName) {
                                     // Self-paced: the model names its own delay.
-                                    LoopWatch.TOOL -> { armedThisTurn = true; onLoopWakeup(tu.input) }
+                                    LoopWatch.TOOL -> { armedThisTurn = true; loopArmed = true; onLoopWakeup(tu.input) }
                                     // Interval: `/loop 30m …` schedules a cron job
                                     // instead, and never touches ScheduleWakeup.
-                                    LoopWatch.CRON_TOOL -> { armedThisTurn = true; onLoopCron(tu.input) }
-                                    LoopWatch.CRON_STOP_TOOL -> onLoopWakeup(null)
+                                    LoopWatch.CRON_TOOL -> { armedThisTurn = true; loopArmed = true; onLoopCron(tu.input) }
+                                    LoopWatch.CRON_STOP_TOOL -> { loopArmed = false; onLoopWakeup(null) }
                                 }
                             }
                         }
@@ -1331,6 +1420,140 @@ internal class AgentSessionPersistentStream(
         teardownProcess()
     }
 
+    /** Who holds this session's rollout open on the server, in one exec. See
+     *  [ClaudeSessionLock]. Never throws; an exec that fails comes back as
+     *  [SessionHolder.Probe.Unreachable], which callers must treat as "carry on
+     *  unchanged" and never as "nobody has it". */
+    private suspend fun probeSessionHolders(rid: String): SessionHolder.Probe {
+        if (!ClaudeSessionLock.isSafeSessionId(rid)) return SessionHolder.Probe.Unreachable
+        val raw = SilentlyTry.logged(tag, "probe session holders") {
+            // The cwd is what makes a console REPL findable at all — Claude
+            // keeps no fd on its rollout, so the working directory IS the
+            // evidence. backfillCwdIfNeeded() has already recovered it from the
+            // session's own first record by the time a turn gets here.
+            sshLifecycle.execOnLive(loginShell(ClaudeSessionLock.probeScript(rid, cwdSnapshot())))
+        }
+        return ClaudeSessionLock.parseProbe(raw)
+    }
+
+    /** End the given holders with the same ladder [RemoteTurnKiller] uses for a
+     *  runaway turn — TERM, then KILL if it will not go. */
+    private suspend fun reapHolders(pids: List<Long>) {
+        if (pids.isEmpty()) return
+        val out = sshLifecycle.execOnLive(loginShell(RemoteTurnKiller.killPidsScript(pids)))
+        android.util.Log.d(tag, "reapHolders $pids -> ${RemoteTurnKiller.parseOutcome(out)}")
+    }
+
+    /**
+     * TAKE THE SESSION BACK — the one thing the app must not do by itself.
+     *
+     * [ensureProcess] only ever reaps HEADLESS holders, because those are
+     * orphans of ours. A terminal someone may be sitting in is not ours to end
+     * on a timer or a habitual gesture, and Claude offers no polite ask: there
+     * is no release, so the file's writer set shrinks only when a process ends.
+     * Hence a deliberate tap, and hence this is the ONLY path here that will end
+     * a tty holder.
+     *
+     * Nothing is lost by it: the session's content is its rollout on disk, and
+     * the next resume reads it back in full.
+     */
+    suspend fun takeOverSession(): Boolean {
+        val rid = getResumeId() ?: return false
+        val holders = (probeSessionHolders(rid) as? SessionHolder.Probe.Held)?.holders.orEmpty()
+        if (holders.isEmpty()) {
+            // Already free — the holder closed while the row sat on screen.
+            heldByTty = null
+            history.emitMsg(
+                AgentMessage.EventNote(
+                    id = ClaudeSessionLock.TAKEOVER_MARKER_ID,
+                    label = "session is free again — send to continue it",
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                ),
+            )
+            return true
+        }
+        val pids = holders.map { it.pid }
+        reapHolders(pids)
+        val left = (probeSessionHolders(rid) as? SessionHolder.Probe.Held)?.holders.orEmpty()
+        val ok = left.isEmpty()
+        if (ok) heldByTty = null
+        history.emitMsg(
+            AgentMessage.EventNote(
+                id = ClaudeSessionLock.TAKEOVER_MARKER_ID,
+                label = if (ok) ClaudeSessionLock.takenOverNote(pids)
+                else ClaudeSessionLock.takeoverFailedNote(),
+                tone = if (ok) AgentMessage.EventNote.Tone.INFO
+                else AgentMessage.EventNote.Tone.WARN,
+            ),
+        )
+        return ok
+    }
+
+    /**
+     * HAND THE SESSION BACK when the phone is plainly done with it.
+     *
+     * The phone→server direction of "continue it over there" is decided by one
+     * thing: how long we keep our `claude` parked on the session. Claude has no
+     * lock, so a laptop that resumes while we are still parked is not refused —
+     * it silently becomes the second writer, which is the corruption described
+     * on [ClaudeSessionLock]. Releasing is therefore not politeness, it is the
+     * only thing that makes the other side safe.
+     *
+     * Backgrounding the app is the clearest signal there is: walking to your
+     * desk. It is also the ONLY trigger here, deliberately — unlike codex, this
+     * process is not starving anybody while you are looking at the chat, and
+     * relaunching costs a cold start plus a re-read of the whole session file.
+     *
+     * What is never released, because it would be a loss and not a handoff:
+     *  - a RUNNING turn ("send a task, pocket the phone" is a shipped promise);
+     *  - an armed `/loop`, which lives inside the process and would die with it;
+     *  - live background agents, same reason — [retireBackgroundTasks] exists
+     *    precisely because ending the process ends them.
+     */
+    /**
+     * The phone went into a pocket. Wait out [HANDOFF_GRACE_MS] and, if it is
+     * STILL away and this session is still idle, hand the session back.
+     *
+     * The grace period is the difference between "walked to my desk" and
+     * "glanced at a notification". Without it every screen-off would end the
+     * process, and the next open would pay a cold launch AND re-read the whole
+     * session file — which for Claude means re-billing the conversation's cache
+     * (measured 2026-08-03: 25073 cache_read + 15195 creation on a re-entry vs
+     * 38732 + 13 on a warm one). Idle here is cheap; churn is not.
+     */
+    fun armHandoffRelease() {
+        if (!procAlive) return
+        handoffReleaseJob?.cancel()
+        handoffReleaseJob = scope.launch {
+            var waited = 0L
+            while (waited < HANDOFF_GRACE_MS) {
+                kotlinx.coroutines.delay(HANDOFF_TICK_MS)
+                // Came back — nothing to hand over.
+                if (ai.eight24family.conch.util.AppForeground.isForeground) return@launch
+                if (!procAlive) return@launch
+                waited += HANDOFF_TICK_MS
+            }
+            if (!ai.eight24family.conch.util.AppForeground.isForeground) releaseForHandoff()
+        }
+    }
+
+    fun releaseForHandoff() {
+        if (!procAlive) return
+        if (turnDone != null) {
+            android.util.Log.d(tag, "handoff release skipped — a turn is running")
+            return
+        }
+        if (loopArmed || liveBackgroundTasks.isNotEmpty()) {
+            android.util.Log.d(
+                tag,
+                "handoff release skipped — loopArmed=$loopArmed bgTasks=${liveBackgroundTasks.size}",
+            )
+            return
+        }
+        android.util.Log.d(tag, "backgrounded and idle — releasing ${getResumeId()} so the server can resume it")
+        teardownProcess()
+    }
+
     /** Close stdin (graceful CLI exit: flush session file, then quit),
      *  then the channel. Safe to call repeatedly. */
     fun teardownProcess() {
@@ -1342,7 +1565,10 @@ internal class AgentSessionPersistentStream(
         // Pending `/loop` wakeups live in the process, so they die with it.
         // Clearing here (rather than only on an explicit stop) is what keeps
         // the chip from outliving the loop it describes.
+        loopArmed = false
         onLoopWakeup(null)
+        handoffReleaseJob?.cancel()
+        handoffReleaseJob = null
         readerJob?.cancel()
         readerJob = null
         procCmd?.let { cmd ->
@@ -1494,5 +1720,12 @@ internal class AgentSessionPersistentStream(
         /** initialize response — arrives right after launch; generous for
          *  node cold start on a small VPS. */
         private const val INIT_RESPONSE_TIMEOUT_MS = 45_000L
+
+        /** How long the phone must stay away before an idle session is handed
+         *  back to the server. Long enough that a glance at a notification or
+         *  a screen-off in the hand costs nothing; short enough that the walk
+         *  to a desk is over before you sit down. */
+        private const val HANDOFF_GRACE_MS = 90_000L
+        private const val HANDOFF_TICK_MS = 5_000L
     }
 }

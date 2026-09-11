@@ -91,7 +91,7 @@ internal class AgentSessionCodexAppServer(
      * down that road is exactly the doubling bug (2026-09-09). Busy is
      * temporary - the next send must try the SAME thread again.
      */
-    @Volatile private var threadBusy: List<CodexThreadLock.Holder>? = null
+    @Volatile private var threadBusy: List<SessionHolder.Holder>? = null
 
     /**
      * Pending "hand the thread back" timer. Cancelled when a turn starts,
@@ -575,7 +575,7 @@ internal class AgentSessionCodexAppServer(
             CodexThreadLock.isWriterConflict(openErr)
         ) {
             val holders = probeThreadLock(rid)
-            val ours = holders.filter { it.kind == CodexThreadLock.Kind.HEADLESS }
+            val ours = holders.filter { it.kind == SessionHolder.Kind.HEADLESS }
             if (holders.isNotEmpty() && ours.size == holders.size) {
                 // Every holder is headless - an app-server of OURS that
                 // outlived its SSH channel. Our garbage, our cleanup: reap it
@@ -650,11 +650,11 @@ internal class AgentSessionCodexAppServer(
      *  Empty when nobody does, or when the probe itself could not run - the
      *  caller treats both as "cannot prove it is ours", which keeps the
      *  destructive branch closed. */
-    private suspend fun probeThreadLock(rid: String): List<CodexThreadLock.Holder> {
+    private suspend fun probeThreadLock(rid: String): List<SessionHolder.Holder> {
         if (!CodexThreadLock.isSafeThreadId(rid)) return emptyList()
         val raw = sshLifecycle.execOnLive(loginShell(CodexThreadLock.probeScript(rid)))
         val parsed = CodexThreadLock.parseProbe(raw)
-        return (parsed as? CodexThreadLock.Probe.Held)?.holders ?: emptyList()
+        return (parsed as? SessionHolder.Probe.Held)?.holders ?: emptyList()
     }
 
     /**
@@ -1264,7 +1264,7 @@ internal class AgentSessionCodexAppServer(
         android.util.Log.d(tag, "releasing thread $rid for handoff")
         teardownProcess()
         if (rid == null) return
-        val leftovers = probeThreadLock(rid).filter { it.kind == CodexThreadLock.Kind.HEADLESS }
+        val leftovers = probeThreadLock(rid).filter { it.kind == SessionHolder.Kind.HEADLESS }
         if (leftovers.isEmpty()) return
         // ⛔ DO NOT REAP A PROCESS THE USER JUST STARTED.
         //

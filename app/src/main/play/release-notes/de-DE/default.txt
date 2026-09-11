@@ -1,6 +1,6 @@
-Eine Sitzung, wo immer du bist.
+Eine Claude-Sitzung überall fortsetzen - und seltener zum Sicherheitsschlüssel greifen.
 
-• Ein Codex-Chat wird jetzt wirklich fortgesetzt - keine neue, leere Sitzung mehr, wenn die alte belegt ist.
-• Sitzungen wechseln frei zwischen Handy und Server: das Handy gibt sie frei, sobald es untaetig ist.
-• Haelt ein Terminal am Server die Sitzung, tippe auf die Zeile, um sie zu uebernehmen.
-• Das eingebaute Terminal ist bei langer Ausgabe viel schneller, scrollt richtig und hat einen Sprung-nach-unten-Knopf.
+• Zu einer im Terminal geöffneten Sitzung kommt keine zweite mehr hinzu: der Chat nennt den Ort, ein Tippen übernimmt sie.
+• Am Laptop anfangen, am Handy weitermachen - eine untätige Sitzung wird zurückgegeben, sobald Sie das Handy weglegen.
+• Kurze Sitzungen aus dem Terminal erscheinen nun am Handy.
+• Chat, Liste und Verbindung nutzen den Schlüssel, dem Ihr Server schon vertraut.

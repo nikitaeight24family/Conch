@@ -30,6 +30,20 @@ object AppForeground {
     /** True between the first onStart and the last onStop of our activities. */
     val isForeground: Boolean get() = startedActivities.get() > 0
 
+    /**
+     * Called once each time the LAST activity stops — the moment the user
+     * stopped looking.
+     *
+     * Polling `isForeground` answers "are they looking now"; several things
+     * need the EDGE instead, because they want to start a grace period from it
+     * (handing a session back to the server once the phone is plainly put away
+     * — see `AgentSessionPersistentStream.releaseForHandoff`). Listeners run on
+     * the main thread and must not block: arm something and return.
+     */
+    private val onBackgrounded = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addOnBackgrounded(listener: () -> Unit) { onBackgrounded += listener }
+
     fun install(app: Application) {
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
@@ -40,7 +54,14 @@ object AppForeground {
                 // Never let a stray unbalanced stop push this negative — a
                 // negative count would read as "background forever" and silently
                 // kill prefetch even while the user is staring at the screen.
-                startedActivities.updateAndGet { if (it > 0) it - 1 else 0 }
+                val left = startedActivities.updateAndGet { if (it > 0) it - 1 else 0 }
+                if (left == 0) {
+                    // A listener that throws must not take the others (or the
+                    // activity callback) down with it.
+                    for (l in onBackgrounded) {
+                        ai.eight24family.conch.util.SilentlyTry.fired("Conch-Foreground", "backgrounded listener") { l() }
+                    }
+                }
             }
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit

@@ -113,7 +113,25 @@ open class SshClient {
         // — closing it would drop every chat sharing the transport). SK-safe:
         // a live pooled client means the touch already happened. Only when there
         // is NO live transport do we fall through to a fresh one-shot dial.
-        ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)?.let { pooled ->
+        // ⚠ And when the pool is EMPTY, the tapless credentials are still a
+        // transport — try them before falling through. The cold path below
+        // dials its own one-shot and calls [authenticate], which on an SK row
+        // with no signer can only `error("security-key signer not provided")`;
+        // several callers here (status probes, session discovery, memory and
+        // subagent reads, ServerStatsProbe) pass no signer by design, so on a
+        // seamless server every one of them failed outright the moment the pool
+        // lapsed — while a device key sat on the server ready to answer. This
+        // is a background caller, so it stays behind the silent-dial cool-down.
+        val warm = ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(server.id)
+            ?: if (skSigner == null && secrets.skKeys.isNotEmpty()) {
+                SilentlyTry.logged("Conch-SshClient", "tapless connect for one-shot exec") {
+                    ai.eight24family.conch.di.ServiceLocator.sshConnectionPool
+                        .taplessConnect(server, secrets)
+                }
+            } else {
+                null
+            }
+        warm?.let { pooled ->
             return@withContext runCatching {
                 val session = pooled.startSession()
                 try {

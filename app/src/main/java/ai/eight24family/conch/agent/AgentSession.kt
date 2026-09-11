@@ -307,13 +307,34 @@ class AgentSession(
     )
 
     /**
-     * End whatever process is holding this Codex thread's writer, so this
+     * End whatever process is holding this session open on the server, so this
      * chat can continue the SAME session instead of starting a new one.
-     * Only meaningful for Codex (no other CLI here locks a thread); false
-     * when there was nothing to take.
+     *
+     * Codex is refused by its own writer lock; Claude is not refused at all and
+     * would happily fork the history instead (see
+     * [ai.eight24family.conch.agent.claude.ClaudeSessionLock]) — different
+     * reasons, same deliberate tap. False when there was nothing to take.
      */
-    suspend fun takeOverAgentSession(): Boolean =
-        if (server.agent == Agent.CODEX) codexAppServer.takeOverThread() else false
+    suspend fun takeOverAgentSession(): Boolean = when (server.agent) {
+        Agent.CODEX -> codexAppServer.takeOverThread()
+        else -> if (AgentSpecRegistry[server.agent].supportsControlProtocol) {
+            persistentStream.takeOverSession()
+        } else {
+            false
+        }
+    }
+
+    /**
+     * The user put the phone away. Sessions that are plainly finished hand
+     * themselves back so the SAME session can be continued on the server
+     * without two writers appending to one file — the phone→server half of
+     * seamless continuation. Anything still working keeps its process.
+     */
+    fun onAppBackgrounded() {
+        if (AgentSpecRegistry[server.agent].supportsControlProtocol) {
+            persistentStream.armHandoffRelease()
+        }
+    }
 
     /** True while this session's turns ride the persistent control
      *  channel (spec supports it AND it hasn't broken at launch). */

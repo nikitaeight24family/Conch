@@ -18,6 +18,16 @@ class ConchApp : Application() {
         // process alive forever, so "running" != "the user is looking" — and
         // speculative background work has to know the difference.
         ai.eight24family.conch.util.AppForeground.install(this)
+        // Putting the phone away is the clearest "I'm done here" there is, so
+        // an idle session hands its server-side process back and the SAME
+        // session can be picked up in a terminal with nobody forking its
+        // history. Sessions with a turn, a loop or a background agent running
+        // keep theirs — see AgentSessionPersistentStream.releaseForHandoff.
+        ai.eight24family.conch.util.AppForeground.addOnBackgrounded {
+            ai.eight24family.conch.util.SilentlyTry.fired("Conch-App", "handoff on background") {
+                ServiceLocator.agentSessions.onAppBackgrounded()
+            }
+        }
         // Connectivity signal — drives "no internet, message queued".
         ai.eight24family.conch.util.NetworkCost.install(this)
         ServiceLocator.init(this)

@@ -15,6 +15,77 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.7.2] — 2026-09-11
+
+The same question 0.7.1 answered for Codex, asked for Claude — where it is much
+quieter and much more damaging, because Claude does not refuse a second writer,
+it simply lets it in. And the other half of the release: the app had four
+separate ways of asking for a security key it did not need.
+
+### Fixed
+- **A Claude session open in a terminal no longer gets a second one behind your
+  back.** Claude ships no writer lock, so `claude --resume` against a session a
+  terminal already holds succeeds — and upstream reports what that costs
+  (anthropics/claude-code#48270): concurrent resumes anchor to a stale branch of
+  the conversation tree, and every further resume extends it, so the history
+  degrades quietly instead of announcing itself. The app now asks who has the
+  session before launching. A terminal is left alone and named in the chat, with
+  the pts and pid and one tap to take it over; an orphan of our own — a process
+  whose SSH channel died while it lived on — is ended silently, which nothing
+  did before.
+- **The question is asked of the working directory, not of file handles.**
+  Measured against a real terminal session: a Claude REPL holds no descriptor on
+  its transcript and takes no lock on it — forty samples across a running turn
+  and at the idle prompt, zero — because it opens the file to append and closes
+  it. Its working directory, however, is the project directory, and its output
+  is still a terminal. Discovery therefore has three layers: the open file
+  (which is how Codex is found), the session id on the command line, and the
+  working directory of the REPL that created the session. The last is narrowed
+  to a single session by requiring it to be the newest transcript in that
+  directory and the process to predate that file's last write.
+- **Stop works on a session started in a terminal.** Discovery by command line
+  cannot see a REPL that created the session — there is no id in its arguments —
+  so Stop degraded into a sentence telling you to go and stop it yourself. It
+  now finds the writer the same way the rest of this release does.
+- **A short session started in a terminal shows up on the phone.** Transcripts
+  under a kilobyte were dropped as launch stubs. That is a size test standing in
+  for a content test, and a real but brief exchange is exactly the session you
+  most want to pick up later. Small files are now judged by whether they contain
+  a turn.
+- **Opening a chat no longer asks for your security key when the server already
+  trusts this phone.** Every connection path is supposed to try the credentials
+  that cost no gesture before reaching for the token; opening a chat and
+  refreshing the session list were still going straight to the key prompt. All
+  of them now go through one function, so a screen cannot forget a credential it
+  has never heard of.
+- **A recovered connection was being destroyed the moment it was made.** The
+  pooled entry for a silently reconnected transport was stamped with the wrong
+  timestamp, so the guard that protects a young connection from being blamed for
+  an older failure measured its age in decades and never applied. Each recovery
+  was torn down and redialled, and the resulting run of failures was then read as
+  a failing host — which is what ended in a key prompt.
+- **A server with both a passwordless key and a security key ignored the
+  passwordless one** whenever the security key happened to be listed first. Key
+  order is documented as cosmetic; it was deciding how you authenticate.
+- **Your own tap is no longer held back by the reconnect backoff.** The backoff
+  exists so that automatic retries cannot hammer a host into banning you, and it
+  was never meant to apply to a person pressing Connect — but it was silencing
+  the tapless attempt and handing them the token instead, for fifteen minutes
+  after any refusal and indefinitely with auto-connect switched off. Automatic
+  callers are still throttled exactly as before.
+- **Sending a file after a network change works on a seamless server.** The
+  rebuild path documented itself as needing no touch and had nothing
+  implementing it; it failed outright instead. Background probes that carry no
+  signer by design had the same problem the moment the connection lapsed.
+
+### Changed
+- Handing a session back is automatic in one direction: an idle Claude session
+  is released about a minute and a half after you put the phone away, so the
+  same session can be continued from a terminal with nobody forking it. A
+  running turn, an armed loop or a live background agent is never released.
+
+---
+
 ## [0.7.1] — 2026-09-09
 
 One session, wherever you are. Codex 0.153 gives a thread a single writer and

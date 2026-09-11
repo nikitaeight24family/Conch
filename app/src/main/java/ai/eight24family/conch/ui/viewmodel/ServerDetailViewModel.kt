@@ -178,8 +178,12 @@ class ServerDetailViewModel(
                     // on-server device key must NEVER re-prompt the physical key.
                     // Mirrors the picker's refresh path; this connect() was the one
                     // place that skipped it and always demanded a tap.
+                    // userTriggered: this IS the human's Connect tap. Without it
+                    // the silent-dial cool-down answered for us and the person got
+                    // the touch dialog on a server whose device key was sitting
+                    // there, valid.
                     val eph = runCatching {
-                        ServiceLocator.sshConnectionPool.userConnectEphemeral(srv)
+                        ServiceLocator.sshConnectionPool.userConnectEphemeral(srv, userTriggered = true)
                     }.getOrNull()
                     if (eph != null) {
                         _connected.value = true

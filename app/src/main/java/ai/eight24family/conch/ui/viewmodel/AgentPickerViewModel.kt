@@ -812,7 +812,7 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         return@launch
                     }
                     _connectLog.value = "Authenticating with device key…"
-                    val c = ServiceLocator.sshConnectionPool.userConnectEphemeral(server)
+                    val c = ServiceLocator.sshConnectionPool.userConnectEphemeral(server, userTriggered = true)
                     _connectLog.value = if (c != null) "Connected ✓"
                         else "Device key rejected — reconnect the key by opening this server"
                 } else {
@@ -1017,8 +1017,13 @@ class AgentPickerViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { repo.getById(serverId) }
             // 1. Silent device-key reconnect (seamless servers — no touch).
             if (server != null) {
+                // ensureConnectedThenRun only ever runs behind a tap (install,
+                // login, update) — userTriggered, so the cool-down cannot force
+                // a physical key on a server that has a device key.
                 val live = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    runCatching { ServiceLocator.sshConnectionPool.userConnectEphemeral(server) }.getOrNull()
+                    runCatching {
+                        ServiceLocator.sshConnectionPool.userConnectEphemeral(server, userTriggered = true)
+                    }.getOrNull()
                 }
                 if (live != null) {
                     android.util.Log.d(tag, "  → ephemeral connected, running $what")

@@ -195,8 +195,14 @@ internal class AgentPickerViewModelRefresh(
                     // a no-op here (the app-wide connectAllSeamlessSilently has
                     // already brought the pool up, so the pooled path above ran)
                     // — this is the backstop for the window before it lands.
+                    // A pull-to-refresh / install tap is the person asking, so it
+                    // rides through the silent-dial cool-down (see
+                    // [SshConnectionPool.userConnectEphemeral]); a background or
+                    // navigation refresh stays behind the ladder.
                     val silentUp = ai.eight24family.conch.ssh.EphemeralSshKey.exists(serverId) &&
-                        runCatching { ServiceLocator.sshConnectionPool.userConnectEphemeral(server) }.getOrNull() != null
+                        runCatching {
+                            ServiceLocator.sshConnectionPool.userConnectEphemeral(server, userTriggered)
+                        }.getOrNull() != null
                     if (silentUp) {
                         val pooledNow = ServiceLocator.sshConnectionPool.peek(serverId)
                         if (pooledNow != null) {

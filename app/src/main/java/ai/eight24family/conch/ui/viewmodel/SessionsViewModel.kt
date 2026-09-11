@@ -937,6 +937,20 @@ class SessionsViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // through to the touch flow so the user has a way out.
                 android.util.Log.d("Conch-Sessions", "  reuse failed — falling back to touch flow")
             }
+            // ⚠ TAPLESS FIRST, before any dialog. The two short-circuits above
+            // only reuse a transport somebody ELSE already built; when there is
+            // none, this list used to go straight to the touch request AND the
+            // "hold your security key" notification — on a server whose device
+            // key would have connected silently. Same rule the agent picker has
+            // honoured since 2026-06-07 (INVARIANTS 2026-06-05 rule 2), applied
+            // here. `visible` is the user-gesture signal this screen already
+            // keeps: a refresh nobody is watching stays behind the cool-down.
+            ServiceLocator.sshConnectionPool.taplessConnect(server, secrets, userTriggered = visible)
+                ?.let { fresh ->
+                    android.util.Log.d("Conch-Sessions", "discovery via tapless connect — no touch")
+                    if (runDiscoveryViaPooledClient(server, secrets, fresh)) return
+                    android.util.Log.d("Conch-Sessions", "  tapless discovery failed — falling through")
+                }
             if (!visible) {
                 _lastSyncedAt.value = System.currentTimeMillis()
                 return

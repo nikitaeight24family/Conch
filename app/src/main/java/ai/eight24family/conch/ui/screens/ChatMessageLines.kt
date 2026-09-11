@@ -285,7 +285,8 @@ internal fun TerminalLine(
             onClick = when (msg.id) {
                 ai.eight24family.conch.ui.viewmodel.ChatViewModel.HISTORY_WINDOW_MARKER_ID ->
                     onLoadEarlier
-                ai.eight24family.conch.agent.codex.CodexThreadLock.TAKEOVER_MARKER_ID ->
+                ai.eight24family.conch.agent.codex.CodexThreadLock.TAKEOVER_MARKER_ID,
+                ai.eight24family.conch.agent.claude.ClaudeSessionLock.TAKEOVER_MARKER_ID ->
                     onTakeOverSession
                 else -> null
             },

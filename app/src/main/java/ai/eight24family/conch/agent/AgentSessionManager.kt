@@ -196,6 +196,21 @@ class AgentSessionManager(
      * an already-authenticated SSH channel instead of paying handshake
      * cost on every operation.
      */
+    /**
+     * The user stopped looking. Tell every live session, so the ones that are
+     * plainly finished can hand their server-side process back and let the SAME
+     * session be continued from a terminal without a second writer. Sessions
+     * still working keep theirs — the decision is each session's, this only
+     * delivers the news.
+     */
+    fun onAppBackgrounded() {
+        for (s in sessions.values) {
+            ai.eight24family.conch.util.SilentlyTry.fired(
+                "Conch-AgentSessionManager", "backgrounded handoff",
+            ) { s.onAppBackgrounded() }
+        }
+    }
+
     fun findAnyAlive(serverId: String, agent: Agent): AgentSession? {
         val prefix = "$serverId:${agent.name}:"
         return sessions.entries.firstOrNull { (k, v) ->

@@ -62,10 +62,30 @@ class SshConnectionPool {
      *  [evictPoisoned] from killing a transport that CANNOT be the poisoned
      *  one because it did not exist yet when the turn failed. See the
      *  livelock note on [evictPoisoned]. */
-    private data class Entry(
+    /**
+     * ⚠ THE SECOND FIELD IS NOT A REFCOUNT, and the constructor is private so
+     * that nothing can ever say so again by accident.
+     *
+     * This was `Entry(client, refCount)` until the 2026-08-18 rework moved the
+     * refcount into `outstanding`. One call site kept the old two-argument
+     * shape, and `1` then silently bound to [openedAtMs] — a birthday one
+     * millisecond after the epoch. [evictPoisoned] measured that transport's age
+     * at ~55 years, so its "never kill a transport younger than the failure that
+     * reported it" guard never protected the seamless path: the recovery was
+     * destroyed and redialled on every stale failure report, and the streak that
+     * manufactured suppressed the tapless reconnect until the user was asked for
+     * a physical key. A private constructor plus [now] makes the same mistake a
+     * compile error instead of a 55-year-old timestamp.
+     */
+    private data class Entry private constructor(
         val client: SSHClient,
-        val openedAtMs: Long = System.currentTimeMillis(),
-    )
+        val openedAtMs: Long,
+    ) {
+        companion object {
+            /** The only way to make one: a transport is born when it is pooled. */
+            fun now(client: SSHClient) = Entry(client, System.currentTimeMillis())
+        }
+    }
 
     /** Holds entries by server id. ConcurrentHashMap so [peek] and
      *  [aliveCount] are lock-free reads — those run from the UI
@@ -203,7 +223,7 @@ class SshConnectionPool {
             // throw out of it never leaves a socket behind.
             // NOT reset to 1: holders of the transport we just replaced still
             // owe a release each.
-            pool[server.id] = Entry(fresh)
+            pool[server.id] = Entry.now(fresh)
             val opened = bumpOutstanding(server.id)
             android.util.Log.d(TAG, "acquire(${server.id}) opened refcount=$opened")
             return fresh
@@ -1033,8 +1053,21 @@ class SshConnectionPool {
      * (no FIDO tap). Mirrors [userConnect]'s held bookkeeping. Returns the live
      * client, or null if there's no device key or the connect failed (caller
      * keeps intent + falls back to a tap). Never throws.
+     *
+     * [userTriggered] = a PERSON just asked for this connection (tapped Connect,
+     * opened a chat, pulled to refresh). The fail2ban machinery documented on
+     * [refusedUntil] already promises "explicit connects never consult this" —
+     * but only [userConnect], the FIDO path, honoured it. This method is the
+     * FIRST thing every human connect path tries (INVARIANTS 2026-06-05 rule 2:
+     * no connect path may skip the device key), so the cool-down was silencing
+     * the tapless attempt and handing the person straight to the physical key —
+     * for a flat 15 minutes after any refusal, and forever with auto-connect
+     * off. A human dial is not the twenty-second watchdog knocking while nobody
+     * watches; it is one deliberate attempt, and it goes through. Automatic
+     * callers leave this false and stay behind the ladder, which is what keeps
+     * the jail quiet.
      */
-    fun userConnectEphemeral(server: Server): SSHClient? {
+    fun userConnectEphemeral(server: Server, userTriggered: Boolean = false): SSHClient? {
         val provider = EphemeralSshKey.keyProvider(server.id) ?: return null
         android.util.Log.d(TAG, "ephemeral reconnect ${server.id}: presenting ${EphemeralSshKey.keyPart(server.id)}")
         val lock = perServerLock.computeIfAbsent(server.id) { Any() }
@@ -1054,7 +1087,7 @@ class SshConnectionPool {
                 // evening of bad Wi-Fi was a ban. No path may dial silently
                 // faster than the cool-down; a HUMAN action resets it via
                 // [resetSilentBackoff].
-                if (!silentCooldownPassed(server.id)) {
+                if (!userTriggered && !silentCooldownPassed(server.id)) {
                     android.util.Log.d(TAG, "ephemeral dial ${server.id} suppressed — cooling down after failures")
                     return null
                 }
@@ -1081,23 +1114,13 @@ class SshConnectionPool {
                     return null
                 }
                 noteSilentDialResult(server.id, ok = true)
-                pool[server.id] = Entry(fresh, 1)
+                // This line used to read `Entry(fresh, 1)` — see [Entry], whose
+                // constructor is private now precisely because of it.
+                pool[server.id] = Entry.now(fresh)
                 fresh
             }
         }
-        userHeld.add(server.id)
-        _connectedAt[server.id] = System.currentTimeMillis()
-        rememberHost(server)
-        noteHostSuccess(server.host, server.port)
-        _userHeldCount.value = userHeld.size
-        _userHeldIds.value = userHeld.toSet()
-        persistUserHeldAsync()
-        SilentlyTry.fired("Conch-Pool", "start ConchService (eph)") {
-            ai.eight24family.conch.service.ConchService.start(
-                ai.eight24family.conch.di.ServiceLocator.appContext
-            )
-        }
-        android.util.Log.d(TAG, "userConnectEphemeral(${server.id}) — connected silently via device key")
+        markHeldAfterTaplessConnect(server, "device key")
         // SLIDING EXPIRY: refresh the authorized_keys expiry-time on EVERY silent
         // reconnect too — not only on FIDO taps (userConnect). Without this the
         // server-side expiry counted down from the LAST TAP, so a user who only
@@ -1107,6 +1130,135 @@ class SshConnectionPool {
         // idempotent (re-stamps our marker line); honours the per-server seamless
         // opt-in.
         maybeEnrollEphemeralAsync(server)
+        return client
+    }
+
+    /** The held/notification/expiry bookkeeping every TAPLESS connect owes,
+     *  whichever credential got it in. Shared so a second tapless path cannot
+     *  come up connected but invisible to the dot, the notification or
+     *  `connectAllPossibleSilently`. */
+    private fun markHeldAfterTaplessConnect(server: Server, via: String) {
+        userHeld.add(server.id)
+        _connectedAt[server.id] = System.currentTimeMillis()
+        rememberHost(server)
+        noteHostSuccess(server.host, server.port)
+        _userHeldCount.value = userHeld.size
+        _userHeldIds.value = userHeld.toSet()
+        persistUserHeldAsync()
+        SilentlyTry.fired("Conch-Pool", "start ConchService (tapless)") {
+            ai.eight24family.conch.service.ConchService.start(
+                ai.eight24family.conch.di.ServiceLocator.appContext
+            )
+        }
+        android.util.Log.d(TAG, "tapless connect(${server.id}) — up silently via $via")
+    }
+
+    /**
+     * EVERY way into [server] that does not cost the person a gesture, tried in
+     * order, once. Returns the live client or null — never throws, never
+     * prompts, never opens a dialog.
+     *
+     * This is the call a screen makes BEFORE it decides it needs the physical
+     * key. The rule it enforces is INVARIANTS 2026-06-05 rule (2) — no connect
+     * path may reach for the token without trying the tapless credentials first
+     * — and the reason it exists as one function is that the rule kept being
+     * re-implemented per screen and kept being forgotten on one of them
+     * (`ServerDetailViewModel.connect` in June, `ChatViewModel.startNewChat` and
+     * `SessionsViewModel` until now). A screen that calls this cannot forget a
+     * credential it has never heard of.
+     *
+     * The ladder:
+     *  1. a pooled, live transport — nothing to do;
+     *  2. the enrolled hardware device key ([userConnectEphemeral]);
+     *  3. a software key attached to this same server ([ServerSecrets.taplessPem]),
+     *     which before [ServerSecrets.taplessPem] existed was thrown away
+     *     whenever a security key happened to sort first.
+     *
+     * [userTriggered] passes through to the silent-dial cool-down: a person's
+     * own tap is not the watchdog knocking, and is not held back by it.
+     */
+    fun taplessConnect(
+        server: Server,
+        secrets: ServerSecrets,
+        userTriggered: Boolean = false,
+    ): SSHClient? {
+        peek(server.id)?.let { return it }
+        if (EphemeralSshKey.exists(server.id)) {
+            userConnectEphemeral(server, userTriggered)?.let { return it }
+        }
+        val pem = secrets.taplessPem ?: return null
+        val lock = perServerLock.computeIfAbsent(server.id) { Any() }
+        val client = synchronized(lock) {
+            pool[server.id]?.takeIf { it.client.isConnected }?.client ?: run {
+                if (!userTriggered && !silentCooldownPassed(server.id)) {
+                    android.util.Log.d(TAG, "tapless PEM dial ${server.id} suppressed — cooling down")
+                    return null
+                }
+                val fresh = try {
+                    openWithPem(server, pem, secrets.taplessPassphrase)
+                } catch (t: Throwable) {
+                    rememberHost(server)
+                    noteSilentDialResult(server.id, ok = false)
+                    if (looksRefused(t)) noteDialRefused(server.id)
+                    android.util.Log.w(
+                        TAG,
+                        "tapless software-key connect failed ${server.id}: " +
+                            "${t.javaClass.simpleName}: ${t.message}",
+                    )
+                    return null
+                }
+                noteSilentDialResult(server.id, ok = true)
+                pool[server.id] = Entry.now(fresh)
+                fresh
+            }
+        }
+        markHeldAfterTaplessConnect(server, "software key")
+        // An SK row that got in without a tap is still a seamless candidate —
+        // the enroll is idempotent and gates on the per-server opt-in itself.
+        maybeEnrollEphemeralAsync(server)
+        return client
+    }
+
+    /**
+     * Connect + stock publickey-auth with a SOFTWARE key. Same connect, host-key
+     * and keepalive setup as [openWithProvider] — but the auth differs and must:
+     * [openWithProvider] signs through [EphemeralEcdsaAuthMethod] because the
+     * device key lives in the AndroidKeyStore and cannot be handed to sshj's
+     * BouncyCastle signer. A PEM has no such problem, so it goes through
+     * [pickKeyProvider] + `authPublickey`, exactly like [openAndAuthenticate]'s
+     * software branch and [SshClient]'s — one PEM parser for the whole app,
+     * including the OPENSSH-vs-PKCS#8 sniffing that lives inside it.
+     */
+    private fun openWithPem(server: Server, pem: String, passphrase: String?): SSHClient {
+        val connectTimeoutSec = runBlocking {
+            ai.eight24family.conch.di.ServiceLocator.preferences.sshConnectTimeoutSec.first()
+        }.takeIf { it > 0 }?.coerceIn(5, 60) ?: 15
+        val keepaliveIntervalSec = runBlocking {
+            ai.eight24family.conch.di.ServiceLocator.preferences.sshKeepaliveIntervalSec.first()
+        }.takeIf { it > 0 }?.coerceIn(15, 120) ?: 30
+        val client = SSHClient(deadPeerDetectingConfig()).apply {
+            connectTimeout = TimeUnit.SECONDS.toMillis(connectTimeoutSec.toLong()).toInt()
+            timeout = TimeUnit.MINUTES.toMillis(20).toInt()
+        }
+        val hostKeyVerifier = FingerprintHostKeyVerifier(server.knownHostKey)
+        client.addHostKeyVerifier(hostKeyVerifier)
+        try {
+            client.connect(server.host, server.port)
+        } catch (t: Throwable) {
+            if (hostKeyVerifier.mismatch) hostKeyMismatchError(server, hostKeyVerifier.seenFingerprint)
+            throw t
+        }
+        try {
+            configureKeepAlive(client, keepaliveIntervalSec)
+            client.authPublickey(server.username, pickKeyProvider(pem, passphrase))
+        } catch (t: Throwable) {
+            // Same rule as every other opener here: a throw between connect()
+            // and a completed auth must close our half, or the server reaps the
+            // socket at LoginGraceTime and fail2ban counts the preauth line.
+            SilentlyTry.fired("Conch-Pool", "disconnect after failed tapless PEM auth") { client.disconnect() }
+            throw t
+        }
+        pinHostKeyIfUnset(server, hostKeyVerifier)
         return client
     }
 

@@ -46,4 +46,23 @@ data class ServerSecrets(
      * `authorized_keys` triggers a tap. Empty for non-SK rows.
      */
     val skKeys: List<SshKey> = emptyList(),
+    /**
+     * A SOFTWARE key attached to a server that also has a security key — the
+     * way in that costs no tap.
+     *
+     * [privateKeyPem] stays null on an SK row, because every `skKeys.isNotEmpty()`
+     * branch in the app reads it as "this server authenticates with the physical
+     * key" and quietly filling the PEM there would reroute the deliberate FIDO
+     * session the owner chose. This field is the other half of the answer: the
+     * credential exists, it just isn't the primary one, and the tapless ladder
+     * ([ai.eight24family.conch.ssh.SshConnectionPool.taplessConnect]) may reach
+     * for it when nobody is there to touch anything.
+     *
+     * Before this existed the whole server was decided by `keys.first()`, so a
+     * row whose security key happened to be added first ignored a perfectly good
+     * passwordless key and demanded a tap — and the key order is documented on
+     * [Server.sshKeyIds] as purely cosmetic.
+     */
+    val taplessPem: String? = null,
+    val taplessPassphrase: String? = null,
 )

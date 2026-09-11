@@ -47,7 +47,25 @@ class ServerRepository(
                     val skKeys = keys.filter {
                         it.type == SshKeyType.SK_ED25519 || it.type == SshKeyType.SK_ECDSA_NISTP256
                     }
-                    ServerSecrets(skKeys = skKeys)
+                    // A software key attached to the SAME server is a way in that
+                    // costs no tap. It does NOT become `privateKeyPem` — that
+                    // field is what every `skKeys.isNotEmpty()` branch treats as
+                    // "not an SK server", and flipping it would take the physical
+                    // key out of a session the owner deliberately keyed to it.
+                    // It rides along as the tapless fallback instead, for the
+                    // paths where nobody is present to touch anything. Whichever
+                    // of the two keys happens to be `first()` no longer decides
+                    // for the whole server (Server.sshKeyIds calls that order
+                    // cosmetic, and it was not).
+                    val soft = keys.firstOrNull {
+                        it.type != SshKeyType.SK_ED25519 && it.type != SshKeyType.SK_ECDSA_NISTP256
+                    }
+                    val softSec = soft?.let { sshKeyRepository.loadSecret(it.id) }
+                    ServerSecrets(
+                        skKeys = skKeys,
+                        taplessPem = softSec?.privateKeyPem,
+                        taplessPassphrase = softSec?.passphrase,
+                    )
                 } else {
                     // Software path is single-key — multi-PEM is rare and
                     // adds confusing UX (which key signed?). Use first only.

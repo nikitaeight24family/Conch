@@ -1,6 +1,6 @@
-Una sesion, donde sea.
+Retoma una sesión de Claude en cualquier parte - y saca la llave mucho menos.
 
-• Continuar un chat de Codex lo continua de verdad: ya no crea otro vacio cuando la sesion esta ocupada.
-• La sesion pasa libremente entre telefono y servidor: el telefono la libera al quedar inactivo o al salir.
-• Si una terminal del servidor la retiene, toca la fila para tomarla.
-• La terminal integrada es mucho mas rapida con salidas largas, se desplaza bien y tiene boton para ir al final.
+• A una sesión abierta en un terminal ya no se le suma otra a tus espaldas: el chat dice dónde está retenida y una pulsación la recupera.
+• Empieza en el portátil y sigue en el móvil: una sesión inactiva se devuelve al guardar el teléfono.
+• Las sesiones cortas iniciadas en un terminal ya aparecen en el móvil.
+• Chat, lista y reconexión usan la clave en la que tu servidor ya confía.

@@ -260,6 +260,19 @@ internal class AgentSessionSshLifecycle(
             SilentlyTry.fired("Conch-AgentSession", "evict before rebuild") {
                 pool.evictPoisoned(server.id, reason)
             }
+            // ⚠ The kdoc above promises "on a seamless-enrolled server the
+            // rebuild needs no touch" and nothing used to implement it: this
+            // session's captured [skSigner] is null for every session that came
+            // up over the device key in the first place, and `acquire`'s MISS
+            // branch answers a null signer on an SK row by throwing
+            // "security-key signer not provided". So sending a photo after a
+            // network blip failed outright on exactly the servers that had a
+            // silent way back in. Refill the pool tapless FIRST — `acquire`
+            // then finds the live transport and only bumps the refcount, so the
+            // 1:1 acquire/release pairing in the `finally` is untouched.
+            SilentlyTry.fired("Conch-AgentSession", "tapless refill before rebuild") {
+                pool.taplessConnect(server, secrets)
+            }
             val fresh = SilentlyTry.logged("Conch-AgentSession", "rebuild transport after $reason") {
                 pool.acquire(server, secrets, skSigner)
             } ?: return@withContext null

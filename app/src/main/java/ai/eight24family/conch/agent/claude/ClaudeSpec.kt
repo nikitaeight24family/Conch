@@ -348,10 +348,22 @@ object ClaudeSpec : AgentCliSpec {
 # i.e. SDK mode). Rewriting that single field is the whole fix; `claude --resume <id>`
 # keeps working (verified). NOT the session header, NOT history.jsonl — those were
 # red herrings (see reference_claude_resume_headless_hidden / tmp_build/bisect.py).
-# GUARD: never rewrite a file a live process still holds open — the persistent channel
-# keeps the fd open for the whole session and an mv would drop that turn's appends; we
-# skip any jsonl currently open per /proc (lsof/strace aren't on the box). Idempotent
-# (post-fix the file has "cli", so the grep gate skips it). Silent — no stdout here.
+# GUARD: never rewrite a file a live process still holds open — an mv would drop that
+# turn's appends; we skip any jsonl currently open per /proc (lsof/strace aren't on the
+# box). Idempotent (post-fix the file has "cli", so the grep gate skips it). Silent —
+# no stdout here.
+# ⚠ THIS GUARD CATCHES NOTHING TODAY, and the comment here used to claim the opposite
+# ("the persistent channel keeps the fd open for the whole session"). MEASURED on the
+# owner's server 2026-09-11 (claude 2.1.268): neither an interactive REPL nor our own
+# `claude --output-format stream-json` holds an fd on its jsonl — 40 samples at 0.5 s
+# across a live turn and at the idle prompt, zero hits, and /proc/locks empty for the
+# file too. Claude opens the rollout to append and closes it. So the thing actually
+# protecting a live session from this rewrite is the `-mmin -1` cool-down below, NOT
+# this scan. Kept anyway: it costs one /proc walk and it is the guard that would catch
+# a future CLI that does hold the handle. Do not "simplify" it away, and do not lean
+# on it either — if you need to know who is writing a session, ask
+# ai.eight24family.conch.agent.SessionHolder, which knows why fds are the wrong
+# question for this CLI.
 CONCH_INUSE=${'$'}(for l in /proc/[0-9]*/fd/*; do readlink "${'$'}l" 2>/dev/null; done | grep '\.jsonl${'$'}' | sort -u)
 for f in ~/.claude/projects/*/*.jsonl; do
   [ -f "${'$'}f" ] || continue
@@ -399,7 +411,18 @@ for f in ~/.claude/projects/*/*.jsonl; do
   # another copy of the chat it came from (user, 2026-08-03, counting to four).
   # 1 KB is far below any real first turn.
   sz=${'$'}(stat -c %s "${'$'}f" 2>/dev/null || stat -f %z "${'$'}f" 2>/dev/null)
-  [ "${'$'}{sz:-0}" -lt 1024 ] && continue
+  # ⚠ SIZE ALONE CANNOT TELL A STUB FROM A SHORT CONVERSATION, and it used to
+  # decide. A real but brief exchange in a terminal — the "quick question on
+  # the laptop" that is exactly what the phone should be able to pick up
+  # afterwards — fits under 1 KB and vanished from the list with it, silently
+  # and unreachably. So the floor now only ASKS a question instead of
+  # answering one: below it, a file counts as a session iff it actually
+  # contains a user turn. A launch stub has none (a couple of hundred bytes of
+  # header plus an inherited title, which is the duplicate row this guard was
+  # added for). Above the floor nothing changed and no extra read happens.
+  if [ "${'$'}{sz:-0}" -lt 1024 ]; then
+    head -n 500 "${'$'}f" 2>/dev/null | grep -q '"type":"user"' || continue
+  fi
   mtime=${'$'}(stat -c %Y "${'$'}f" 2>/dev/null || stat -f %m "${'$'}f" 2>/dev/null)
   # ACTIVITY = the last MESSAGE time, NOT the file mtime. mtime is bumped by
   # touches that add no message — `claude --resume` on open, our own entrypoint

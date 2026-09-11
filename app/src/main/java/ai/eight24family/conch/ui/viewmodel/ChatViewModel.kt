@@ -3418,7 +3418,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // explicitly skip the awaitSkSignerFromUi path so the user
             // doesn't see a "tap your security key" dialog every time they
             // open a chat on a server they're already authenticated to.
-            val existingPooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            var existingPooled = ServiceLocator.sshConnectionPool.peek(serverId)
+            if (existingAlive == null && existingPooled == null) {
+                // ⚠ TAPLESS FIRST — INVARIANTS 2026-06-05 rule (2): no connect
+                // path may reach for the physical key before trying the
+                // credentials that cost nothing. This block was the last one
+                // that still did (the picker's refresh and ServerDetail were
+                // fixed in June, this was missed), so opening a chat on a
+                // seamless server whose transport had merely lapsed popped the
+                // touch dialog with a valid device key sitting on the server —
+                // the owner's complaint, verbatim. Opening a chat IS the
+                // person's own gesture, so it rides through the silent-dial
+                // cool-down too.
+                val serverForTapless = repo.getById(serverId)
+                if (serverForTapless != null) {
+                    val up = withContext(Dispatchers.IO) {
+                        runCatching {
+                            ServiceLocator.sshConnectionPool.taplessConnect(
+                                serverForTapless,
+                                repo.getSecrets(serverId),
+                                userTriggered = true,
+                            )
+                        }.getOrNull()
+                    }
+                    if (up != null) existingPooled = up
+                }
+            }
             if (existingAlive == null && existingPooled == null) {
                 val server = repo.getById(serverId)
                 val skKeyId = server?.sshKeyIds?.firstOrNull()
@@ -5665,6 +5690,49 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         val post = execPooledText(client, remoteSizeScript(path))?.trim()?.toLongOrNull()
                         post != null && post > preSize
                     } else false
+                    // ⚠ ARGV IS NOT THE ONLY WAY TO FIND A WRITER, and until now
+                    // it was the only one tried here. A console `claude` that
+                    // MINTED this session carries no `--resume <id>` on its
+                    // command line, so discovery came back empty and Stop
+                    // degraded into a sentence — a button that does nothing, on
+                    // the exact everyday case (started it on the laptop,
+                    // stopping it from the phone). The file it is writing names
+                    // it regardless of argv. Only when the file is DEMONSTRABLY
+                    // still growing: a Stop is a deliberate ask to end the work,
+                    // but it is not a licence to go killing processes on a
+                    // guess.
+                    val pgNarrow = _currentAgent.value.cliCommand
+                    if (stillGrowing &&
+                        ai.eight24family.conch.agent.SessionHolder.canProbe(rid, pgNarrow)
+                    ) {
+                        val pg = pgNarrow
+                        val probe = ai.eight24family.conch.agent.SessionHolder.parseProbe(
+                            execPooledText(
+                                client,
+                                ai.eight24family.conch.agent.SessionHolder.probeScript(
+                                    rid,
+                                    pg,
+                                    // The session FILE is what makes a console
+                                    // REPL findable — it keeps no fd and puts no
+                                    // id in argv, but it does sit in the
+                                    // directory the rollout lives in.
+                                    path?.let { ai.eight24family.conch.agent.SessionHolder.mintedInFile(it) },
+                                ),
+                            )
+                        )
+                        val holders = (probe as? ai.eight24family.conch.agent.SessionHolder.Probe.Held)
+                            ?.holders.orEmpty()
+                        if (holders.isNotEmpty()) {
+                            val second = killer.parseOutcome(
+                                execPooledText(client, killer.killPidsScript(holders.map { it.pid }))
+                            )
+                            if (second is ai.eight24family.conch.agent.RemoteTurnKiller.Outcome.Killed) {
+                                tailPollCoord.setRemoteFileOpen(false)
+                                _chatNotice.value = "Server-side turn stopped."
+                                return@launch
+                            }
+                        }
+                    }
                     _chatNotice.value = when {
                         stillGrowing && _currentAgent.value != Agent.CLAUDE ->
                             "Can't stop a mirrored ${_currentAgent.value.displayName} turn from here — stop it on the machine that started it."
