@@ -110,9 +110,9 @@ internal fun SettingsSectionBridge(@Suppress("UNUSED_PARAMETER") vm: SettingsVie
             // ⛔ NOTHING HERE MAY NAME A COMPUTER. This paragraph used to offer
             // `adb tcpip 5555` "plugged into a computer" as the better way in —
             // advice about a machine most of the people reading it do not own,
-            // inside the app whose whole premise is that they do not need one
-            // (owner, 2026-09-06). The steps above are the entire path, and
-            // they need nothing but this phone.
+            // inside the app whose whole premise is that they do not need one.
+            // The steps above are the entire path, and they need nothing but
+            // this phone.
             //
             // ⚠ AND THE APP MUST NOT ISSUE `tcpip` FOR THEM EITHER, though it
             // could: adbd runs it for any client on an existing connection, so

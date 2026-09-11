@@ -130,7 +130,7 @@ object CodexMessageParser {
             // ──── OLD schema (pre-0.125) ────
             "session_meta" -> parseSessionMeta(obj, trimmed)
             "response_item" -> parseResponseItem(obj, trimmed)
-            "event_msg" -> parseEventMsg(obj)
+            "event_msg" -> parseEventMsg(obj, trimmed, turnTag)
             // Per-turn launch metadata (cwd / model / approval policy) —
             // same information the init row already carries.
             "turn_context" -> emptyList()
@@ -190,6 +190,12 @@ object CodexMessageParser {
         isStarted: Boolean,
         turnTag: String = "",
         rawLine: String = "",
+        /** True when the item came from a rollout's event_msg/item_* envelope
+         *  rather than a live item.* frame. The rollout ALSO stores the same
+         *  message and reasoning as response_item records, so those two must
+         *  not be rendered twice — exactly the rule the old schema's
+         *  "agent_message"/"user_message" event branch already follows. */
+        fromRollout: Boolean = false,
     ): List<AgentMessage> {
         val item = SilentlyTry.logged("Conch-CodexParse", "read item obj") { obj["item"]?.jsonObject } ?: return emptyList()
         // Codex always supplies item.id in practice; the fallback is
@@ -198,7 +204,13 @@ object CodexMessageParser {
         // pass `itemId` only as `toolUseId` (correlator, not own id),
         // so the random ↔ stable swap is invisible for them.
         val itemId = item.string("id") ?: stableId(rawLine, "item")
-        val itemType = item.string("type") ?: return emptyList()
+        val itemType = item.string("type")?.let(::normalizeItemType) ?: return emptyList()
+        // The conversation itself is carried by response_item records in a
+        // rollout; these envelopes are the same content a second time, paired
+        // by id (verified on the owner's file: ordinal 10 item_completed and
+        // ordinal 11 response_item share msg_0fdcdd19…). Rendering both doubles
+        // every reply and every prompt.
+        if (fromRollout && itemType in ROLLOUT_DUPLICATE_ITEMS) return emptyList()
 
         return when (itemType) {
             "agent_message" -> {
@@ -225,7 +237,11 @@ object CodexMessageParser {
                 else listOf(note("thinking · ${text.take(120)}", detail = text.takeIf { it.length > 120 }))
             }
             "command_execution" -> {
-                val command = item.string("command").orEmpty()
+                // The live stream sends `command` as a string; a rollout sends
+                // the argv array (["/bin/bash","-lc","…"]). string() returns
+                // null on the array, which rendered "exec ·" with no command at
+                // all — formatCommand already unwraps bash -lc for us.
+                val command = item.string("command") ?: formatCommand(item["command"]).orEmpty()
                 val aggregated = item.string("aggregated_output").orEmpty()
                 val exitCode = item.string("exit_code")
                 val status = item.string("status").orEmpty()
@@ -249,21 +265,39 @@ object CodexMessageParser {
                 }
             }
             "file_change" -> {
-                val changes = SilentlyTry.logged("Conch-CodexParse", "read changes array") { item["changes"]?.jsonArray }
-                val count = changes?.size ?: 0
-                val first = changes?.firstOrNull()?.jsonObject
-                val path = first?.string("path")?.substringAfterLast('/')
-                val kind = first?.string("kind")
+                // ⛔ TWO SHAPES, AND THE SECOND ONE WAS SILENTLY EMPTY.
+                // The live stream sends `changes` as an ARRAY of {kind, path}.
+                // A rollout sends an OBJECT keyed BY path: {"/a/b.kt":{"type":
+                // "add","content":"…"}}. `jsonArray` on the object returns null,
+                // so count was 0, path and kind were null, and every file the
+                // agent wrote rendered as the bare word "files" — 188 of them in
+                // the owner's session. Read whichever shape arrived.
+                val rows: List<String> =
+                    SilentlyTry.logged("Conch-CodexParse", "read changes array") { item["changes"]?.jsonArray }
+                        ?.mapNotNull { c ->
+                            SilentlyTry.logged("Conch-CodexParse", "read change row") {
+                                val o = c.jsonObject
+                                listOfNotNull(o.string("kind"), o.string("path")).joinToString(" ")
+                            }
+                        }?.filter { it.isNotBlank() }
+                        ?: SilentlyTry.logged("Conch-CodexParse", "read changes map") { item["changes"]?.jsonObject }
+                            ?.entries?.map { (path, v) ->
+                                val kind = SilentlyTry.logged("Conch-CodexParse", "read change kind") {
+                                    v.jsonObject.string("type")
+                                } ?: "change"
+                                "$kind $path"
+                            }
+                        ?: emptyList()
+                val count = rows.size
                 val tail = if (count > 1) " (+${count - 1} more)" else ""
-                val label = listOfNotNull(kind, path).joinToString(" ").ifBlank { "files" }
-                // Full change list in the expandable detail.
-                val all = changes?.mapNotNull { c ->
-                    SilentlyTry.logged("Conch-CodexParse", "read change row") {
-                        val o = c.jsonObject
-                        listOfNotNull(o.string("kind"), o.string("path")).joinToString(" ")
-                    }
-                }?.filter { it.isNotBlank() }?.joinToString("\n")
-                listOf(note("$label$tail", detail = all?.takeIf { count > 1 },
+                // `<kind> <basename>` — the path's last segment is what a phone
+                // screen has room for; the full paths hang off the detail.
+                val label = rows.firstOrNull()
+                    ?.let { it.substringBefore(' ') + " " + it.substringAfter(' ').substringAfterLast('/') }
+                    ?.trim()
+                    ?.ifBlank { null }
+                    ?: "files"
+                listOf(note("$label$tail", detail = rows.joinToString(separator = "\n").takeIf { count > 1 },
                     id = "codexevt-files-$turnTag$itemId"))
             }
             "mcp_tool_call" -> {
@@ -313,6 +347,34 @@ object CodexMessageParser {
                 val msg = item.string("message") ?: item.string("error") ?: "error"
                 listOf(AgentMessage.Error(uuid(), msg))
             }
+            // The agent opened an image (a screenshot it just took, a generated
+            // asset). The path is the whole content.
+            "image_view" -> {
+                val path = item.string("path").orEmpty().removePrefix("file://")
+                listOf(
+                    note(
+                        "viewed image · ${path.substringAfterLast('/').ifBlank { "image" }}",
+                        detail = path.takeIf { it.isNotBlank() },
+                        id = "codexevt-img-$turnTag$itemId",
+                    )
+                )
+            }
+            // Built-in extensions: web.search, image_gen.generation, … `kind`
+            // names which one; `query` is the only short field worth showing.
+            "extension" -> {
+                val kind = item.string("kind") ?: "extension"
+                val q = item.string("query") ?: item.string("revisedPrompt")
+                listOf(
+                    note(
+                        kind.replace('.', ' ') + (q?.let { " · ${it.take(100)}" } ?: ""),
+                        detail = q?.takeIf { it.length > 100 },
+                        id = "codexevt-ext-$turnTag$itemId",
+                    )
+                )
+            }
+            "context_compaction" ->
+                listOf(note("context compacted", tone = AgentMessage.EventNote.Tone.INFO,
+                    id = "codexevt-compact-$turnTag$itemId"))
             // UNKNOWN item type — render generically, never swallow.
             else -> listOf(note(genericLabel(itemType, item), detail = genericDetail(item)))
         }
@@ -407,7 +469,7 @@ object CodexMessageParser {
         }
     }
 
-    private fun parseEventMsg(obj: JsonObject): List<AgentMessage> {
+    private fun parseEventMsg(obj: JsonObject, rawLine: String = "", turnTag: String = ""): List<AgentMessage> {
         val payload = SilentlyTry.logged("Conch-CodexParse", "read event_msg payload") { obj["payload"]?.jsonObject } ?: return emptyList()
         return when (val ptype = payload.string("type")) {
             "agent_message", "user_message" -> emptyList()   // duplicates response_item.message
@@ -486,6 +548,27 @@ object CodexMessageParser {
                 val msg = payload.string("message") ?: payload.string("error") ?: "error"
                 listOf(AgentMessage.Error(uuid(), msg))
             }
+            // ⛔ THE ROLLOUT'S OWN ITEM ENVELOPE — 1872 RECORDS THAT USED TO
+            // FALL THROUGH TO "item completed" AND SHOW NOTHING.
+            //
+            // A live `codex exec` stream sends items at the TOP level
+            // ("item.completed"), and that path has been parsed since 0.125. The
+            // rollout on disk wraps the same item in event_msg/item_completed,
+            // and nothing routed it — so replaying a session from its file
+            // rendered one dim, empty "item completed" row per item. Measured on
+            // the owner's rollout 2026-09-12: 682 CommandExecution, 657
+            // Reasoning, 188 FileChange, 159 AgentMessage, 93 ImageView, 54
+            // UserMessage, 32 Extension — every command, every file write and
+            // every image in the session, drawn as a label with no content. The
+            // bytes were there; the parser dropped them.
+            "item_started", "item_updated", "item_completed" ->
+                parseItem(
+                    payload,
+                    isStarted = ptype == "item_started",
+                    turnTag = turnTag,
+                    rawLine = rawLine,
+                    fromRollout = true,
+                )
             // UNKNOWN event type — render generically, never swallow.
             else -> {
                 if (ptype == null) emptyList()
@@ -541,6 +624,24 @@ object CodexMessageParser {
         tone: AgentMessage.EventNote.Tone = AgentMessage.EventNote.Tone.DIM,
         id: String = uuid(),
     ): AgentMessage = AgentMessage.EventNote(id = id, label = label, detail = detail, tone = tone)
+
+    /** Item types a rollout stores TWICE — once as this envelope, once as a
+     *  response_item. Parsed from the response_item, skipped here. */
+    private val ROLLOUT_DUPLICATE_ITEMS = setOf("agent_message", "user_message", "reasoning")
+
+    /**
+     * `CommandExecution` → `command_execution`.
+     *
+     * The two schemas spell the same item type differently: the live
+     * `item.completed` stream uses snake_case, the rollout on disk uses
+     * PascalCase. Only the snake_case names were ever handled, so every
+     * PascalCase item fell through to the generic label — which is what the
+     * owner saw as a screen of "item completed". Normalising here fixes all of
+     * them at once and keeps the `when` arms in one vocabulary.
+     */
+    internal fun normalizeItemType(t: String): String =
+        if (t.none { it.isUpperCase() }) t
+        else t.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), "_").lowercase()
 
     private val NOISE_KEYS = setOf("type", "id", "session_id", "call_id", "timestamp")
 

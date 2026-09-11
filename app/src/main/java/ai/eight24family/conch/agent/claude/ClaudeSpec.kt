@@ -739,89 +739,58 @@ case " ${'$'}CM " in
       if [ -z "${'$'}RTOK" ]; then echo "claude_run_state=TOKEN_EXPIRED"; else echo "claude_run_state=UNKNOWN"; fi
       exit 0
     fi
-    VER=${'$'}(conch_ver claude claude)
-    UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
-    prof=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/profile" 2>/dev/null)
-    PC=${'$'}(printf '%s' "${'$'}prof" | sed -n 's/^HTTP://p' | tail -1)
-    PJ=${'$'}(printf '%s' "${'$'}prof" | sed '${'$'}d')
-    # profile 200 itself proves the token is live (validate is 405 on GET). 401 =
-    # THIS TOKEN is not accepted (NOT "auth dead" — see the 401 branch). 403 needs
-    # the BODY: a `claude setup-token` login mints an INFERENCE-ONLY token
-    # (authorize URL literally has scope=user:inference), so profile/usage answer
-    # 403 permission_error "does not meet scope requirement" while the token is
-    # perfectly LIVE and turns run (verified: claude -p exit 0 on exactly this
-    # state). the turn surfaces any problem. Any OTHER 403 = auth dead. 401 = THIS
-    # access token is not accepted. with a live refresh token the CLI recovers by
-    # itself, so the honest answer is "could not check" — never a block that greys
-    # out the send button.
-    if [ "${'$'}PC" = "401" ]; then
-      if [ -n "${'$'}RTOK" ]; then echo "claude_run_state=UNKNOWN"; else echo "claude_run_state=TOKEN_EXPIRED"; fi
-      exit 0
-    fi
-    if [ "${'$'}PC" = "403" ]; then
-      if printf '%s' "${'$'}PJ" | grep -qE 'permission_error|scope requirement'; then echo "claude_run_state=OK"
-      # Same rule as 401: refreshable => "could not check", not "logged out".
-      elif [ -n "${'$'}RTOK" ]; then echo "claude_run_state=UNKNOWN"
-      else echo "claude_run_state=TOKEN_EXPIRED"; fi
-      exit 0
-    fi
-    if [ "${'$'}PC" != "200" ]; then echo "claude_run_state=UNKNOWN"; exit 0; fi
-    h() { printf '%s' "${'$'}PJ" | grep -qE "${'$'}1"; }
-    mx=n; h '"has_claude_max"[[:space:]]*:[[:space:]]*true' && mx=y
-    pr=n; h '"has_claude_pro"[[:space:]]*:[[:space:]]*true' && pr=y
-    sa=n; h '"subscription_status"[[:space:]]*:[[:space:]]*"(active|trialing)"' && sa=y
-    # ORG plans carry no personal has_claude_* flags at all: a Team seat probes
-    # has_claude_max:false + has_claude_pro:false while organization_type says
-    # claude_team and the ORG's subscription_status is active — and the CLI runs
-    # turns fine (verified live 2026-08-18: claude -p exit 0 on exactly this
-    # profile, while the picker said "[ no subscription ]"). Whether the SEAT
-    # includes Code isn't in this profile; a refused turn surfaces that itself.
-    ot=${'$'}(printf '%s' "${'$'}PJ" | sed -n -E 's/.*"organization_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
-    pd=n; { h '"payment_auth_hosted_invoice_url"[[:space:]]*:[[:space:]]*"http' || h '"pending_invoice"[[:space:]]*:[[:space:]]*("|\{|true)'; } && pd=y
-    TE=${'$'}(printf '%s' "${'$'}PJ" | sed -n -E 's/.*"claude_code_trial_ends_at"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
-    NW=${'$'}(date +%s); TS=; [ -n "${'$'}TE" ] && TS=${'$'}(date -d "${'$'}TE" +%s 2>/dev/null)
+    # ⛔ NO SPOOFED FIRST-PARTY CALL — ASK THE BINARY, NOT THE API.
+    #
+    # This block used to read the user's OAuth access token out of
+    # ~/.claude/.credentials.json and curl api.anthropic.com's
+    # /api/oauth/profile and /api/oauth/usage wearing
+    # "claude-code/<ver> (external, cli)" as its User-Agent. Impersonating the
+    # first-party client with a subscription credential is provider-guardrail
+    # circumvention whatever it is used for, and it outlived the limits bar's
+    # own conversion to the CLI's `get_usage` by a month. Same trick the limits
+    # bar now uses: drive the real `claude`, read its answer.
+    #
+    # WHAT THAT COSTS, STATED PLAINLY: get_usage knows the plan and the
+    # windows; it does not know the account's billing states. TRIAL_ACTIVE,
+    # TRIAL_START, TRIAL_ENDED, PAYMENT_DUE and NO_SUBSCRIPTION are gone from
+    # this probe. They were also the states that mislabelled a perfectly
+    # working Team seat "[ no subscription ]" (2026-08-18), so what is lost is
+    # a guess. What is kept is everything that actually BLOCKS a turn: an
+    # answer at all proves this login runs, and the windows still give
+    # NEAR_LIMIT / RATE_LIMITED. Anything else the turn itself surfaces.
+    command -v claude >/dev/null 2>&1 || { echo "claude_run_state=UNKNOWN"; exit 0; }
+    U=${'$'}({ printf '%s\n' '{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","supportedDialogKinds":["can_use_tool","ask_user_question"]}}'
+        sleep 2
+        printf '%s\n' '{"type":"control_request","request_id":"u-1","request":{"subtype":"get_usage"}}'
+        sleep 2
+      } | conch_timeout 20 claude --output-format stream-json --input-format stream-json --verbose 2>/dev/null | grep -m1 '"u-1"')
+    # No answer is "could not check", never a block — the same rule the 401 and
+    # 403 branches above were corrected to follow.
+    [ -z "${'$'}U" ] && { echo "claude_run_state=UNKNOWN"; exit 0; }
     ST=OK; DA=
-    if [ "${'$'}mx" = y -o "${'$'}pr" = y ] && [ "${'$'}sa" = y ]; then ST=OK
-    elif [ "${'$'}sa" = y ] && { [ "${'$'}ot" = claude_team ] || [ "${'$'}ot" = claude_enterprise ]; }; then ST=OK
-    elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -gt "${'$'}NW" ]; then ST=TRIAL_ACTIVE; DA="${'$'}(( (${'$'}TS-${'$'}NW)/86400 )) days"
-    elif [ -n "${'$'}TS" ] && [ "${'$'}TS" -le "${'$'}NW" ] && [ "${'$'}mx" = n ] && [ "${'$'}pr" = n ]; then ST=TRIAL_ENDED
-    elif [ "${'$'}pr" = y ] && [ -z "${'$'}TE" ]; then ST=TRIAL_START
-    elif [ "${'$'}pd" = y ]; then ST=PAYMENT_DUE
-    elif [ "${'$'}mx" = n ] && [ "${'$'}pr" = n ]; then ST=NO_SUBSCRIPTION
+    # Windows that HARD-block OUR turns: five_hour, seven_day, and
+    # seven_day_oauth_apps (the third-party-OAuth-app bucket = our own access
+    # path). Model-scoped opus/sonnet are a per-model degrade, excluded.
+    MU=0; RS=
+    for w in five_hour seven_day seven_day_oauth_apps; do
+      bd=${'$'}(printf '%s' "${'$'}U" | grep -oE "\"${'$'}w\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" | head -1)
+      [ -z "${'$'}bd" ] && continue
+      u=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"utilization"[[:space:]]*:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+      [ -z "${'$'}u" ] && continue
+      ui=${'$'}{u%.*}
+      if [ "${'$'}ui" -gt "${'$'}MU" ] 2>/dev/null; then MU=${'$'}ui; RS=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"resets_at"[[:space:]]*:[[:space:]]*"?([^",}]+)"?.*/\1/p' | head -1); fi
+    done
+    if [ "${'$'}MU" -ge 100 ] 2>/dev/null; then ST=RATE_LIMITED; DA=${'$'}RS
+    elif [ "${'$'}MU" -ge 80 ] 2>/dev/null; then ST=NEAR_LIMIT; DA=${'$'}RS
     fi
-    # Usage overlay only for a runnable state; skip when usage itself is 429/empty
-    # (do NOT fake rate-limit). Windows that HARD-block OUR turns: five_hour,
-    # seven_day, and seven_day_oauth_apps (the third-party-OAuth-app bucket = our
-    # own access path). Model-scoped opus/sonnet are a per-model degrade, excluded.
-    if [ "${'$'}ST" = OK ] || [ "${'$'}ST" = TRIAL_ACTIVE ]; then
-      usg=${'$'}(curl -sS -m 6 -w '\nHTTP:%{http_code}' -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-      UC=${'$'}(printf '%s' "${'$'}usg" | sed -n 's/^HTTP://p' | tail -1)
-      UJ=${'$'}(printf '%s' "${'$'}usg" | sed '${'$'}d')
-      if [ "${'$'}UC" = "200" ]; then
-        MU=0; RS=
-        for w in five_hour seven_day seven_day_oauth_apps; do
-          bd=${'$'}(printf '%s' "${'$'}UJ" | grep -oE "\"${'$'}w\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" | head -1)
-          [ -z "${'$'}bd" ] && continue
-          u=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"utilization"[[:space:]]*:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
-          [ -z "${'$'}u" ] && continue
-          ui=${'$'}{u%.*}
-          if [ "${'$'}ui" -gt "${'$'}MU" ] 2>/dev/null; then MU=${'$'}ui; RS=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"resets_at"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1); fi
-        done
-        if [ "${'$'}MU" -ge 100 ] 2>/dev/null; then ST=RATE_LIMITED; DA=${'$'}RS
-        elif [ "${'$'}MU" -ge 80 ] 2>/dev/null; then ST=NEAR_LIMIT; DA=${'$'}RS
-        fi
-      fi
-    fi
-    # Plan tier for the limits sheet header — only knowable from a 200 profile
-    # (an inference-only setup-token 403s above and never reaches here, so its
-    # tier stays unknown and the sheet just omits it).
-    PLAN=
-    if [ "${'$'}mx" = y ]; then PLAN=Max; elif [ "${'$'}pr" = y ]; then PLAN=Pro; fi
-    [ -z "${'$'}PLAN" ] && [ "${'$'}ot" = claude_team ] && PLAN=Team
-    [ -z "${'$'}PLAN" ] && [ "${'$'}ot" = claude_enterprise ] && PLAN=Enterprise
-    [ -z "${'$'}PLAN" ] && { [ "${'$'}ST" = TRIAL_ACTIVE ] || [ "${'$'}ST" = TRIAL_START ]; } && PLAN="Pro trial"
-    [ -z "${'$'}PLAN" ] && [ "${'$'}ST" = NO_SUBSCRIPTION ] && PLAN=Free
-    [ -n "${'$'}PLAN" ] && echo "claude_plan=${'$'}PLAN"
+    # Plan tier for the limits sheet header — the CLI's own subscription_type.
+    SUB=${'$'}(printf '%s' "${'$'}U" | sed -n -E 's/.*"subscription_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+    case "${'$'}SUB" in
+      max*) echo "claude_plan=Max" ;;
+      pro*) echo "claude_plan=Pro" ;;
+      team*) echo "claude_plan=Team" ;;
+      enterprise*) echo "claude_plan=Enterprise" ;;
+    esac
     echo "claude_run_state=${'$'}ST"
     [ -n "${'$'}DA" ] && echo "claude_run_data=${'$'}DA"
   ) ;;

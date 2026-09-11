@@ -15,6 +15,56 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.7.3] — 2026-09-12
+
+A session you have been working in all day, opened on the phone, showed eight
+collapsed tool rows over an empty screen. Two independent causes, both found by
+measuring a real 483 MB rollout rather than reading the code.
+
+### Fixed
+- **A huge session opens with its whole conversation, in seconds.** A byte
+  window is not a unit of conversation. In the rollout this was measured on,
+  command output and completed-item records are 430 of its 483 MB — 119 single
+  lines are over a megabyte each — while every message in the entire session
+  totals 294 KB, 0.06% of the file. So a bounded tail landed inside two or three
+  blobs and held 25 of 5,391 records, one of them a message; and downloading the
+  whole file would have shown exactly the same thing, after twenty-four minutes
+  and a third of a gigabyte of phone storage. The session is now projected on
+  the server instead: records under 32 KB pass through byte-for-byte, an
+  oversized one becomes a stub that keeps its envelope, type and id and says how
+  big the body was. 483 MB becomes 13 MB of records — 3.5 MB gzipped on the
+  wire, 1.9 s of server CPU — and the chat shows the conversation from its first
+  message to its last. The same pass takes a 23 MB Claude rollout to 3.7 MB.
+- **Codex sessions replayed from disk show what actually happened in them.** The
+  parser understood the live stream's item frames but not the rollout's own
+  envelope, whose item types are spelled differently. Every command, file edit
+  and image in a session — 1872 records in the one measured — rendered as a dim,
+  contentless "item completed". File changes had a second shape too, an object
+  keyed by path rather than an array, so 188 file writes said only "files".
+- **The limit bar stops reporting a number it knows is old.** A rate-limit
+  snapshot read off a session file on disk was allowed to overwrite a reading
+  taken from the CLI a moment earlier, and the snapshot often landed last — so a
+  spent plan read "2% left". Sources are now ranked, and a reading holds against
+  a weaker one while it is still young. Two Codex probes were also silently
+  returning nothing: the live one was killed 1.1 s in, before its answer
+  arrived, and the fallback took the last rate-limit line in the rollout, which
+  on some accounts is a second bucket with no numbers in it at all. With both
+  halves empty the bar simply kept its last value forever.
+- **The limit refreshes while a turn is running.** It used to skip exactly the
+  server that was burning the window, on the theory that the turn moves the
+  number itself; it does not move it fast enough.
+- **Storage left behind by an interrupted download is reclaimed** on launch.
+
+### Changed
+- The Claude run-state probe drives the CLI's own `get_usage` instead of calling
+  Anthropic's OAuth endpoints directly with the user's token. The account's
+  billing states (trial, payment due, no subscription) are no longer guessed
+  from that call — they were also what once mislabelled a working team seat as
+  having no subscription. Rate-limit state and plan tier are kept, from the
+  CLI's own numbers.
+
+---
+
 ## [0.7.2] — 2026-09-11
 
 The same question 0.7.1 answered for Codex, asked for Claude — where it is much
@@ -2035,6 +2085,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.7.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.3
 [0.7.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.1
 [0.7.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.0
 [0.6.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.5

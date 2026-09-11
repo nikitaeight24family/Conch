@@ -1,6 +1,6 @@
-Pick up a Claude session anywhere - and reach for your security key far less.
+Huge sessions finally open — and show everything.
 
-• A session open in a terminal no longer gets a second one behind your back: the chat names where it is held, and one tap takes it over.
-• Start on the laptop, carry on from the phone - an idle session is handed back when you put the phone away.
-• Short sessions started in a terminal now show up on the phone.
-• Opening a chat, refreshing the list or reconnecting use the key your server already trusts.
+• A session of any size opens in seconds with its whole conversation, first message to last. Big command output and images stay on the server instead of landing on your phone.
+• Fixed Codex sessions from disk showing rows of "item completed" instead of the commands, file edits and images.
+• The usage bar no longer shows a stale number and refreshes while a turn runs.
+• Reclaims space left by interrupted downloads.

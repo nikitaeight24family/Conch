@@ -260,6 +260,15 @@ class AgentSessionManager(
         it.isAlive() && (it.state.value == SessionState.Working || it.drainerBusy)
     }
 
+    /** Is a turn in flight on [serverId] right now? The background usage warmer
+     *  skips such a server — its working chat already refreshes the limit over
+     *  the live channel (+ the provider's rate_limit_event push), so a second
+     *  probe would only launch a competing `claude` for numbers already moving. */
+    fun anyWorkingOn(serverId: String): Boolean = sessions.values.any {
+        it.server.id == serverId && it.isAlive() &&
+            (it.state.value == SessionState.Working || it.drainerBusy)
+    }
+
     /**
      * Work worth keeping the Activity alive for, which is a WIDER question than
      * [findWorkingSession].

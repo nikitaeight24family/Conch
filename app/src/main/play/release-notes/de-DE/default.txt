@@ -1,6 +1,6 @@
-Eine Claude-Sitzung überall fortsetzen - und seltener zum Sicherheitsschlüssel greifen.
+Riesige Sitzungen öffnen sich endlich — und zeigen alles.
 
-• Zu einer im Terminal geöffneten Sitzung kommt keine zweite mehr hinzu: der Chat nennt den Ort, ein Tippen übernimmt sie.
-• Am Laptop anfangen, am Handy weitermachen - eine untätige Sitzung wird zurückgegeben, sobald Sie das Handy weglegen.
-• Kurze Sitzungen aus dem Terminal erscheinen nun am Handy.
-• Chat, Liste und Verbindung nutzen den Schlüssel, dem Ihr Server schon vertraut.
+• Eine Sitzung jeder Größe öffnet sich in Sekunden mit dem ganzen Verlauf. Große Befehlsausgaben und Bilder bleiben auf dem Server, statt aufs Telefon zu wandern.
+• Behoben: Codex-Sitzungen von der Festplatte zeigten „item completed“ statt Befehlen, Dateiänderungen und Bildern.
+• Die Limit-Anzeige ist nicht mehr veraltet und aktualisiert sich während eines Zugs.
+• Gibt Speicher abgebrochener Downloads frei.

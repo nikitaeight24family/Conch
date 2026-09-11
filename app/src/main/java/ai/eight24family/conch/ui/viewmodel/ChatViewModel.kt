@@ -3279,7 +3279,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // deceptively complete.
                     val headMissing = win.windowed ||
                         ServiceLocator.historyCache.baseOffset(resumeIdParam) > 0L
-                    cachedParsed = if (headMissing) listOf(historyWindowMarker()) + parsed else parsed
+                    cachedParsed = historyWindowRows(resumeIdParam, headMissing) + parsed
                     // Timing on the OPEN path — openRemoteSession is NOT launched, so
                     // this hydrate parse runs on the MAIN thread. If parseMs is high on
                     // a big session, that's the "loaded slowly" jank → move off Main.
@@ -3709,16 +3709,15 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // open. Skipped on a reconnect carry (seedMessages) — that
                 // already holds the freshest display.
                 if (resumeFilePath != null && resumeIdParam != null && seedMessages.isNullOrEmpty()) {
-                    val base = ServiceLocator.historyCache.baseOffset(resumeIdParam)
-                    val cachedLen = cachedBytesLen
+                    val cachedRemoteEnd = ServiceLocator.historyCache.remoteEnd(resumeIdParam)
                     viewModelScope.launch(Dispatchers.IO) {
                         val live = ServiceLocator.sshConnectionPool.peek(serverId) ?: return@launch
                         val serverSize = execPooledText(live, remoteSizeScript(resumeFilePath))
                             ?.trim()?.toLongOrNull()
-                        if (serverAheadOfCache(serverSize, base, cachedLen)) {
+                        if (serverAheadOfCache(serverSize, cachedRemoteEnd)) {
                             android.util.Log.d(
                                 "Conch-Chat",
-                                "cache stale on open (server=$serverSize base=$base cached=$cachedLen) — " +
+                                "cache stale on open (server=$serverSize cachedRemoteEnd=$cachedRemoteEnd) — " +
                                     "refreshing display tail so the in-flight prompt shows with the answer",
                             )
                             paintTailFromServer(live, resumeFilePath, s, agent, localId)
@@ -3790,7 +3789,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                                 val win = ai.eight24family.conch.util.JsonlUtils
                                     .tailSlice(snap.buffer, DISPLAY_TAIL_BYTES)
                                 val p = tailPollCoord.parseJsonl(win.slice, agent)
-                                if (win.windowed) listOf(historyWindowMarker()) + p else p
+                                historyWindowRows(resumeIdParam, win.windowed) + p
                             } ?: tailPollCoord.parseJsonl(safe, agent)
                             s.loadHistory(parsed)
                             // Caching the body makes this session searchable — so it
@@ -4029,7 +4028,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // The poller speaks REMOTE offsets; a tail-first cache's local
                 // length maps to remote only after adding its base origin
                 // (0 for complete mirrors, so this is byte-identical for them).
-                val initialOffset = ServiceLocator.historyCache.baseOffset(resumeIdParam) + cachedBytesLen
+                // A PROJECTED body knows its own remote position; a copied one
+                // derives it. The two are not interchangeable: a projection of a
+                // 483 MB rollout is 13 MB local, so base + localLength would aim
+                // the next fetch 470 MB too early and re-pull the session every
+                // tick. See HistoryCache.remoteOffset.
+                val initialOffset = ServiceLocator.historyCache.remoteEnd(resumeIdParam)
                 pollerJobs[localId] = viewModelScope.launch(Dispatchers.IO) {
                     tailPollCoord.tailPoll(s, agent, resumeIdParam, resumeFilePath, initialOffset)
                 }
@@ -4072,10 +4076,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                         pollerJobs[localId] = viewModelScope.launch(Dispatchers.IO) {
                             tailPollCoord.tailPoll(
                                 s, agent, sid, p,
-                                // Base is 0 for phone-born sessions today, but the
-                                // offset contract is base + localLen everywhere.
-                                ServiceLocator.historyCache.baseOffset(sid) +
-                                    ServiceLocator.historyCache.size(sid),
+                                ServiceLocator.historyCache.remoteEnd(sid),
                             )
                         }
                     }
@@ -4708,6 +4709,36 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      */
     private fun publishUsage(rep: ai.eight24family.conch.agent.UsageReport?, tier: String) {
         val current = _usage.value
+        // ⛔ AND IT REFUSES TO GO BACKWARDS IN AUTHORITY EITHER.
+        //
+        // The stamp rule above orders the one STAMPED tier against the rest. It
+        // cannot order two unstamped tiers, and two of them disagree by
+        // construction: `fast` greps a rate-limit snapshot out of a session
+        // rollout on disk — a record of some earlier moment — while `live` asks
+        // the CLI what the number is NOW. Measured on the owner's phone
+        // 2026-09-12, alternating every few seconds:
+        //
+        //     bar<-live  5-hour limit=0%
+        //     bar<-fast  5-hour limit=2%
+        //
+        // The server's app-server said usedPercent:100. The bar showed 2%,
+        // because the snapshot happened to land last. A plan that is SPENT
+        // reading as "2% left" is the exact failure the owner has now reported
+        // twice, and the ladder's whole purpose is to paint something early, not
+        // to keep overwriting the answer with the guess.
+        //
+        // So a lower tier may fill an empty bar and may refresh its own, but it
+        // may not replace a higher tier's reading while that reading is still
+        // young. [TIER_HOLD_MS] keeps it from ever wedging: once the live number
+        // ages out, whatever answers next is better than something stale.
+        val rank = usageTierRank(tier)
+        val held = System.currentTimeMillis() - lastUsagePublishMs < TIER_HOLD_MS
+        if (rep != null && current != null && held && rank < lastUsageTierRank) {
+            ai.eight24family.conch.util.Logx.d("Conch-Usage") {
+                "bar<-$tier REJECTED (weaker source than the one on screen)"
+            }
+            return
+        }
         if (rep != null && current != null &&
             !ai.eight24family.conch.agent.usageReadingSupersedes(
                 current.fetchedAtEpochMs, rep.fetchedAtEpochMs,
@@ -4719,8 +4750,27 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             return
         }
         _usage.value = rep
+        if (rep != null) {
+            lastUsageTierRank = rank
+            lastUsagePublishMs = System.currentTimeMillis()
+        }
         logUsageSource(tier, rep)
     }
+
+    /** How much a source is worth against another. `control` rides the running
+     *  turn's own stream, `live` asks the CLI right now, `cli-cache` reads what
+     *  the CLI last persisted, `fast` greps a snapshot off disk, and `warm` is
+     *  whatever the last poll left in memory. */
+    private fun usageTierRank(tier: String): Int = when (tier) {
+        "control" -> 5
+        "live" -> 4
+        "cli-cache" -> 2
+        "fast" -> 1
+        else -> 0 // warm, and anything added later, until it earns a rank
+    }
+
+    private var lastUsageTierRank: Int = -1
+    private var lastUsagePublishMs: Long = 0L
 
     private fun logUsageSource(tier: String, rep: ai.eight24family.conch.agent.UsageReport?) {
         ai.eight24family.conch.util.Logx.d("Conch-Usage") {
@@ -5799,7 +5849,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         } else tailPollCoord.trimToLastNewline(tailRaw)
         val parsed = tailPollCoord.parseJsonl(safe, agent)
         if (parsed.isNotEmpty()) {
-            val display = if (windowed) listOf(historyWindowMarker()) + parsed else parsed
+            val display = historyWindowRows(s.agentSessionId, windowed) + parsed
             s.loadHistory(display)
             _messagesBySession.update { m ->
                 if ((m[localId]?.size ?: 0) > display.size) m else m + (localId to display)
@@ -6095,10 +6145,35 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * The full history stays cached on disk; this is display-only. Stable id so
      * re-hydrates / appends keep exactly one.
      */
+    /**
+     * The marker rows to prepend — usually none.
+     *
+     * A tail-first cache (base > 0) has its head missing, and as of 2026-09-12
+     * the tail-poll downloads that head by itself the moment the chat opens
+     * (ChatViewModelTailPoll's backfill). Telling the user their history is
+     * hidden, while it is actively arriving, is a chore invented for a problem
+     * the app is in the middle of solving — and it was rejected in those exact
+     * terms. With a live connection the row is simply wrong; without one
+     * nothing is coming, and then it is the honest truth.
+     *
+     * The remaining case is a DISPLAY window over a body that is fully local:
+     * the row says what is on screen, the tap is instant, and it costs no
+     * transfer. [maybeAutoExpand] removes even that one whenever the body is
+     * small enough to render whole.
+     */
+    private fun historyWindowRows(resumeId: String?, windowed: Boolean): List<AgentMessage> {
+        if (!windowed) return emptyList()
+        val headMissing = resumeId != null &&
+            ServiceLocator.historyCache.baseOffset(resumeId) > 0L
+        val backfilling = headMissing &&
+            ServiceLocator.sshConnectionPool.peek(serverId) != null
+        return if (backfilling) emptyList() else listOf(historyWindowMarker())
+    }
+
     private fun historyWindowMarker(): AgentMessage =
         AgentMessage.EventNote(
             id = HISTORY_WINDOW_MARKER_ID,
-            label = "↑ earlier history hidden — tap to load all",
+            label = "↑ earlier history hidden",
             tone = AgentMessage.EventNote.Tone.DIM,
         )
 
@@ -6224,6 +6299,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     }
 
     companion object {
+        /** How long a reading holds the bar against a weaker source. Long
+         *  enough to outlast the ladder's own retry cadence (seconds),
+         *  short enough that nothing stale can wedge the bar. */
+        private const val TIER_HOLD_MS = 120_000L
+
         /** Public constant — referenced by ChatPromptBar / ChatScreenPromptHost. */
         const val MAX_ATTACHMENTS: Int = 10
 
@@ -6309,8 +6389,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          * `serverSize > baseOffset + cachedLen` is the correct, base-aware test.
          * A null server size (stat failed) ⇒ can't tell ⇒ don't refresh.
          */
-        internal fun serverAheadOfCache(serverSize: Long?, baseOffset: Long, cachedLen: Long): Boolean =
-            serverSize != null && serverSize > baseOffset + cachedLen
+        /** @param cachedRemoteEnd from HistoryCache.remoteEnd — NEVER
+         *  re-derived here; a projected body makes local length meaningless. */
+        internal fun serverAheadOfCache(serverSize: Long?, cachedRemoteEnd: Long): Boolean =
+            serverSize != null && serverSize > cachedRemoteEnd
 
         /**
          * Does a fresh send go to the VISIBLE QUEUE instead of straight to the

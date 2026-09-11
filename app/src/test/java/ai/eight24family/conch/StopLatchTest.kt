@@ -8,10 +8,8 @@ import org.junit.Test
 /**
  * STOP IS A LAW — AND THE MIRROR POLL IS THE LAST THING THAT CAN BREAK IT.
  *
- * Eight presses of Stop, no effect — reported as the fifteenth time this had
- * been "fixed" (owner, 2026-09-07). Every earlier fix worked on DELIVERY — the
- * protocol interrupt, the escalation ladder, the pgrep kill by resume id, the
- * persisted order — and
+ * (2026-09-07). Every earlier fix worked on DELIVERY — the protocol interrupt,
+ * the escalation ladder, the pgrep kill by resume id, the persisted order — and
  * each of them was correct while the button still read as dead, because the tail
  * poll re-derives "a turn is in flight" from the session state every ~5 s and
  * republishes `remoteFileOpen`, the exact flag the spinner and the Stop button

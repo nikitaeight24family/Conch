@@ -519,17 +519,19 @@ object UsageProbe {
             forget(serverId, agent)
             return null
         }
-        val windows = when (agent) {
-            Agent.CLAUDE -> parseClaude(out)
-            Agent.CODEX -> parseCodex(out)
+        val raw: UsageReport? = when (agent) {
+            // Claude now returns a `get_usage` control_response line, not the
+            // raw endpoint JSON — the CLI itself produced it (see
+            // [CLAUDE_USAGE_CMD]). [reportFromControlPayload] reads its windows,
+            // model_scoped rows, subscription_type and extra_usage in one pass —
+            // exactly the parse the live-channel path already uses.
+            Agent.CLAUDE -> reportFromControlPayload(out)
+            Agent.CODEX -> parseCodex(out).takeIf { it.isNotEmpty() }
+                ?.let { UsageReport(windows = it) }
             Agent.GEMINI, Agent.GROK, Agent.COPILOT,
             Agent.QWEN, Agent.CURSOR, Agent.OPENCODE, Agent.CRUSH,
-            Agent.CONTINUE -> emptyList()
+            Agent.CONTINUE -> null
         }
-        val raw = if (windows.isEmpty()) null else UsageReport(
-            windows = windows,
-            extraUsedUsd = if (agent == Agent.CLAUDE) parseClaudeExtra(out) else null,
-        )
         // Merge BEFORE caching — a fallback-source report without the
         // per-model layer must not clobber the carried rows (see
         // [withPerModelCarryOver]); returned merged too, so the caller
@@ -1012,67 +1014,32 @@ object UsageProbe {
     // `claude-code/<ver>` UA — so we mirror the CLI's own header.
     // PATH comes from RemoteEnv (a hand-rolled subset here missed nvm, so a
     // claude installed via nvm read VER empty and the UA fell back to 2.0.0).
-    private val CLAUDE_USAGE_CMD = RemoteEnv.PATH_PREAMBLE + """
+    // Claude plan-limit windows, read by DRIVING THE REAL CLI — the same way
+    // [CODEX_LIVE_CMD] drives `codex app-server`. We launch `claude` in its
+    // stream-json control mode, send `initialize` (which makes the CLI itself
+    // refresh usage from the network — MEASURED 2026-09-12 on the dev server: a
+    // 31-hour-stale ~/.claude.json cache went 7 s fresh the moment init ran)
+    // then `get_usage`, and read back the single control_response line. The
+    // number is the CLI's OWN — its token, its request, its User-Agent — so
+    // nothing here impersonates the first-party client and no inference turn is
+    // spent (measured total_cost_usd=0, and no session .jsonl is created).
+    // Replaces the old direct api.anthropic.com probe that wore a
+    // `claude-code/<ver> (external, cli)` UA and POSTed a max_tokens:1
+    // /v1/messages to scrape rate-limit headers. [reportFromControlPayload]
+    // reads the returned line. Credential gate FIRST: no token → CONCH_NOAUTH
+    // (drives the logged-out purge) and the CLI is never launched.
+    private val CLAUDE_USAGE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         C=${'$'}HOME/.claude/.credentials.json
         [ -f "${'$'}C" ] || C=${'$'}HOME/.config/claude/.credentials.json
         TOK=${'$'}(sed -n -E 's/.*"access_?[Tt]oken"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}C" 2>/dev/null | head -1)
-        # A `claude setup-token` login has NO usable token in the file — it lives
-        # in CLAUDE_CODE_OAUTH_TOKEN (~/.profile). Read the env token as fallback,
-        # else the usage bar could never refresh and showed a stale ghost %.
         [ -z "${'$'}TOK" ] && TOK="${'$'}CLAUDE_CODE_OAUTH_TOKEN"
         [ -z "${'$'}TOK" ] && { echo CONCH_NOAUTH; exit 0; }
-        VER=${'$'}(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        UA="claude-code/${'$'}{VER:-2.0.0} (external, cli)"
-        # 1) FULL-scope OAuth (browser login): the rich usage endpoint — five_hour,
-        #    seven_day, per-model weeklies, extra_usage. Best data when available.
-        J=${'$'}(curl -fsS -m 6 -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-        if printf '%s' "${'$'}J" | grep -q '"utilization"'; then printf '%s' "${'$'}J"; exit 0; fi
-        # 2) INFERENCE-only token (claude setup-token, scope=user:inference) 403s on
-        #    that endpoint — but the SAME live 5h/weekly limits ride the rate-limit
-        #    response headers of a normal inference call, which this token CAN make.
-        #    A max_tokens:1 message is ~free; the headers come back regardless of the
-        #    body. Synthesize the same JSON shape the parser expects.
-        # Verified live against a setup-token account (2026-07-16): the OAuth token
-        # ONLY accepts a Claude-Code-shaped request — the "You are Claude Code…"
-        # system prompt is mandatory (without it → 404). The unified headers then
-        # come back on the 200. `utilization` is a FRACTION (0.55), so ×100 to match
-        # the percent the endpoint/parser use.
-        #
-        # Model is picked DYNAMICALLY from the live GET /v1/models list — the
-        # cheapest tier (haiku) if present, else the last-listed model — so a
-        # monthly model rename NEVER breaks this (a hardcoded id like
-        # claude-3-5-haiku-* already 404s). Only a last-ditch static fallback if the
-        # list can't be fetched.
-        IDS=${'$'}(curl -sS -m 6 -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" -H "anthropic-version: 2023-06-01" -H "User-Agent: ${'$'}UA" "https://api.anthropic.com/v1/models?limit=100" 2>/dev/null | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"${'$'}/\1/')
-        MODEL=${'$'}(printf '%s' "${'$'}IDS" | grep -i haiku | head -1)
-        [ -z "${'$'}MODEL" ] && MODEL=${'$'}(printf '%s' "${'$'}IDS" | tail -1)
-        [ -z "${'$'}MODEL" ] && MODEL="claude-haiku-4-5"
-        SYS="You are Claude Code, Anthropic's official CLI for Claude."
-        BODY="{\"model\":\"${'$'}MODEL\",\"max_tokens\":1,\"system\":\"${'$'}SYS\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
-        H=${'$'}(curl -sS -m 10 -D - -o /dev/null -X POST \
-          -H "Authorization: Bearer ${'$'}TOK" -H "anthropic-beta: oauth-2025-04-20" \
-          -H "anthropic-version: 2023-06-01" -H "User-Agent: ${'$'}UA" -H "content-type: application/json" \
-          -d "${'$'}BODY" "https://api.anthropic.com/v1/messages" 2>/dev/null | tr -d '\r')
-        pct(){ awk -v v="${'$'}1" 'BEGIN{ if(v=="") exit; printf "%.2f", v*100 }'; }
-        iso(){ [ -n "${'$'}1" ] && { date -u -d "@${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${'$'}1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; }; }
-        # DYNAMIC — emit EVERY unified rate window the headers carry, not just
-        # 5h/7d, so a subscribed account's per-model caps (7d-opus, 7d-fable, …)
-        # ride through too. Header window name → the usage-endpoint JSON key the
-        # dynamic parser labels: 5h→five_hour, 7d→seven_day, 5h-<m>→five_hour_<m>,
-        # 7d-<m>→seven_day_<m>.
-        norm(){ case "${'$'}1" in 5h) echo five_hour;; 7d) echo seven_day;; 5h-*) echo "five_hour_${'$'}{1#5h-}";; 7d-*) echo "seven_day_${'$'}{1#7d-}";; *) printf '%s' "${'$'}1" | tr - _;; esac; }
-        WINS=${'$'}(printf '%s' "${'$'}H" | grep -ioE '^anthropic-ratelimit-unified-[a-z0-9-]+-utilization:' | sed -E 's/^anthropic-ratelimit-unified-(.*)-utilization:.*/\1/i')
-        OUT=; SEP=
-        for w in ${'$'}WINS; do
-          uv=${'$'}(printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}w-utilization:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1)
-          up=${'$'}(pct "${'$'}uv"); [ -z "${'$'}up" ] && continue
-          rv=${'$'}(printf '%s' "${'$'}H" | grep -i "^anthropic-ratelimit-unified-${'$'}w-reset:" | sed -E 's/^[^:]*:[[:space:]]*//' | head -1)
-          k=${'$'}(norm "${'$'}w")
-          OUT="${'$'}OUT${'$'}SEP\"${'$'}k\":{\"utilization\":${'$'}up,\"resets_at\":\"${'$'}(iso "${'$'}rv")\"}"
-          SEP=,
-        done
-        [ -z "${'$'}OUT" ] && exit 0
-        printf '{%s}' "${'$'}OUT"
+        command -v claude >/dev/null 2>&1 || exit 0
+        { printf '%s\n' '{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","supportedDialogKinds":["can_use_tool","ask_user_question"]}}'
+          sleep 2
+          printf '%s\n' '{"type":"control_request","request_id":"u-1","request":{"subtype":"get_usage"}}'
+          sleep 2
+        } | conch_timeout 20 claude --output-format stream-json --input-format stream-json --verbose 2>/dev/null | grep -m1 '"u-1"'
     """.trimIndent()
 
     // Claude /context breakdown — run on a THROWAWAY COPY of the chat's session
@@ -1139,7 +1106,16 @@ object UsageProbe {
         [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         f=${'$'}(ls -t ${'$'}HOME/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}f" ] && f=${'$'}(ls -t ${'$'}(find ${'$'}HOME/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null) 2>/dev/null | head -1)
-        [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null | tail -1
+        # ⛔ THE LAST rate_limits LINE IS NOT THE LAST LINE WITH NUMBERS.
+        # Codex writes a second bucket (limit_id "premium") whose primary and
+        # secondary are BOTH null, and on the owner's server that null block was
+        # the final rate_limits line in the newest rollout. `tail -1` handed the
+        # parser a snapshot with nothing in it, parseCodex returned empty, and the
+        # cache kept its previous value — so the bar read 4% while the real window
+        # was 100% spent (measured 2026-09-12, app-server said usedPercent:100).
+        # Take the last line that actually carries a number.
+        [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null |
+          grep -E '"used_percent"[[:space:]]*:[[:space:]]*[0-9]' | tail -1
     """.trimIndent()
 
     // LIVE source: drive `codex app-server` over stdio (initialize →
@@ -1152,14 +1128,32 @@ object UsageProbe {
     private val CODEX_LIVE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         if command -v codex >/dev/null 2>&1; then
+          # ⛔ DO NOT SHORTEN THESE SLEEPS. stdin EOF shuts the app-server down,
+          # so they are the whole time budget it has to answer. Measured on the
+          # owner's server 2026-09-12 (codex-cli 0.153.4): before the id:1 result
+          # arrives the server emits a bubblewrap ERROR, a configWarning and a
+          # remoteControl/status/changed — with 0.4+0.7 s it was killed first and
+          # this half returned NOTHING on every poll, silently, for as long as it
+          # has existed. At 1.5+4 s the rateLimits result comes back every time.
+          # This is the background refine, not the paint: it may be slow, it may
+          # not be absent.
           { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"conch","title":"conch","version":"1.0"}}}'
-            sleep 0.4
+            sleep 1.5
             printf '%s\n' '{"id":1,"method":"account/rateLimits/read","params":{}}'
-            sleep 0.7
-          } | conch_timeout 6 codex app-server 2>/dev/null | grep -i 'ratelimit' | tail -1
+            sleep 4
+          } | conch_timeout 12 codex app-server 2>/dev/null | grep '"rateLimits"' | tail -1
         fi
         f=${'$'}(ls -t ${'$'}HOME/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}f" ] && f=${'$'}(ls -t ${'$'}(find ${'$'}HOME/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null) 2>/dev/null | head -1)
-        [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null | tail -1
+        # ⛔ THE LAST rate_limits LINE IS NOT THE LAST LINE WITH NUMBERS.
+        # Codex writes a second bucket (limit_id "premium") whose primary and
+        # secondary are BOTH null, and on the owner's server that null block was
+        # the final rate_limits line in the newest rollout. `tail -1` handed the
+        # parser a snapshot with nothing in it, parseCodex returned empty, and the
+        # cache kept its previous value — so the bar read 4% while the real window
+        # was 100% spent (measured 2026-09-12, app-server said usedPercent:100).
+        # Take the last line that actually carries a number.
+        [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null |
+          grep -E '"used_percent"[[:space:]]*:[[:space:]]*[0-9]' | tail -1
     """.trimIndent()
 }

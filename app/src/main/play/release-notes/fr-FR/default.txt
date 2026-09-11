@@ -1,6 +1,6 @@
-Reprenez une session Claude où que vous soyez - et sortez bien moins votre clé.
+Les sessions énormes s'ouvrent enfin — et montrent tout.
 
-• Une session ouverte dans un terminal n'en reçoit plus une seconde à votre insu : le chat dit où elle est tenue, une pression la reprend.
-• Commencez sur le portable, continuez sur le téléphone : une session inactive est rendue quand vous rangez le téléphone.
-• Les sessions courtes lancées dans un terminal apparaissent sur le téléphone.
-• Chat, liste et reconnexion utilisent la clé approuvée par votre serveur.
+• Une session de toute taille s'ouvre en quelques secondes avec toute la conversation. Les grosses sorties de commandes et les images restent sur le serveur.
+• Corrigé : les sessions Codex du disque affichaient « item completed » au lieu des commandes, modifications et images.
+• La barre de limite n'est plus périmée et se rafraîchit pendant un tour.
+• Libère l'espace des téléchargements interrompus.

@@ -7,9 +7,9 @@ package ai.eight24family.conch.adb
  * ⛔ NO SENTENCE HERE TELLS ANYONE WHERE TO GO. They used to: "Set it up in
  * Settings > Phone bridge; Android needs it armed once per boot…" — three
  * clauses of directions, printed into a one-line row that clipped them at
- * "Phone bridge…", beside a [ retry ] button that could not possibly help
- * (owner, 2026-09-06). None of it is the user's business: not adb, not which
- * Android switch is involved, not that a switch exists.
+ * "Phone bridge…", beside a [ retry ] button that could not possibly help.
+ * None of it is the user's business: not adb, not which Android switch is
+ * involved, not that a switch exists.
  *
  * So each line here states ONE observed fact in a few words, and the screen
  * that prints it carries the door beside it — [PhoneBridgeSetup.ask], which

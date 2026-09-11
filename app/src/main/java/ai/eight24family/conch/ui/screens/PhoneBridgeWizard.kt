@@ -47,8 +47,7 @@ import kotlinx.coroutines.delay
  * button that could not help. The best of them sent the user to the Settings
  * tab — which is still the app walking away from its own problem: the screen
  * they were on is gone, the thing they asked for is forgotten, and a page of
- * explanation is what they get instead of the two taps they need (owner,
- * 2026-09-06: either the app fixes it itself, or it leads by the hand).
+ * explanation is what they get instead of the two taps they need.
  *
  * So this appears OVER whatever is on screen, from anywhere, via
  * [PhoneBridgeSetup.ask] — including from an agent's request while the phone is

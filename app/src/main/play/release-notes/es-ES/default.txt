@@ -1,6 +1,6 @@
-Retoma una sesión de Claude en cualquier parte - y saca la llave mucho menos.
+Las sesiones enormes por fin se abren, y lo muestran todo.
 
-• A una sesión abierta en un terminal ya no se le suma otra a tus espaldas: el chat dice dónde está retenida y una pulsación la recupera.
-• Empieza en el portátil y sigue en el móvil: una sesión inactiva se devuelve al guardar el teléfono.
-• Las sesiones cortas iniciadas en un terminal ya aparecen en el móvil.
-• Chat, lista y reconexión usan la clave en la que tu servidor ya confía.
+• Una sesión de cualquier tamaño se abre en segundos con toda la conversación. Las salidas grandes de comandos y las imágenes se quedan en el servidor.
+• Corregido: las sesiones de Codex del disco mostraban «item completed» en vez de comandos, cambios de archivos e imágenes.
+• La barra de límite ya no queda obsoleta y se actualiza durante un turno.
+• Libera el espacio de descargas interrumpidas.

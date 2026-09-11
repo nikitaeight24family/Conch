@@ -3,11 +3,13 @@ package ai.eight24family.conch.ui.viewmodel
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.AgentMessage
 import ai.eight24family.conch.agent.AgentSession
+import ai.eight24family.conch.agent.SessionProjection
 import ai.eight24family.conch.agent.SessionState
 import ai.eight24family.conch.agent.spec.AgentSpecRegistry
 import ai.eight24family.conch.di.ServiceLocator
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -266,25 +268,77 @@ internal class ChatViewModelTailPoll(
         // failed stream degrades to the ordinary fetch instead of silently doing
         // nothing.
         var streamedOk = false
-        if (lastOffset == 0L && s.history.value.isEmpty() && (preSize ?: 0L) > BIG_FILE_STREAM_BYTES) {
-            val written = streamFullToCache(s, sessionId, path)
-            if (written != null && written > 0) {
-                cache.load(sessionId)?.use { snap -> s.loadHistory(parseJsonl(snap.buffer, agent)) }
-                lastOffset = written
+        var giantUnseeded = false
+        // The background head-download and its hand-off flag. Only the poll
+        // thread ever adopts, so there is no window where the file changes
+        // underneath a half-finished append.
+        // Two ways a chat arrives here needing more than it can afford to fetch:
+        // a COLD open of a giant rollout, and a cache left far behind one (the
+        // session grew by hundreds of megabytes while the chat was closed). Both
+        // end in the same place — the delta cannot be materialised — so both take
+        // the bounded tail. Without the second case the fallback below would
+        // `fetchTail(lastOffset)` a 483 MB delta into a ByteArray, which is the
+        // OOM the big-file guard exists to prevent.
+        val giantRemote = (preSize ?: 0L) > BIG_FILE_STREAM_BYTES
+        val deltaUnaffordable = (preSize ?: 0L) - lastOffset > GIANT_OPEN_TAIL_BYTES
+        // ⛔ AND A THIRD WAY, WHICH IS THE ONE THAT ACTUALLY STRANDED A CHAT.
+        // A cache can be "caught up" and still hold nothing renderable: measured
+        // on the owner's phone 2026-09-12, sid 01a075f4 carried lastOffset =
+        // 483,478,308 (exactly the server size, so every poll fetched 0 bytes)
+        // over a local body of 23,561 B — and that rollout's records average
+        // ~90 KB, so the cache held less than ONE complete record. The chat had
+        // nothing to draw and nothing incoming, forever. Hold-too-little is
+        // therefore its own trigger: on a giant remote, a local body smaller
+        // than a couple of records is re-seeded from the tail. Converges by
+        // construction — the re-seed leaves ~GIANT_OPEN_TAIL_BYTES local.
+        val localHeld = (lastOffset - cache.baseOffset(sessionId)).coerceAtLeast(0L)
+        val holdsTooLittle = giantRemote && !cache.isProjected(sessionId) &&
+            localHeld < GIANT_MIN_LOCAL_BYTES
+        if (giantRemote &&
+            ((lastOffset == 0L && s.history.value.isEmpty()) || deltaUnaffordable || holdsTooLittle)
+        ) {
+            // ⛔ NEVER DOWNLOAD THE WHOLE ROLLOUT BEFORE THE CHAT CAN STREAM.
+            //
+            // This used to call streamFullToCache — the ENTIRE file — and the
+            // live poll loop below only starts once that returns. Measured on the
+            // owner's server 2026-09-12: a Codex rollout of 483,478,308 B (5,391
+            // records, ~90 KB each) downloading at ~550 KB/s = 15 minutes during
+            // which the OPEN session rendered nothing and streamed nothing.
+            // Streaming the open session is the app's core function, so nothing
+            // may block it — least of all backfill of history the user has to
+            // scroll up to see.
+            //
+            // Take a BOUNDED tail instead: one `tail -c +<from>` (gzipped on the
+            // wire like every other fetch), keep only whole records, paint, and
+            // fall straight through to the poll. The head is simply not local
+            // yet — baseOffset records that, exactly as the tail-first cache
+            // already expects, and the remaining history is filled in behind the
+            // user without touching this path.
+            val size = preSize ?: 0L
+            val seed = seedProjected(s, sessionId, path, agent)
+            if (seed != null) {
+                lastOffset = seed
+                tailBase = 0L
                 streamedOk = true
                 android.util.Log.i(
                     "Conch-Tail",
-                    "catch-up STREAMED sid=${sessionId.take(8)} bytes=$written history=${s.history.value.size}",
+                    "catch-up PROJECTED sid=${sessionId.take(8)} serverSize=$size " +
+                        "rawEnd=$lastOffset history=${s.history.value.size} — WHOLE session, by record",
                 )
             } else {
+                // ⛔ AND DO NOT FALL THROUGH. The ordinary catch-up below fetches
+                // lastOffset→EOF in one ByteArray; on this branch that delta is
+                // the very hundreds of megabytes the tail exists to avoid, so a
+                // "fallback" here is an OOM, not a rescue. The poll retries in
+                // seconds — a late paint beats a killed process.
                 android.util.Log.w(
                     "Conch-Tail",
-                    "catch-up STREAM FAILED sid=${sessionId.take(8)} written=$written — " +
-                        "falling back to the plain fetch so the chat still paints",
+                    "catch-up TAIL FAILED sid=${sessionId.take(8)} serverSize=$size — retrying on the next poll",
                 )
+                giantUnseeded = true
             }
         }
-        if (!streamedOk) {
+        if (!streamedOk && !giantUnseeded) {
         val tailBytes = fetchTail(s, path, lastOffset) ?: ByteArray(0)
         android.util.Log.i(
             "Conch-Tail",
@@ -522,20 +576,25 @@ internal class ChatViewModelTailPoll(
                     _remoteFileOpen.value = curWorking
                     continue
                 }
-                // A GIANT file must stream, exactly like the open path does. This
-                // branch used to call fetchTail(0) unconditionally, materialising
-                // the whole rollout in RAM — the very OOM the 4 MB guard exists to
-                // prevent, just on the mid-poll side where nobody added it.
+                // A GIANT file takes the same bounded tail the open path takes.
+                // This branch used to call fetchTail(0) unconditionally,
+                // materialising the whole rollout in RAM — the very OOM the 4 MB
+                // guard exists to prevent, just on the mid-poll side where nobody
+                // added it. Then it downloaded the whole file instead, which is
+                // not an OOM but is minutes of a frozen chat mid-turn: the loop
+                // cannot poll while it runs. A re-adopt after a rewrite needs the
+                // LAST records, not all of them.
                 if (size > BIG_FILE_STREAM_BYTES) {
-                    val written = streamFullToCache(s, sessionId, path)
-                    if (written != null && written > 0) {
-                        cache.load(sessionId)?.use { snap -> s.loadHistory(parseJsonl(snap.buffer, agent)) }
-                        lastOffset = written
-                        tailBase = 0L
+                    val seed = seedFromTail(s, sessionId, path, size, agent)
+                    if (seed != null) {
+                        lastOffset = seed.end
+                        tailBase = seed.base
+                        s.loadHistory(seed.messages)
                         reseedWindow()
                         android.util.Log.i(
                             "Conch-Tail",
-                            "shrink mid-poll sid=${sessionId.take(8)} $lastOffset→$size — STREAMED (${written}B)",
+                            "shrink mid-poll sid=${sessionId.take(8)} →$size — RE-SEEDED FROM TAIL " +
+                                "(base=${seed.base} history=${seed.messages.size})",
                         )
                         idleTicks = 0
                         lastSeenWorking = curWorking
@@ -543,10 +602,17 @@ internal class ChatViewModelTailPoll(
                         _remoteFileOpen.value = curWorking
                         continue
                     }
+                    // Same reasoning as the open path: the in-memory fetch below
+                    // would pull the entire giant file. Wait for the next poll.
                     android.util.Log.w(
                         "Conch-Tail",
-                        "shrink mid-poll sid=${sessionId.take(8)} stream failed — falling back to in-memory fetch",
+                        "shrink mid-poll sid=${sessionId.take(8)} tail re-seed failed — retrying next poll",
                     )
+                    idleTicks = 0
+                    lastSeenWorking = curWorking
+                    lastCurWorking = curWorking
+                    _remoteFileOpen.value = curWorking
+                    continue
                 }
                 val serverFull = fetchTail(s, path, 0L) ?: ByteArray(0)
                 if (serverFull.isNotEmpty() &&
@@ -582,7 +648,16 @@ internal class ChatViewModelTailPoll(
             }
             val grew = size > lastOffset
             if (grew) {
-                val bytes = fetchTail(s, path, lastOffset)
+                // ⛔ A PROJECTED SESSION MUST GROW BY PROJECTION TOO. Its cache
+                // holds records, not a byte range, so appending raw bytes would
+                // mix the two representations — and one new 12 MB tool output
+                // would put 12 MB on the wire mid-turn, which is the transfer
+                // the projection exists to avoid. The projector reports where it
+                // stopped; that number, not the appended length, is the new
+                // remote position.
+                val projecting = cache.isProjected(sessionId)
+                val proj = if (projecting) fetchProjected(s, path, lastOffset) else null
+                val bytes = if (projecting) proj?.body else fetchTail(s, path, lastOffset)
                 if (bytes != null && bytes.isNotEmpty()) {
                     val safe = trimToLastNewline(bytes)
                     if (safe.isNotEmpty()) {
@@ -616,8 +691,20 @@ internal class ChatViewModelTailPoll(
                         growWindow(safe)
                         // Proof this turn actually reached the file.
                         if (curWorking) sawGrowthThisTurn = true
-                        lastOffset += safe.size.toLong()
+                        if (proj != null) {
+                            lastOffset = proj.rawEnd
+                            cache.setRemoteOffset(sessionId, proj.rawEnd)
+                        } else {
+                            lastOffset += safe.size.toLong()
+                        }
                     }
+                } else if (proj != null) {
+                    // The pass read raw bytes but every record in them was
+                    // stubbed away to nothing renderable (or the delta held no
+                    // complete record yet). Still advance — otherwise the same
+                    // bytes are re-read forever.
+                    lastOffset = proj.rawEnd
+                    cache.setRemoteOffset(sessionId, proj.rawEnd)
                 }
                 idleTicks = 0  // growth → poll fast
                 // The ONE thing that lifts a standing Stop from the mirror's
@@ -1172,6 +1259,39 @@ internal class ChatViewModelTailPoll(
         return out.toByteArray(Charsets.UTF_8)
     }
 
+    /** A projected read: the records, and the raw remote offset they end at. */
+    internal data class Projected(val body: ByteArray, val rawEnd: Long)
+
+    /**
+     * Read a rollout BY RECORD instead of by byte — see [SessionProjection] for
+     * the measurement that makes this the only sane way to open a giant session.
+     *
+     * `from` is a raw remote offset that must sit on a record boundary; the
+     * projector's trailing `conch_raw_end` marker says where the pass stopped,
+     * and that marker is what the caller stores. The marker line is stripped
+     * here so it never reaches a parser.
+     */
+    internal suspend fun fetchProjected(s: AgentSession, path: String, from: Long): Projected? {
+        val gz = s.execOnLive(SessionProjection.command(path, from)) ?: return null
+        if (gz.isBlank()) return null
+        val plain = gunzipBase64(gz) ?: return null
+        // The marker is the LAST line. Find it from the end; anything else is
+        // a malformed pass and is refused rather than half-adopted, because a
+        // wrong offset here silently re-downloads or skips the session.
+        val trimmed = trimToLastNewline(plain)
+        if (trimmed.isEmpty()) return null
+        val lastNl = trimmed.dropLast(1).lastIndexOf('\n'.code.toByte())
+        val markerStart = if (lastNl >= 0) lastNl + 1 else 0
+        val marker = String(trimmed, markerStart, trimmed.size - markerStart, Charsets.UTF_8)
+        val raw = Regex("\"${SessionProjection.RAW_END}\"\\s*:\\s*([0-9]+)")
+            .find(marker)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        val body = trimmed.copyOfRange(0, markerStart)
+        ai.eight24family.conch.util.Logx.d("Conch-Tail") {
+            "projected from=$from wire=${gz.length}B records=${body.size}B raw=${raw}B"
+        }
+        return Projected(body, from + raw)
+    }
+
     /** base64 → gzip → bytes. Null when the payload isn't what we asked for. */
     private fun gunzipBase64(b64: String): ByteArray? =
         SilentlyTry.loggedOrElse("Conch-Tail", "gunzip base64 tail", null) {
@@ -1189,6 +1309,39 @@ internal class ChatViewModelTailPoll(
      * client (caller keeps the small-file String path). Mirrors GlobalPrefetcher's
      * streaming body fetch.
      */
+    /**
+     * Download the WHOLE rollout into the cache's sibling tmp, off the poll's
+     * thread, without touching anything the chat is currently reading.
+     *
+     * This is the invisible half of the giant-session story. [seedFromTail]
+     * paints in a second or two; this then fetches the head behind the user, and
+     * the poll adopts it at a tick boundary ([HistoryCache.adoptStreamTmp]), at
+     * which point the "earlier history hidden" marker simply stops being true
+     * and disappears.
+     *
+     * Returns the tmp's length, or null if it could not be filled.
+     */
+    internal suspend fun streamFullToTmp(s: AgentSession, sessionId: String, path: String): Long? {
+        val client = ServiceLocator.sshConnectionPool.peek(s.server.id) ?: return null
+        val cmd = ai.eight24family.conch.agent.RemoteEnv.portable(
+            "bash -lc " + shQuote("cat ${shQuote(path)} | gzip -c"),
+        )
+        return SilentlyTry.loggedOrElse("Conch-Tail", "backfill session head", null) {
+            val sess = client.startSession()
+            try {
+                val proc = sess.exec(cmd)
+                val n = ServiceLocator.historyCache.streamToTmp(
+                    sessionId,
+                    java.util.zip.GZIPInputStream(proc.inputStream),
+                )
+                proc.join(20, java.util.concurrent.TimeUnit.MINUTES)
+                n.takeIf { it > 0L }
+            } finally {
+                SilentlyTry.fired("Conch-Tail", "close backfill session") { sess.close() }
+            }
+        }
+    }
+
     internal suspend fun streamFullToCache(s: AgentSession, sessionId: String, path: String): Long? {
         val client = ServiceLocator.sshConnectionPool.peek(s.server.id) ?: return null
         // Same wire-compression story as fetchTail, minus the base64: this path
@@ -1212,6 +1365,80 @@ internal class ChatViewModelTailPoll(
                 SilentlyTry.fired("Conch-Tail", "close stream session") { sess.close() }
             }
         }
+    }
+
+    /**
+     * Load a giant session WHOLE, by record, and return the raw remote offset
+     * it now stands at (null if the projection could not be read).
+     *
+     * ⛔ WHY NOT A BYTE TAIL. The previous answer here took the last N bytes of
+     * the file. On the rollout that produced this code that window held 25 of
+     * 5,391 records and ONE message: the user opened a session he had been
+     * working in all day and saw eight collapsed tool rows over an empty screen.
+     * Bytes are not a unit of conversation — in that file the conversation is
+     * 0.06% of the bytes. [SessionProjection] does the arithmetic.
+     *
+     * The body is stored with base 0 (it is not a suffix of anything) and the
+     * remote position kept in its own sidecar, because local length and remote
+     * length are no longer related by any offset.
+     */
+    internal suspend fun seedProjected(
+        s: AgentSession,
+        sessionId: String,
+        path: String,
+        agent: Agent,
+    ): Long? {
+        val p = fetchProjected(s, path, 0L) ?: return null
+        if (p.body.isEmpty()) return null
+        val cache = ServiceLocator.historyCache
+        cache.save(sessionId, p.body)
+        cache.setBaseOffset(sessionId, 0L)
+        cache.setRemoteOffset(sessionId, p.rawEnd)
+        s.loadHistory(parseJsonl(p.body, agent))
+        return p.rawEnd
+    }
+
+    /** Where a tail-seeded cache begins and ends on the server, plus what it
+     *  parsed to. `base` is the head we deliberately do NOT hold locally. */
+    internal data class TailSeed(val base: Long, val end: Long, val messages: List<AgentMessage>)
+
+    /**
+     * Seed the cache from the LAST [GIANT_OPEN_TAIL_BYTES] of a rollout.
+     *
+     * The one way a giant session is allowed to reach the screen. Cost does not
+     * scale with the file: a 483 MB rollout and a 5 MB one both pull this many
+     * bytes, gzipped on the wire like every other fetch. Both ends are cut to
+     * record boundaries — `from` lands mid-record so the first partial line is
+     * dropped, [trimToLastNewline] does the same at the far end — because every
+     * offset the poll loop computes afterwards assumes whole records.
+     *
+     * `save()` declares a COMPLETE body (base 0), so the head's byte count is
+     * restored right after it; get that wrong and `remoteOffset = base + local`
+     * silently reads from the wrong place in the file.
+     */
+    internal suspend fun seedFromTail(
+        s: AgentSession,
+        sessionId: String,
+        path: String,
+        size: Long,
+        agent: Agent,
+    ): TailSeed? {
+        val from = (size - GIANT_OPEN_TAIL_BYTES).coerceAtLeast(0L)
+        val raw = fetchTail(s, path, from) ?: return null
+        if (raw.isEmpty()) return null
+        val nl = if (from > 0L) raw.indexOf('\n'.code.toByte()) else -1
+        val startIdx = if (nl >= 0) nl + 1 else 0
+        val body = if (startIdx < raw.size) {
+            trimToLastNewline(raw.copyOfRange(startIdx, raw.size))
+        } else {
+            ByteArray(0)
+        }
+        if (body.isEmpty()) return null
+        val base = from + startIdx
+        val cache = ServiceLocator.historyCache
+        cache.save(sessionId, body)
+        cache.setBaseOffset(sessionId, base)
+        return TailSeed(base, base + body.size, parseJsonl(body, agent))
     }
 
     fun trimToLastNewline(bytes: ByteArray): ByteArray =
@@ -1402,7 +1629,7 @@ internal class ChatViewModelTailPoll(
          * every few seconds and republishes the flag the spinner and the Stop
          * button read — so without this, Stop's own writes survive at most one
          * tick and the button reads as broken however well the halt was
-         * delivered — eight presses, no effect (owner, 2026-09-07).
+         * delivered.
          *
          * Lifted only by GROWTH after the stop: bytes landing in the session file
          * are proof the turn outlived the halt, and a spinner is then honest.
@@ -1555,5 +1782,22 @@ internal class ChatViewModelTailPoll(
          *  cache (RAM-flat) instead of materialising it as a String — the latter
          *  OOM-crashed on a giant rollout. Small files stay on the fast inline path. */
         const val BIG_FILE_STREAM_BYTES: Long = 4_000_000L
+
+        /** How much of a giant rollout's TAIL is pulled so an opened chat paints
+         *  and starts streaming at once. Bounded because the whole point is that
+         *  nothing about opening a session may scale with its size: a 483 MB
+         *  rollout and a 5 MB one both cost this. Gzip on the wire takes it to
+         *  well under a megabyte; the head is backfilled behind the user. */
+        const val GIANT_OPEN_TAIL_BYTES: Long = 8_000_000L
+
+        /** Below this much LOCAL body, a cache on a giant rollout is treated as
+         *  holding nothing, however caught-up its offset claims to be. Measured
+         *  on the owner's phone: 23,561 B against a 483 MB file whose records
+         *  average ~90 KB — less than one record, so the chat drew nothing while
+         *  every poll correctly reported zero new bytes. A quarter of the seed
+         *  window is comfortably several records for any agent and still far
+         *  under what a healthy tail-seeded cache holds, so this never re-seeds
+         *  a cache that is actually fine. */
+        const val GIANT_MIN_LOCAL_BYTES: Long = GIANT_OPEN_TAIL_BYTES / 4
     }
 }

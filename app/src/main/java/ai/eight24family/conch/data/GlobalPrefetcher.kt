@@ -183,6 +183,77 @@ class GlobalPrefetcher(
                 }
             }
         }
+        // USAGE WARMER — the limit bar must already know before a chat is
+        // opened. Keep it warm at the app level instead: on a cadence, for every
+        // connected server, while the app is on screen and on an UNMETERED link
+        // (the owner's rule — a running turn refreshes it for free anyway, so
+        // the timer is for the idle case and must not spend mobile data). A
+        // server mid-turn is skipped — its chat already moves the number over
+        // the live channel.
+        procScope.launch {
+            // Reclaim storage from downloads a kill interrupted, before anything
+            // else spends any. See HistoryCache.sweepStreamTmp.
+            SilentlyTry.fired(TAG, "sweep orphaned history tmp") {
+                ai.eight24family.conch.di.ServiceLocator.historyCache.sweepStreamTmp()
+            }
+            delay(3_000L) // warm shortly after launch, before the user reaches a chat
+            while (true) {
+                var working = false
+                try {
+                    if (!ai.eight24family.conch.util.AppForeground.isForeground) {
+                        delay(5_000L); continue
+                    }
+                    // WiFi only. On a metered link the timer stands down; the
+                    // number still refreshes whenever a turn runs (that path is
+                    // the CLI's own, no extra cost).
+                    if (ai.eight24family.conch.util.NetworkCost.isMetered()) {
+                        delay(USAGE_WARM_MS); continue
+                    }
+                    val servers = runCatching { repoListAll(repo) }.getOrElse { emptyList() }
+                        .filter { ai.eight24family.conch.di.ServiceLocator.sshConnectionPool.peek(it.id) != null }
+                    // ⛔ A SERVER WITH A TURN RUNNING IS THE ONE THAT MOST NEEDS
+                    // WARMING, not the one to skip. This loop used to `continue`
+                    // past it, reasoning that the live channel moves the number
+                    // by itself. It does not move it ENOUGH: a long turn burns
+                    // the window between two of its own reports, so the bar sat
+                    // at 4% for over five minutes while the plan was actually
+                    // exhausted. His rule has no exception in it: refresh on the
+                    // timer on WiFi, and simply refresh while work is running. A
+                    // stale number is worse than no number, because it is
+                    // believed.
+                    working = servers.any {
+                        ai.eight24family.conch.di.ServiceLocator.agentSessions.anyWorkingOn(it.id)
+                    }
+                    for (server in servers) {
+                        if (!ai.eight24family.conch.util.AppForeground.isForeground) break
+                        // Warm EVERY agent — never a hardcoded subset. UsageProbe.fetch
+                        // returns null instantly (no SSH) for an agent that has no
+                        // machine-readable plan window, so the ones that bill per
+                        // token/credit (Copilot/Qwen/Cursor/Opencode/Crush/Continue/
+                        // Gemini) cost nothing here, and the moment a new agent grows
+                        // an account-usage probe (e.g. Grok's x.ai/session/usage) it
+                        // is warmed automatically with no change to this loop. Today
+                        // that means Claude (get_usage) and Codex (rateLimits) do real
+                        // work; each self-gates on its own credentials file
+                        // (CONCH_NOAUTH before it launches the CLI), so an agent not
+                        // logged in on this server costs a cheap creds check.
+                        for (agent in Agent.entries) {
+                            if (!ai.eight24family.conch.util.AppForeground.isForeground) break
+                            SilentlyTry.fired(TAG, "warm ${agent.name} usage ${server.name}") {
+                                ai.eight24family.conch.agent.UsageProbe.fetch(server.id, agent, fast = false)
+                            }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    android.util.Log.w(TAG, "usage warm tick failed: ${t.message}")
+                    working = false
+                }
+                // Twice as often while a turn is burning the window — that is
+                // exactly when the displayed number goes stale fastest.
+                delay(if (working) USAGE_WARM_WORKING_MS else USAGE_WARM_MS)
+            }
+        }
     }
 
     /**
@@ -369,10 +440,10 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
             if (appended >= APPEND_SESSIONS_PER_SWEEP) return
             val remote = s.sizeBytes ?: continue
             val cached = historyCache.size(s.id)
-            // TAIL-BASE AWARE: local length is a remote offset only after adding
-            // the .base origin (0 for complete mirrors — the common case).
-            val base = historyCache.baseOffset(s.id)
-            val remoteOff = base + cached
+            // One definition of "where are we in the remote file" — it also
+            // covers a PROJECTED body, whose local length says nothing about
+            // the remote position at all. See HistoryCache.remoteEnd.
+            val remoteOff = historyCache.remoteEnd(s.id)
             // Only sessions we already hold (first fetch is the full sweep's
             // job) that GREW; a shrink (compaction) is the chat-open re-adopt's.
             if (cached <= 0L || remote <= remoteOff) continue
@@ -1002,6 +1073,17 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
          *  the expensive half (bodies) is not on this path. */
         private const val FULL_RELIST_MS = 10_000L
         private const val DATA_SAVER_RELIST_MS = 90_000L
+
+        /** Cadence of the background usage warmer. The plan limit is a 5-hour /
+         *  weekly window — it drifts slowly — so 2 minutes keeps the bar
+         *  effectively current without launching a `claude` usage probe often.
+         *  Runs only foreground + unmetered + idle (see the loop). */
+        private const val USAGE_WARM_MS = 120_000L
+
+        /** Cadence while a turn is running somewhere. The probe costs no
+         *  inference and rides the already-open transport, so the only thing
+         *  halving this spends is a few seconds of a pooled channel. */
+        private const val USAGE_WARM_WORKING_MS = 60_000L
 
         /** Fast tier: `stat` + `tail` over the sessions that are actually
          *  moving. No directory scan, no listing — cheap enough to run

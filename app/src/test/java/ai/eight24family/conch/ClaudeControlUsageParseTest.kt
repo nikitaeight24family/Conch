@@ -51,6 +51,24 @@ class ClaudeControlUsageParseTest {
     }
 
     @Test
+    fun `a FULL get_usage control_response line parses — the shape the CLI-driven probe returns`() {
+        // CLAUDE_USAGE_CMD now drives the real `claude` and returns the whole
+        // control_response envelope line (grep -m1 '"u-1"'), not the inner
+        // payload. Captured verbatim from the dev server 2026-09-12; the parse
+        // must reach the windows + subscription_type through the double
+        // `response` wrapping.
+        val line = """{"type":"control_response","response":{"subtype":"success","request_id":"u-1","response":{"session":{"total_cost_usd":0,"total_api_duration_ms":0,"total_duration_ms":2243,"model_usage":{}},"subscription_type":"team","rate_limits":{"five_hour":{"utilization":22,"resets_at":"2099-09-11T21:10:00.041307+00:00"},"seven_day":{"utilization":12,"resets_at":"2099-09-18T12:00:00.041327+00:00"},"nimbus_quill":{"utilization":0,"resets_at":null}}}}}"""
+        val report = UsageProbe.reportFromControlPayload(line)!!
+        assertEquals("Team", report.plan)
+        val labels = report.windows.map { it.label }
+        assertTrue(labels.contains("5-hour · all models"))
+        assertTrue(labels.contains("Weekly · all models"))
+        val fiveHour = report.windows.first { it.label == "5-hour · all models" }
+        assertEquals(22, fiveHour.percent)
+        assertTrue("ISO resets_at must yield a live countdown anchor", fiveHour.resetAtEpochMs != null)
+    }
+
+    @Test
     fun `payload without windows returns null so callers fall back`() {
         assertNull(
             UsageProbe.reportFromControlPayload(

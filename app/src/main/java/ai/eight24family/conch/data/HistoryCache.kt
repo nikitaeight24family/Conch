@@ -285,7 +285,6 @@ class HistoryCache internal constructor(private val rootDir: File) {
      * drains stdout to EOF, same ordering as the old copyTo path).
      */
     fun saveFromStream(sessionId: String, input: java.io.InputStream): Long {
-        val f = file(sessionId)
         // ⚠ SAME ATOMIC-RENAME DISCIPLINE AS [save] — this was the one writer
         // still rewriting the target IN PLACE (`f.outputStream()` truncates to
         // zero, then setLength trims), and it is exactly the crash the header
@@ -295,6 +294,24 @@ class HistoryCache internal constructor(private val rootDir: File) {
         // Stream to a sibling, trim the SIBLING, rename over the target: old
         // readers keep a valid mapping to the last byte, new readers open the
         // new bytes.
+        if (streamToTmp(sessionId, input) <= 0L) return 0L
+        return adoptStreamTmp(sessionId) ?: 0L
+    }
+
+    /**
+     * Half one of [saveFromStream]: fill the sibling tmp and stop there.
+     *
+     * Split out so a body can be downloaded WHILE the chat is being polled and
+     * rendered. The tail-poll owns the cache file; if a background backfill
+     * renamed over it on its own thread, it would land between the poll's
+     * "append these new bytes" and its offset bookkeeping. So the downloader
+     * only writes the sibling — the poll adopts it at a tick boundary, on its
+     * own thread, with [adoptStreamTmp].
+     *
+     * Returns the trimmed tmp length, 0 on any failure (tmp removed).
+     */
+    fun streamToTmp(sessionId: String, input: java.io.InputStream): Long {
+        val f = file(sessionId)
         val tmp = java.io.File(f.parentFile, f.name + ".stream.tmp")
         try {
             tmp.outputStream().use { fos -> input.copyTo(fos, 64 * 1024) }
@@ -306,6 +323,15 @@ class HistoryCache internal constructor(private val rootDir: File) {
         if (tmp.length() == 0L) { tmp.delete(); return 0L }
         trimFileToLastNewline(tmp)
         if (tmp.length() == 0L) { tmp.delete(); return 0L }
+        return tmp.length()
+    }
+
+    /** Half two: publish a tmp filled by [streamToTmp]. Null when there is
+     *  nothing to adopt. Returns the new body length. */
+    fun adoptStreamTmp(sessionId: String): Long? {
+        val f = file(sessionId)
+        val tmp = java.io.File(f.parentFile, f.name + ".stream.tmp")
+        if (!tmp.exists() || tmp.length() == 0L) return null
         if (!tmp.renameTo(f)) {
             // Same directory — rename "can't" fail; the in-place copy is the
             // documented last resort, not the normal path (see [save]).
@@ -320,6 +346,39 @@ class HistoryCache internal constructor(private val rootDir: File) {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
         return f.length()
+    }
+
+    /**
+     * Delete `.stream.tmp` files left behind by a stream that never finished.
+     *
+     * [saveFromStream]'s own catch covers a failed COPY. It cannot cover the
+     * process simply ceasing to exist — a force-stop, a swipe from recents, the
+     * low-memory killer — and that is not hypothetical: the owner's phone was
+     * carrying a **294 MB** orphan from a giant-rollout download that never
+     * completed (found 2026-09-12 next to a 3.8 MB real cache). Nothing ever
+     * looked at it again and nothing would have; it is invisible, unbounded, and
+     * grows by one file per interrupted download.
+     *
+     * Safe by construction: a live stream renames its tmp away the moment it
+     * finishes, so a tmp older than [ORPHAN_TMP_AGE_MS] cannot belong to a
+     * download still in flight.
+     */
+    fun sweepStreamTmp(nowMs: Long = System.currentTimeMillis()): Long {
+        var freed = 0L
+        SilentlyTry.fired("Conch-HistCache", "sweep orphaned stream tmp") {
+            dir.listFiles { f -> f.isFile && f.name.endsWith(".stream.tmp") }?.forEach { t ->
+                if (nowMs - t.lastModified() < ORPHAN_TMP_AGE_MS) return@forEach
+                val n = t.length()
+                if (t.delete()) {
+                    freed += n
+                    android.util.Log.i(
+                        "Conch-HistCache",
+                        "swept orphaned ${t.name} (${n / 1024}KB)",
+                    )
+                }
+            }
+        }
+        return freed
     }
 
     /** Truncate [f] to its last `\n` — the file equivalent of
@@ -527,6 +586,67 @@ class HistoryCache internal constructor(private val rootDir: File) {
             val f = baseFile(sessionId)
             if (base <= 0L) f.delete() else f.writeText(base.toString(), Charsets.UTF_8)
         }
+    }
+
+    /**
+     * How many RAW remote bytes this cache has consumed, when the body is a
+     * server-side PROJECTION rather than a copy.
+     *
+     * ⛔ THE `.base` SIDECAR CANNOT EXPRESS THIS. It says "the local body is the
+     * remote file from byte N onward", so the poll derives its remote position
+     * as `base + localLength`. A projected body is not a byte range of the
+     * remote file at all — 483 MB of rollout becomes 13 MB of records — and that
+     * arithmetic would put the next fetch 470 MB too early, re-downloading the
+     * session on every tick. The projector reports what it actually read
+     * (`conch_raw_end`) and that number is stored here, verbatim.
+     *
+     * Its presence is also the flag for "this body is projected": every
+     * byte-comparison shortcut (mergeServer, serverContainsAllLocal, the
+     * entrypoint rewrite) is meaningless on it and must be skipped.
+     */
+    fun remoteOffset(sessionId: String): Long? {
+        val f = roffFile(sessionId)
+        if (!f.exists()) return null
+        return SilentlyTry.loggedOrElse("Conch-HistCache", "read projected remote offset", null) {
+            f.readText(Charsets.UTF_8).trim().toLongOrNull()
+        }
+    }
+
+    /**
+     * THE remote offset this cache has consumed — the single definition.
+     *
+     * ⛔ THIS FORMULA WAS COPIED INTO FIVE CALL SITES and each copy was a
+     * latent bug the moment a body stopped being a byte-suffix. Under a
+     * projection `base + localLength` still compiles, still type-checks and is
+     * wrong by the size of every stubbed record — on the owner's rollout, by
+     * 470 MB — so `tail -c +N` would re-read almost the whole session on every
+     * poll tick and every background sweep, forever, with `appendDeduped`
+     * hiding it from the screen while the data bill grew. That is precisely the
+     * shape of the 3 GB-in-four-hours incident this class already carries scars
+     * from, and it would have been re-introduced silently.
+     *
+     * So there is now exactly one place that answers the question. Projected
+     * bodies report what the projector actually read; copied ones keep the old
+     * arithmetic.
+     */
+    fun remoteEnd(sessionId: String): Long =
+        remoteOffset(sessionId) ?: (baseOffset(sessionId) + size(sessionId))
+
+    /** True iff the body is a projection, not a copy. */
+    fun isProjected(sessionId: String): Boolean = roffFile(sessionId).exists()
+
+    /** Record the raw remote position of a projected body. A non-positive
+     *  value clears the marker — the body is a verbatim copy again. */
+    fun setRemoteOffset(sessionId: String, off: Long) {
+        SilentlyTry.fired("Conch-HistCache", "write projected remote offset") {
+            val f = roffFile(sessionId)
+            if (off <= 0L) f.delete() else f.writeText(off.toString(), Charsets.UTF_8)
+        }
+    }
+
+    private fun roffFile(sessionId: String): File {
+        val safe = sessionId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(dir, "$safe.roff")
     }
 
     private fun baseFile(sessionId: String): File {
@@ -1039,6 +1159,10 @@ class HistoryCache internal constructor(private val rootDir: File) {
     fun outstandingMappingCount(): Int = outstandingMaps.get()
 
     private companion object {
+        /** A `.stream.tmp` untouched this long belongs to no live download —
+         *  the slowest giant-rollout pull measured took minutes, not an hour. */
+        const val ORPHAN_TMP_AGE_MS = 60 * 60 * 1000L
+
         // NUL-bracketed separator: NUL bytes don't appear in valid UTF-8
         // user text or in any of the file paths the buffer carries.
         const val DRAFT_SEPARATOR = "  "
