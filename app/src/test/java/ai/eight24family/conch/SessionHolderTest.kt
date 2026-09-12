@@ -189,9 +189,44 @@ class SessionHolderTest {
     }
 
     @Test
+    fun `the relay line says what was ended, in the past tense`() {
+        val holders = listOf(
+            SessionHolder.Holder(3123405, SessionHolder.Kind.TTY, "/dev/pts/0", "Sat Sep 12 00:24:26 2026", "fd"),
+        )
+        val note = CodexThreadLock.relayedNote(holders)
+        // It reports, it does not ask: no tap, no "send again". The handoff is
+        // already done by the time this row exists.
+        assertTrue(note.contains("continued here"))
+        assertTrue(note.contains("/dev/pts/0"))
+        assertTrue(note.contains("3123405"))
+        assertFalse(note.contains("tap"))
+        assertFalse(note.contains("send again"))
+        assertTrue(ClaudeSessionLock.relayedNote(holders).contains("claude"))
+    }
+
+    @Test
+    fun `a refusal with no holder found still produces a row, never a crash`() {
+        // The CLI refused but the probe came back Unreachable, or the holder
+        // exited in between: the caller still has to say something. This used to
+        // be holders.first() inside the turn's IO scope.
+        val note = CodexThreadLock.ttyHolderNote(emptyList())
+        assertTrue(note.contains("tap to take it over"))
+        assertTrue(note.contains("one writer"))
+        assertTrue(ClaudeSessionLock.ttyHolderNote(emptyList()).isNotBlank())
+        assertTrue(CodexThreadLock.relayedNote(emptyList()).isNotBlank())
+    }
+
+    @Test
     fun `the app UI stays English-only`() {
         val texts = listOf(
             ClaudeSessionLock.ttyHolderNote(
+                listOf(SessionHolder.Holder(1, SessionHolder.Kind.TTY, "/dev/pts/0", "now", "cwd"))
+            ),
+            ClaudeSessionLock.ttyHolderNote(emptyList()),
+            ClaudeSessionLock.relayedNote(
+                listOf(SessionHolder.Holder(1, SessionHolder.Kind.TTY, "/dev/pts/0", "now", "cwd"))
+            ),
+            CodexThreadLock.relayedNote(
                 listOf(SessionHolder.Holder(1, SessionHolder.Kind.TTY, "/dev/pts/0", "now", "cwd"))
             ),
             ClaudeSessionLock.takenOverNote(listOf(1L, 2L)),

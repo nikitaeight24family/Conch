@@ -128,6 +128,26 @@ class AgentStatusProbe(private val ssh: SshClient) {
 
     /** Internal (not private) so the k=v → status fold — including the guard
      *  block's three states — is testable without an SSH server. */
+    /**
+     * Parse the shared probe's k=v output.
+     *
+     * ⛔ SILENCE IS NOT A VERDICT. Returns an EMPTY map when the probe said
+     * nothing this parser recognises, so the caller keeps whatever it knew
+     * before instead of publishing a fabricated one.
+     *
+     * Every spec's block runs in a parallel subshell writing to its own file,
+     * and the script ends with a single `wait` + `cat`. So a probe cut short
+     * does not return PART of the answer — it returns NOTHING, and every
+     * `<agent>_inst` / `<agent>_methods` lookup misses. That parsed, silently
+     * and confidently, as "not installed, not logged in" for every agent on the
+     * server. Measured on the owner's phone 2026-09-12: the chat told him Codex
+     * was not logged in on a server where `codex login status` answers "Logged
+     * in using ChatGPT" in under a second and a turn was running as he read it;
+     * the probe had simply been made slow enough to be cut off. The same rule
+     * SessionHolder already follows — a probe that could not run is
+     * `Unreachable`, NEVER `Free` — and it belongs here too, because this
+     * verdict greys out the send button.
+     */
     internal fun parse(text: String): Map<Agent, AgentStatus> {
         val kv = text.lineSequence()
             .mapNotNull { line ->
@@ -135,6 +155,20 @@ class AgentStatusProbe(private val ssh: SshClient) {
                 line.substring(0, eq).trim() to line.substring(eq + 1).trim()
             }
             .toMap()
+        // Nothing came back at all. Not "everything is absent" — unknown.
+        // ⚠ The test only that the output is EMPTY, not that it lacks agent keys:
+        // the guard block legitimately answers on its own (guard_present=… with
+        // no agent lines), and demanding an `_inst` key threw that away too.
+        // A cut-short exec yields NOTHING, because the script ends in one
+        // `wait` + one `cat` — so emptiness is the honest signal here.
+        if (kv.isEmpty()) {
+            android.util.Log.w(
+                "Conch-Probe",
+                "status probe returned nothing parseable (${text.length}B) — " +
+                    "keeping the previous statuses rather than reporting logged-out",
+            )
+            return emptyMap()
+        }
         fun y(key: String) = kv[key].equals("y", ignoreCase = true)
         // Server-wide guard state (see GUARD_PROBE_LINES), folded per-agent below.
         val guardPresent = y("guard_present")

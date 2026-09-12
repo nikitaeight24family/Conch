@@ -81,6 +81,48 @@ object JsonlUtils {
      * exactly like [trimToLastNewline] (droppedBytes = 0). Empty / no
      * newline ⇒ empty slice ("nothing complete yet"), same as the trims.
      */
+    /**
+     * The display window, counted in RECORDS — never in bytes.
+     *
+     * ⛔ BYTES ARE NOT A UNIT OF CONVERSATION, AND THIS IS THE SECOND PLACE THAT
+     * HAD TO LEARN IT. The fetch layer learned it first: a 483 MB rollout is
+     * 99.4% command output, so a byte window lands inside two or three blobs.
+     * The DISPLAY had the same bug one layer up, and it survived the fetch fix —
+     * measured on the owner's phone 2026-09-12, the cache held the whole session
+     * (5,688 records, 17.3 MB) and the last 2 MB of it contained **13 records**,
+     * because a single file-write record runs ~150 KB. So the chat drew thirteen
+     * rows over a session of five thousand and looked empty.
+     *
+     * A record is what a person reads, so a record is what the window counts.
+     * The cap exists only to bound work on a pathological file; it is set far
+     * above any real session, so in practice nothing is hidden and the "earlier
+     * history hidden" row never appears.
+     */
+    fun tailRecords(buffer: ByteBuffer, maxRecords: Int): TailWindow {
+        val dup = buffer.duplicate().apply { rewind() }
+        val limit = dup.limit()
+        if (limit == 0) return TailWindow(ByteBuffer.allocate(0), 0L)
+        val newline = '\n'.code.toByte()
+        var end = limit - 1
+        while (end >= 0 && dup.get(end) != newline) end--
+        if (end < 0) return TailWindow(ByteBuffer.allocate(0), 0L)
+        val endLimit = end + 1
+        // Walk back counting line breaks. One pass over the tail, stopping the
+        // moment the budget is met — a complete session costs one scan of it.
+        var seen = 0
+        var start = endLimit - 1
+        while (start > 0) {
+            if (dup.get(start - 1) == newline) {
+                seen++
+                if (seen >= maxRecords) break
+            }
+            start--
+        }
+        if (start <= 0) { dup.limit(endLimit); dup.position(0); return TailWindow(dup.slice(), 0L) }
+        dup.limit(endLimit); dup.position(start)
+        return TailWindow(dup.slice(), start.toLong())
+    }
+
     fun tailSlice(buffer: ByteBuffer, maxBytes: Int): TailWindow {
         val dup = buffer.duplicate().apply { rewind() }
         val limit = dup.limit()

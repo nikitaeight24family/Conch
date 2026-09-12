@@ -730,7 +730,9 @@ private fun UsagePanel(
                     // countdown ("6h") — the clock answers "when does it lift?"
                     // without the CLI's foreign-zone confusion, the countdown
                     // answers "how long?".
-                    val countdown = w.resetTextLive(now)
+                    // Server's answer first (re-asked every 8 s in an open
+                    // chat); the local countdown only when there is none.
+                    val countdown = w.resetTextServer().ifBlank { w.resetTextLive(now) }
                     val clock = w.resetAtEpochMs?.let { ai.eight24family.conch.agent.usageResetClock(it) }
                     val resetStr = when {
                         clock != null && countdown.isNotEmpty() -> " · $clock ($countdown)"

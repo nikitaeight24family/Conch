@@ -166,6 +166,13 @@ class HistoryCache internal constructor(private val rootDir: File) {
      * byte, and new readers open the new file.
      */
     fun save(sessionId: String, bytes: ByteArray) {
+        // ⛔ A NON-PROJECTED BODY MUST DROP THE PROJECTED MARKER. `.roff` says
+        // "this body is records, and it covers N raw remote bytes". Writing raw
+        // bytes here makes both halves false, and leaving the marker behind makes
+        // the poll compute its next fetch from a number that belongs to a body
+        // that no longer exists — the app then alternates between two
+        // inconsistent views of the same session.
+        setRemoteOffset(sessionId, 0L)
         // A save REPLACES the body — a compaction merge, a verbatim re-adopt, a
         // local repair. The unread watermark is a byte offset into this very
         // file, so any rewrite moves the goalposts under it. Remember where the
@@ -340,8 +347,10 @@ class HistoryCache internal constructor(private val rootDir: File) {
                 tmp.delete()
             }
         }
-        // Same complete-body statement as [save] — see the base reset there.
+        // Same complete-body statement as [save] — see the base reset there,
+        // and the projected marker goes with it for the same reason.
         setBaseOffset(sessionId, 0L)
+        setRemoteOffset(sessionId, 0L)
         SilentlyTry.fired("Conch-HistCache", "index session after stream") {
             ai.eight24family.conch.di.ServiceLocator.searchIndexer.indexSession(sessionId)
         }
@@ -670,6 +679,13 @@ class HistoryCache internal constructor(private val rootDir: File) {
      * housekeeping, not agent output (the 2026-08-17 fake-working rule).
      */
     fun saveTail(sessionId: String, bytes: ByteArray, newBase: Long) {
+        // ⛔ A NON-PROJECTED BODY MUST DROP THE PROJECTED MARKER. `.roff` says
+        // "this body is records, and it covers N raw remote bytes". Writing raw
+        // bytes here makes both halves false, and leaving the marker behind makes
+        // the poll compute its next fetch from a number that belongs to a body
+        // that no longer exists — the app then alternates between two
+        // inconsistent views of the same session.
+        setRemoteOffset(sessionId, 0L)
         if (bytes.isEmpty()) return
         val oldBase = baseOffset(sessionId)
         val oldSeen = seenBytes(sessionId)

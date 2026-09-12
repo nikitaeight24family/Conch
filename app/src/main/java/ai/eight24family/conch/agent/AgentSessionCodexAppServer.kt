@@ -9,6 +9,7 @@ import ai.eight24family.conch.agent.codex.CodexMessageParser
 import ai.eight24family.conch.agent.codex.CodexThreadLock
 import ai.eight24family.conch.util.SilentlyTry
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -70,8 +71,28 @@ internal class AgentSessionCodexAppServer(
     private val getAuthPrep: () -> String,
     private val onPromptUndelivered: (String) -> Unit,
     private val onThinkingTokens: (Long?) -> Unit = {},
+    /** Raised once when the relay had to end a terminal's copy of this
+     *  session — the UI turns it into the one-time "here is the clean path"
+     *  dialog. See [HandoffAdvice]. */
+    private val onHandoffAdvice: (HandoffAdvice) -> Unit = {},
 ) {
     private val tag = "Conch-CodexApp"
+
+    /**
+     * ON — the terminal half is measured (2026-09-12).
+     *
+     * `codex --remote ws://127.0.0.1:<port>` really does attach: with the TUI
+     * up, `ss` showed an ESTABLISHED pair against the brain, and the rollout fd
+     * was held by the BRAIN's own pid (90693), not by the TUI. That is the
+     * proof the whole design rests on — clients of one app-server do not
+     * contend for the writer; only a SECOND app-server does, which is exactly
+     * what a bare `codex` starts and what this hook prevents.
+     *
+     * The earlier "it never attaches" reading was a measurement error: the TUI
+     * stalls on its own interactive update prompt, and `ss` was sampled after
+     * the session had already been killed.
+     */
+    private val TERMINAL_HOOK_ENABLED = true
 
     @Volatile private var procSession: Session? = null
     @Volatile private var procCmd: Session.Command? = null
@@ -92,6 +113,44 @@ internal class AgentSessionCodexAppServer(
      * temporary - the next send must try the SAME thread again.
      */
     @Volatile private var threadBusy: List<SessionHolder.Holder>? = null
+
+    /**
+     * What this server's codex can do about sharing one app-server (see
+     * [ai.eight24family.conch.agent.codex.CodexDaemon]). Probed once per live
+     * process, kept for the advice dialog even when the daemon is not usable —
+     * "your server runs 0.80.0" is the difference between an instruction he can
+     * follow and a shrug.
+     */
+    @Volatile private var daemonSupport: ai.eight24family.conch.agent.codex.CodexDaemon.Support? = null
+
+    /** Did the LAST launch actually ride the daemon? Drives the one retry when
+     *  a proxied channel fails to hand back an `initialize` — a shared brain
+     *  that will not answer must degrade to the private one, not to nothing. */
+    @Volatile private var launchedViaDaemon = false
+
+    /** Set when a proxied launch failed its handshake: stop trying for the
+     *  life of this session object rather than alternating forever. */
+    @Volatile private var daemonRefused = false
+
+    /**
+     * THE SHARED BRAIN'S TRANSPORT, when this chat rides one.
+     *
+     * A direct-tcpip channel over the SSH connection we already hold, to
+     * `127.0.0.1:<port>` on the server, carrying a WebSocket that carries the
+     * ordinary app-server JSON-RPC. MEASURED 2026-09-12: two clients of one
+     * such server resume the SAME thread, with no writer conflict — which stdio
+     * could never do, and which is the entire reason this exists
+     * ([ai.eight24family.conch.agent.codex.CodexWsBrain]).
+     */
+    @Volatile private var wsSession: Session? = null
+    @Volatile private var wsCmd: Session.Command? = null
+    @Volatile private var wsOut: java.io.OutputStream? = null
+    @Volatile private var wsPort: Int? = null
+
+    /** True while the WebSocket is the live channel: writes frame instead of
+     *  writing a line, teardown closes a channel instead of a process, and the
+     *  relay must never reap the server on the other end of it. */
+    private val onSharedBrain: Boolean get() = wsCmd != null
 
     /**
      * Pending "hand the thread back" timer. Cancelled when a turn starts,
@@ -236,7 +295,7 @@ internal class AgentSessionCodexAppServer(
             // This turn owns the thread until it ends; the release timer is
             // re-armed from the `finally` below.
             idleReleaseJob?.cancel()
-            if (!ensureReady()) {
+            if (!ensureReady(userInitiated = true)) {
                 // Returning false here reruns the prompt through the one-shot
                 // `codex exec` path, and THAT path reads a resume refusal as a
                 // dead session: it drops the resume id and answers in a new
@@ -260,7 +319,24 @@ internal class AgentSessionCodexAppServer(
                         ),
                     )
                     onPromptUndelivered(text)
-                    onStateChange(SessionState.Failed("session open elsewhere"))
+                    // ⛔ NOT Failed — a HELD session is not a transport failure.
+                    //
+                    // Failed here is caught by the VM's reconnect rescue
+                    // (state==Failed → rescueIfPoolLive → retry → re-deliver the
+                    // parked prompt → ensureReady → same writer conflict →
+                    // Failed again), a 3 s loop that relaunched `codex
+                    // app-server` forever, spamming "starting codex · resuming
+                    // session" and "remoteControl status changed" and burying the
+                    // one takeover row under them (owner 2026-09-12). It never
+                    // reached turn/start, so it burned no model quota — but it
+                    // looked exactly like the app spending it, and it made the
+                    // handoff impossible to complete. The session is live and
+                    // resumable; it is waiting for ONE deliberate takeover tap,
+                    // exactly like Claude's held-by-tty branch
+                    // (AgentSessionPersistentStream.runTurn). Park at Running so
+                    // nothing auto-retries and the chat stays interactive; the
+                    // prompt is back in the composer for the post-takeover send.
+                    onStateChange(SessionState.Running)
                     return@withContext true
                 }
                 return@withContext false
@@ -371,7 +447,9 @@ internal class AgentSessionCodexAppServer(
         // Same stale-cancel re-arm as runTurn.
         sshLifecycle.userCancelled = false
         try {
-            if (!ensureReady()) {
+            // A review is an operation the owner just asked for, so it claims
+            // the thread the same way a turn does.
+            if (!ensureReady(userInitiated = true)) {
                 threadBusy?.let { holders ->
                     threadBusy = null
                     history.emitMsg(
@@ -381,7 +459,10 @@ internal class AgentSessionCodexAppServer(
                             tone = AgentMessage.EventNote.Tone.WARN,
                         ),
                     )
-                    onStateChange(SessionState.Failed("session open elsewhere"))
+                    // Held, not Failed — see the matching branch in runTurn:
+                    // Failed loops through the VM's reconnect rescue. A review
+                    // has no prompt to hand back, but the state rule is the same.
+                    onStateChange(SessionState.Running)
                     return@withContext true
                 }
                 return@withContext false
@@ -470,8 +551,16 @@ internal class AgentSessionCodexAppServer(
      *  (owner's screenshot). */
     @Volatile private var launchedLocalProvider: Boolean? = null
 
-    /** Process + handshake + thread open. True when a turn can be sent. */
-    private suspend fun ensureReady(): Boolean {
+    /**
+     * Process + handshake + thread open. True when a turn can be sent.
+     *
+     * [userInitiated] is the RELAY's authority: true only when the owner just
+     * sent something into THIS chat (a turn, a review). That send is the claim —
+     * it is what licenses ending a copy of the same session held in a terminal
+     * on the server. A chat that merely opened, a limit-bar warm-up or any
+     * background path passes false and still keeps hands off.
+     */
+    private suspend fun ensureReady(userInitiated: Boolean = false): Boolean {
         val authPrep = getAuthPrep()
         if (procAlive && launchedAuthPrep == authPrep && threadId != null &&
             launchedLocalProvider == wantsLocalProvider()
@@ -522,17 +611,81 @@ internal class AgentSessionCodexAppServer(
             // whole local-agent path would 401 on its first turn.
             val localKey =
                 if (wantsLocal) ai.eight24family.conch.agent.codex.CodexSpec.localKeyEnv() else ""
-            // stderr DROPPED — app-server logs there and any line would
-            // corrupt the stdout JSONL framing.
-            val cmd = sess.exec(
-                loginShell(authPrep + localKey + "codex app-server$localProvider 2>/dev/null"),
-            )
-            procSession = sess
-            procCmd = cmd
-            procAlive = true
-            launchedAuthPrep = authPrep
-            launchedLocalProvider = wantsLocal
-            startReader(cmd)
+            // THE SHARED BRAIN, when this server's codex has one.
+            //
+            // Riding `codex app-server proxy` makes our channel a CLIENT of one
+            // daemon instead of a second app-server — which is the only way his
+            // terminal (`codex --remote unix://`) and the phone can hold the
+            // same thread without one of them being ended. Everything about it
+            // is conditional on what the binary says it supports, because his
+            // own 824 box runs 0.80.0 and has none of it.
+            //
+            // ⛔ NOT for the phone's local-model row. Provider flags are baked
+            // per app-server PROCESS (that is why they are on this command
+            // line); a shared daemon cannot carry a per-chat provider, and
+            // handing the loopback engine's chat to a cloud-configured daemon
+            // is the 401 of 2026-08-31 all over again.
+            // ⛔ THE SHARED BRAIN IS TRIED FIRST, AND ONLY FOR A CLOUD CHAT.
+            //
+            // One `codex app-server --listen ws://127.0.0.1:<port>` serves every
+            // client on the box: this chat through the SSH channel, his terminal
+            // through `codex --remote ws://…`. Because they are clients of ONE
+            // process, they share the thread instead of fighting over it — so
+            // nothing has to be ended, which is what the relay was a workaround
+            // for.
+            //
+            // NOT for the phone's local-model row: provider flags are baked per
+            // app-server PROCESS (that is why they are on the command line
+            // below), and a shared server cannot carry a per-chat provider —
+            // handing the loopback engine's chat to a cloud-configured server is
+            // the 401 of 2026-08-31 again.
+            val sharedBrain =
+                if (wantsLocal || daemonRefused) null
+                else SilentlyTry.logged(tag, "ensure shared codex brain") { ensureSharedBrain() }
+            if (sharedBrain != null && openSharedBrain(client, sharedBrain.port)) {
+                // ⛔ RELEASE THE EXEC SESSION WE NO LONGER NEED. sshd's
+                // MaxSessions is 10 by default and the app already keeps
+                // several channels per server (listings, usage, the bridge);
+                // measured on the owner's box, every exec started failing with
+                // "open failed" once they piled up.
+                SilentlyTry.fired(tag, "close unused exec session") { sess.close() }
+                procSession = null
+                procCmd = null
+                procAlive = true
+                launchedAuthPrep = authPrep
+                launchedLocalProvider = wantsLocal
+                launchedViaDaemon = true
+                wsPort = sharedBrain.port
+                android.util.Log.i(tag, "riding the shared codex brain on 127.0.0.1:${sharedBrain.port}")
+                // ⛔ WIRE THE TERMINAL NOW, NOT AFTER THE FIRST COLLISION.
+                //
+                // The brain holds each thread's rollout for as long as it lives
+                // (measured: the rollout fd belongs to the app-server pid, and
+                // it does not let go when a client disconnects). So a bare
+                // `codex` in a terminal cannot open any thread this app has
+                // touched — it gets "already has an active writer" and the
+                // person is simply stuck. Hooking only after a relay would
+                // leave exactly that gap between the first phone turn and the
+                // first collision. The script is idempotent and rewrites its
+                // own block, so running it per launch costs one exec.
+                if (TERMINAL_HOOK_ENABLED) {
+                    SilentlyTry.logged(tag, "wire terminal to the brain") {
+                        installTerminalHook(sharedBrain.port)
+                    }
+                }
+            } else {
+                val launchCmd = "codex app-server$localProvider 2>/dev/null"
+                // stderr DROPPED — app-server logs there and any line would
+                // corrupt the stdout JSONL framing.
+                val cmd = sess.exec(loginShell(authPrep + localKey + launchCmd))
+                launchedViaDaemon = false
+                procSession = sess
+                procCmd = cmd
+                procAlive = true
+                launchedAuthPrep = authPrep
+                launchedLocalProvider = wantsLocal
+                startReader(cmd)
+            }
         } catch (t: Throwable) {
             android.util.Log.w(tag, "app-server launch failed: ${t.message} — falling back to exec", t)
             broken = true
@@ -548,6 +701,29 @@ internal class AgentSessionCodexAppServer(
             timeoutMs = 20_000,
         )
         if (init == null) {
+            if (onSharedBrain) {
+                // The brain answered the socket but not the protocol — a half
+                // dead server, a version we cannot speak to. Stop sharing, do
+                // NOT declare codex too old (that flips `broken`, and the exec
+                // path reads a resume refusal as a dead session → the doubling
+                // bug of 2026-09-09).
+                android.util.Log.w(tag, "shared brain did not initialize — falling back to a private app-server")
+                daemonRefused = true
+                teardownProcess()
+                return ensureReady(userInitiated)
+            }
+            if (launchedViaDaemon) {
+                // The daemon answered `version` but not `initialize` — a stale
+                // socket, a half-dead daemon, a version mismatch. That is a
+                // reason to stop sharing a brain, NOT a reason to declare codex
+                // too old and drop this chat onto the one-shot exec path (which
+                // reads a resume refusal as a dead session and doubles it).
+                android.util.Log.w(tag, "proxied app-server did not initialize — dropping the daemon path")
+                daemonRefused = true
+                launchedViaDaemon = false
+                teardownProcess()
+                return ensureReady(userInitiated)
+            }
             android.util.Log.w(tag, "initialize failed — codex too old for app-server? falling back to exec")
             broken = true
             teardownProcess()
@@ -576,6 +752,29 @@ internal class AgentSessionCodexAppServer(
         ) {
             val holders = probeThreadLock(rid)
             val ours = holders.filter { it.kind == SessionHolder.Kind.HEADLESS }
+            // ⛔ ON THE DAEMON PATH, A HEADLESS HOLDER IS THE DAEMON ITSELF.
+            //
+            // The orphan-reaping below exists because a private `codex
+            // app-server` of ours can outlive its SSH channel. Riding the shared
+            // daemon makes that impossible — our channel is a short-lived
+            // `proxy` client and the thread is held by the daemon, which is also
+            // what HIS terminal (`codex --remote unix://`) is talking to.
+            // Reaping it here would kill the shared brain and take his terminal
+            // down with it: the exact opposite of why the daemon exists.
+            //
+            // So on this path a refusal means another CLIENT has the thread, and
+            // the honest move is to say so rather than to end anything. A tty
+            // holder is still a separate, private app-server (a plain `codex`)
+            // and the relay below still applies to it.
+            if ((launchedViaDaemon || onSharedBrain) && ours.isNotEmpty()) {
+                android.util.Log.w(
+                    tag,
+                    "thread $rid held by ${ours.map { it.pid }} on the shared daemon — not reaping the brain",
+                )
+                threadBusy = holders
+                teardownProcess()
+                return false
+            }
             if (holders.isNotEmpty() && ours.size == holders.size) {
                 // Every holder is headless - an app-server of OURS that
                 // outlived its SSH channel. Our garbage, our cleanup: reap it
@@ -588,9 +787,87 @@ internal class AgentSessionCodexAppServer(
                 reapHolders(ours.map { it.pid })
                 openThread(rid).let { newThreadId = it.first; openErr = it.second }
             }
+            if (newThreadId.isNullOrBlank() && userInitiated && holders.isNotEmpty()) {
+                // THE RELAY. He sent this from here, so here is where the
+                // session lives now — the other copy is ended for him, in the
+                // SAME turn, and the prompt goes on to be delivered below.
+                //
+                // ⛔ Not a question, and not two gestures. "tap to take it over"
+                // then "send again" costs three actions per alternation, and he
+                // alternates phone / server message by message
+                // (feedback_own_device_is_never_disconnected: the app takes on
+                // the whole mechanic, it does not ask). The tap below survives
+                // for the case this path FAILS.
+                //
+                // Safe because the claim is a send: nothing here fires on
+                // opening a chat, on a limit warm-up, or on any timer — those
+                // callers pass userInitiated=false and still keep hands off.
+                // Nothing is lost either way: the thread is its rollout file,
+                // and the resume immediately after reads it back whole.
+                android.util.Log.i(
+                    tag,
+                    "thread $rid held by ${holders.map { it.pid }} - relay: ending them, resuming here",
+                )
+                reapHolders(holders.map { it.pid })
+                openThread(rid).let { newThreadId = it.first; openErr = it.second }
+                if (!newThreadId.isNullOrBlank()) {
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = CodexThreadLock.TAKEOVER_MARKER_ID,
+                            label = CodexThreadLock.relayedNote(holders),
+                            tone = AgentMessage.EventNote.Tone.INFO,
+                        ),
+                    )
+                    // …and then FIX THE CAUSE, without asking. A relay means
+                    // two clients are real on this box, so the shared brain is
+                    // worth having: if this codex can host one, the terminal is
+                    // wired to join it right here (one idempotent exec), and
+                    // nothing is ever shown. The advice object goes up either
+                    // way — the ViewModel owns the half this layer cannot do
+                    // (updating the CLI) and is the one that decides whether a
+                    // human has to be told anything at all.
+                    val h = holders.firstOrNull { it.kind == SessionHolder.Kind.TTY }
+                        ?: holders.first()
+                    val sup = daemonSupport ?: probeDaemonSupport()
+                    // ⛔ ONLY WHEN THE APP IS ITSELF ON THAT BRAIN. Wiring his
+                    // terminal into a server the phone cannot reach would leave
+                    // the phone unable to continue its own session — the dead
+                    // end the earlier daemon attempt would have shipped.
+                    //
+                    // On the brain, this is the LAST relay this session will
+                    // ever need: from now on his terminal joins as a second
+                    // client instead of starting a rival app-server.
+                    // ⛔ HOOK HELD BACK UNTIL THE TERMINAL SIDE IS PROVEN.
+                    // The app's own half is measured working (it rides the
+                    // brain and turns stream), but `codex --remote ws://…` was
+                    // never seen to attach: the TUI stalls on its own
+                    // interactive update prompt, and `--remote` is refused for
+                    // `codex exec`, so there is no non-interactive way to check
+                    // it. Writing a wrapper that sends his terminal somewhere
+                    // unverified is the dead end this project already refused
+                    // once — so the relay stays the mechanism until a real TUI
+                    // attach is observed.
+                    val hook = if (TERMINAL_HOOK_ENABLED) wsPort?.let { installTerminalHook(it) } else null
+                    onHandoffAdvice(
+                        HandoffAdvice(
+                            cli = "codex",
+                            where = h.stream.ifBlank { "a terminal" },
+                            pid = h.pid,
+                            cliVersion = sup?.version.orEmpty(),
+                            // "Shared" means THIS CHAT IS ON THE BRAIN — the
+                            // only state in which wiring his terminal to it is
+                            // safe, and the only one that makes future relays
+                            // unnecessary.
+                            sharedBrain = onSharedBrain,
+                            hookOutcome = hook,
+                        ),
+                    )
+                }
+            }
             if (newThreadId.isNullOrBlank()) {
-                // A person is sitting in it (or we could not prove otherwise).
-                // Hands off, and the chat STAYS on this thread.
+                // The relay could not clear it (or there was nothing to clear
+                // and codex still refuses). Hands off, and the chat STAYS on
+                // this thread - the takeover row is the way out.
                 android.util.Log.w(tag, "thread $rid busy: holders=$holders")
                 threadBusy = holders
                 teardownProcess()
@@ -644,6 +921,184 @@ internal class AgentSessionCodexAppServer(
             SilentlyTry.logged(tag, "read thread id") { it["thread"]?.jsonObject?.str("id") }
         }
         return id to err
+    }
+
+    /**
+     * Ask this server's codex what it supports, once per live session object.
+     * Null (probe could not run) is never cached as "no" — same rule as
+     * [SessionHolder.Probe.Unreachable].
+     */
+    private suspend fun probeDaemonSupport(): ai.eight24family.conch.agent.codex.CodexDaemon.Support? {
+        daemonSupport?.let { return it }
+        val raw = sshLifecycle.execOnLive(
+            loginShell(ai.eight24family.conch.agent.codex.CodexDaemon.probeScript()),
+        )
+        val parsed = ai.eight24family.conch.agent.codex.CodexDaemon.parseProbe(raw)
+        if (parsed != null) {
+            daemonSupport = parsed
+            android.util.Log.i(tag, "codex support: $parsed")
+        }
+        return parsed
+    }
+
+    /**
+     * True when a daemon is up and ours to talk to. Starts it if it is not —
+     * idempotent, silent, and PROVEN by `daemon version` rather than hoped for
+     * (a start that failed would otherwise become a channel that never speaks).
+     */
+    private suspend fun daemonReady(): Boolean {
+        val sup = probeDaemonSupport() ?: return false
+        if (!sup.sharedBrain) return false
+        val raw = sshLifecycle.execOnLive(
+            loginShell(ai.eight24family.conch.agent.codex.CodexDaemon.startScript()),
+        )
+        val up = ai.eight24family.conch.agent.codex.CodexDaemon.parseStart(raw)
+        if (!up) android.util.Log.w(tag, "codex app-server daemon would not start — private app-server it is")
+        return up
+    }
+
+    /**
+     * Make sure a shared app-server is listening on the server's loopback, and
+     * say on which port. Idempotent — an already-running one is REUSED, which
+     * is the entire point: his terminal may already be attached to it.
+     */
+    private suspend fun ensureSharedBrain(): ai.eight24family.conch.agent.codex.CodexWsBrain.Brain? {
+        val raw = sshLifecycle.execOnLive(
+            loginShell(ai.eight24family.conch.agent.codex.CodexWsBrain.ensureScript()),
+        )
+        val brain = ai.eight24family.conch.agent.codex.CodexWsBrain.parseEnsure(raw)
+        if (brain == null) {
+            android.util.Log.w(tag, "no shared brain (old codex, no port, or start failed) — private app-server")
+        } else if (brain.startedNow) {
+            android.util.Log.i(tag, "started the shared codex brain on port ${brain.port}")
+        }
+        return brain
+    }
+
+    /**
+     * Open the WebSocket to that brain over the SSH connection we already hold.
+     *
+     * ⛔ A DIRECT CHANNEL, NOT A FORWARDED PORT. Listening on the PHONE would
+     * expose the whole session protocol to every other app on the device; this
+     * way the bytes never leave the encrypted SSH channel and nothing on the
+     * device is listening at all.
+     */
+    private suspend fun openSharedBrain(client: net.schmizz.sshj.SSHClient, port: Int): Boolean = try {
+        val sess = client.startStreamSession()
+        val cmd = sess.exec(
+            loginShell(ai.eight24family.conch.agent.codex.CodexWsBrain.bridgeCommand(port)),
+        )
+        val out = cmd.outputStream
+        // ⛔ THE HANDSHAKE MUST BE ABLE TO GIVE UP.
+        //
+        // It reads the HTTP upgrade byte by byte off a blocking stream. If the
+        // port is held by something that is NOT an app-server (any other
+        // service that accepts and stays silent), or the brain is wedged, that
+        // read never returns — and the whole turn hangs instead of falling back
+        // to a private app-server. A cancelled coroutine cannot unblock a
+        // socket read either, so the timeout must CLOSE the channel: that is
+        // what wakes the reader with an exception.
+        val shook = scope.async(Dispatchers.IO) {
+            ai.eight24family.conch.agent.codex.CodexWsFrames.handshake(
+                cmd.inputStream, out, "127.0.0.1", port,
+            )
+            true
+        }
+        val ok = withTimeoutOrNull(BRAIN_HANDSHAKE_TIMEOUT_MS) { shook.await() } == true
+        if (!ok) {
+            android.util.Log.w(tag, "shared brain did not answer the upgrade in time — private app-server")
+            SilentlyTry.fired(tag, "close stalled brain channel") { sess.close() }
+            shook.cancel()
+            return false
+        }
+        wsSession = sess
+        wsCmd = cmd
+        wsOut = out
+        startSharedBrainReader(cmd)
+        true
+    } catch (t: Throwable) {
+        android.util.Log.w(
+            tag,
+            "shared brain unreachable on 127.0.0.1:$port: ${t.javaClass.simpleName}: ${t.message}",
+        )
+        SilentlyTry.fired(tag, "close failed brain channel") { wsSession?.close() }
+        wsSession = null
+        wsCmd = null
+        wsOut = null
+        false
+    }
+
+    /** Frames in, JSON-RPC lines out — the same [handleIncoming] the stdio
+     *  reader feeds, so nothing downstream knows which transport it rode. */
+    private fun startSharedBrainReader(cmd: Session.Command) {
+        readerJob = scope.launch {
+            try {
+                val input = java.io.DataInputStream(java.io.BufferedInputStream(cmd.inputStream))
+                while (true) {
+                    val text = ai.eight24family.conch.agent.codex.CodexWsFrames.readText(input, cmd.outputStream)
+                        ?: break
+                    for (line in text.lineSequence()) {
+                        if (line.isNotBlank()) handleLine(line)
+                    }
+                }
+                android.util.Log.w(
+                    tag,
+                    "shared brain closed the socket (bridge exit=${SilentlyTry.logged(tag, "brain exit") { cmd.exitStatus }})",
+                )
+            } catch (t: Throwable) {
+                if (t !is kotlinx.coroutines.CancellationException) {
+                    android.util.Log.w(tag, "shared brain reader died: ${t.message}")
+                }
+            } finally {
+                onReaderEnd("shared-brain reader ended")
+            }
+        }
+    }
+
+    /**
+     * Re-ask after the app has UPDATED codex on the server — the cached answer
+     * is from the old binary, and the whole point of the update was to change
+     * it. Returns the fresh support, so the caller can say what actually
+     * happened instead of "try again".
+     */
+    suspend fun refreshSharedBrainSupport(): Boolean {
+        daemonSupport = null
+        daemonRefused = false
+        // The question is not "which flags does the binary list" but "can a
+        // shared app-server actually be had on this box" — so ask by doing.
+        return ensureSharedBrain() != null
+    }
+
+    /** Last support answer without asking the server again — for UI that is
+     *  deciding which button to show. */
+    fun sharedBrainSupport(): ai.eight24family.conch.agent.codex.CodexDaemon.Support? = daemonSupport
+
+    /**
+     * Teach the server account's shell to join the daemon, so a plain `codex`
+     * typed in a terminal becomes a client instead of a second app-server.
+     * Returns the CLI's own word for what happened (`added:<rc>`, `present`,
+     * `unsupported:<shell>`, `failed`) or null when the exec did not run.
+     */
+    suspend fun installTerminalHook(port: Int): String? {
+        val raw = sshLifecycle.execOnLive(
+            loginShell(ai.eight24family.conch.agent.codex.CodexWsBrain.installHookScript(port)),
+        )
+        val outcome = ai.eight24family.conch.agent.codex.CodexWsBrain.parseHook(raw)
+        android.util.Log.i(tag, "terminal hook -> $outcome")
+        // ONE line, and only when something actually changed. The app wrote to
+        // a file in his account: silence there would be the app hiding a change
+        // it made, and a second line on every later handoff would be noise.
+        if (outcome?.startsWith("added") == true) {
+            history.emitMsg(
+                AgentMessage.EventNote(
+                    id = "conch-codex-terminal-joined",
+                    label = "this server's terminal now joins this session instead of taking it over " +
+                        "— a plain `codex` there attaches to the same app-server as the phone",
+                    tone = AgentMessage.EventNote.Tone.INFO,
+                ),
+            )
+        }
+        return outcome
     }
 
     /** Who has this thread's rollout open, over the live SSH channel.
@@ -708,6 +1163,28 @@ internal class AgentSessionCodexAppServer(
         android.util.Log.d(tag, "reapHolders $pids -> ${RemoteTurnKiller.parseOutcome(out)}")
     }
 
+    /**
+     * The account's plan windows, over the channel THAT IS ALREADY OPEN.
+     *
+     * ⛔ THIS IS THE WHOLE POINT. The out-of-band probe
+     * ([UsageProbe.CODEX_LIVE_CMD]) has to LAUNCH an `app-server`, sit through
+     * its bubblewrap/config warnings and shut it down again. Here the process
+     * is already running and already initialized, so the windows are one
+     * JSON-RPC round trip on a transport the turns themselves ride —
+     * milliseconds, no new ssh channel, no new process. The owner watched the
+     * old path for a minute and was right about why: the ssh session is open,
+     * so the answer should be immediate (2026-09-12).
+     *
+     * NEVER LAUNCHES ANYTHING. A chat with no live app-server returns null and
+     * the caller falls back to the probe — asking to start one would turn the
+     * free read into exactly the expensive one it exists to replace.
+     */
+    suspend fun fetchRateLimitsLive(): JsonObject? = withContext(Dispatchers.IO) {
+        if (broken || !procAlive) return@withContext null
+        val id = reqCounter.incrementAndGet()
+        rpc(id, CodexAppServerWire.encodeRateLimitsRead(id), RATE_LIMITS_TIMEOUT_MS)
+    }
+
     /** Send one request and await its JSON-RPC response. Null on write
      *  failure, timeout, or an error response (logged). [id] MUST be the
      *  exact id stamped into [line] — passed explicitly, a counter read
@@ -740,40 +1217,56 @@ internal class AgentSessionCodexAppServer(
                 BufferedReader(InputStreamReader(cmd.inputStream, Charsets.UTF_8)).use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
-                        if (line.isBlank()) continue
-                        when (val msg = CodexAppServerWire.parseLine(line)) {
-                            is CodexAppServerWire.Incoming.Response -> {
-                                val id = msg.id
-                                if (id != null) {
-                                    if (msg.error != null) {
-                                        android.util.Log.w(tag, "rpc error for #$id: ${msg.error.toString().take(200)}")
-                                        // KEEP the text — see [rpcErrors].
-                                        rpcErrors[id] = msg.error.toString()
-                                        pendingResponses.remove(id)?.complete(null)
-                                    } else {
-                                        pendingResponses.remove(id)?.complete(msg.result ?: JsonObject(emptyMap()))
-                                    }
-                                }
-                            }
-                            is CodexAppServerWire.Incoming.ServerReq -> handleServerRequest(msg)
-                            is CodexAppServerWire.Incoming.Notification -> handleNotification(msg.method, msg.params)
-                            null -> android.util.Log.d(tag, "non-rpc stdout: ${line.take(160)}")
-                        }
+                        if (line.isNotBlank()) handleLine(line)
                     }
                 }
             } catch (t: Throwable) {
                 android.util.Log.w(tag, "reader died: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
-                android.util.Log.w(tag, "reader EOF — app-server gone")
-                procAlive = false
-                threadId = null
-                pendingServerReqs.keys.toList().forEach { retireServerReq(it) }
-                pendingResponses.values.forEach { it.complete(null) }
-                pendingResponses.clear()
-                rpcErrors.clear()
-                turnDone?.complete(false)
+                onReaderEnd("reader EOF — app-server gone")
             }
         }
+    }
+
+    /**
+     * One JSON-RPC line from whichever transport delivered it — stdio from a
+     * private app-server, or a WebSocket text frame from the shared brain. Split
+     * out so the two readers cannot drift: a response that completes a pending
+     * call on one transport and not the other would hang a turn forever, with
+     * nothing in the log to say which half was wrong.
+     */
+    private suspend fun handleLine(line: String) {
+        when (val msg = CodexAppServerWire.parseLine(line)) {
+            is CodexAppServerWire.Incoming.Response -> {
+                val id = msg.id
+                if (id != null) {
+                    if (msg.error != null) {
+                        android.util.Log.w(tag, "rpc error for #$id: ${msg.error.toString().take(200)}")
+                        // KEEP the text — see [rpcErrors].
+                        rpcErrors[id] = msg.error.toString()
+                        pendingResponses.remove(id)?.complete(null)
+                    } else {
+                        pendingResponses.remove(id)?.complete(msg.result ?: JsonObject(emptyMap()))
+                    }
+                }
+            }
+            is CodexAppServerWire.Incoming.ServerReq -> handleServerRequest(msg)
+            is CodexAppServerWire.Incoming.Notification -> handleNotification(msg.method, msg.params)
+            null -> android.util.Log.d(tag, "non-rpc line: ${line.take(160)}")
+        }
+    }
+
+    /** The channel is gone, whichever kind it was: nobody is left to answer, so
+     *  every waiter is released rather than left to time out one by one. */
+    private fun onReaderEnd(why: String) {
+        android.util.Log.w(tag, why)
+        procAlive = false
+        threadId = null
+        pendingServerReqs.keys.toList().forEach { retireServerReq(it) }
+        pendingResponses.values.forEach { it.complete(null) }
+        pendingResponses.clear()
+        rpcErrors.clear()
+        turnDone?.complete(false)
     }
 
     private fun handleNotification(method: String, params: JsonObject) {
@@ -888,6 +1381,16 @@ internal class AgentSessionCodexAppServer(
             // turn aborted) — freeze the card so taps don't write into a void.
             "serverRequest/resolved" -> params.str("requestId")?.let { retireServerReq(it) }
 
+            // The server PUSHES the account's windows down this channel
+            // whenever they move, so the freshest numbers in the app cost
+            // nothing at all: no request, no ssh command, no second process.
+            // This line sat in the discard bucket below while the limit bar
+            // paid eleven seconds of hard-coded sleeps in a SECOND `codex
+            // app-server` to ask for what was already being handed to us.
+            "account/rateLimits/updated" ->
+                ai.eight24family.conch.agent.UsageProbe
+                    .rememberCodexPush(server.id, params.toString())
+
             // Per-chunk delta spam / bookkeeping with no chat-row value.
             // The completed items and tailored branches above carry it all.
             "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
@@ -896,10 +1399,16 @@ internal class AgentSessionCodexAppServer(
             "item/plan/delta", "turn/diff/updated", "turn/moderationMetadata",
             "rawResponseItem/completed", "thread/started", "thread/status/changed",
             "thread/name/updated", "thread/settings/updated",
-            "account/rateLimits/updated", "account/updated",
+            "account/updated",
             "mcpServer/startupStatus/updated", "fs/changed", "skills/changed",
             "item/autoApprovalReview/started", "item/autoApprovalReview/completed",
             "hook/started", "hook/completed",
+            // codex's OWN remote-control feature toggling itself — an internal
+            // control-plane event, nothing the user drives. It fell through to
+            // the generic "surface it" bucket below and printed "remoteControl
+            // status changed · disabled" on EVERY app-server launch; stacked by
+            // the resume loop it filled the whole screen (owner 2026-09-12).
+            "remoteControl/status/changed", "remoteControl/status/updated",
             -> Unit
 
             "warning", "guardianWarning", "configWarning", "deprecationNotice" -> {
@@ -1174,6 +1683,15 @@ internal class AgentSessionCodexAppServer(
     }
 
     private fun writeLine(line: String): Boolean = synchronized(writeLock) {
+        wsOut?.let { out ->
+            return try {
+                ai.eight24family.conch.agent.codex.CodexWsFrames.writeText(out, line)
+                true
+            } catch (t: Throwable) {
+                android.util.Log.w(tag, "shared-brain write failed: ${t.message}")
+                false
+            }
+        }
         val cmd = procCmd ?: run {
             android.util.Log.w(tag, "stdin write skipped: procCmd is null")
             return false
@@ -1264,6 +1782,16 @@ internal class AgentSessionCodexAppServer(
         android.util.Log.d(tag, "releasing thread $rid for handoff")
         teardownProcess()
         if (rid == null) return
+        // ⛔ NOTHING TO RELEASE ON THE SHARED DAEMON, AND NOTHING SAFE TO REAP.
+        //
+        // Our channel there was a `proxy` client; closing it above already gave
+        // the thread back as far as we are concerned. The headless holder that
+        // remains is the DAEMON — the very process his terminal is attached to.
+        // Reaping it is how a "polite handoff" would end his session.
+        if (launchedViaDaemon) {
+            android.util.Log.d(tag, "handoff release on the daemon path — proxy closed, brain left alone")
+            return
+        }
         val leftovers = probeThreadLock(rid).filter { it.kind == SessionHolder.Kind.HEADLESS }
         if (leftovers.isEmpty()) return
         // ⛔ DO NOT REAP A PROCESS THE USER JUST STARTED.
@@ -1290,6 +1818,15 @@ internal class AgentSessionCodexAppServer(
         readerJob = null
         // A login can happen between launches — never trust a stale verdict.
         cloudAuthCache = null
+        // ⛔ CLOSING OUR CLIENT MUST NOT TOUCH THE BRAIN. The server on the
+        // other end is shared with his terminal; we hang up, it stays.
+        wsSession?.let { c ->
+            SilentlyTry.fired(tag, "close shared-brain channel") { c.close() }
+        }
+        wsSession = null
+        wsCmd = null
+        wsOut = null
+        wsPort = null
         procCmd?.let { cmd ->
             SilentlyTry.fired(tag, "close app-server stdin") { cmd.outputStream.close() }
         }
@@ -1318,12 +1855,25 @@ internal class AgentSessionCodexAppServer(
         private const val TURN_TIMEOUT_MS = 15L * 60 * 1000
 
         /**
+         * Ceiling on the live rate-limit read. It is a CEILING, not a wait —
+         * the answer comes back off a running, initialized process, so the
+         * normal case is milliseconds. Short on purpose: if the channel is
+         * wedged the bar must fall through to the probe, not hold the open.
+         */
+        private const val RATE_LIMITS_TIMEOUT_MS = 3_000L
+
+        /**
          * How long an IDLE thread stays parked here before the writer is
          * handed back. See [armIdleRelease] for the measured numbers behind
          * the choice: a burst of turns (gaps of seconds) keeps its ~5 s-a-turn
          * warm path, and the long gaps between bursts stop locking every other
          * client out. Backgrounding the app cuts the wait short.
          */
+        /** How long the shared brain has to answer the WebSocket upgrade before
+         *  the chat gives up on it and launches a private app-server. Short on
+         *  purpose: this sits in front of every cold turn. */
+        private const val BRAIN_HANDSHAKE_TIMEOUT_MS = 8_000L
+
         private const val IDLE_RELEASE_MS = 120_000L
         private const val IDLE_TICK_MS = 5_000L
     }

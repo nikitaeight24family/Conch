@@ -123,6 +123,15 @@ class AgentSession(
 
     private val sshLifecycle = AgentSessionSshLifecycle(server, secrets, ssh, scope)
 
+    /**
+     * Raised when the relay had to end a copy of this session running in a
+     * terminal on the server — carries what was ended and what THIS server's
+     * CLI offers instead (see [HandoffAdvice]). The ViewModel turns it into the
+     * one-time advice dialog and clears it; a session that never collides never
+     * emits.
+     */
+    val handoffAdvice = MutableStateFlow<HandoffAdvice?>(null)
+
     /** Prompts that a [AgentSessionRunOneShot] ABORTED on because the transport
      *  was dead — they never reached the agent. The ViewModel drains these in
      *  retry() (via [consumeUndelivered]) and re-buffers them so the silent
@@ -198,6 +207,7 @@ class AgentSession(
         getAuthPrep = { authPrep },
         getForkOnce = { forkOnce },
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
+        onHandoffAdvice = { advice -> handoffAdvice.value = advice },
         onThinkingTokens = { n -> liveThinkingTokens.value = n },
         onInitState = { st ->
             // Publish into the spec-level globals FIRST (default model/key,
@@ -271,6 +281,7 @@ class AgentSession(
         getAuthPrep = { authPrep },
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
         onThinkingTokens = { n -> liveThinkingTokens.value = n },
+        onHandoffAdvice = { advice -> handoffAdvice.value = advice },
     )
 
     /**
@@ -305,6 +316,19 @@ class AgentSession(
         getAuthPrep = { authPrep },
         onPromptUndelivered = { text -> undeliveredPrompts.add(text) },
     )
+
+    /**
+     * Make this server's terminal side join the shared codex daemon (writes one
+     * idempotent block into the account's shell rc). Codex-only; other agents
+     * have nothing to join.
+     */
+    suspend fun installCodexTerminalHook(port: Int): String? =
+        if (server.agent == Agent.CODEX) codexAppServer.installTerminalHook(port) else null
+
+    /** Re-probe what this server's codex supports — used right after the app
+     *  updates it, so the UI can report the NEW answer. */
+    suspend fun refreshCodexSharedBrain(): Boolean =
+        server.agent == Agent.CODEX && codexAppServer.refreshSharedBrainSupport()
 
     /**
      * End whatever process is holding this session open on the server, so this
@@ -982,6 +1006,12 @@ class AgentSession(
     /** Plan-limit windows from the CLI's own cache over the control channel. */
     suspend fun fetchUsageLive(): kotlinx.serialization.json.JsonObject? =
         if (usePersistent()) persistentStream.getUsage() else null
+
+    /** Codex's plan windows over the app-server channel this chat already
+     *  holds — see [AgentSessionCodexAppServer.fetchRateLimitsLive]. Null when
+     *  there is no live channel; the caller falls back to the probe. */
+    suspend fun fetchCodexRateLimitsLive(): kotlinx.serialization.json.JsonObject? =
+        if (useCodexAppServer()) codexAppServer.fetchRateLimitsLive() else null
 
     /**
      * Server-side file search for @-mentions.

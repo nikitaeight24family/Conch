@@ -1,6 +1,6 @@
-Huge sessions finally open — and show everything.
+One session, whichever screen you reach for.
 
-• A session of any size opens in seconds with its whole conversation, first message to last. Big command output and images stay on the server instead of landing on your phone.
-• Fixed Codex sessions from disk showing rows of "item completed" instead of the commands, file edits and images.
-• The usage bar no longer shows a stale number and refreshes while a turn runs.
-• Reclaims space left by interrupted downloads.
+• Continue on the phone a session you left open in a terminal: the app takes it over on send, keeps the same history and answers there. No taps, no re-typing.
+• Codex can now hold one session for both sides at once — the phone and your terminal talk to the same app-server, so neither has to end the other.
+• Works for every agent now, not just Claude and Codex.
+• Fixed Gemini sessions refusing to resume with "no previous sessions for this project".

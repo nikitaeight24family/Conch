@@ -11,6 +11,9 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -40,6 +43,25 @@ data class UsageWindow(
     /** "Until reset" recomputed against [nowMs] from the absolute reset time, so
      *  it counts down without a refetch; falls back to the fetch-time
      *  [resetText] when no absolute anchor is available. */
+    /**
+     * ⛔ WHAT THE SERVER LAST SAID, NOT WHAT OUR CLOCK MAKES OF IT.
+     *
+     * The remaining time is the PROVIDER's answer, refreshed by asking again —
+     * an open chat re-reads usage every 8 s ([ChatViewModel.USAGE_POLL_
+     * FOREGROUND_MS]) — not a number the phone counts down between answers.
+     * They are not the same claim: only the provider knows when a window rolls,
+     * when credits are topped up, or when a reset moves, and a local countdown
+     * keeps confidently subtracting through all three.
+     *
+     * [resetTextLive] remains for the case this cannot cover: no fresh answer
+     * (backgrounded, offline, a probe that could not run), where a stale string
+     * would freeze on screen. That was the 2026-06-14 report — "49m" frozen
+     * while the desktop read 14m — and it happened because the text was only
+     * recomputed on chat-open and turn-finish. With a live 8 s poll the fresh
+     * answer is the better one; without one, the clock is all there is.
+     */
+    fun resetTextServer(): String = resetText
+
     fun resetTextLive(nowMs: Long): String {
         val at = resetAtEpochMs ?: return resetText
         return usageCountdownText((at - nowMs) / 1000)
@@ -303,6 +325,17 @@ object UsageProbe {
 
     private fun key(serverId: String, agent: Agent) = "$serverId/${agent.name}"
 
+    /** The cache key, for consumers that want to filter [updates]. */
+    fun keyOf(serverId: String, agent: Agent) = key(serverId, agent)
+
+    /** Emits the cache key whenever a remembered report is replaced, so an open
+     *  chat repaints the INSTANT a fresher number lands — including one the
+     *  provider pushed at us unasked. Without this a pushed answer would sit in
+     *  the cache until the next poll came round to notice it, which is the
+     *  waiting this whole path exists to delete. */
+    private val _updates = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val updates: SharedFlow<String> = _updates.asSharedFlow()
+
     private fun diskFile(): File? = runCatching {
         File(ServiceLocator.appContext.filesDir, "usage-cache.json")
     }.getOrNull()
@@ -315,20 +348,87 @@ object UsageProbe {
     fun preload() {
         if (loaded) return
         loaded = true
-        ioScope.launch {
+        // ⛔ READ IT HERE, NOT ON A COROUTINE. This used to be dispatched to
+        // the IO pool, which on a cold start is already carrying the session
+        // parse — so a chat could open, ask for the remembered limits and be
+        // told there are none, purely because the file had not been read yet.
+        // It is a few KB of JSON at process start; the pool it was waiting for
+        // is the expensive thing.
+        run {
             runCatching {
-                val f = diskFile() ?: return@launch
-                if (!f.exists()) return@launch
-                json.decodeFromString<Map<String, UsageReport>>(f.readText())
-                    .forEach { (k, v) -> cache.putIfAbsent(k, v) }
+                val f = diskFile() ?: return@run
+                if (!f.exists()) return@run
+                val text = f.readText()
+                // Current format carries the stamp. A file written by an older
+                // build is a bare map — adopt it, but with NO stamp, so it can
+                // still be shown as a last-known value and is never mistaken
+                // for a fresh one.
+                val stamped = runCatching {
+                    json.decodeFromString<Map<String, Stamped>>(text)
+                }.getOrNull()
+                if (stamped != null) {
+                    stamped.forEach { (k, v) ->
+                        if (cache.putIfAbsent(k, v.report) == null) fetchedAt[k] = v.atMs
+                    }
+                } else {
+                    json.decodeFromString<Map<String, UsageReport>>(text)
+                        .forEach { (k, v) -> cache.putIfAbsent(k, v) }
+                }
             }
         }
     }
 
+    /** A remembered report plus WHEN WE ASKED FOR IT.
+     *
+     * ⛔ THE STAMP HAS TO BE ON DISK OR IT DOES NOT EXIST. It lived in a
+     * memory-only map, so every cold start came up holding reports and no
+     * times for them — [cachedFresh] rejected every one and the bar had
+     * nothing to paint until a probe answered seconds later.
+     *
+     *  Deliberately NOT [UsageReport.fetchedAtEpochMs]: that field means "this
+     *  DATA came out of the CLI's own on-disk cache and therefore carries
+     *  age", and the rate-limited banner refuses to be cleared by any report
+     *  carrying it. Overloading it would make every cached report look like a
+     *  stale CLI reading. */
+    @Serializable
+    private data class Stamped(val report: UsageReport, val atMs: Long)
+
     private fun persistToDisk() {
         ioScope.launch {
-            runCatching { diskFile()?.writeText(json.encodeToString(cache.toMap())) }
+            runCatching {
+                val snapshot = cache.toMap().mapValues { (k, v) ->
+                    Stamped(v, fetchedAt[k] ?: 0L)
+                }
+                diskFile()?.writeText(json.encodeToString(snapshot))
+            }
         }
+    }
+
+    /** One way in: cache it, stamp it, persist it. Both writers did this by
+     *  hand and the fetch path never stamped at all — so the value it saved
+     *  sat on disk unjudgeable, which is the other half of the empty bar. */
+    private fun store(k: String, report: UsageReport) {
+        cache[k] = report
+        fetchedAt[k] = System.currentTimeMillis()
+        persistToDisk()
+        _updates.tryEmit(k)
+    }
+
+    /**
+     * Adopt the rate-limit body the Codex app-server PUSHED at us.
+     *
+     * ⛔ THE PROVIDER SENDS THIS UNASKED AND WE USED TO BIN IT. Codex emits
+     * `account/rateLimits/updated` down the channel the chat already holds
+     * whenever the windows move. It sat in that handler's discard bucket while
+     * the limit bar spawned a SECOND `codex app-server` over a fresh ssh
+     * channel, with eleven seconds of hard-coded sleeps, to ask for the very
+     * numbers already being handed to us for free.
+     */
+    fun rememberCodexPush(serverId: String, paramsJson: String) {
+        val text =
+            if (paramsJson.contains("\"rateLimits\"")) paramsJson
+            else "{" + "\"rateLimits\"" + ":" + paramsJson + "}"
+        reportFromCodex(text)?.let { remember(serverId, Agent.CODEX, it) }
     }
 
     /** Last known report (cache hit) — instant, no SSH. Null if never fetched. */
@@ -360,8 +460,50 @@ object UsageProbe {
      * ones over — they stay valid until their own reset passes (utilization only
      * grows between resets; slightly stale beats vanishing). */
     fun remember(serverId: String, agent: Agent, report: UsageReport) {
-        cache[key(serverId, agent)] = withPerModelCarryOver(serverId, agent, report)
-        persistToDisk()
+        store(key(serverId, agent), withPerModelCarryOver(serverId, agent, report))
+        // ⛔ STAMP IT, OR IT CANNOT BE JUDGED LATER. A remembered report is
+        // perfectly good for a minute and a lie after an hour, and without a
+        // time on it the bar cannot tell those apart — which is how a "0%" from
+        // a previous run got painted onto a window that had gone back to 74%.
+    }
+
+    private val fetchedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Below this age a reading is simply current — the warm loop re-asks every
+     *  60-120 s, so anything younger than this came from the last poll or two
+     *  and needs no further argument. Older than it, [cachedFresh] falls back
+     *  to asking the WINDOW whether it is still the same window. */
+    const val CACHE_TRUST_MS = 3 * 60_000L
+
+    /**
+     * The remembered report, but only while it still describes the present.
+     *
+     * ⛔ A FLAT TTL WAS THE WRONG QUESTION AND IT EMPTIED THE BAR. Three
+     * minutes after the last successful poll the bar went blank on open, so a
+     * phone that had been in a pocket for half an hour showed nothing —
+     * while the CLI on the same account showed its numbers immediately.
+     *
+     * The provider already tells us the only thing that actually invalidates a
+     * reading: when its window rolls. Inside that window a percentage can only
+     * grow — usage is not given back — so a reading taken earlier in the SAME
+     * window is a floor, not a guess, and showing it is honest. Once
+     * `resetAtEpochMs` has passed, the window it describes no longer exists and
+     * the number means nothing; that is the case that produced a stale "0%"
+     * painted over a window that had gone back to 74%, and it is the case this
+     * refuses.
+     *
+     * So: young enough to be current, OR still inside the window it measured.
+     * A report with no reset stamp at all has nothing to check itself against
+     * and gets the age rule alone.
+     */
+    fun cachedFresh(serverId: String, agent: Agent): UsageReport? {
+        val k = key(serverId, agent)
+        val rep = cache[k] ?: return null
+        val at = fetchedAt[k] ?: return null
+        val now = System.currentTimeMillis()
+        if (now - at <= CACHE_TRUST_MS) return rep
+        val resetAt = rep.windows.mapNotNull { it.resetAtEpochMs }.minOrNull() ?: return null
+        return rep.takeIf { now < resetAt }
     }
 
     /** See [remember]. Public-ish so the fetch path applies the same rule. */
@@ -495,7 +637,8 @@ object UsageProbe {
         val cmd = when (agent) {
             Agent.CLAUDE -> if (fast) return cached(serverId, agent) else CLAUDE_USAGE_CMD
             Agent.CODEX -> if (fast) CODEX_FAST_CMD else CODEX_LIVE_CMD
-            Agent.GEMINI -> return null // no machine-readable quota
+            Agent.GEMINI -> GEMINI_USAGE_CMD
+            Agent.COPILOT -> COPILOT_USAGE_CMD
             // Grok bills in grok.com credits (weekly/monthly windows live
             // behind its billing endpoint / ACP x.ai/session/usage — a
             // follow-up); Copilot bills in AI credits, surfaced per-turn from
@@ -508,7 +651,7 @@ object UsageProbe {
             // opencode and Crush bill through whichever provider the user
             // configured, so there is no plan window to read; their per-turn
             // spend rides the stream instead.
-            Agent.GROK, Agent.COPILOT, Agent.QWEN, Agent.CURSOR,
+            Agent.GROK, Agent.QWEN, Agent.CURSOR,
             Agent.OPENCODE, Agent.CRUSH, Agent.CONTINUE -> return null
         }
         val out = execOnServer(serverId, cmd)?.takeIf { it.isNotBlank() } ?: return null
@@ -528,7 +671,9 @@ object UsageProbe {
             Agent.CLAUDE -> reportFromControlPayload(out)
             Agent.CODEX -> parseCodex(out).takeIf { it.isNotEmpty() }
                 ?.let { UsageReport(windows = it) }
-            Agent.GEMINI, Agent.GROK, Agent.COPILOT,
+            Agent.GEMINI -> reportFromGemini(out)
+            Agent.COPILOT -> reportFromCopilot(out)
+            Agent.GROK,
             Agent.QWEN, Agent.CURSOR, Agent.OPENCODE, Agent.CRUSH,
             Agent.CONTINUE -> null
         }
@@ -538,8 +683,7 @@ object UsageProbe {
         // displays exactly what the cache holds.
         val report = raw?.let { withPerModelCarryOver(serverId, agent, it) }
         if (report != null) {
-            cache[key(serverId, agent)] = report // keep last good
-            persistToDisk()                       // survive restarts → instant on next open
+            store(key(serverId, agent), report) // last good, stamped, on disk
         }
         return report
     }
@@ -893,10 +1037,55 @@ object UsageProbe {
     // `"primary":{"used_percent":47.0,"window_minutes":10080,…}` — 10080 minutes,
     // a SEVEN-DAY window sitting under the key we called five-hourly. The label
     // is derived from that number now.
+    /** Test seam: the same windows the bar draws, from a raw Codex payload.
+     *  Pinned by CodexCreditsAndResetTest against real provider answers. */
+    internal fun reportFromCodex(out: String): UsageReport? =
+        parseCodex(out).takeIf { it.isNotEmpty() }?.let { UsageReport(windows = it) }
+
+    /**
+     * Is this payload a LIVE answer, or a snapshot read off a session file?
+     *
+     * ⛔ ONLY A LIVE ANSWER MAY SUPPLY A RESET TIME. The rollout snapshot is a
+     * record of a past moment: measured 2026-09-12, its `resets_at` said 17:24
+     * while the CLI's own panel said 20:40 — three and a quarter hours out,
+     * because the window had rolled since the line was written. A percentage
+     * that is a little behind is a small lie; a reset time that is a little
+     * behind is a countdown to nothing. So the snapshot keeps the percentages
+     * and loses the clock, and a failed live probe shows no countdown rather
+     * than a confident wrong one.
+     */
+    private fun codexPayloadIsLive(out: String): Boolean = out.contains("\"rateLimits\"")
+
     private fun parseCodex(out: String): List<UsageWindow> = buildList {
-        codexWindow(out, "primary", "Usage limit", 5 * 3600L)?.let { add(it) }
-        codexWindow(out, "secondary", "Secondary limit", 7 * 86_400L)?.let { add(it) }
+        // The provider's windows, exactly as it reports them — the same two rows
+        // Codex's own panel shows, with the same numbers and the same times.
+        //
+        // ⛔ NOTHING INVENTED ALONGSIDE THEM. A "Credits" row was added here to
+        // explain a blocked account and it was wrong twice over: it first
+        // REPLACED these windows, so the sheet showed one synthetic row where
+        // the CLI shows the user's real limits, and even beside them it is a row
+        // the native app does not have. Codex states the credit block as a
+        // SENTENCE under the windows, not as a window; a window is a percentage
+        // with a clock, and credits are neither.
+        // ⛔ A SNAPSHOT IS NOT AN ANSWER. The rollout's rate_limits line records
+        // a past moment, and on 2026-09-12 it was wrong on BOTH axes at once:
+        // it said 1% left resetting at 17:24 while the CLI's own panel said 84%
+        // left resetting at 20:40. Every "why doesn't it match the CLI" that
+        // day traced back to it. So it is not a fallback any more — with no live
+        // answer the app reports nothing and shows nothing, which is a state the
+        // user can read, unlike a confident wrong number.
+        if (!codexPayloadIsLive(out)) return@buildList
+        codexWindow(out, "primary", "Usage limit", live = true)?.let { add(it) }
+        codexWindow(out, "secondary", "Secondary limit", live = true)?.let { add(it) }
     }
+
+    /** `has_credits:false` / `hasCredits:false`, or any `rate_limit_reached_type`
+     *  naming credits. Matches the rollout's snake_case and the app-server's
+     *  camelCase, because the probe may answer in either. */
+    internal fun codexCreditsDepleted(out: String): Boolean =
+        Regex("""has_?[Cc]redits"\s*:\s*false""").containsMatchIn(out) ||
+            Regex("""rate_?[Ll]imit_?[Rr]eached_?[Tt]ype"\s*:\s*"[^"]*credits[^"]*"""")
+                .containsMatchIn(out)
 
     /**
      * @param fallbackLabel used ONLY when the payload does not state the window
@@ -906,7 +1095,97 @@ object UsageProbe {
      * @param defaultWindowSec still needed for the reset projection, which has to
      *   pick some cadence; it never reaches the label.
      */
-    private fun codexWindow(out: String, key: String, fallbackLabel: String, defaultWindowSec: Long): UsageWindow? {
+    /**
+     * Gemini's quota buckets, read the way its own CLI reads them.
+     *
+     * `Config.refreshUserQuota()` iterates `quota.buckets`, skips any entry
+     * missing `modelId` or `remainingFraction`, and keeps
+     * {remaining, limit, resetTime} per model. We do the same and no more: the
+     * fraction is the provider's, the reset stamp is the provider's, and a
+     * bucket that carries neither draws nothing.
+     *
+     * One row per model, shown as REMAINING, because that is the direction
+     * `remainingFraction` is stated in and the direction the CLI reports.
+     *
+     * NOT built from `availableCredits` / `getG1CreditBalance` — that is a
+     * wallet balance with no denominator and no reset, and a percentage bar
+     * drawn from it would be invented. Same rule that killed the fabricated
+     * Codex "Credits" row.
+     */
+    internal fun reportFromGemini(out: String): UsageReport? {
+        if (!out.contains("buckets")) return null
+        val now = System.currentTimeMillis()
+        val rows = Regex("\\{([^{}]*)\\}").findAll(out).mapNotNull { m ->
+            val b = m.groupValues[1]
+            val model = Regex("\"modelId\"\\s*:\\s*\"([^\"]+)\"").find(b)
+                ?.groupValues?.get(1) ?: return@mapNotNull null
+            val frac = Regex("\"remainingFraction\"\\s*:\\s*([0-9.eE+-]+)").find(b)
+                ?.groupValues?.get(1)?.toFloatOrNull() ?: return@mapNotNull null
+            val at = parseIsoInstant(
+                Regex("\"resetTime\"\\s*:\\s*\"([^\"]+)\"").find(b)?.groupValues?.get(1),
+            )?.takeIf { it > now }
+            window(
+                label = model,
+                raw = (1f - frac.coerceIn(0f, 1f)) * 100f,
+                resetText = at?.let { secsToText((it - now) / 1000) } ?: "",
+                remaining = true,
+                resetAtEpochMs = at,
+            )
+        }.toList()
+        return rows.takeIf { it.isNotEmpty() }?.let { UsageReport(windows = it) }
+    }
+
+    /** The quotas Copilot reports, in the order they matter to someone using
+     *  it through Conch: the premium pool runs out first and is what blocks a
+     *  turn. Labels are ours; the numbers are entirely the provider's. */
+    private val COPILOT_QUOTAS = listOf(
+        "premium_interactions" to "Premium",
+        "chat" to "Chat",
+        "completions" to "Completions",
+    )
+
+    /**
+     * Copilot's quota snapshots from `account.getCurrentAuth`.
+     *
+     * Percentage: `percent_remaining` per snapshot, shown as remaining, which
+     * is how the provider states it. An `unlimited` snapshot is skipped rather
+     * than drawn as 100% — an unlimited pool is not a full one, and a bar that
+     * can never move is noise.
+     *
+     * Reset: `quota_reset_date_utc`, and ONLY that. `account.getQuota` also
+     * returns a `resetDate`, and it is a decoy — the CLI assigns it
+     * `timestamp_utc`, the moment the snapshot was taken, so it tracks the wall
+     * clock and a countdown built on it would never count down.
+     */
+    internal fun reportFromCopilot(out: String): UsageReport? {
+        if (!out.contains("quota_snapshots")) return null
+        val now = System.currentTimeMillis()
+        val at = parseIsoInstant(
+            Regex("\"quota_reset_date_utc\"\\s*:\\s*\"([^\"]+)\"").find(out)?.groupValues?.get(1),
+        )?.takeIf { it > now }
+        val rt = at?.let { secsToText((it - now) / 1000) } ?: ""
+        val rows = buildList {
+            for ((key, label) in COPILOT_QUOTAS) {
+                val b = Regex("\"" + key + "\"\\s*:\\s*\\{([^{}]*)\\}")
+                    .find(out)?.groupValues?.get(1) ?: continue
+                if (Regex("\"unlimited\"\\s*:\\s*true").containsMatchIn(b)) continue
+                val rem = Regex("\"percent_remaining\"\\s*:\\s*([0-9.]+)").find(b)
+                    ?.groupValues?.get(1)?.toFloatOrNull() ?: continue
+                add(
+                    window(
+                        label = label,
+                        raw = 100f - rem.coerceIn(0f, 100f),
+                        resetText = rt,
+                        remaining = true,
+                        resetAtEpochMs = at,
+                    ),
+                )
+            }
+        }
+        return rows.takeIf { it.isNotEmpty() }?.let { UsageReport(windows = it) }
+    }
+
+    private fun codexWindow(out: String, key: String, fallbackLabel: String, live: Boolean): UsageWindow? {
         // First flat "{...}" block under this key. With BOTH the live (camelCase)
         // line and the rollout (snake_case) line present, `find` takes the live
         // one first; if that block is nested/garbage the regex skips it and
@@ -919,10 +1198,10 @@ object UsageProbe {
         // "window_minutes" — match both (and "windowMinutes" for good measure).
         val declaredSec = Regex("\"window[A-Za-z_]*[Mm]in[a-z]*s?\"\\s*:\\s*([0-9]+)").find(body)
             ?.groupValues?.get(1)?.toLongOrNull()?.takeIf { it > 0L }?.let { it * 60 }
-        val windowSec = declaredSec ?: defaultWindowSec
         val label = declaredSec?.let(::durationWindowLabel) ?: fallbackLabel
         // Codex shows what's LEFT (like its /status), not what's used.
-        val (rt, resetEpochMs) = codexReset(body, windowSec)
+        // The clock comes only from a live answer — see codexPayloadIsLive.
+        val (rt, resetEpochMs) = if (live) codexReset(body) else "" to null
         return window(label, used, rt, remaining = true, resetAtEpochMs = resetEpochMs)
     }
 
@@ -946,27 +1225,26 @@ object UsageProbe {
      *  string. Rollout snapshots can be STALE (already past their reset → naive
      *  delta shows a bogus "now"), so we project forward by the fixed window
      *  cadence to the NEXT real reset, and return THAT as the live anchor. */
-    private fun codexReset(body: String, windowSec: Long): Pair<String, Long?> {
+    private fun codexReset(body: String): Pair<String, Long?> {
         val now = Instant.now().epochSecond
         val epoch =
             Regex("\"resets_?[Aa]t\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)?.let { isoToEpoch(it) }
                 ?: Regex("\"resets_?[Aa]t\"\\s*:\\s*([0-9]+)").find(body)?.groupValues?.get(1)?.toLongOrNull()
                     ?.let { if (it > 1_000_000_000_000L) it / 1000 else it }
         if (epoch != null) {
-            val projected = projectForward(epoch, windowSec, now)
-            return secsToText(projected - now) to (projected * 1000)
+            // ⛔ THE RESET IS THE PROVIDER'S NUMBER OR IT IS NOTHING. This used
+            // to step a past reset forward by the window cadence and present
+            // the result as fact. That is an app-side guess wearing the
+            // provider's clothes: the owner asked for (2026-09-12), and a
+            // countdown he cannot act on is worse than no countdown. A snapshot
+            // whose reset has already passed says nothing about the next one —
+            // the live probe will bring a real number within the minute.
+            if (epoch <= now) return "" to null
+            return secsToText(epoch - now) to (epoch * 1000)
         }
         val inSec = Regex("\"resets_?[Ii]n_?[Ss]econds\"\\s*:\\s*([0-9]+)").find(body)
             ?.groupValues?.get(1)?.toLongOrNull()
         return if (inSec != null) secsToText(inSec) to ((now + inSec) * 1000) else "" to null
-    }
-
-    /** Smallest reset ≥ now, stepping by [window]. Fixed-cadence windows (5h /
-     *  weekly) reset periodically, so even a past snapshot pins a real future
-     *  reset rather than collapsing to "now". */
-    private fun projectForward(reset: Long, window: Long, now: Long): Long {
-        if (window <= 0L || reset >= now) return reset
-        return reset + ((now - reset) / window + 1) * window
     }
 
     private fun isoToEpoch(iso: String): Long? =
@@ -1001,12 +1279,18 @@ object UsageProbe {
         )
     }
 
-    private fun secsToText(s: Long): String = when {
-        s <= 0 -> "now"
-        s < 3600 -> "${s / 60}m"
-        s < 86_400 -> "${s / 3600}h"
-        else -> "${s / 86_400}d"
-    }
+    /**
+     * ⛔ HOURS *AND* MINUTES. This floored to the hour, so a server answer of
+     * 1h31m appeared as "1h" — and now that this text is what the bar and the
+     * auto-continue row actually display (the provider's number, re-asked every
+     * 8 s, instead of a local countdown), that floor became a 31-minute lie on
+     * screen. [usageCountdownText] already had the right shape for exactly this
+     * reason (2026-07-03: the app read 40 minutes behind the CLI); a second,
+     * coarser formatter had no reason to exist. "now" is kept — a reset that has
+     * already passed is a statement, not a duration.
+     */
+    private fun secsToText(s: Long): String =
+        if (s <= 0) "now" else usageCountdownText(s)
 
     // The token is read and used entirely on the server; only the JSON
     // response (percentages + reset times) ever crosses the SSH channel.
@@ -1128,20 +1412,42 @@ object UsageProbe {
     private val CODEX_LIVE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
         [ -f "${'$'}HOME/.codex/auth.json" ] || { echo CONCH_NOAUTH; exit 0; }
         if command -v codex >/dev/null 2>&1; then
-          # ⛔ DO NOT SHORTEN THESE SLEEPS. stdin EOF shuts the app-server down,
-          # so they are the whole time budget it has to answer. Measured on the
-          # owner's server 2026-09-12 (codex-cli 0.153.4): before the id:1 result
-          # arrives the server emits a bubblewrap ERROR, a configWarning and a
-          # remoteControl/status/changed — with 0.4+0.7 s it was killed first and
-          # this half returned NOTHING on every poll, silently, for as long as it
-          # has existed. At 1.5+4 s the rateLimits result comes back every time.
-          # This is the background refine, not the paint: it may be slow, it may
-          # not be absent.
+          # ⛔ NO FIXED SLEEPS — THEY *WERE* THE DELAY. This used to `sleep 2`
+          # then `sleep 9`, because stdin EOF shuts the app-server down and the
+          # sleeps were its whole time budget. The cost of that: the command
+          # ALWAYS took eleven seconds, even when the answer had landed in one.
+          # Now a fifo holds stdin open, the request goes the moment
+          # `initialize` is ACKED rather than after a guessed pause, and the
+          # command returns the instant the answer appears. Every number below
+          # is a CEILING, never a wait.
+          #
+          # And this is only the FALLBACK. A chat holding a live app-server
+          # channel reads its windows over that channel in one round trip and
+          # never runs this at all — see
+          # AgentSessionCodexAppServer.fetchRateLimitsLive.
+          d=${'$'}(mktemp -d 2>/dev/null) || d=${'$'}HOME/.conch-rl.${'$'}${'$'}
+          mkdir -p "${'$'}d" && rm -f "${'$'}d/p" && mkfifo "${'$'}d/p" 2>/dev/null
           { printf '%s\n' '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"conch","title":"conch","version":"1.0"}}}'
-            sleep 1.5
+            j=0
+            while [ ${'$'}j -lt 200 ]; do
+              grep -q '"id"[[:space:]]*:[[:space:]]*0' "${'$'}d/o" 2>/dev/null && break
+              sleep 0.05; j=${'$'}((j+1))
+            done
             printf '%s\n' '{"id":1,"method":"account/rateLimits/read","params":{}}'
-            sleep 4
-          } | conch_timeout 12 codex app-server 2>/dev/null | grep '"rateLimits"' | tail -1
+            sleep 20
+          } > "${'$'}d/p" &
+          wp=${'$'}!
+          conch_timeout 25 codex app-server < "${'$'}d/p" > "${'$'}d/o" 2>/dev/null &
+          cp=${'$'}!
+          i=0
+          while [ ${'$'}i -lt 250 ]; do
+            grep -q '"rateLimits"' "${'$'}d/o" 2>/dev/null && break
+            kill -0 ${'$'}cp 2>/dev/null || break
+            sleep 0.1; i=${'$'}((i+1))
+          done
+          kill ${'$'}wp ${'$'}cp 2>/dev/null
+          grep '"rateLimits"' "${'$'}d/o" 2>/dev/null | tail -1
+          rm -rf "${'$'}d"
         fi
         f=${'$'}(ls -t ${'$'}HOME/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -1)
         [ -z "${'$'}f" ] && f=${'$'}(ls -t ${'$'}(find ${'$'}HOME/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null) 2>/dev/null | head -1)
@@ -1155,5 +1461,116 @@ object UsageProbe {
         # Take the last line that actually carries a number.
         [ -n "${'$'}f" ] && grep '"rate_limits"' "${'$'}f" 2>/dev/null |
           grep -E '"used_percent"[[:space:]]*:[[:space:]]*[0-9]' | tail -1
+    """.trimIndent()
+
+    // -- Gemini plan windows ---------------------------------------------
+    //
+    // The comment that used to sit here said "no machine-readable quota" and it
+    // had gone stale. Read out of the shipped gemini-cli 0.57.0 bundle, not the
+    // docs: `CodeAssistServer.retrieveUserQuota()` POSTs to
+    // cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota and answers with
+    // `buckets[]`, each carrying {modelId, remainingFraction, resetTime} -- a
+    // provider fraction AND a provider reset stamp, exactly the pair a window
+    // needs. The CLI's own loop over it is `Config.refreshUserQuota()`;
+    // [reportFromGemini] mirrors that loop rather than inventing a reading.
+    //
+    // NOT an ACP call. The entire ACP method inventory in that bundle is
+    // session/*, fs/* and terminal/* -- nothing usage-shaped -- and the quota
+    // the CLI does fetch is emitted as `CoreEvent.QuotaChanged`, whose only
+    // subscriber is its interactive TUI. So this is a shell round trip on the
+    // connection we already hold, like Claude's.
+    //
+    // Credential gate FIRST, the same rule as everywhere: an API-key or Vertex
+    // user has no quota surface at all (the CLI itself bails on
+    // `!codeAssistServer.projectId`), so we say CONCH_NOAUTH and draw nothing
+    // rather than a zero. The project id is resolved once and cached on the
+    // server, so the steady state is one POST.
+    private val GEMINI_USAGE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
+        G=${'$'}HOME/.gemini/oauth_creds.json
+        [ -f "${'$'}G" ] || { echo CONCH_NOAUTH; exit 0; }
+        TOK=${'$'}(sed -n -E 's/.*"access_token"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}G" | head -1)
+        [ -z "${'$'}TOK" ] && { echo CONCH_NOAUTH; exit 0; }
+        EXP=${'$'}(sed -n -E 's/.*"expiry_date"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "${'$'}G" | head -1)
+        NOW=${'$'}(( ${'$'}(date +%s) * 1000 ))
+        if [ -n "${'$'}EXP" ] && [ "${'$'}EXP" -lt ${'$'}((NOW + 60000)) ]; then
+          # The CLI refreshes its own token exactly this way. Doing it here stops
+          # a long-idle server from reporting a logout on a perfectly good login.
+          B=${'$'}(dirname ${'$'}(dirname ${'$'}(readlink -f ${'$'}(command -v gemini) 2>/dev/null) 2>/dev/null) 2>/dev/null)/bundle
+          RT=${'$'}(sed -n -E 's/.*"refresh_token"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "${'$'}G" | head -1)
+          CI=${'$'}(grep -roh 'OAUTH_CLIENT_ID = "[^"]*"' "${'$'}B" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"/\1/')
+          CS=${'$'}(grep -roh 'OAUTH_CLIENT_SECRET = "[^"]*"' "${'$'}B" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"/\1/')
+          if [ -n "${'$'}RT" ] && [ -n "${'$'}CI" ]; then
+            TOK=${'$'}(curl -s -m 5 -X POST https://oauth2.googleapis.com/token -d client_id="${'$'}CI" -d client_secret="${'$'}CS" -d refresh_token="${'$'}RT" -d grant_type=refresh_token 2>/dev/null | sed -n -E 's/.*"access_token"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
+          fi
+          [ -z "${'$'}TOK" ] && { echo CONCH_NOAUTH; exit 0; }
+        fi
+        P="${'$'}GOOGLE_CLOUD_PROJECT"
+        [ -z "${'$'}P" ] && P="${'$'}GCLOUD_PROJECT"
+        PF=${'$'}HOME/.conch/gemini-project
+        [ -z "${'$'}P" ] && [ -f "${'$'}PF" ] && P=${'$'}(cat "${'$'}PF" 2>/dev/null)
+        if [ -z "${'$'}P" ]; then
+          P=${'$'}(curl -s -m 5 -X POST "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" -H "Authorization: Bearer ${'$'}TOK" -H "Content-Type: application/json" -d '{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}' 2>/dev/null | sed -n -E 's/.*"cloudaicompanionProject"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)
+          [ -n "${'$'}P" ] && { mkdir -p "${'$'}HOME/.conch" 2>/dev/null; printf '%s' "${'$'}P" > "${'$'}PF" 2>/dev/null; }
+        fi
+        [ -z "${'$'}P" ] && exit 0
+        curl -s -m 5 -X POST "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota" -H "Authorization: Bearer ${'$'}TOK" -H "Content-Type: application/json" -d "{\\"project\\":\\"${'$'}P\\"}" | tr -d '\n'
+    """.trimIndent()
+
+    // -- Copilot plan windows --------------------------------------------
+    //
+    // `copilot --server --stdio` is a hidden headless JSON-RPC mode -- the flags
+    // are `.hideHelp()` in the CLI's own app.js, but real. `connect` then
+    // `account.getCurrentAuth` returns `copilotUser` carrying
+    // `quota_snapshots.{chat,completions,premium_interactions}` with
+    // `percent_remaining`, plus `quota_reset_date_utc`: provider percentage and
+    // provider reset in ONE call.
+    //
+    // TWO TRAPS, both verified against the shipped 1.0.80 package:
+    //  - The framing is vscode-jsonrpc, "Content-Length: N" + CRLF + CRLF +
+    //    body. A plain NDJSON line is silently ignored, which looks exactly
+    //    like a server that never answers.
+    //  - `account.getQuota`'s `resetDate` is NOT a reset. The CLI assigns it
+    //    `timestamp_utc` -- the snapshot time -- and it advances with the wall
+    //    clock. The reset is `copilotUser.quota_reset_date_utc` and nothing
+    //    else; the other one would give a countdown that never counts down.
+    //
+    // Unavailable under `--acp` (the wire entry is scope:"server", so an ACP
+    // peer answers -32601), hence a spawn rather than a live-channel round
+    // trip. It is the slow tier by nature; the stamped cache is what makes the
+    // NEXT open instant.
+    private val COPILOT_USAGE_CMD = RemoteEnv.PATH_PREAMBLE + RemoteEnv.TIMEOUT_FN + "\n" + """
+        command -v copilot >/dev/null 2>&1 || exit 0
+        d=${'$'}(mktemp -d 2>/dev/null) || d=${'$'}HOME/.conch-cq.${'$'}${'$'}
+        mkdir -p "${'$'}d" && rm -f "${'$'}d/p" && mkfifo "${'$'}d/p" 2>/dev/null
+        {
+          A='{"jsonrpc":"2.0","id":1,"method":"connect","params":{"clientInfo":{"name":"conch","version":"0"}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${'$'}{#A}" "${'$'}A"
+          j=0
+          while [ ${'$'}j -lt 200 ]; do
+            grep -q '"protocolVersion"' "${'$'}d/o" 2>/dev/null && break
+            sleep 0.05; j=${'$'}((j+1))
+          done
+          B='{"jsonrpc":"2.0","id":2,"method":"account.getCurrentAuth","params":{}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${'$'}{#B}" "${'$'}B"
+          sleep 15
+        } > "${'$'}d/p" &
+        wp=${'$'}!
+        conch_timeout 20 copilot --server --stdio --no-auto-update < "${'$'}d/p" > "${'$'}d/o" 2>/dev/null &
+        cp=${'$'}!
+        i=0
+        while [ ${'$'}i -lt 200 ]; do
+          grep -q 'quota_snapshots' "${'$'}d/o" 2>/dev/null && break
+          kill -0 ${'$'}cp 2>/dev/null || break
+          sleep 0.1; i=${'$'}((i+1))
+        done
+        kill ${'$'}wp ${'$'}cp 2>/dev/null
+        if grep -q 'quota_snapshots' "${'$'}d/o" 2>/dev/null; then
+          grep 'quota_snapshots' "${'$'}d/o" 2>/dev/null | tail -1
+        elif grep -q '"protocolVersion"' "${'$'}d/o" 2>/dev/null; then
+          # The server answered and holds no account: a real logout, not a
+          # hiccup, so the remembered numbers have to go.
+          echo CONCH_NOAUTH
+        fi
+        rm -rf "${'$'}d"
     """.trimIndent()
 }

@@ -32,6 +32,13 @@ private val Context.statusDataStore by preferencesDataStore(name = "agent_status
 
 class AgentStatusCache(private val context: Context) {
 
+    /** Process-wide, because [peek]'s whole value is being answerable from any
+     *  instance without touching disk. Written by [parse], so both [load] and
+     *  [observeStatuses] keep it current. */
+    private companion object {
+        val mem = java.util.concurrent.ConcurrentHashMap<String, Snapshot>()
+    }
+
     /**
      * How long a BLOCK run-state may be carried forward on preserved evidence
      * alone before the app stops presenting it as fact.
@@ -134,8 +141,23 @@ class AgentStatusCache(private val context: Context) {
             statuses = map,
             lastCheckedAt = newestTs,
             serverOs = prefs[osKey(serverId)]?.takeIf { it.isNotBlank() },
-        )
+        ).also { mem[serverId] = it }
     }
+
+    /**
+     * The last snapshot this process parsed for a server — free, synchronous,
+     * no DataStore read.
+     *
+     * ⛔ THE LIMIT BAR IS WHY THIS EXISTS. It may only paint a remembered
+     * number once it knows the account is not logged out, and that check went
+     * through [load] — a suspend DataStore read that, on a chat parsing a
+     * half-gigabyte session file at the same moment, queued behind the parse
+     * on Dispatchers.IO and took THREE SECONDS to answer. The rule is
+     * unchanged (a logged-out account's numbers must never even flash); only
+     * the lookup is free now. Null = never parsed this run, which callers must
+     * treat as "unknown", exactly as [load] returning no row for the agent.
+     */
+    fun peek(serverId: String): Snapshot? = mem[serverId]
 
     /** Record the OS pre-probe's verdict (see AgentStatusProbe.classifyOsProbe).
      *  Persisted so the picker can say "Windows OpenSSH server" instead of a
@@ -170,6 +192,17 @@ class AgentStatusCache(private val context: Context) {
      * and we let it clear.
      */
     suspend fun save(serverId: String, statuses: Map<Agent, AgentStatus>): Map<Agent, AgentStatus> {
+        // ⛔ AN EMPTY MAP IS "I COULD NOT CHECK", NOT "NOTHING IS THERE".
+        // AgentStatusProbe.parse now returns nothing when the probe said nothing
+        // it recognises — a cut-short exec yields no output at all, because the
+        // script ends in one `wait` + `cat`. Persisting that would stamp every
+        // agent on the server as not installed and not logged in, which greys
+        // out the send button on a server the user is actively working on
+        // (2026-09-12). Keep what we knew; the next sweep re-probes.
+        if (statuses.isEmpty()) {
+            android.util.Log.w("Conch-Status", "refusing to save an empty status map for $serverId")
+            return load(serverId).statuses
+        }
         val ts = System.currentTimeMillis()
         val effective = LinkedHashMap<Agent, AgentStatus>(statuses.size)
         context.statusDataStore.edit { prefs ->

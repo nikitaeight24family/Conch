@@ -372,13 +372,38 @@ fi
     override fun parseCustomCommands(rawOutput: String): List<SlashCommand> = emptyList()
 
     /**
-     * Gemini buckets sessions by `project_hash` (SHA-256 of cwd), so resume
-     * only finds a session when invoked from the same cwd. The hash is
-     * one-way — we can't reverse it from a saved file path. Returning null
-     * means we don't backfill; if our local DB doesn't remember the cwd,
-     * resume may silently start a fresh session.
+     * FIND THE SESSION'S CWD — because Gemini refuses to resume without it.
+     *
+     * Gemini buckets sessions by `project_hash` (SHA-256 of the cwd), and a
+     * resume launched from the wrong directory does not fall back: it fails
+     * outright. MEASURED on the owner's server 2026-09-12, driving the phone
+     * against a session a terminal had open in `~/conch-gem` — the chat showed
+     * "Error resuming session: No previous sessions found for this project."
+     * and `gemini exited with code 42`. The old comment here said the hash is
+     * one-way and gave up; the hash never had to be reversed.
+     *
+     * Two facts on disk do it instead:
+     *  - the session file lives at
+     *    `~/.gemini/tmp/<projectFolder>/chats/session-<ts>-<id8>.jsonl`, and its
+     *    FIRST record carries the full `"sessionId"`, so the file is findable by
+     *    the exact id rather than by its truncated filename;
+     *  - `~/.gemini/projects.json` maps every cwd to that folder name
+     *    (`{"projects":{"/home/user/conch-gem":"conch-gem"}}`), which is the
+     *    mapping the hash was hiding.
+     *
+     * Output contract is the one the callers already parse: a `"cwd":"…"` pair.
+     * Silence when nothing matches — an unfound cwd must stay "unknown", never
+     * a guess, or the resume lands in the wrong project and forks a session.
      */
-    override fun cwdBackfillScript(resumeId: String): String? = null
+    override fun cwdBackfillScript(resumeId: String): String {
+        val id = shellEscape(resumeId)
+        // The filename carries only the first 8 chars of the id, so the
+        // glob narrows and the grep proves — the file must contain the
+        // FULL id or this returns nothing at all.
+        val id8 = shellEscape(resumeId.take(8))
+        return "id=" + id + "; id8=" + id8 + "; " +
+            "f=\$(ls \$HOME/.gemini/tmp/*/chats/*\$id8*.jsonl 2>/dev/null | head -1); [ -n \"\$f\" ] || exit 0; grep -q \"\$id\" \"\$f\" 2>/dev/null || exit 0; d=\$(basename \"\$(dirname \"\$(dirname \"\$f\")\")\"); [ -n \"\$d\" ] || exit 0; p=\$(tr -d ' ' < \$HOME/.gemini/projects.json 2>/dev/null | tr ',' '\\n' | grep -m1 \":\\\"\$d\\\"\" | awk -F'\\\"' '{print \$(NF-3)}'); [ -n \"\$p\" ] || exit 0; printf '\\\"cwd\\\":\\\"%s\\\"\\n' \"\$p\"; exit 0"
+    }
 
     /**
      * Gemini doesn't expose a `--model` flag we drive yet, so the

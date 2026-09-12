@@ -106,6 +106,21 @@ class ConchService : Service() {
                     SilentlyTry.fired("Conch-Service", "watchdog reconnect held-but-down") {
                         ServiceLocator.sshConnectionPool.reconnectHeldButDownSilently()
                     }
+                    // AUTO-CONTINUE, WITH THE CHAT CLOSED AND THE PHONE IN A
+                    // POCKET — which is the only case that matters, because a
+                    // user watching the screen can press send themselves.
+                    //
+                    // This ticker, not the prefetch sweep: that one is gated on
+                    // the app being in the FOREGROUND and on an unmetered link,
+                    // by design (speculative work must not run during a
+                    // four-hour taxi ride). Carrying on work the user asked for
+                    // is not speculative. This loop is unconditional for as long
+                    // as the service lives, which is exactly as long as a
+                    // session or a held connection exists — and without one
+                    // there would be nothing to send through anyway.
+                    SilentlyTry.fired("Conch-Service", "auto-continue after limit reset") {
+                        fireDueAutoResumes()
+                    }
                 }
             }
         }
@@ -763,4 +778,61 @@ class ConchService : Service() {
             context.stopService(Intent(context, ConchService::class.java))
         }
     }
+
+    /**
+     * Send each armed chat's parked prompt once its provider reset has passed.
+     *
+     * ⛔ DISARMS BEFORE SENDING, NEVER AFTER. The in-chat path and this one can
+     * both be alive at the same moment; clearing the persisted arming first
+     * means whichever gets there wins and the other finds nothing to do. The
+     * opposite order is how a prompt goes out twice.
+     */
+    private suspend fun fireDueAutoResumes() {
+        val prefs = ServiceLocator.preferences
+        val armed = prefs.armedAutoResumes()
+        if (armed.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for ((chatId, entry) in armed) {
+            if (entry.resetAtMs <= 0L || entry.resetAtMs > now) continue
+            if (entry.prompt.isBlank()) { prefs.setAutoResume(chatId, null); continue }
+            // ⛔ A CLOSED CHAT IS THE CASE THIS EXISTS FOR. Requiring a live
+            // session meant auto-continue only worked while the user was
+            // watching — which is exactly when they could press send
+            // themselves. So bring the session up, using what was persisted at
+            // arming time; the ViewModel that knew the server and the CLI is
+            // long gone by now.
+            //
+            // Only over a connection the user already holds: `peek` non-null
+            // means a pooled transport is up, so this needs no handshake and
+            // cannot demand a security-key tap from a pocket. And only because
+            // the user armed it deliberately and can cancel it — this is their
+            // press, deferred, not the app inventing a session.
+            var session = ServiceLocator.agentSessions.aliveByResumeId(chatId)
+            if (session == null) {
+                if (entry.serverId.isBlank() || entry.agent.isBlank()) continue
+                if (ServiceLocator.sshConnectionPool.peek(entry.serverId) == null) continue
+                val agent = runCatching { ai.eight24family.conch.agent.Agent.valueOf(entry.agent) }
+                    .getOrNull() ?: continue
+                session = ServiceLocator.agentSessions.openOrGet(
+                    serverId = entry.serverId,
+                    agent = agent,
+                    chatSessionId = chatId,
+                    resumeId = chatId,
+                )
+            }
+            if (session == null || !session.canAcceptSend()) continue
+            // A turn already running means the work carried on without us.
+            if (session.state.value is ai.eight24family.conch.agent.SessionState.Working) {
+                prefs.setAutoResume(chatId, null)
+                continue
+            }
+            prefs.setAutoResume(chatId, null)
+            android.util.Log.i(
+                "Conch-AutoResume",
+                "service resuming chat=${chatId.take(8)} — limit reset at ${entry.resetAtMs}",
+            )
+            session.send(entry.prompt)
+        }
+    }
+
 }

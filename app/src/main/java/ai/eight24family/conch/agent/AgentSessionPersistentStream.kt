@@ -76,6 +76,9 @@ internal class AgentSessionPersistentStream(
     /** True while this chat still has to FORK the session it resumes. */
     private val getForkOnce: () -> Boolean = { false },
     private val onPromptUndelivered: (String) -> Unit,
+    /** Raised once when the relay ended a terminal's copy of this session —
+     *  the UI turns it into the one-time "clean path" dialog. */
+    private val onHandoffAdvice: (HandoffAdvice) -> Unit = {},
     /** Live reasoning-token feed (`system/thinking_tokens` →
      *  estimated_tokens). null clears the row at turn end. */
     private val onThinkingTokens: (Long?) -> Unit = {},
@@ -215,7 +218,7 @@ internal class AgentSessionPersistentStream(
         loopRequestedThisTurn = text.trimStart().startsWith("/loop")
         try {
             backfillCwdIfNeeded()
-            if (!ensureProcess()) {
+            if (!ensureProcess(userInitiated = true)) {
                 // A terminal holds this session. The one-shot fallback would
                 // resume the SAME session and become the second writer the
                 // launch just declined to be, so this outcome must never fall
@@ -430,25 +433,13 @@ internal class AgentSessionPersistentStream(
     /** Same cwd backfill the one-shot runner performs — a resumed chat
      *  must `cd` into the directory its session was created in. */
     private suspend fun backfillCwdIfNeeded() {
-        val rid = getResumeId() ?: return
-        if (cwdSnapshot() != null) return
-        val spec = AgentSpecRegistry[server.agent]
-        val script = spec.cwdBackfillScript(rid) ?: return
-        val raw = sshLifecycle.execOnLive("bash -lc " + shellEscape(script))
-        val cwd = raw?.let {
-            Regex("\"cwd\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.getOrNull(1)
-        }
-        if (!cwd.isNullOrBlank()) {
-            history.emitMsg(
-                AgentMessage.System(
-                    id = UUID.randomUUID().toString(),
-                    subtype = "cwd_backfill",
-                    cwd = cwd,
-                    sessionId = rid,
-                    raw = "{\"backfilled\":true,\"cwd\":\"$cwd\"}",
-                )
-            )
-        }
+        SessionCwd.backfill(
+            agent = server.agent,
+            resumeId = getResumeId(),
+            currentCwd = cwdSnapshot(),
+            exec = { script -> sshLifecycle.execOnLive("bash -lc " + shellEscape(script)) },
+            emit = { msg -> history.emitMsg(msg) },
+        )
     }
 
     /** Start (or reuse) the persistent process. Restarts when launch
@@ -457,7 +448,15 @@ internal class AgentSessionPersistentStream(
      *  Suspending because a launch now ASKS the server who else has this
      *  session open before becoming a second writer on it — see the holder
      *  probe below and [ClaudeSessionLock]. */
-    private suspend fun ensureProcess(): Boolean {
+    /**
+     * Launch (or reuse) the persistent CLI process for this chat.
+     *
+     * [userInitiated] is the RELAY's authority - see the tty branch below and
+     * the twin in `AgentSessionCodexAppServer.ensureReady`. True only when the
+     * owner just sent something into THIS chat; every background caller leaves
+     * it false and keeps hands off whatever holds the session.
+     */
+    private suspend fun ensureProcess(userInitiated: Boolean = false): Boolean {
         val params = LaunchParams(
             model = getModelOverride()?.takeIf { it.isNotBlank() },
             reasoning = getReasoningOverride()?.takeIf { it.isNotBlank() },
@@ -509,25 +508,87 @@ internal class AgentSessionPersistentStream(
             when (val probe = probeSessionHolders(rid)) {
                 is SessionHolder.Probe.Held -> {
                     val tty = probe.holders.filter { it.kind == SessionHolder.Kind.TTY }
-                    if (tty.isNotEmpty()) {
-                        // A person may be looking at it. Do not launch, do not
-                        // kill; the chat stays bound to the REAL session and the
-                        // caller shows a row with a way out.
+                    if (tty.isNotEmpty() && userInitiated) {
+                        // THE RELAY — the same rule as codex, for the opposite
+                        // reason. codex refuses a second writer; Claude would
+                        // ACCEPT us as one and quietly fork the history
+                        // (anthropics/claude-code#48270), so "launch anyway" was
+                        // never on the table. What changes is WHO resolves it:
+                        // the send into this chat IS the claim, so the app ends
+                        // the terminal copy and continues the SAME session here,
+                        // inside this turn, instead of parking behind a tap and
+                        // a re-send — three gestures per alternation, and he
+                        // alternates phone / server message by message.
+                        //
+                        // Only on a send. A chat opened, a reconnect or any
+                        // background poll passes userInitiated=false and still
+                        // stops dead in the branch below: nobody's terminal ends
+                        // because an app came to the foreground.
+                        android.util.Log.i(
+                            tag,
+                            "session $rid held by ${tty.map { it.pid }} — relay: ending them, resuming here",
+                        )
+                        reapHolders(tty.map { it.pid })
+                        // ⛔ PROVE IT IS FREE BEFORE LAUNCHING. A kill that
+                        // failed, or a probe that could not run, must NOT fall
+                        // through into becoming the second writer — that is the
+                        // invariant this whole branch defends. Anything short of
+                        // "no tty holder left" keeps the old, careful behaviour.
+                        val after = probeSessionHolders(rid)
+                        val leftovers = (after as? SessionHolder.Probe.Held)?.holders.orEmpty()
+                        val cleared = after is SessionHolder.Probe.Free ||
+                            leftovers.none { it.kind == SessionHolder.Kind.TTY }
+                        if (!cleared) {
+                            android.util.Log.w(tag, "relay failed, $rid still held: $after")
+                            heldByTty = tty
+                            return false
+                        }
+                        history.emitMsg(
+                            AgentMessage.EventNote(
+                                id = ClaudeSessionLock.TAKEOVER_MARKER_ID,
+                                label = ClaudeSessionLock.relayedNote(tty),
+                                tone = AgentMessage.EventNote.Tone.INFO,
+                            )
+                        )
+                        // The explanation behind that line, once. Claude has no
+                        // shared-brain mode to offer (no daemon, no --remote
+                        // socket — its own Remote Control goes through the
+                        // vendor's cloud, not a local socket we could join), so
+                        // the clean path it teaches is the deliberate handover.
+                        tty.firstOrNull()?.let { h ->
+                            onHandoffAdvice(
+                                HandoffAdvice(
+                                    cli = "claude",
+                                    where = h.stream.ifBlank { "a terminal" },
+                                    pid = h.pid,
+                                    sharedBrain = false,
+                                )
+                            )
+                        }
+                        // Headless leftovers are ours either way — reap them in
+                        // the same breath, then fall through to the launch.
+                        leftovers.map { it.pid }.takeIf { it.isNotEmpty() }?.let { reapHolders(it) }
+                    } else if (tty.isNotEmpty()) {
+                        // A person may be looking at it and nobody asked for
+                        // anything here. Do not launch, do not kill; the chat
+                        // stays bound to the REAL session and the caller shows a
+                        // row with a way out.
                         android.util.Log.w(tag, "session $rid held by a terminal: $tty — not launching a second writer")
                         heldByTty = tty
                         return false
+                    } else {
+                        // Headless holders are ours: a persistent channel whose
+                        // transport died while the remote CLI lived on. Nothing
+                        // else reaped these — the app just launched a second
+                        // process beside each one, which is the same corruption
+                        // arriving by our own hand. Silent, because it is our
+                        // mess (feedback_auto_fix_errors).
+                        android.util.Log.w(
+                            tag,
+                            "reaping ${probe.holders.map { it.pid }} — our own orphaned holders of $rid",
+                        )
+                        reapHolders(probe.holders.map { it.pid })
                     }
-                    // Headless holders are ours: a persistent channel whose
-                    // transport died while the remote CLI lived on. Nothing else
-                    // reaped these — the app just launched a second process
-                    // beside each one, which is the same corruption arriving by
-                    // our own hand. Silent, because it is our mess
-                    // (feedback_auto_fix_errors).
-                    android.util.Log.w(
-                        tag,
-                        "reaping ${probe.holders.map { it.pid }} — our own orphaned holders of $rid",
-                    )
-                    reapHolders(probe.holders.map { it.pid })
                 }
                 // Free, or the probe could not run. Either way carry on exactly
                 // as before — acting on a guess here is what made the phantom

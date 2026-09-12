@@ -1,6 +1,6 @@
-Riesige Sitzungen öffnen sich endlich — und zeigen alles.
+Eine Sitzung, egal welcher Bildschirm.
 
-• Eine Sitzung jeder Größe öffnet sich in Sekunden mit dem ganzen Verlauf. Große Befehlsausgaben und Bilder bleiben auf dem Server, statt aufs Telefon zu wandern.
-• Behoben: Codex-Sitzungen von der Festplatte zeigten „item completed“ statt Befehlen, Dateiänderungen und Bildern.
-• Die Limit-Anzeige ist nicht mehr veraltet und aktualisiert sich während eines Zugs.
-• Gibt Speicher abgebrochener Downloads frei.
+• Setze am Telefon fort, was im Terminal offen blieb: Die App übernimmt beim Senden, behält den Verlauf und antwortet hier. Ohne Tippen.
+• Codex hält eine Sitzung für beide Seiten zugleich — Telefon und Terminal am selben App-Server, keiner beendet den anderen.
+• Gilt für alle Agenten, nicht nur Claude und Codex.
+• Behoben: Gemini-Sitzungen ließen sich nicht fortsetzen.

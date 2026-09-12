@@ -125,6 +125,10 @@ internal fun ChatModalsHost(
             body = "Tap the topbar (where it says “${selectedModel ?: "default"} ▾”) to switch model.",
             onDismiss = { vm.dismissModal() }
         )
+        is ChatModal.SessionHandoff -> SessionHandoffDialog(
+            advice = m.advice,
+            onDismiss = { dontShowAgain -> vm.dismissHandoffAdvice(dontShowAgain) },
+        )
         is ChatModal.Unsupported -> SimpleNotice(
             title = "/${m.name}",
             body = m.reason,

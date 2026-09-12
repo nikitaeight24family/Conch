@@ -1,6 +1,6 @@
-Las sesiones enormes por fin se abren, y lo muestran todo.
+Una sesión, en la pantalla que tengas.
 
-• Una sesión de cualquier tamaño se abre en segundos con toda la conversación. Las salidas grandes de comandos y las imágenes se quedan en el servidor.
-• Corregido: las sesiones de Codex del disco mostraban «item completed» en vez de comandos, cambios de archivos e imágenes.
-• La barra de límite ya no queda obsoleta y se actualiza durante un turno.
-• Libera el espacio de descargas interrumpidas.
+• Continúa en el teléfono lo que dejaste abierto en la terminal: la app lo toma al enviar, conserva el historial y responde aquí. Sin toques.
+• Codex sostiene una sesión para ambos lados: teléfono y terminal en el mismo app-server, nadie cierra al otro.
+• Funciona con todos los agentes, no solo Claude y Codex.
+• Corregido: las sesiones de Gemini no se reanudaban.

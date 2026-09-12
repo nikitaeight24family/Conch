@@ -147,30 +147,16 @@ internal class AgentSessionRunOneShot(
         // Returns null for CLIs that aren't cwd-locked (Codex resumes by
         // global thread id regardless of cwd).
         val currentResumeId = getResumeId()
-        if (cwdSnapshot() == null && currentResumeId != null) {
-            val spec = AgentSpecRegistry[server.agent]
-            val backfillScript = spec.cwdBackfillScript(currentResumeId)
-            if (backfillScript != null) {
-                val raw = sshLifecycle.execOnLive("bash -lc " + shellEscape(backfillScript))
-                val cwdFromJsonl = raw?.let {
-                    Regex("\"cwd\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.getOrNull(1)
-                }
-                if (!cwdFromJsonl.isNullOrBlank()) {
-                    android.util.Log.d(tag, "  cwd backfilled for ${server.agent}: $cwdFromJsonl")
-                    history.emitMsg(
-                        AgentMessage.System(
-                            id = UUID.randomUUID().toString(),
-                            subtype = "cwd_backfill",
-                            cwd = cwdFromJsonl,
-                            sessionId = currentResumeId,
-                            raw = "{\"backfilled\":true,\"cwd\":\"$cwdFromJsonl\"}",
-                        )
-                    )
-                } else {
-                    android.util.Log.w(tag, "  could not backfill cwd for sid=$currentResumeId agent=${server.agent} (raw=${raw?.take(120)})")
-                }
-            }
-        }
+        SessionCwd.backfill(
+            agent = server.agent,
+            resumeId = currentResumeId,
+            currentCwd = cwdSnapshot(),
+            exec = { script -> sshLifecycle.execOnLive("bash -lc " + shellEscape(script)) },
+            emit = { msg -> history.emitMsg(msg) },
+        ) ?: android.util.Log.d(
+            tag,
+            "no cwd backfill for sid=$currentResumeId agent=${server.agent} (already known, or none available)",
+        )
         // A `local:` model means the brain is the phone's own inference
         // engine — it must be SERVING before the CLI dials 127.0.0.1, or the
         // very first turn dies on a connection refusal. Idempotent when the
@@ -191,6 +177,38 @@ internal class AgentSessionRunOneShot(
                     )
                 }
             }
+        // ⛔ NEVER BE THE SECOND PROCESS ON A SESSION SOMEONE IS SITTING IN.
+        //
+        // The one-shot path serves eight of the ten agents, and until now none
+        // of them asked: the phone resumed a session a terminal had open and
+        // both appended to it. Same rule as the two channel agents, one
+        // implementation (SessionRelay): our orphans are reaped silently, a
+        // person's terminal is ended only because THIS send claims the session,
+        // and anything unprovable changes nothing.
+        //
+        // A survivor is not fatal here — a one-shot CLI has no lock to violate,
+        // so the turn proceeds exactly as it did before this existed, having
+        // told the user where the other copy is.
+        currentResumeId?.let { rid ->
+            SessionRelay.claim(
+                cli = server.agent.cliCommand,
+                sessionId = rid,
+                userInitiated = true,
+                exec = { script -> sshLifecycle.execOnLive("bash -lc " + shellEscape(script)) },
+                reap = { pids ->
+                    sshLifecycle.execOnLive("bash -lc " + shellEscape(RemoteTurnKiller.killPidsScript(pids)))
+                },
+                note = { line ->
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = "conch-session-relayed",
+                            label = line,
+                            tone = AgentMessage.EventNote.Tone.INFO,
+                        )
+                    )
+                },
+            )
+        }
         val cliCmd = buildCommand(server.agent, text)
         android.util.Log.d(tag, "runOneShot exec: agent=${server.agent} cwd=${cwdSnapshot() ?: "(default \$HOME)"} resumeId=${getResumeId()} cmdLen=${cliCmd.length}")
         val activityLogStart = System.currentTimeMillis()

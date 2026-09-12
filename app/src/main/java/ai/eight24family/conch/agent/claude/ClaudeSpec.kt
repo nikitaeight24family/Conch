@@ -739,41 +739,44 @@ case " ${'$'}CM " in
       if [ -z "${'$'}RTOK" ]; then echo "claude_run_state=TOKEN_EXPIRED"; else echo "claude_run_state=UNKNOWN"; fi
       exit 0
     fi
-    # ⛔ NO SPOOFED FIRST-PARTY CALL — ASK THE BINARY, NOT THE API.
+    # ⛔ READ THE CLI'S OWN CACHE. DO NOT LAUNCH THE CLI FROM THIS PROBE.
     #
-    # This block used to read the user's OAuth access token out of
-    # ~/.claude/.credentials.json and curl api.anthropic.com's
-    # /api/oauth/profile and /api/oauth/usage wearing
-    # "claude-code/<ver> (external, cli)" as its User-Agent. Impersonating the
-    # first-party client with a subscription credential is provider-guardrail
-    # circumvention whatever it is used for, and it outlived the limits bar's
-    # own conversion to the CLI's `get_usage` by a month. Same trick the limits
-    # bar now uses: drive the real `claude`, read its answer.
+    # Two rules collide here and both are real. The numbers must come from the
+    # CLI, not from a spoofed first-party call — that is why the curls to
+    # api.anthropic.com/api/oauth/{profile,usage} wearing
+    # "claude-code/<ver> (external, cli)" are gone. But this block runs inside
+    # the SHARED status probe, and every spec's block runs in parallel under one
+    # `wait` and one final `cat`, so the whole probe costs as much as its slowest
+    # branch — and if the exec is cut short the output is EMPTY, which the parser
+    # reads as "no methods", which reads as NOT LOGGED IN for every agent on the
+    # server.
     #
-    # WHAT THAT COSTS, STATED PLAINLY: get_usage knows the plan and the
-    # windows; it does not know the account's billing states. TRIAL_ACTIVE,
-    # TRIAL_START, TRIAL_ENDED, PAYMENT_DUE and NO_SUBSCRIPTION are gone from
-    # this probe. They were also the states that mislabelled a perfectly
-    # working Team seat "[ no subscription ]" (2026-08-18), so what is lost is
-    # a guess. What is kept is everything that actually BLOCKS a turn: an
-    # answer at all proves this login runs, and the windows still give
-    # NEAR_LIMIT / RATE_LIMITED. Anything else the turn itself surfaces.
-    command -v claude >/dev/null 2>&1 || { echo "claude_run_state=UNKNOWN"; exit 0; }
-    U=${'$'}({ printf '%s\n' '{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","supportedDialogKinds":["can_use_tool","ask_user_question"]}}'
-        sleep 2
-        printf '%s\n' '{"type":"control_request","request_id":"u-1","request":{"subtype":"get_usage"}}'
-        sleep 2
-      } | conch_timeout 20 claude --output-format stream-json --input-format stream-json --verbose 2>/dev/null | grep -m1 '"u-1"')
-    # No answer is "could not check", never a block — the same rule the 401 and
-    # 403 branches above were corrected to follow.
-    [ -z "${'$'}U" ] && { echo "claude_run_state=UNKNOWN"; exit 0; }
+    # Driving `claude` here did exactly that. Measured on the owner's server
+    # 2026-09-12 under his own load (load average 4.3): the drive took **12.85 s**
+    # against Codex's 0.97 s, and the phone told him Codex was not logged in on a
+    # server where `codex login status` says "Logged in using ChatGPT" and a turn
+    # was running as he read it.
+    #
+    # The CLI already persists these numbers itself, in ~/.claude.json's
+    # `cachedUsageUtilization`, and GlobalPrefetcher.warmUsageLoop refreshes that
+    # cache in the background by driving `get_usage` OUT OF BAND. So this block
+    # reads the file. Same source, same numbers, no process, milliseconds.
+    CJ="${'$'}HOME/.claude.json"
+    [ -f "${'$'}CJ" ] || { echo "claude_run_state=UNKNOWN"; exit 0; }
+    # Staleness first: an old cache must not blame the account for a number
+    # nobody has refreshed. 6 h is generous next to the warm loop's 1-2 min.
+    FA=${'$'}(grep -oE '"fetchedAtMs"[[:space:]]*:[[:space:]]*[0-9]+' "${'$'}CJ" 2>/dev/null | head -1 | sed 's/.*://')
+    NW=${'$'}(date +%s)
+    if [ -n "${'$'}FA" ] && [ "${'$'}(( NW - ${'$'}{FA%???} ))" -gt 21600 ] 2>/dev/null; then
+      echo "claude_run_state=UNKNOWN"; exit 0
+    fi
     ST=OK; DA=
     # Windows that HARD-block OUR turns: five_hour, seven_day, and
     # seven_day_oauth_apps (the third-party-OAuth-app bucket = our own access
     # path). Model-scoped opus/sonnet are a per-model degrade, excluded.
     MU=0; RS=
     for w in five_hour seven_day seven_day_oauth_apps; do
-      bd=${'$'}(printf '%s' "${'$'}U" | grep -oE "\"${'$'}w\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" | head -1)
+      bd=${'$'}(grep -oE "\"${'$'}w\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" "${'$'}CJ" 2>/dev/null | head -1)
       [ -z "${'$'}bd" ] && continue
       u=${'$'}(printf '%s' "${'$'}bd" | sed -n -E 's/.*"utilization"[[:space:]]*:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
       [ -z "${'$'}u" ] && continue
@@ -784,7 +787,7 @@ case " ${'$'}CM " in
     elif [ "${'$'}MU" -ge 80 ] 2>/dev/null; then ST=NEAR_LIMIT; DA=${'$'}RS
     fi
     # Plan tier for the limits sheet header — the CLI's own subscription_type.
-    SUB=${'$'}(printf '%s' "${'$'}U" | sed -n -E 's/.*"subscription_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+    SUB=${'$'}(grep -oE '"subscription_type"[[:space:]]*:[[:space:]]*"[a-z_]+"' "${'$'}CJ" 2>/dev/null | head -1 | sed -E 's/.*"([a-z_]+)"${'$'}/\1/')
     case "${'$'}SUB" in
       max*) echo "claude_plan=Max" ;;
       pro*) echo "claude_plan=Pro" ;;

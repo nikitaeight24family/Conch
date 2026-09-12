@@ -282,18 +282,59 @@ internal object SessionHolder {
     }
 
     /**
-     * One line for the chat when the holder is a person's terminal. Names the
-     * tty and the start time, because "session is busy" with no `where` is the
-     * kind of sentence that sends the owner hunting through windows.
+     * One line for the chat when a person's terminal holds the session AND the
+     * app could not take it back by itself — i.e. [relayedNote]'s path already
+     * ran and the holder survived it. Names the tty and the start time, because
+     * "session is busy" with no `where` is the kind of sentence that sends the
+     * owner hunting through windows.
      *
      * [why] is the per-agent half — what the app will and will not do about it.
+     *
+     * Tolerates an EMPTY list. The caller reaches this line whenever the CLI
+     * refused, and a refusal with NO holder found is a real outcome — the probe
+     * came back [Probe.Unreachable], or the holder exited between the refusal
+     * and the probe. `holders.first()` threw NoSuchElementException there,
+     * inside the turn's IO scope.
      */
     fun ttyHolderNote(holders: List<Holder>, cli: String, why: String): String {
-        val h = holders.firstOrNull { it.kind == Kind.TTY } ?: holders.first()
-        val where = h.stream.ifBlank { "a terminal" }
-        val since = h.since.takeIf { it.isNotBlank() }?.let { ", since $it" }.orEmpty()
+        val h = holders.firstOrNull { it.kind == Kind.TTY } ?: holders.firstOrNull()
+        val where = h?.stream?.ifBlank { null } ?: "a terminal"
+        val who = h?.let { p ->
+            val since = p.since.takeIf { it.isNotBlank() }?.let { ", since $it" }.orEmpty()
+            "($where, pid ${p.pid}$since)"
+        } ?: "(holder not found)"
         return "session open in a $cli terminal on the server " +
-            "($where, pid ${h.pid}$since) — $why — tap to take it over"
+            "$who — $why — tap to take it over"
+    }
+
+    /**
+     * THE RELAY LINE — said AFTER the app has already continued the session.
+     *
+     * The owner's rule (2026-09-11, restated 2026-09-12 in anger): a handoff is
+     * a RELAY, not a negotiation. Whichever side he SENDS from is the side that
+     * lives, and he alternates phone / server message by message. A row saying
+     * "tap to take it over" plus a re-send makes every alternation three
+     * gestures — the opposite of what the probe exists to deliver.
+     *
+     * Neither CLI offers anything gentler. codex has no thread-level release
+     * (`thread/unsubscribe` answers "unsubscribed" and moves no writer, measured
+     * on 0.153.4) and upstream confirms the writer moves only when a process
+     * ends — openai/codex#37403, #41849, #38297 are all the same complaint from
+     * other clients. Claude ships no lock to release at all. So ending the other
+     * copy IS the handoff protocol, for everyone.
+     *
+     * Past tense, one line, INFO not WARN: nothing is being asked, and an
+     * expected step of a handoff is not a problem to solve. Nothing is lost —
+     * a session's content is its file on disk, appended per turn; the holder is
+     * only the process with the write handle.
+     */
+    fun relayedNote(holders: List<Holder>, cli: String): String {
+        val h = holders.firstOrNull { it.kind == Kind.TTY } ?: holders.firstOrNull()
+        val where = h?.stream?.ifBlank { null } ?: "a terminal"
+        val pids = holders.map { it.pid }
+        return "continued here — the $cli session was open in $where on the server " +
+            "(pid${if (pids.size > 1) "s" else ""} ${pids.joinToString(" ")}); " +
+            "that copy was ended so this one carries the same session on"
     }
 
     /**
@@ -302,12 +343,13 @@ internal object SessionHolder {
      * write handle. Ending it frees the session; the history stays and the very
      * next resume reads it back whole.
      *
-     * It still needs a deliberate tap and never a habitual gesture: the holder
-     * can be a terminal someone is looking at.
+     * This is the EXPLICIT tap's wording; the automatic relay speaks through
+     * [relayedNote]. The tap stays because the relay runs only on a SEND: a chat
+     * merely opened and looked at still ends nobody's terminal.
      */
     fun takenOverNote(pids: List<Long>): String =
         "took the session over (ended pid${if (pids.size > 1) "s" else ""} " +
-            "${pids.joinToString(" ")} on the server) — send again to continue it"
+            "${pids.joinToString(" ")} on the server) — continuing it here"
 
     fun takeoverFailedNote(cli: String): String =
         "could not take the session over — it is still held on the server; " +

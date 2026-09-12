@@ -75,6 +75,11 @@ internal object CodexThreadLock {
     fun ttyHolderNote(holders: List<SessionHolder.Holder>): String =
         SessionHolder.ttyHolderNote(holders, cli = "codex", why = "codex allows one writer")
 
+    /** The relay line — the app already continued the session here; this says
+     *  what it ended to do it. */
+    fun relayedNote(holders: List<SessionHolder.Holder>): String =
+        SessionHolder.relayedNote(holders, cli = "codex")
+
     fun takenOverNote(pids: List<Long>): String = SessionHolder.takenOverNote(pids)
 
     fun takeoverFailedNote(): String = SessionHolder.takeoverFailedNote("codex")

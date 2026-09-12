@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import ai.eight24family.conch.agent.Agent
 import ai.eight24family.conch.agent.AgentMessage
 import ai.eight24family.conch.agent.AgentSession
+import ai.eight24family.conch.agent.HandoffAdvice
 import ai.eight24family.conch.agent.RemoteSession
 import ai.eight24family.conch.agent.UsageProbe
 import ai.eight24family.conch.agent.UsageReport
@@ -643,6 +644,67 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  handshake in this same chat cannot end this one before it starts. */
     @Volatile private var bridgeHandshakeFrom: Int = Int.MAX_VALUE
 
+    /** 30 s heartbeat for anything that renders a countdown — the limit bar and
+     *  the auto-continue row. Without it a "3h54m" is computed once and then
+     *  sits there while the real number falls away underneath it. */
+    private val usageTicker = kotlinx.coroutines.flow.flow {
+        while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
+    }
+
+    /** Full provider plan rate-limit report (all windows), fetched server-side
+     *  — the credential never reaches the app (see [UsageProbe]). null when
+     *  there's no machine-readable limit (API-key mode, Gemini, no live link).
+     *
+     *  ⛔ DECLARED HERE, ABOVE `init`, ON PURPOSE. `observeLimitForAutoResume`
+     *  collects it, and a property declared below the constructor is still null
+     *  while the constructor runs — the collect threw NullPointerException and
+     *  the app died the moment a chat opened (2026-09-12). Wrapping the call in
+     *  `viewModelScope.launch` does NOT save it either: Main.immediate starts
+     *  the body synchronously, up to the first suspension. Order is the fix. */
+    private val _usage = MutableStateFlow<UsageReport?>(null)
+
+    /**
+     * ⛔ THE BAR IS PAINTED HERE, AS SOON AS [_usage] EXISTS, AND NOWHERE
+     * LATER.
+     *
+     * [refreshUsage] is called from the session-setup coroutine, i.e. only
+     * AFTER the AgentSession is opened — so a number already sitting in this
+     * process's memory waited on an SSH session it does not need. Measured on
+     * the owner's phone 2026-09-12: tap 17:33:32.419, VM init 17:33:32.584,
+     * bar 17:33:35.399. Nearly three seconds spent opening a session to show an
+     * account-wide figure that is true with or without one.
+     *
+     * ⛔ AND IT CANNOT MOVE UP INTO THE CONSTRUCTOR'S FIRST init BLOCK. That is
+     * where it was first written, and it crashed every chat open with an NPE on
+     * `_usage.value` — Kotlin runs initializers in declaration order, so the
+     * flow this publishes into did not exist yet.
+     *
+     * Two in-memory map reads, no IO, no coroutine. The login rule is unchanged
+     * — a logged-out account's numbers must never flash — only its lookup is
+     * free now, see [AgentStatusCache.peek].
+     */
+    init {
+        val a0 = _currentAgent.value
+        val known = ServiceLocator.agentStatusCache.peek(serverId)?.statuses?.get(a0)
+        if (known == null || known.loggedIn) {
+            UsageProbe.cachedFresh(serverId, a0)?.let { publishUsage(it, "warm") }
+        }
+    }
+
+    private val _autoResume = MutableStateFlow<ai.eight24family.conch.data.prefs.AppPreferences.AutoResume?>(null)
+
+    /** Remaining time until the limit lifts, as the SERVER last reported it —
+     *  the same string the bar draws. Empty when no provider answer carries one. */
+    val autoResumeResetIn: StateFlow<String> = _usage
+        .map { r ->
+            r?.barPick()?.window?.let { w -> w.resetTextServer().ifBlank { w.resetTextLive(System.currentTimeMillis()) } }
+                .orEmpty()
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    /** What the auto-continue row shows, or null when there is nothing to say. */
+    val autoResume: StateFlow<ai.eight24family.conch.data.prefs.AppPreferences.AutoResume?> = _autoResume.asStateFlow()
+
     val messages: StateFlow<List<AgentMessage>> = combine(
         _localSessionId, _messagesBySession, _bridgeConnecting, _bridgeUnreachable,
     ) { id, byId, connecting, unreachable ->
@@ -738,13 +800,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // both be on screen — the row is replaced, never stacked.
         val tail = ordered.lastOrNull()
         val alreadyShowing = tail is AgentMessage.System && tail.subtype.startsWith("bridge_")
-        when {
+        val withBridge = when {
             connecting && !alreadyShowing ->
                 ordered + AgentMessage.System(id = "bridge-connecting-live", subtype = "bridge_connecting", raw = "")
             unreachable != null ->
                 ordered + AgentMessage.System(id = "bridge-unreachable", subtype = "bridge_unreachable", raw = unreachable)
             else -> ordered
         }
+        // The auto-continue offer belongs at the END: it is about what happens
+        // next, not about anything that has already been said. Appended HERE, in
+        // the one place the display list is assembled, so it survives every
+        // reparse instead of being injected at each parse site and lost by the
+        // one that was forgotten.
+        withBridge
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
@@ -1964,7 +2032,157 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     // ── Per-chat input draft ── Persist whatever the user typed but didn't send,
     // so leaving the chat never throws it away. Keyed by the chat's resume id
     // (stable) or its local id for a brand-new chat. Only send/explicit-delete
-    // clears it — never an auto-wipe.
+    // clears it — never an auto-wipe. ─────────────── AUTO-CONTINUE AFTER A USAGE
+    // LIMIT ───────────────
+    //
+    // A turn that a plan limit cut short is not finished work — it is work with
+    // a known restart time, and the provider tells us that time exactly. So the
+    // chat offers to carry on by itself, says when, and lets the user call it
+    // off. The offer is visible for the same reason every turn logs who asked
+    // for it: nothing here may start spinning unannounced.
+
+    /**
+     * Arm (or re-arm) auto-continue for this chat.
+     *
+     * ⛔ CAPTURED AT ARMING, NOT LOOKED UP LATER. The signals that tell us a
+     * limit stopped the turn are cleared the instant any text lands at the tail,
+     * and the outbox/draft copies of the user's prompt are destroyed by the send
+     * that failed. Whatever this needs at reset time it must hold now.
+     */
+    private fun armAutoResume(resetAtMs: Long, prompt: String) {
+        val chatId = draftChatId() ?: return
+        if (prompt.isBlank()) return
+        val prev = _autoResume.value
+        // A user who cancelled stays cancelled until they say otherwise — a new
+        // limit hit must not quietly re-enable what they switched off.
+        val enabled = prev?.enabled ?: true
+        val next = ai.eight24family.conch.data.prefs.AppPreferences.AutoResume(
+            resetAtMs = resetAtMs,
+            prompt = prompt,
+            enabled = enabled,
+            serverId = serverId,
+            agent = _currentAgent.value.name,
+        )
+        if (next == prev) return
+        _autoResume.value = next
+        viewModelScope.launch { ServiceLocator.preferences.setAutoResume(chatId, next) }
+        android.util.Log.i(
+            "Conch-AutoResume",
+            "armed chat=${chatId.take(8)} at=$resetAtMs enabled=$enabled promptLen=${prompt.length}",
+        )
+        scheduleAutoResume()
+    }
+
+    /** The row's tap: cancel an armed continuation, or take the offer back up. */
+    fun toggleAutoResume() {
+        val chatId = draftChatId() ?: return
+        val cur = _autoResume.value ?: return
+        val next = cur.copy(enabled = !cur.enabled)
+        _autoResume.value = next
+        viewModelScope.launch { ServiceLocator.preferences.setAutoResume(chatId, next) }
+        android.util.Log.i("Conch-AutoResume", "user set enabled=${next.enabled} chat=${chatId.take(8)}")
+        if (next.enabled) scheduleAutoResume() else autoResumeJob?.cancel()
+    }
+
+    private var autoResumeJob: kotlinx.coroutines.Job? = null
+
+    /** One-shot wakeup at the provider's reset moment — the same shape the
+     *  limit-expiry tick already uses, so the in-chat case needs no polling. */
+    private fun scheduleAutoResume() {
+        autoResumeJob?.cancel()
+        val armed = _autoResume.value?.takeIf { it.enabled && it.resetAtMs > 0L } ?: return
+        val waitMs = armed.resetAtMs - System.currentTimeMillis()
+        autoResumeJob = viewModelScope.launch {
+            // Start looking straight away. The stored reset is a hint, not a
+            // gate — the limit can lift early, or turn out not to have been the
+            // blocker at all, and either way the check is one cheap read of a
+            // number the bar already has.
+            if (waitMs > 0L) kotlinx.coroutines.delay(AUTO_RESUME_RETRY_EVERY_MS)
+            // ⛔ THE RESET MOMENT IS WHEN TO START TRYING, NOT A SINGLE SHOT.
+            //
+            // At resetAt+2s the app's usage reading is almost certainly still
+            // the old one — the in-chat poll runs every 8 s and the CLI's own
+            // cached snapshot lags further. A single attempt therefore met "still
+            // spent", logged it, and returned, with nothing left to fire again:
+            // the timer had already completed. That is a feature that silently
+            // never happens, which is worse than one that visibly fails.
+            //
+            // So keep asking, on the poll's own cadence, until the provider says
+            // there is room — or until the window itself would have rolled again,
+            // at which point something is wrong that waiting will not fix.
+            val giveUpAt = maxOf(System.currentTimeMillis(), armed.resetAtMs) +
+                AUTO_RESUME_RETRY_FOR_MS
+            while (System.currentTimeMillis() < giveUpAt) {
+                if (fireAutoResume("reset reached")) return@launch
+                kotlinx.coroutines.delay(AUTO_RESUME_RETRY_EVERY_MS)
+            }
+            android.util.Log.w(
+                "Conch-AutoResume",
+                "gave up waiting for room after the reset — leaving it armed for the next edge",
+            )
+        }
+    }
+
+    /**
+     * Send the parked prompt again, now that the limit has lifted.
+     *
+     * Routed through the OUTBOX on purpose. `send()` is gated by
+     * [claudeBlockLine] — which a rate limit is exactly what sets — and four
+     * separate edges already drain the outbox safely with an atomic claim. A
+     * fifth private send path is how a prompt ends up delivered twice.
+     */
+    /** @return true when the prompt actually went out (or there is nothing left
+     *  to do); false while it is still worth retrying. */
+    private fun fireAutoResume(why: String): Boolean {
+        val armed = _autoResume.value?.takeIf { it.enabled } ?: return true
+        val localId = _localSessionId.value ?: return false
+        val s = activeSessions[localId] ?: return false
+        // ⛔ THE CONDITION IS ROOM, NOT A CLOCK. This waited for the stored
+        // reset moment to arrive — so with the window already back at 74% it sat
+        // there until 20:39 doing nothing, which is the opposite of the point.
+        // The reset time is only a hint for when to START looking; what actually
+        // decides is whether the provider says there is room now. If the limit
+        // lifts early, or was never the real blocker, the work carries on at
+        // once.
+        val window = _usage.value?.barPick()?.window
+        if (window == null) {
+            // No live answer yet — asking again costs nothing, guessing does.
+            return false
+        }
+        if (window.usedFraction >= 1f) {
+            android.util.Log.i("Conch-AutoResume", "still spent — will ask again")
+            return false
+        }
+        android.util.Log.i(
+            "Conch-AutoResume",
+            "resuming chat=${draftChatId()?.take(8)} ($why) — re-sending the user's own last prompt",
+        )
+        // The same question drainOutbox asks, asked BEFORE we disarm. It
+        // refuses a session whose scope is dead and keeps the rows queued —
+        // correct for a message the user typed, wrong here: auto-continue would
+        // already be switched off, so nothing would ever try again and the
+        // prompt would sit in the queue waiting for a gesture the whole feature
+        // exists to avoid. Staying armed costs one more pass of the retry loop.
+        if (!s.canAcceptSend()) {
+            android.util.Log.i(
+                "Conch-AutoResume",
+                "session can't take a send yet — staying armed, will try again",
+            )
+            return false
+        }
+        disarmAutoResume()
+        parkInOutbox(armed.prompt, armed.prompt)
+        drainOutbox(s)
+        return true
+    }
+
+    private fun disarmAutoResume() {
+        val chatId = draftChatId()
+        _autoResume.value = null
+        autoResumeJob?.cancel()
+        if (chatId != null) viewModelScope.launch { ServiceLocator.preferences.setAutoResume(chatId, null) }
+    }
+
     private fun draftChatId(): String? = _resumeId.value ?: _localSessionId.value
     private var draftSaveJob: kotlinx.coroutines.Job? = null
 
@@ -2007,6 +2225,43 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      * again, so a prompt typed with no internet lands by itself — the user
      * shouldn't have to remember to press send again (user, 2026-07-27).
      */
+
+    /**
+     * Arm auto-continue the moment the plan is spent, from the ONE signal that
+     * is agent-independent: the usage report the bar already draws.
+     *
+     * Deliberately not built on the Claude-only rate-limit text watcher — that
+     * one is gated to Claude and reads phrasing out of chat rows. The usage
+     * report is a number from the provider for both CLIs that report one, and
+     * it carries the provider's own reset moment.
+     */
+    private fun observeLimitForAutoResume() {
+        viewModelScope.launch {
+            _usage.collect { report ->
+                val w = report?.barPick()?.window ?: return@collect
+                if (w.usedFraction < 1f) return@collect
+                val resetAt = w.resetAtEpochMs ?: 0L
+                // The user's own last words. Read from the DISPLAY list, which
+                // holds the optimistic bubble too — a prompt that a limit
+                // refused may never have reached the session's own history.
+                val prompt = messages.value.asReversed()
+                    .filterIsInstance<AgentMessage.UserText>()
+                    .firstOrNull()?.text?.trim().orEmpty()
+                armAutoResume(resetAt, prompt)
+            }
+        }
+    }
+
+    /** Re-read a chat's armed continuation when it opens, so cancelling on one
+     *  device and reopening on another does not resurrect it. */
+    private fun restoreAutoResume() {
+        val chatId = draftChatId() ?: return
+        viewModelScope.launch {
+            _autoResume.value = ServiceLocator.preferences.autoResumeOnce(chatId)
+            scheduleAutoResume()
+        }
+    }
+
     private fun observeConnectivityForOutbox() {
         viewModelScope.launch {
             ai.eight24family.conch.util.NetworkCost.online.collect { up ->
@@ -2840,6 +3095,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
     init {
         observeConnectivityForOutbox()
+        observeLimitForAutoResume()
         viewModelScope.launch {
             // ⚠ THIS COROUTINE MUST ALWAYS REACH startNewChat.
             //
@@ -2887,6 +3143,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // Read the parked queue BEFORE arming the writer — see the KDoc.
             restoreUnsentQueue()
             observeOutboxForPersistence()
+            restoreAutoResume()
             if (s != null) refreshSessions()
         }
         // Backfill the per-chat model key on the null → non-null resumeId transition —
@@ -3269,7 +3526,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                     // tail-sync. A marker row tells the user earlier turns are hidden
                     // (honest — never silently "looks like everything loaded").
                     val win = ai.eight24family.conch.util.JsonlUtils
-                        .tailSlice(snap.buffer, DISPLAY_TAIL_BYTES)
+                        .tailRecords(snap.buffer, DISPLAY_TAIL_RECORDS)
                     val t0 = System.currentTimeMillis()
                     val parsed = tailPollCoord.parseJsonl(win.slice, agent)
                     val parseMs = System.currentTimeMillis() - t0
@@ -3780,14 +4037,19 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                             val safe = tailPollCoord.trimToLastNewline(bytes)
                             // FULL body cached first (search + tail-sync byte-offset
                             // contract depend on the whole file being present).
-                            ServiceLocator.historyCache.save(resumeIdParam, safe)
+                            // Same rule as the prefetcher: a server byte-tail
+                            // must never replace a projected body that already
+                            // holds every record of this session.
+                            if (!ServiceLocator.historyCache.isProjected(resumeIdParam)) {
+                                ServiceLocator.historyCache.save(resumeIdParam, safe)
+                            }
                             cachedBytesLen = safe.size.toLong()
                             // Window the DISPLAY parse off the freshly-saved mmap — never
                             // decode 20 MB here. Falls back to the byte parse if the
                             // re-load races (cache should be present, just written).
                             val parsed = ServiceLocator.historyCache.load(resumeIdParam)?.use { snap ->
                                 val win = ai.eight24family.conch.util.JsonlUtils
-                                    .tailSlice(snap.buffer, DISPLAY_TAIL_BYTES)
+                                    .tailRecords(snap.buffer, DISPLAY_TAIL_RECORDS)
                                 val p = tailPollCoord.parseJsonl(win.slice, agent)
                                 historyWindowRows(resumeIdParam, win.windowed) + p
                             } ?: tailPollCoord.parseJsonl(safe, agent)
@@ -3816,6 +4078,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             }
 
             collectorJobs[localId] = viewModelScope.launch {
+                launch {
+                    // The relay had to end a terminal's copy of this session.
+                    // Explain it once — the transcript already carries the
+                    // one-line record, so this is the part that teaches the
+                    // clean path, and it is silenceable for good.
+                    s.handoffAdvice.collect { advice ->
+                        if (advice == null) return@collect
+                        s.handoffAdvice.value = null
+                        healHandoff(s, advice)
+                    }
+                }
                 launch {
                     s.liveThinkingTokens.collect { n ->
                         _thinkingTokensBySession.update { it + (localId to n) }
@@ -4626,10 +4899,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, CostStats())
 
-    /** Full provider plan rate-limit report (all windows), fetched server-side
-     *  — the credential never reaches the app (see [UsageProbe]). null when
-     *  there's no machine-readable limit (API-key mode, Gemini, no live link). */
-    private val _usage = MutableStateFlow<UsageReport?>(null)
 
     /** The whole report (all windows) for the tap-to-open limits sheet. */
     val usageReport: StateFlow<UsageReport?> = _usage.asStateFlow()
@@ -4659,9 +4928,6 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  reset time, so it counts DOWN without a refetch — user 2026-06-14: the
      *  bar froze at "49m" while the desktop ticked to 14m because the string was
      *  baked at fetch time and only refreshed on open / turn-finish. */
-    private val usageTicker = kotlinx.coroutines.flow.flow {
-        while (true) { emit(Unit); kotlinx.coroutines.delay(30_000) }
-    }
 
     /** The two CLI-refusal signals as one flow, so [usageBar] can also take the
      *  model in force and still fit `combine`'s five-arg form. */
@@ -4822,7 +5088,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 // below it → a live countdown ("how long until my window rolls").
                 val reset =
                     if (primary.percent >= 100) primary.resetAtEpochMs?.let { ai.eight24family.conch.agent.usageResetClock(it) }.orEmpty()
-                    else primary.resetTextLive(now)
+                    // The server's own number (refreshed every 8 s while the
+                    // chat is open), falling back to the local countdown only
+                    // when there is no fresh answer to show. See resetTextServer.
+                    else primary.resetTextServer().ifBlank { primary.resetTextLive(now) }
                 // An escalated window is NAMED: a bare "100%" that actually
                 // means "weekly" (or another model's cap) reads as "everything
                 // is gone" — which is the misread being fixed here.
@@ -4854,6 +5123,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      *  login state flips to logged-out (account removed from ANY screen). */
     private var usageAuthWatch: Job? = null
 
+    /** Repaints the bar the moment a fresher report lands in the cache from
+     *  ANY source — including one the provider pushed at us with no request.
+     *  Without it a pushed answer waits for the next poll to be noticed, which
+     *  is exactly the waiting the push exists to remove. */
+    private var usagePushWatch: Job? = null
+
     /** Re-read the plan windows from the provider (server-side). Cheap; called
      *  on chat open and when a turn finishes. Shows the cached value instantly
      *  so the bar is never empty on (re)open, and a failed refresh keeps the
@@ -4880,6 +5155,33 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 }
             }
         }
+        // INSTANT — BEFORE ANY IO AT ALL. Everything below runs on
+        // Dispatchers.IO, which at chat-open time is carrying the session
+        // parse; queueing behind it is what made a number already sitting in
+        // this process's memory take three seconds to reach the screen
+        // (measured on the owner's phone 2026-09-12: VM init 17:30:38.688,
+        // bar 17:30:41.745).
+        //
+        // Two in-memory map reads: the account's last known login state and
+        // the last fresh report. The login rule is NOT relaxed — a logged-out
+        // account's numbers must not even flash — only its lookup is free.
+        run {
+            val knownNow = ServiceLocator.agentStatusCache.peek(serverId)?.statuses?.get(agent)
+            if (knownNow == null || knownNow.loggedIn) {
+                UsageProbe.cachedFresh(serverId, agent)?.let {
+                    if (_usage.value == null) publishUsage(it, "warm")
+                }
+            }
+        }
+        if (usagePushWatch == null) {
+            usagePushWatch = viewModelScope.launch(Dispatchers.IO) {
+                UsageProbe.updates.collect { k ->
+                    val a = _currentAgent.value
+                    if (k != UsageProbe.keyOf(serverId, a)) return@collect
+                    UsageProbe.cached(serverId, a)?.let { publishUsage(it, "control") }
+                }
+            }
+        }
         usageJob?.cancel()
         usageJob = viewModelScope.launch(Dispatchers.IO) {
             val known = ServiceLocator.agentStatusCache.load(serverId).statuses[agent]
@@ -4892,7 +5194,46 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // the bar is already there on open, not popping in seconds later.
             // AFTER the login check — a dead account's numbers must not even
             // flash.
-            UsageProbe.cached(serverId, agent)?.let { if (_usage.value == null) publishUsage(it, "warm") }
+            // A remembered answer, but ONLY while it is still fresh. Painting
+            // whatever the last run happened to hold put a "0%" from a previous
+            // build onto a window that had gone back to 74%; refusing to paint
+            // anything at all left the bar empty for the fifteen seconds the
+            // live probe takes, which the owner sat and watched. The background
+            // warm loop re-asks every 60-120 s, so a stamped report younger than
+            // that is the real number — and older than that means the asking
+            // has stopped working, where nothing is the honest answer.
+            UsageProbe.cachedFresh(serverId, agent)?.let {
+                if (_usage.value == null) publishUsage(it, "warm")
+            }
+            // CODEX, LIVE CHANNEL — the first thing asked, because it is both
+            // the fastest source and the most correct one. The chat already
+            // holds an initialized `codex app-server`; its windows are one
+            // JSON-RPC round trip down that same transport. Everything below
+            // this line costs an ssh command or a process launch, and the old
+            // order paid for both before ever getting here: the probe's
+            // hard-coded sleeps meant the bar could not fill in under eleven
+            // seconds no matter how fast the server answered.
+            //
+            // Returns early on success: this IS the provider's own answer, so
+            // nothing below can improve on it.
+            if (agent == Agent.CODEX) {
+                val sess = _localSessionId.value?.let { activeSessions[it] }
+                val payload = runCatching { sess?.fetchCodexRateLimitsLive() }.getOrNull()
+                if (payload != null) {
+                    // The result object is the `rateLimits` body; older/newer
+                    // app-servers differ on whether they wrap it. Normalise to
+                    // the shape the parser gates on rather than hoping.
+                    val body = payload.toString()
+                    val text =
+                        if (body.contains("\"rateLimits\"")) body
+                        else "{\"rateLimits\":" + body + "}"
+                    UsageProbe.reportFromCodex(text)?.let { rep ->
+                        publishUsage(rep, "control")
+                        UsageProbe.remember(serverId, agent, rep)
+                        return@launch
+                    }
+                }
+            }
             // FAST: cheap source paints within a few hundred ms (Codex rollout
             // snapshot with projected resets / Claude's cached value)...
             UsageProbe.fetch(serverId, agent, fast = true)?.let { publishUsage(it, "fast") }
@@ -6187,21 +6528,118 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      */
     /**
      * Tap on the "session open elsewhere" row: end whatever process holds the
-     * Codex thread's writer so THIS chat can continue the SAME session.
+     * session on the server so THIS chat continues the SAME one.
      *
-     * Deliberate and rare on purpose — the holder may be a terminal someone
-     * is looking at, and codex has no polite way to ask for the writer back
-     * (there is no thread-level release; only ending the process frees it).
-     * The user's text is already back in the composer, so the flow is: tap,
-     * then send.
+     * ⛔ THE TAP IS NOW THE FALLBACK, NOT THE ROUTE. A send already relays the
+     * session by itself (`AgentSessionCodexAppServer.ensureReady` /
+     * `AgentSessionPersistentStream.ensureProcess`, both gated on
+     * `userInitiated`), so this row only appears when that relay ran and the
+     * holder survived it — a kill that did not land, or a probe that could not
+     * run. Kept because it is the one place a person can insist.
+     *
+     * And it FINISHES the job: whatever the held turn parked comes back out and
+     * is redelivered echo-free (the bubble is already on screen). "Take it over,
+     * then type it again" is a gesture the owner should never have to make —
+     * he alternates phone / server message by message.
      */
+    /**
+     * (serverId, cli) pairs whose handoff dialog has been shown since the app
+     * started — see the gate in [healHandoff]. Process-wide, not per chat: the
+     * same imperfect server is the same imperfect server in every chat on it.
+     */
+    private val handoffAdviceShownThisRun = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+    )
+
+    /**
+     * MAKE IT PERFECT WITHOUT ASKING; SHOW A DIALOG ONLY IF IT CANNOT BE.
+     *
+     * The owner's rule (2026-09-12): So there is no button anywhere in this
+     * path. By the time this returns, the app has
+     *
+     *  1. started the shared daemon (done in the channel's launch),
+     *  2. written the terminal hook if the server could already host one
+     *     (done in the channel, right after the relay),
+     *  3. and, if that server's codex was too old, UPDATED IT — through the
+     *     same cascade the agent picker uses (npm user prefix → sudo npm →
+     *     system package manager → nvm), then re-probed and wired the hook.
+     *
+     * Only what is left over reaches a human, as the manual step it actually
+     * is. ⛔ The update runs ONCE PER SERVER (`codexAutoUpdatedServers`): it is
+     * automatic, so a box that cannot be updated from here must not re-run the
+     * installer on every handoff for the rest of time.
+     */
+    private suspend fun healHandoff(s: AgentSession, advice: HandoffAdvice) {
+        var cur = advice
+        // An update is worth running again: a codex without `app-server
+        // --listen` (0.80 ships none) is exactly the case where updating buys a
+        // working shared brain, and with it the end of relays on this box.
+        if (cur.cli == "codex" && !cur.sharedBrain) {
+            val already = ServiceLocator.preferences.codexAutoUpdatedServers.first()
+            // Stamped per (server, version): a box whose codex has CHANGED since
+            // the failed attempt — the user updated it by hand, or the distro
+            // did — gets one fresh try instead of being written off forever.
+            val stamp = "$serverId@${cur.cliVersion}"
+            if (stamp !in already) {
+                ServiceLocator.preferences.markCodexAutoUpdated(serverId, cur.cliVersion)
+                android.util.Log.i("Conch-Chat", "auto-updating codex on $serverId for the shared app-server")
+                SilentlyTry.fired("Conch-Chat", "auto-update codex for the shared daemon") {
+                    AgentPickerViewModelInstall(serverId) { null }
+                        .doInstall(ai.eight24family.conch.agent.Agent.CODEX, forceLatest = true)
+                }
+                val shared = SilentlyTry.logged("Conch-Chat", "re-probe codex support") {
+                    s.refreshCodexSharedBrain()
+                } == true
+                // The hook is written by the CHANNEL, once it is actually on
+                // the brain and knows its port — not from here with a guess.
+                cur = cur.copy(sharedBrain = shared)
+            }
+        }
+        // Nothing to say: the transcript already carries the one-line record of
+        // what changed, and a dialog on a solved problem is the he ruled out.
+        if (cur.perfect) return
+        if (ServiceLocator.preferences.handoffAdviceSuppressed.first()) return
+        // ⛔ AT MOST ONCE PER APP RUN, even without the checkbox. Claude can never
+        // reach "perfect" (no daemon exists to join), so this branch is permanent
+        // there — and a dialog on every single handoff is exactly the that were
+        // ruled out. The checkbox makes it permanent; this makes the un-ticked
+        // case bearable.
+        if (!handoffAdviceShownThisRun.add("$serverId ${cur.cli}")) return
+        _modal.value = ChatModal.SessionHandoff(cur)
+    }
+
+    /**
+     * Close the handoff advice. [dontWarnAgain] makes it permanent — the user
+     * asked for the switch in the same breath as the dialog itself, and a
+     * warning that cannot be turned off becomes noise on the tenth handoff.
+     */
+    fun dismissHandoffAdvice(dontWarnAgain: Boolean) {
+        _modal.value = null
+        if (!dontWarnAgain) return
+        viewModelScope.launch {
+            SilentlyTry.fired("Conch-Chat", "persist handoff advice opt-out") {
+                ServiceLocator.preferences.setHandoffAdviceSuppressed(true)
+            }
+        }
+    }
+
     fun takeOverSession() {
         val sid = _localSessionId.value ?: return
         val s = activeSessions[sid] ?: return
         viewModelScope.launch {
-            SilentlyTry.fired("Conch-Chat", "take over locked agent session") {
+            val ok = SilentlyTry.logged("Conch-Chat", "take over locked agent session") {
                 s.takeOverAgentSession()
+            } == true
+            if (!ok) return@launch
+            val parked = s.consumeUndelivered()
+            if (parked.isEmpty()) return@launch
+            if (!s.canAcceptSend()) {
+                // Dead scope: putting the text back where the exit path
+                // persists it as a draft beats silently eating it.
+                pendingRedelivery.update { it + parked }
+                return@launch
             }
+            parked.forEach { s.redeliver(it) }
         }
     }
 
@@ -6316,6 +6754,13 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          * tick, only while foreground, so 8 s is affordable; backgrounded costs
          * nothing.
          */
+        /** How often to re-ask after the reset moment, and for how long. The
+         *  cadence matches the usage poll — asking faster than the number can
+         *  change is just noise. Half an hour is well past any legitimate lag
+         *  between the provider's reset and the account actually having room. */
+        private const val AUTO_RESUME_RETRY_EVERY_MS = 10_000L
+        private const val AUTO_RESUME_RETRY_FOR_MS = 30 * 60_000L
+
         private const val USAGE_POLL_FOREGROUND_MS = 8_000L
 
         /** [coldCacheMaybe] fires only when re-sending is actually expensive:
@@ -6341,6 +6786,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
          *  latest model_observed/effort rows — while keeping the Main-thread
          *  parse sub-100 ms even on a 20 MB+ ultracode-workflow session. */
         private const val DISPLAY_TAIL_BYTES: Int = 2 * 1024 * 1024
+
+        /**
+         * How many RECORDS the chat renders. Not bytes — see
+         * JsonlUtils.tailRecords for the measurement that killed the byte
+         * window: 2 MB of the owner's session held thirteen records.
+         *
+         * 40,000 is far above any real session (his largest is 5,688), so this
+         * shows everything and exists only so a pathological file cannot make
+         * the open unbounded.
+         */
+        private const val DISPLAY_TAIL_RECORDS: Int = 40_000
 
         /** Stable id for [historyWindowMarker] — internal so the chat row renderer
          *  can recognise it and wire the tap-to-load-all action. */

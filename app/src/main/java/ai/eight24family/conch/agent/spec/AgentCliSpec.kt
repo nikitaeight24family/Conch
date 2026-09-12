@@ -561,7 +561,28 @@ interface AgentCliSpec {
      */
     fun inferTurnState(records: List<List<String>>, frozenForMs: Long?): TurnSignals =
         TurnSignals()
+
+    /**
+     * Does this projected marker OPEN a turn, CLOSE one, or neither?
+     *
+     * ⛔ THE POLL NEEDS THIS TO STOP FORGETTING. `inferTurnState` reads a bounded
+     * window of recent records, and on a long turn the `task_started` that opened
+     * it scrolls out — after which the only thing left is a staleness guess off
+     * the file's mtime. That is why the spinner did not match the CLI: an image
+     * generation writes nothing for minutes, the guess said "over", and the chat
+     * announced a turn that was still running (owner, 2026-09-12, terminal
+     * reading `Working (16m 31s)`).
+     *
+     * The CLI does not guess: it started a turn and has not finished it. With
+     * this predicate the poll pins the last UNCLOSED start marker in its window,
+     * so the same fact survives however long the turn runs. Specs that have no
+     * boundary markers keep the old behaviour by returning [TurnEdge.NONE].
+     */
+    fun turnEdge(marker: String): TurnEdge = TurnEdge.NONE
 }
+
+/** See [AgentCliSpec.turnEdge]. */
+enum class TurnEdge { START, END, NONE }
 
 /**
  * What the tail-poll needs to know about a mirrored turn's state, derived by the

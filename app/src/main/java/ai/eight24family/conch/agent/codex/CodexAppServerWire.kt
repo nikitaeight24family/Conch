@@ -198,6 +198,19 @@ internal object CodexAppServerWire {
         }
     }.toString()
 
+    /**
+     * `account/rateLimits/read` — the account's plan windows.
+     *
+     * The SAME request the out-of-band probe makes, but sent down a channel
+     * that is already up and already initialized, so the answer is one round
+     * trip instead of a process launch.
+     */
+    fun encodeRateLimitsRead(id: Long): String = buildJsonObject {
+        put("method", "account/rateLimits/read")
+        put("id", id)
+        putJsonObject("params") { }
+    }.toString()
+
     // ── Responses to SERVER-initiated requests (echo the server's id) ──
 
     /** commandExecution / fileChange approvals share the decision enum. */

@@ -260,8 +260,43 @@ internal class AgentSessionGeminiAcp(
         // session/new | session/load. cwd is REQUIRED by the schema —
         // default to $HOME via shell expansion not possible here, so use
         // the snapshot or the conventional remote home path.
-        val cwd = params.cwd?.takeIf { it.isNotBlank() } ?: guessHome()
         val rid = getResumeId()
+        // ⛔ GEMINI CANNOT RESUME FROM THE WRONG DIRECTORY. It buckets sessions
+        // by a hash of the cwd and fails outright — "No previous sessions found
+        // for this project", exit 42, measured on the owner's box 2026-09-12.
+        // The other two resume paths had this recovery; this one never did,
+        // which is why it was the one that broke.
+        val recoveredCwd = SessionCwd.backfill(
+            agent = server.agent,
+            resumeId = rid,
+            currentCwd = params.cwd?.takeIf { it.isNotBlank() },
+            exec = { script -> sshLifecycle.execOnLive(loginShell(script)) },
+            emit = { msg -> history.emitMsg(msg) },
+        )
+        val cwd = params.cwd?.takeIf { it.isNotBlank() } ?: recoveredCwd ?: guessHome()
+        // Same rule as every other agent: do not become the second process on a
+        // session someone's terminal is holding (SessionRelay). Gemini's ACP
+        // channel is long-lived like Claude's, so it collides the same way —
+        // it just never asked before. A survivor is not fatal (this path has no
+        // lock to violate); the user is told where the other copy is.
+        rid?.let { id ->
+            SessionRelay.claim(
+                cli = server.agent.cliCommand,
+                sessionId = id,
+                userInitiated = true,
+                exec = { script -> sshLifecycle.execOnLive(loginShell(script)) },
+                reap = { pids -> sshLifecycle.execOnLive(loginShell(RemoteTurnKiller.killPidsScript(pids))) },
+                note = { line ->
+                    history.emitMsg(
+                        AgentMessage.EventNote(
+                            id = "conch-session-relayed",
+                            label = line,
+                            tone = AgentMessage.EventNote.Tone.INFO,
+                        )
+                    )
+                },
+            )
+        }
         val openId = reqCounter.incrementAndGet()
         val resp: GeminiAcpWire.Incoming.Response?
         if (rid != null && canLoad) {

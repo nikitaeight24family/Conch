@@ -5,242 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-A version whose number is not a link has no tag here: the 1.0.x line predates
-this repository, and 0.2.10 and 0.4.6 went to Google Play with their changes
-riding into the next tagged release.
-
 ## [Unreleased]
 
-_Nothing yet — see ROADMAP for what's next._
-
----
-
-## [0.7.3] — 2026-09-12
-
-A session you have been working in all day, opened on the phone, showed eight
-collapsed tool rows over an empty screen. Two independent causes, both found by
-measuring a real 483 MB rollout rather than reading the code.
-
-### Fixed
-- **A huge session opens with its whole conversation, in seconds.** A byte
-  window is not a unit of conversation. In the rollout this was measured on,
-  command output and completed-item records are 430 of its 483 MB — 119 single
-  lines are over a megabyte each — while every message in the entire session
-  totals 294 KB, 0.06% of the file. So a bounded tail landed inside two or three
-  blobs and held 25 of 5,391 records, one of them a message; and downloading the
-  whole file would have shown exactly the same thing, after twenty-four minutes
-  and a third of a gigabyte of phone storage. The session is now projected on
-  the server instead: records under 32 KB pass through byte-for-byte, an
-  oversized one becomes a stub that keeps its envelope, type and id and says how
-  big the body was. 483 MB becomes 13 MB of records — 3.5 MB gzipped on the
-  wire, 1.9 s of server CPU — and the chat shows the conversation from its first
-  message to its last. The same pass takes a 23 MB Claude rollout to 3.7 MB.
-- **Codex sessions replayed from disk show what actually happened in them.** The
-  parser understood the live stream's item frames but not the rollout's own
-  envelope, whose item types are spelled differently. Every command, file edit
-  and image in a session — 1872 records in the one measured — rendered as a dim,
-  contentless "item completed". File changes had a second shape too, an object
-  keyed by path rather than an array, so 188 file writes said only "files".
-- **The limit bar stops reporting a number it knows is old.** A rate-limit
-  snapshot read off a session file on disk was allowed to overwrite a reading
-  taken from the CLI a moment earlier, and the snapshot often landed last — so a
-  spent plan read "2% left". Sources are now ranked, and a reading holds against
-  a weaker one while it is still young. Two Codex probes were also silently
-  returning nothing: the live one was killed 1.1 s in, before its answer
-  arrived, and the fallback took the last rate-limit line in the rollout, which
-  on some accounts is a second bucket with no numbers in it at all. With both
-  halves empty the bar simply kept its last value forever.
-- **The limit refreshes while a turn is running.** It used to skip exactly the
-  server that was burning the window, on the theory that the turn moves the
-  number itself; it does not move it fast enough.
-- **Storage left behind by an interrupted download is reclaimed** on launch.
-
-### Changed
-- The Claude run-state probe drives the CLI's own `get_usage` instead of calling
-  Anthropic's OAuth endpoints directly with the user's token. The account's
-  billing states (trial, payment due, no subscription) are no longer guessed
-  from that call — they were also what once mislabelled a working team seat as
-  having no subscription. Rate-limit state and plan tier are kept, from the
-  CLI's own numbers.
-
----
-
-## [0.7.2] — 2026-09-11
-
-The same question 0.7.1 answered for Codex, asked for Claude — where it is much
-quieter and much more damaging, because Claude does not refuse a second writer,
-it simply lets it in. And the other half of the release: the app had four
-separate ways of asking for a security key it did not need.
-
-### Fixed
-- **A Claude session open in a terminal no longer gets a second one behind your
-  back.** Claude ships no writer lock, so `claude --resume` against a session a
-  terminal already holds succeeds — and upstream reports what that costs
-  (anthropics/claude-code#48270): concurrent resumes anchor to a stale branch of
-  the conversation tree, and every further resume extends it, so the history
-  degrades quietly instead of announcing itself. The app now asks who has the
-  session before launching. A terminal is left alone and named in the chat, with
-  the pts and pid and one tap to take it over; an orphan of our own — a process
-  whose SSH channel died while it lived on — is ended silently, which nothing
-  did before.
-- **The question is asked of the working directory, not of file handles.**
-  Measured against a real terminal session: a Claude REPL holds no descriptor on
-  its transcript and takes no lock on it — forty samples across a running turn
-  and at the idle prompt, zero — because it opens the file to append and closes
-  it. Its working directory, however, is the project directory, and its output
-  is still a terminal. Discovery therefore has three layers: the open file
-  (which is how Codex is found), the session id on the command line, and the
-  working directory of the REPL that created the session. The last is narrowed
-  to a single session by requiring it to be the newest transcript in that
-  directory and the process to predate that file's last write.
-- **Stop works on a session started in a terminal.** Discovery by command line
-  cannot see a REPL that created the session — there is no id in its arguments —
-  so Stop degraded into a sentence telling you to go and stop it yourself. It
-  now finds the writer the same way the rest of this release does.
-- **A short session started in a terminal shows up on the phone.** Transcripts
-  under a kilobyte were dropped as launch stubs. That is a size test standing in
-  for a content test, and a real but brief exchange is exactly the session you
-  most want to pick up later. Small files are now judged by whether they contain
-  a turn.
-- **Opening a chat no longer asks for your security key when the server already
-  trusts this phone.** Every connection path is supposed to try the credentials
-  that cost no gesture before reaching for the token; opening a chat and
-  refreshing the session list were still going straight to the key prompt. All
-  of them now go through one function, so a screen cannot forget a credential it
-  has never heard of.
-- **A recovered connection was being destroyed the moment it was made.** The
-  pooled entry for a silently reconnected transport was stamped with the wrong
-  timestamp, so the guard that protects a young connection from being blamed for
-  an older failure measured its age in decades and never applied. Each recovery
-  was torn down and redialled, and the resulting run of failures was then read as
-  a failing host — which is what ended in a key prompt.
-- **A server with both a passwordless key and a security key ignored the
-  passwordless one** whenever the security key happened to be listed first. Key
-  order is documented as cosmetic; it was deciding how you authenticate.
-- **Your own tap is no longer held back by the reconnect backoff.** The backoff
-  exists so that automatic retries cannot hammer a host into banning you, and it
-  was never meant to apply to a person pressing Connect — but it was silencing
-  the tapless attempt and handing them the token instead, for fifteen minutes
-  after any refusal and indefinitely with auto-connect switched off. Automatic
-  callers are still throttled exactly as before.
-- **Sending a file after a network change works on a seamless server.** The
-  rebuild path documented itself as needing no touch and had nothing
-  implementing it; it failed outright instead. Background probes that carry no
-  signer by design had the same problem the moment the connection lapsed.
-
-### Changed
-- Handing a session back is automatic in one direction: an idle Claude session
-  is released about a minute and a half after you put the phone away, so the
-  same session can be continued from a terminal with nobody forking it. A
-  running turn, an armed loop or a live background agent is never released.
-
----
-
-## [0.7.1] — 2026-09-09
-
-One session, wherever you are. Codex 0.153 gives a thread a single writer and
-no way to hand it over politely, so continuing a chat on the phone, then on the
-server, then on the phone again came down to who was holding it — and the app
-was answering that question wrongly.
-
-### Fixed
-- **Continuing a Codex chat continues it.** A thread whose writer is held
-  elsewhere is refused with `already has an active writer`. That was read as
-  "this session is gone": the app dropped the session id and re-sent the prompt
-  into a brand-new empty thread, which looked exactly like the chat doubling
-  itself with no context. Busy and gone are now separate answers, and no path
-  starts a blank thread because of a lock.
-- **Resuming on the fallback path never parsed its own arguments.** Options
-  placed after the `resume` subcommand are rejected outright, on every codex
-  build tested — so every continued chat on that path died before codex ran,
-  except in the most permissive approval tier, whose single flag happens to be
-  accepted there. Options now precede the subcommand, verified across all
-  three tiers.
-- **The flag audit only ever checked the new-chat shape**, which is why the
-  above shipped green. It checks the resume shape too, and a mode counts as
-  accepted only when every shape parses.
-- **The built-in terminal paid for its whole scrollback on every frame, twice.**
-  Each frame deep-copied the entire scrollback — four array allocations per
-  line, inside the lock the reader thread needs back — although those rows are
-  already copied on the way in and never change afterwards; and the viewport
-  was a single text block re-laid-out in full, so one chunk of output cost as
-  much as everything ever printed. Frames now share the rows, and the viewport
-  renders one line per item.
-- **The terminal can be scrolled.** Pinch-zoom claimed one-finger drags past
-  touch slop, and the transparent input overlay covered the viewport and got
-  the events first. Zoom now only consumes while two fingers are down, and the
-  input sink no longer sits on top of the output.
-
 ### Added
-- **A session moves between the phone and the server on its own.** The
-  app-server process is kept only while it is earning its keep: a turn holds
-  the thread, and once idle — or as soon as you leave the app — it is handed
-  back, so the same session can be continued anywhere. A running turn is never
-  released: sending a task and pocketing the phone still works.
-- **Taking a session back from a terminal.** A codex terminal never releases a
-  thread while it lives, so the "session open elsewhere" row is now the action:
-  it names the process holding it and a tap ends it, after which the same
-  session resumes with its history intact.
-- **A jump-to-newest button in the terminal**, shown when there is somewhere to
-  jump to.
-
----
-
-## [0.7.0] — 2026-09-08
-
-The local-models release: the store you could already browse became something
-you can talk to, dictate to, search, and lend to other apps.
-
-### Added
-- **A model on this phone answers straight away — no Linux, no bridge, no CLI.**
-  Tapping a downloaded model opens a chat with it inside the app. Getting a
-  model was already one tap; TALKING to one used to go through a CLI inside the
-  phone's Linux, which meant wireless debugging and developer options first.
-  The chat shows what a local turn actually costs — the engine's live cpu / ram
-  / heat where a cloud chat shows a quota — plus the window it really got and
-  the measured speed of the last answer. Pictures go to models whose vision
-  pack is installed; thinking is a switch in the top bar; Stop stops, and keeps
-  whatever the model already said. Conversations are kept on the phone and
-  listed under the models. The real agent — a genuine CLI with its tools, shell
-  and sessions on the same local model — is one tap further.
-- **The model on this phone is now behind a key — and other apps can ask for
-  one.** The engine's port was reachable by every app on the device (Android
-  does not isolate 127.0.0.1), and it answered anyone. It now requires a key,
-  and Conch holds its own. Another app can ask for access with a single intent:
-  you see who is asking and what it will be able to do, and if you allow it, it
-  gets a key of its own — prompts and answers from a model that runs on your
-  phone, nothing else, nothing leaving the device. Every grant is listed under
-  `local models → api access` with one tap to revoke, effective immediately.
-  For whoever writes the other app: `docs/local-model-api.md`.
-- **Dictate to a local model.** `[ dictate ]` in a local chat records you and
-  turns it into text ON the phone (Whisper, 99 languages), then drops the words
-  in the composer so you can fix them before sending. Nothing is uploaded, no
-  Google speech service is involved, and the recording is deleted the moment it
-  has become text.
+- **A model on this phone answers straight away — no Linux, no bridge, no
+  CLI.** Tapping a downloaded model opens a chat with it inside the app: the
+  words go to the engine already serving on this device, and the answer streams
+  back. Getting a model was already one tap; TALKING to one used to go through
+  a CLI inside the phone's Linux, which meant wireless debugging and developer
+  options first. The chat shows what a local turn actually costs — the engine's
+  live cpu / ram / heat where a cloud chat shows a quota — plus the window it
+  really got and the measured speed of the last answer. Pictures go to models
+  whose vision pack is installed; thinking is a switch in the top bar; Stop
+  stops, and keeps whatever the model already said. Conversations are kept on
+  the phone and listed under the models, so you can come back to them. The real
+  agent — a genuine CLI with its tools, shell and sessions on the same local
+  model — is one tap further, from that chat's `[ agent ]`.
+- **The store says where its speed number came from.** "measured on this
+  device", "measured on N phones like this one", "SoC-class estimate", or
+  "generic estimate — this chip is unknown to us". A guess and a measurement
+  used to look identical, and the guess prices every Snapdragon 8 alike — an
+  8 Gen 1 and an 8 Elite — so now it can be replaced per chip by real
+  measurements as they come in.
+- **Share your measurements, by hand, reading them first.** The device sheet can
+  show exactly what a contribution would say and hand it to an app you pick.
+  Conch itself still sends nothing anywhere.
+- **Dictate to a local model.** `[ dictate ]` in a local chat records you
+  and turns it into text ON the phone (Whisper, 60 MB, 99 languages), then
+  drops the words in the composer so you can fix them before sending.
+  Nothing is uploaded, no Google speech service is involved, and the
+  recording is deleted the moment it has become text.
 - **Search your local chats by meaning.** Local models now come with an
   optional search model (0.6 GB, 100+ languages): tap index once and the
-  conversations on your phone become searchable by what they were ABOUT — ask
-  in one language and still find the answer written in another. It runs as its
-  own small engine on this device, never touches the network, and nothing is
-  indexed until you ask for it.
-- **Downloaded models are checked against their published checksum.** Every
-  model file arrives with the SHA-256 its repository publishes, and Conch
-  hashes what it downloaded before the file counts as ready — a transfer that
-  ends the right length with the wrong bytes is deleted and says so, instead of
-  becoming a model that quietly misbehaves.
-- **Your own Hugging Face account, if you want one.** Connect a read token in
-  the model store and the gated weights — Llama, Gemma and the rest that need a
-  licence click-through — become ordinary one-tap downloads. The token is stored
-  encrypted on the phone, sent only to huggingface.co (never to the download
-  CDN), shown only as "connected", and forgotten on one tap.
-- **Import a model you already have.** `[ import ]` takes a `.gguf` off this
-  phone, an SD card or a USB stick and makes it a model like any other — it
-  reads the file's own header for its name and its memory cost, so the "fits /
-  tight / short" verdict is as honest for your file as for the store's.
-- **Models the store did not curate are sized from their own header.** A model
-  found by search used to be priced by a flat guess, which on a small phone is
-  the difference between being offered and being hidden. Its real architecture
-  is read from the file after the first download.
+  conversations on your phone become searchable by what they were ABOUT -
+  ask "lighthouse keeper storm" and get the chat where that story was
+  written, ask in Russian and still find the English answer. It runs as its
+  own small engine on this device, it never touches the network, and nothing
+  is indexed until you ask for it.
+- **A model's real context, not the one Conch asked for.** Some models are
+  trained on a smaller window than the app requests, and the engine quietly
+  caps it — so a chat could trim its history to twice the room it really had,
+  and an agent could plan for space that did not exist (and then fail every
+  send). The number now comes back from the engine: the chat header shows what
+  you actually have.
 - **A loaded model stays loaded while you are away — and says so.** While a
   model is in memory Conch keeps a quiet notification with its name and one
   button to unload it, which also stops Android from killing the model the
@@ -250,418 +57,181 @@ you can talk to, dictate to, search, and lend to other apps.
   phone is to throttling and starts the model with fewer threads when it is
   already warm: a slightly slower answer instead of the "device is too hot"
   overlay.
-- **The store says where its speed number came from.** "measured on this
-  device", "measured on N phones like this one", "SoC-class estimate", or
-  "generic estimate — this chip is unknown to us". A guess and a measurement
-  used to look identical, and the guess prices every Snapdragon 8 alike — an
-  8 Gen 1 and an 8 Elite — so it can now be replaced per chip by real
-  measurements as they come in.
-- **Share your measurements, by hand, reading them first.** The device sheet
-  can show exactly what a contribution would say and hand it to an app you
-  pick. Conch itself still sends nothing anywhere.
+- **Downloaded models are checked against their published checksum.** Every
+  model file now arrives with the SHA-256 its repository publishes, and Conch
+  hashes what it downloaded before the file counts as ready — a transfer that
+  ends the right length with the wrong bytes is deleted and says so, instead
+  of becoming a model that quietly misbehaves.
+- **Your own Hugging Face account, if you want one.** Connect a read token in
+  the model store and the gated weights — Llama, Gemma and the rest that need
+  a licence click-through — become ordinary one-tap downloads. The token is
+  stored encrypted on the phone, sent only to huggingface.co (never to the
+  download CDN), shown only as "connected", and forgotten on one tap.
+- **Import a model you already have.** `[ import ]` in local models takes a
+  `.gguf` off this phone, an SD card or a USB stick and makes it a model like
+  any other — it reads the file's own header for its name and its memory cost,
+  so the "fits / tight / short" verdict is as honest for your file as for the
+  store's.
+- **Models the store did not curate are sized from their own header.** A model
+  found by search used to be priced by a flat guess, which on a small phone is
+  the difference between being offered and being hidden. Its real architecture
+  is read from the file after the first download.
+- **The model on this phone is now behind a key — and other apps can ask for
+  one.** The engine's port was reachable by every app on the device (Android
+  does not isolate 127.0.0.1), and it answered anyone. It now requires a key,
+  and Conch holds its own. Another app can ask for access with a single
+  intent: you see who is asking and what it will be able to do, and if you
+  allow it, it gets a key of its own — prompts and answers from a model that
+  runs on your phone, nothing else, nothing leaving the device. Every grant is
+  listed under `local models → api access` with one tap to revoke, which takes
+  effect immediately. For whoever writes the other app: `docs/local-model-api.md`.
 - **The store learns this phone's speed from ordinary use.** Every answer
-  carries the engine's own timings, so a model's measured tok/s — and every
-  estimate re-derived from it — comes from real work instead of waiting for
-  someone to press a verify button.
+  carries the engine's own timings, so a model's measured tok/s (and every
+  estimate re-derived from it) now comes from real work instead of waiting for
+  someone to press the verify button.
+- **Local models run on the phone's GPU.** The app carries llama.cpp's OpenCL
+  backend and offloads the whole model to the graphics chip when the phone has
+  a loadable vendor OpenCL stack (Adreno, most Mali) — prompt digestion, the
+  part an agent turn is mostly made of, gets many times faster (measured ×7.5
+  on a 1.7B and ×16 on a 4B on Adreno 830; the first Codex turn on the 4B
+  drops from ~13 minutes to ~1.5). The telemetry bar and the engine row say
+  `gpu` only when layers actually landed there; phones without a usable GPU
+  stack run exactly as before, and a GPU that fails or keeps dying demotes to
+  CPU on its own — slower beats dead.
+
+- **The phone's Linux is a machine on the list, like any other.** Installing it
+  adds an ordinary server row, reached through an ssh endpoint the environment
+  raises on `127.0.0.1:8022` (OpenSSH, key-only, loopback-only, brought up by
+  the connection itself). Agents install, log in and chat there through exactly
+  the same screens a server uses — there is no phone-specific flow to learn, and
+  no second copy of those screens to keep correct. Its page keeps only what it
+  is for: the size, and install / remove.
+
+- **Local models drive a real agent, offline.** Downloaded models live where
+  agents are installed — the phone's agent panel — and a downloaded model is
+  a model choice for the genuine Codex CLI: tap it and a Codex chat opens
+  already set to it, with Codex's real tools, sessions and approval modes,
+  while every token is generated on the phone. No account, no network, no
+  quota.
+- **Model downloads keep going with the phone in your pocket.** A quiet
+  foreground notification shows live progress and disappears when the
+  download ends; interrupted downloads still resume from where they stopped.
+- **Local models, on the phone itself — with nothing to set up.** The
+  "this phone" page grows a `// local models` section: four small open
+  models (0.8–2.3 GB), each one tap to download, resumable if interrupted,
+  one tap to run, one to delete. No Linux environment, no phone bridge, no
+  account — the inference engine (llama.cpp's official Android arm64 build)
+  ships inside the app, and a running model serves an OpenAI-compatible API
+  on 127.0.0.1, reachable only from this phone. The section shows live free
+  ram and storage, and against them an honest per-model verdict: fits now,
+  tight, or short by how much. Model downloads are the one network call the
+  app makes beyond your servers, only when you tap download, from Hugging
+  Face.
 
 ### Fixed
-- **A model's real context, not the one Conch asked for.** Some models are
-  trained on a smaller window than the app requests, and the engine quietly
-  caps it — so a chat could trim its history to twice the room it really had,
-  and an agent could plan for space that did not exist (and then fail every
-  send). The number now comes back from the engine, and the chat header shows
-  what you actually have.
-- **A model in the library since before checksums is still verified.** The
-  published hash is asked of the live catalog at the one moment it matters, and
-  falls back to the copy inside the signed app when the catalog lags a release
-  — a store download stays hash-checked either way.
+- **The phone no longer accuses itself of a man-in-the-middle.** Swapping the
+  environment's ssh daemon (dropbear → OpenSSH) changed its host key, and every
+  connect then refused with a security warning about the owner's own phone,
+  demanding the forget ritual for a change the app made itself. The pin now
+  follows the environment's own key file, read off the rootfs over the phone
+  shell — never learned from the port, so a foreign process squatting the
+  loopback port still hits the refusal.
+- **The host-key-changed message arrives whole.** The connect dialog cut it at
+  120 characters — it ended mid-word at "Expect", with the fingerprints and the
+  recovery path ("fingerprint → forget") in the part that was thrown away, and
+  chat screens would have degraded the same message to "IllegalStateException".
+- **Signing in to Claude Code works on a machine it never ran on.** A fresh
+  install asks for the login method right after the theme picker, before the
+  composer exists; the sign-in flow only answered that menu after typing
+  `/login` into the composer, so on a virgin machine (the phone's Linux) the
+  dialog spun until the watchdog gave up.
+- **A Claude chat works on hosts without GNU coreutils.** The send command
+  hardcoded `stdbuf`, which BusyBox userlands (Alpine, minimal servers, the
+  phone's Linux) do not have — the whole turn died on
+  `stdbuf: command not found`. The wrapper now applies only where the host has
+  it, and the phone's environment gets real coreutils with the agents.
+- **The phone's Linux could not run node at all, and that is why nothing
+  installed.** Its `proot` was 5.1.0, which has no handler for the `statx`
+  syscall — so every path node looked up was answered by Android's real root
+  (`ENOENT: lstat '/usr'`) and npm was dead on arrival. The bundled runtime is
+  now one that translates it, and an environment created by an older Conch is
+  upgraded to it instead of keeping the one that cannot work.
+- **Two agents installed at once no longer knock each other out.** The
+  environment has one package database with one lock; the second tap used to
+  lose it, continue without node, and fail in two seconds — the row simply
+  going back to `[ install ]`. Installs are queued now, and a failure shows what
+  it said with `[ retry ]`.
+- **Agents no longer install broken on Alpine — on the phone OR on a server.**
+  `apk add nodejs npm` produces a Claude Code that installs cleanly and then
+  crashes: on musl it needs bash, libgcc, libstdc++, a real ripgrep and
+  `USE_BUILTIN_RIPGREP=0`. Both install paths now provide all five (measured
+  end-to-end: `2.1.251` on the bundled Alpine 3.21).
+- **An install in the phone's Linux survives the screen.** It runs detached with
+  its own log, so leaving the page — or the app being killed — no longer kills a
+  100 MB package install; coming back re-attaches to it, and says whether it is
+  installing or removing rather than always the former.
 
-### Not shipped, and written down instead
-- **A Vulkan GPU backend.** Built and measured rather than argued about: on
-  Adreno 830 it loses to the CPU on both axes and crashes inside the vendor
-  driver on a 512-token prompt, while costing +37 MB.
-- **An NPU backend (Hexagon / QNN / LiteRT).** The NPU does not run GGUF — every
-  shipping NPU path runs a graph compiled ahead of time for one chip, one
-  context length and one batch shape — and on the phone we can test, the DSP
-  device node is not open to ordinary apps at all.
+## [0.5.1] — 2026-08-30
+
+### Fixed
+- **The model chip no longer speaks for a server it never asked.** What a CLI
+  starts on with no `--model` is read from that machine's own settings, and it
+  was kept in one slot for the whole app — so whichever server answered last
+  named the model for every other one. A brand-new chat on a box configured for
+  Sonnet opened wearing an **Opus 5** label, launched (correctly) without a
+  model flag, and answered as Sonnet; nothing on screen admitted the swap until
+  the session reported itself. Each server now keeps its own answer, chip and
+  command line read the same record, and a server that has never been asked
+  shows no model rather than borrowing one. Since the app is already connected
+  when a chat opens, it now asks that machine instead of reusing a stale global.
+- **A dropped connection inside a tunnel no longer kills the app.** Both
+  directions of a forwarded connection close together; the one that lost the
+  race then reached for a socket the winner had already closed, and the
+  resulting crash took the whole process down — every SSH connection and any
+  upload in flight with it.
+- **Uploads stop piling up on the server.** Every file a phone ever sent stayed
+  in the staging folder forever, so a server that receives photos fills its
+  `/tmp` over weeks — and a full disk surfaces as the same unexplaining
+  "Stream closed". Staged files older than a week are now swept with each
+  upload, and a failure that looks like a full disk sweeps harder, re-checks
+  the free space and tries again before giving up. Nothing breaks when a file
+  goes: a re-send is verified and repeated automatically.
+- **An attachment survives the connection being rebuilt, and says what really
+  went wrong.** A transfer holds its own channel for its whole duration, so it
+  could not use the reconnect every other command gets: one rebuilt connection
+  and the upload died with `Stream closed` while the chat around it kept
+  working. It now retries once on a fresh connection, never retries something
+  the server actually refused, and checks free space before blaming the
+  network — a full `/tmp` now reads as "out of space" with the numbers.
 
 ---
 
-## [0.6.5] — 2026-09-07
+## [0.4.8] — 2026-08-29
 
 ### Fixed
-- **Stop always stops.** The button was never the problem — the mirror undid it.
-  Stop clears the working state in its first statements, and a few seconds later
-  the poll that watches the session file re-derived "a turn is in flight" and
-  put the flag back: the same flag that draws the spinner and the Stop button.
-  So every case where the halt cannot reach its turn — the connection dropped,
-  the agent's process had already died, the reader wedged — survived exactly one
-  poll tick, and pressing Stop again changed nothing. Stop is now a latch the
-  mirror obeys, lifted only by the session file growing again (proof the turn
-  outlived the halt, so the spinner is honest) or by the next message, which
-  still goes out and starts the next turn.
-- **A turn nobody is working on no longer spins forever.** The probe that asks
-  the server "is anything still writing this session" computed its answer on
-  every tick and then dropped it, so every reader silently fell back to the
-  file's timestamp instead. Wired through, a finished turn clears at once and a
-  long silent one — a build, a big hash, a research turn whose subagents write
-  nothing for a quarter of an hour — keeps its spinner. The probe also no longer
-  counts itself as the writer, and it now distinguishes "nothing is running"
-  from "could not tell", which used to look identical.
-- **A turn whose agent died without a closing record is recognised as over.**
-  The net that clears a wedged turn needed a real end-of-turn record in the
-  session file. An agent killed before writing one left the net unable to fire
-  at all — the state the unstoppable spinner came from. It now also accepts
-  proof that no process is working on the session, which a running turn can
-  never produce.
-
-## [0.6.4] — 2026-09-07
+- **The limit percentage stopped walking backwards.** The usage bar is painted by
+  a ladder of sources on every refresh, and one of them reads the CLI's persisted
+  state, which is trusted up to an hour old. It landed between two live readings,
+  so the same window rendered 87 → 86 → 87 → 86 on a loop every eight seconds.
+  A reading may no longer replace a fresher one; captured in logcat before the
+  fix and verified gone after it.
+- **Work that has finished stops claiming to be alive.** A subagent was retired
+  only by its completion event, so a disconnect, a reinstall or a killed process
+  left the roster saying "5 agents · 5 live" under a turn that had already
+  printed its final summary. An agent from an earlier turn is now retired once a
+  later turn ends, whether or not its completion ever reached us — backgrounded
+  agents, which are launched to outlive their turn, still keep their row. The
+  same applies to a background task the CLI never confirmed.
 
 ### Changed
-- **A phone that needs a switch gets a wizard, not a sentence.** When this
-  phone's own Linux is not running, the machines list used to print the reason
-  in red — clipped mid-instruction at two lines, beside a retry that re-dialled
-  a port with nothing behind it. Every sentence about a missing shell is now one
-  observed fact in a few words, and every place that can print one opens a
-  guided flow instead: a modal over whatever is on screen, one step at a time,
-  each step advancing because the app observed it rather than because anyone
-  pressed next. The app does the rest itself — it watches for Android's pairing
-  dialog, spends the new shell starting the Linux, and says Ready only once the
-  endpoint answers. An agent that asks for the shell while nobody is holding the
-  phone leaves the request waiting with one line in the shade, and is told to
-  try again shortly instead of being handed instructions it cannot follow.
-- **Nothing in the app tells anyone to go and find a computer.** The phone-bridge
-  page offered `adb tcpip 5555` "plugged into a computer" as the better way in —
-  advice about a machine most readers do not own, inside an app whose premise is
-  that they do not need one. Measured from the shell Android hands out: the
-  properties behind that switch are refused by SELinux and writing the setting
-  arms nothing, so the guided flow is not a convenience — it is the only path,
-  and it needs nothing but the phone.
-
-### Fixed
-- **The Wi-Fi step was reporting a radio it had never looked at.** The app never
-  declared ACCESS_WIFI_STATE, so every read threw, was swallowed, and the flow
-  showed a tick over a radio it could not see. A phone sharing its own hotspot
-  satisfies Android's rule while still reading as Wi-Fi off, so that step now
-  carries a way past itself rather than becoming a step nobody can complete.
-- **A page Android refuses no longer leaves the flow silent.** The intent ladder
-  was missing its middle rung — the plain developer-options page — so an OEM that
-  rejects the highlighted deep link cost the user the page entirely. A second tap
-  now reveals where the switch lives on this phone and opens Settings.
-
-## [0.6.3] — 2026-09-05
-
-### Fixed
-- **Opening an old session no longer leaves a phantom duplicate behind.** The
-  context-usage probe measured a chat by copying its transcript under a fresh
-  id and asking the CLI about the copy — and wrote that copy right next to the
-  original, in the same project directory. For the 15-50 s a big transcript
-  takes to load, the 30 s session sweep saw a second file with the same title
-  and listed it as a second session; then the copy was deleted, the row stayed
-  behind pointing at nothing, and a tap opened an empty chat. Because the probe
-  runs on every open, an old session (no live process, so the copy path)
-  reproduced it on the tap itself. The copy now lives in a project directory of
-  its own that the listing skips by name, the CLI runs from that directory so
-  every version finds it there, and a trap removes the copy on every exit —
-  a cut connection used to leave a full-size orphan behind.
-- **A changed session id no longer removes the previous id's row.** The only
-  real id changes are `/clear` and a fork, and in both the previous file stays a
-  live conversation. The removal was built on the belief that the CLI renames a
-  resumed session; it does not (verified on 2.1.220, 2.1.258 and 2.1.260, in
-  print and stream-json mode, from the right and the wrong directory, even with
-  a second live process on the same session).
-- **Reopening a chat no longer resets its owner record's recency to zero.**
-
----
-
-## [0.6.2] — 2026-09-03
-
-### Fixed
-- **The model store stopped hiding models the phone can actually run.** Three
-  faults, all arithmetic. The built-in models were priced by a flat 1.8 GB
-  standing for KV+compute at a fixed 16K context: it over-charged the smallest
-  by ~0.4 GB, so the app hid its own default suggestion from every 4 GB phone
-  by 30 MB, and it under-charged the largest, whose vision projector that flat
-  number never counted — an 8 GB phone was offered a model needing ~4.7 GB.
-  They now carry their real architecture. And the 16K context was a constant,
-  which is a device assumption: the window now steps 16K → 8K → 4K with the ram
-  budget, never below the model's own floor (8K for tool-capable models, whose
-  agent needs room for a ~7K system prompt; 4K for chat), and the same
-  arithmetic prices the shelf and starts the engine, so a model the store
-  offers is one that can start. On a 4 GB phone the shelf goes from 1 model to
-  4; on 8 GB from 8 to 11, and the model that cannot fit correctly leaves it.
-- **Hugging Face results are gated like the shelf.** The long tail had no size
-  at all — a listing carries none — so a 4 GB phone's first page was 30-70 GB
-  repositories with nothing to say about it. Every GGUF repo states its
-  parameter count in its name, so an estimate (labelled as one, replaced by the
-  real file size on the model's page) hides what cannot run and marks it "over
-  budget" under "all". A download that cannot run now asks first, instead of a
-  page that said "over budget" beside a button that started it anyway.
-- **A shelf that filters to nothing explains itself** with the smallest rows and
-  what each would need, rather than rendering as a blank page.
-- **Losing Wi-Fi no longer takes the phone's own Linux with it.** Android ties
-  its wireless-debugging switch to a Wi-Fi association and turns it off with the
-  network; nothing on the device can turn it back on. But the environment needs
-  that access only to START — once its sshd is up it is an ordinary process,
-  alive until the phone restarts. So any moment of shell access is now spent
-  immediately on starting it, and a network change no longer touches that
-  loopback connection at all: it cannot be broken by a handoff and cannot be
-  fixed by a new network.
-- **Every place that needs the phone bridge leads to the flow that arms it.**
-  The guided setup existed and exactly one button could reach it; everywhere
-  else printed a sentence and stopped.
-
----
-
-## [0.6.1] — 2026-09-03
-
-### Fixed
-- **The row for the phone you are holding is never "not connected".** Opening a
-  chat on it starts the phone's own Linux at once instead of waiting to be
-  tapped, the dot shows that start rather than an offline mark, and no screen
-  asks you to connect a machine only the app can reach. Loopback into your own
-  device is the app's plumbing; it was being presented as a server you had to
-  dial.
-- **The phone's own shell survives Android restarting `adbd`.** After the TLS
-  handshake the daemon announces itself, and Conch was greeting it a second
-  time — which this protocol reads as "the peer restarted", so the daemon took
-  the transport offline and ignored every command that followed. A paired phone
-  looked unpaired, and a chat could only report that its Linux was unreachable.
-  Conch now listens for that announcement, remembers the port the daemon
-  answered on (the mDNS advert stops long before the daemon does), and no longer
-  lets a background back-off veto something you just asked for.
-- **The phone bridge no longer needs `python3` on the machine running the
-  agent.** It shelled out to it to build and read its JSON, which is fine on a
-  server and fatal inside the phone's own Alpine Linux: every command died at
-  exit 127 in the instant the phone's real answer arrived. Requests are now
-  quoted with `sed`+`awk`, and responses are not parsed at all — the phone
-  writes the fields the shell needs beside the JSON. A bridge that is a version
-  behind updates itself instead of waiting to be noticed.
-- **The setup text the app injects when you connect a phone stays out of the
-  conversation**, whatever shape the surrounding turn has, and the agent now
-  proves the link with a real `conch-bridge ping` instead of answering
-  "acknowledged".
-- The store no longer offers a model this device cannot run, and a model that is
-  running offers to end it rather than delete it.
-
----
-
-## [0.6.0] — 2026-09-01
+- **The agent picker leads with three names again.** Claude, Codex and Gemini
+  stay in view; the other seven fold behind a `[ more · 7 ]` row, which also
+  says how many of them are installed and signed in on that server — burying a
+  working agent behind a silent toggle would be the picker lying by omission.
 
 ### Added
-- **A model you downloaded is now an agent, and there is nothing to configure.**
-  Pick anything from the in-app store and it drives the shell: it runs commands,
-  reads files and inspects the device. Each model is served the chat template it
-  actually expects and routed to the CLI that suits it, so "does this one do
-  tools" stopped being a question you had to answer yourself.
-- **Every local model wears its own brand** across the app, and a filter chip
-  appears on the home screen for each model you have chatted with, beside the
-  ones for your servers.
-
-### Changed
-- The whole local path **runs entirely offline through the bundled llama.cpp
-  engine**, with GPU offload on devices that support it. Model *data* is the only
-  thing ever fetched.
-- Model rows print each model's real brand rather than a file name, and the
-  working indicator uses an en dash.
-
-### Fixed
-- **A local chat resumed after a restart no longer spins forever.** The ghost
-  "working" state survived the restart, and the same turn came back marked
-  unread when it had already finished.
-
----
-
-## [0.5.2] — 2026-09-01
-
-### Added
-- **A model store that reads your device before it recommends anything.** RAM,
-  chip and GPU become a computed *fits* or *tight* verdict and a speed estimate
-  that recalibrates against your own hardware. Real download counts from Hugging
-  Face, and live search across all of it rather than a fixed shelf.
-- **One tap runs a model entirely offline** through llama.cpp, and a downloaded
-  model becomes a real **Codex** agent — its tools, its sessions, its sandbox,
-  with only the brain local. **GPU offload** via OpenCL where the device supports
-  it.
-- **19 curated models** to start from: Google **Gemma 3** at four sizes (with
-  vision on 4B and 12B), Qwen 3.5, Llama 3.1 and 3.2, SmolLM3, IBM Granite 4.0,
-  gpt-oss 20B and Qwen3-Coder 30B. Models proven to fire tools on-device wear an
-  **agent** badge; the rest are marked honestly as chat or vision, rather than
-  left to disappoint you. The catalogue is a live manifest, so the shelf keeps
-  growing without an app update.
-- **One-tap RAM reclaim**, and automatic reclaim when a model needs room to
-  launch. Downloads resume themselves on Wi-Fi.
-
-### Changed
-- Command output aligns properly, and the copy stops calling a tablet or an
-  Android desktop a phone.
-
-### Fixed
-- A local chat could answer twice.
-
-### Removed
-- **The experimental traffic-routing toggle, to comply with Google Play policy.**
-  It had shipped two days earlier in 0.5.0. **Port forwarding is unaffected** —
-  reaching the server's own ports from the phone works exactly as it did.
-
----
-
-## [0.5.0] — 2026-08-30
-
-### Added
-- **Reach the server's own ports from the phone.** A dev server on the server's
-  `localhost:3000`, a database, an admin page bound to `127.0.0.1` — none of it
-  is reachable from a phone, and reaching for a laptop to look at it is the
-  moment this app exists to remove. A switch per port, and the address becomes
-  `http://127.0.0.1:3000` in any browser. It rides the SSH connection that is
-  already open: no second login, and on a security-key server no second touch.
-  Nothing is installed on the server — port forwarding is part of the SSH
-  protocol itself.
-- **Route the phone's traffic out through the server.** Your address becomes the
-  server's, and a café network sees one SSH connection and nothing else. It is
-  built on the door Android opens for a VPN to hand apps a proxy, so no packet
-  is ever captured or parsed — which is also its limit, stated everywhere it
-  could mislead: apps that honour the system proxy are covered (browsers are),
-  and an app that ignores it keeps using the phone's own connection.
-
-### Changed
-- **Neither of those makes the connection steadier**, and the app says so where
-  you would look. A tunnel over the same SSH link adds load to the one thing
-  everything already depends on.
-
-### Fixed
-An audit of 0.4.9 read the source line by line; all fifteen findings are closed.
-The ones worth naming:
-
-- **"Log out" left the token in a file beside the one it cleaned.** `sed -i.bak`
-  does not edit in place — it renames the original and writes a cleaned copy —
-  so the last step of a real log-out made a readable copy of the key it had just
-  erased. Switching accounts did the same. Every such site now removes the
-  backup it creates.
-- **An API key travelled on the command line.** The remote shell runs the whole
-  command as one string, so for as long as it lived the key was visible to `ps`
-  for every user on that machine. It goes over stdin now, and `~/.profile` is
-  no longer left world-readable.
-- **A second SSH path accepted any host key and remembered none.** After one tap
-  on "Forget", every background probe trusted whoever answered — permanently,
-  because nothing could record a new fingerprint. It now pins after a successful
-  login, like the main path.
-- **A long microphone capture was left on the server, readable by everyone.**
-  Both the permission change and the cleanup lived on a branch that request can
-  never reach. Permissions are set by whoever writes the file, and unclaimed
-  replies are swept.
-- **One recording froze the whole phone bridge** for as long as it ran: requests
-  were handled one at a time, so logs, ping and shell all timed out while the
-  microphone was busy.
-- **A one-second network blink deleted a valid request** without answering it,
-  and it could never be retried.
-- **The API-key dialog failed in silence** with no connection, and reported a
-  successful login even when the write had failed.
-- **`screenshot` was promised in four places and implemented in none** — to the
-  agent, to you in Settings, in the server CLI and in the store declaration. It
-  works now.
-- **A switched-off tunnel could keep carrying traffic.** The tracking of open
-  connections only ever grew, and past a limit it dropped the oldest — which is
-  the long-lived one — without closing it.
-- **The download icon in a message had a touch target a third of the minimum**,
-  and it is the only way to retry a failed download.
-
----
-
-## [0.4.9] — 2026-08-30
-
-### Added
-- **A real Linux, on the phone, with no computer and no server.** Alpine with
-  its package manager: 25 000 packages, from python and git to compilers,
-  installed from inside it. It runs as an ordinary app would — no root, nothing
-  unlocked, nothing outside its own folder touched. Paths are rewritten by a
-  ptrace runtime that needs no privilege at all, and the userland believes it is
-  root only within its own tree while the kernel still sees an unprivileged uid.
-  Measured on a phone: `apk add python3` pulls 32 packages and python runs.
-- **It installs with no network at all.** The runtime and the whole userland
-  ship inside the app, so setting it up works in flight mode. Once it is there
-  the environment uses the phone's connection like anything else, so `apk`
-  reaches its mirrors normally. The one thing it needs is the phone bridge armed
-  once, because only the shell's own directory may hold something runnable.
-- **`conch-bridge linux '<cmd>'`** — the agent on your server can run commands
-  inside it, behind the same switch as `shell`. It is the shell: the runtime
-  grants nothing `shell` did not already have.
-
-### Changed
-- **Linux is reached from the machines list, not from Settings.** It is a
-  machine, in the same sense the servers on that list are machines, so
-  `[ + linux ]` sits beside `[ + add server ]` and opens its own screen. In
-  Settings it read as a preference about the app, which is the wrong idea of it.
-
-### Fixed
-- **A test could hang the whole suite, and did — for hours.** It asserted that a
-  device answering the legacy ADB handshake must be refused. That was true until
-  the same handshake became the only path that survives leaving Wi-Fi: the
-  client now signs the challenge, the test's device double never answered, and
-  the read blocked forever. Two tests replace it and pin the real exchange — a
-  trusted key completes with no dialog, an unknown key is offered, which is what
-  makes the phone ask its owner.
-
----
-
-## [0.4.8] — 2026-08-30
-
-### Added
-- **Conch reaches this phone's shell by itself.** Reading the device's logs or
-  running a command on it needs the `shell` uid, which an ordinary app does not
-  have. Conch now speaks ADB to the phone over its own loopback interface,
-  authenticated by a key the device is paired with once — the wire protocol, the
-  SPAKE2 pairing exchange, the TLS carrier and the shell channel are all
-  implemented here. No helper app to install, keep updated, or re-grant.
-- **The pairing code is typed into a notification.** Android shows the six
-  digits inside its own dialog, and that dialog cancels the pairing the instant
-  it closes — so a field on our own screen was unusable by construction. The
-  notification shade draws over the dialog without dismissing it: Conch spots
-  the dialog by itself (it is advertised over mDNS while it is open), asks for
-  the digits there, and takes you back to the chat you started from.
-- **A connection that survives leaving Wi-Fi.** Android's wireless debugging is
-  gated on a Wi-Fi association and is torn down the moment it drops. The legacy
-  `adb tcpip` listener is not — it runs until the phone reboots, needs no
-  network of any kind, and is reached over loopback like everything else. Conch
-  now speaks that handshake too, and tries it first.
-
-### Changed
-- **The agent picker leads with three names.** Claude, Codex and Gemini stay in
-  view; the rest fold behind "More", with a count of what is there.
-- **The phone handshake leaves one row in the chat.** The instructions Conch
-  injects, the queue they pass through, the tool call, its output, the ready
-  token and both turn markers are plumbing — and plumbing is not conversation.
-  Anything actually said inside that turn is still carried out of it.
-
-### Fixed
-- **Nothing about the phone refuses a message any more.** A send into a
-  phone-wired chat used to be held back with a dialog demanding that wireless
-  debugging be turned on. On mobile data that cannot be done at all — Android
-  reverts the setting within milliseconds without a Wi-Fi association — so the
-  app stood between its owner and an agent that runs on the server regardless.
-  The phone is an accessory to that agent, and an unreachable accessory is not
-  a reason to stop working.
-- **A working shell is never dropped.** An open loopback socket keeps serving
-  after Android switches wireless debugging off; the listener is only needed to
-  make a NEW connection. A liveness probe that closed the session on a single
-  hiccup destroyed exactly that, permanently, because nothing could reopen it.
-- **A session the agent will not resume no longer kills the chat.** The id
-  comes from the agent itself and can still be refused later. The message is now
-  re-sent as a fresh session with one line saying so, instead of dying with the
-  CLI's exit code and taking every later message with it.
-- **The session list stopped burning CPU on expected failures.** It ran a strict
-  JSON parse over lines the server's listing script cuts, so failure is the
-  normal case — and each one threw and logged. Across a few hundred cached
-  sessions that is thousands of exceptions per rebuild of the list.
-- **Crash on opening any chat.** Two initialisation-order faults in the same
-  file, both fixed at the root: the constants involved are compile-time now, so
-  there is no order left to get wrong.
-
-### Removed
-- **Shizuku.** The helper app, its provider, its permission plumbing and every
-  mention of it. Conch obtains shell access itself now, so a second app that had
-  to be installed, updated and re-armed after every reboot is no longer part of
-  anyone's setup.
+- A credit in About for AndroidHarness, whose author's project is where the idea
+  of an on-device Linux environment came from. None of its code is used here.
 
 ---
 
@@ -688,7 +258,7 @@ The ones worth naming:
 
 ---
 
-## 0.4.6 — 2026-08-29
+## [0.4.6] — 2026-08-29
 
 ### Added
 - **Five more agents: Qwen Code, Cursor CLI, opencode, Crush and Continue CLI**
@@ -748,822 +318,24 @@ The ones worth naming:
 
 ### Added
 - **Two new agents: xAI Grok Build and GitHub Copilot CLI.** Full first-class
-  integrations alongside Claude, Codex and Gemini: streaming chat, session
-  listing/resume with the CLI's own titles, per-agent brand marks and spinners,
-  device-code sign-in for both, model catalogs from each CLI's own registry,
-  reasoning-effort control (Grok), plan mode, turn-state mirroring off each
-  CLI's own session files, and npm install/update like the others.
+  integrations alongside Claude/Codex/Gemini: streaming chat (Grok speaks the
+  Anthropic wire format by its own contract; Copilot emits first-class JSONL),
+  session listing/resume/fork with the CLI's own titles, per-agent brand marks
+  and spinners (Grok's ◆ pulse, Copilot's blinking mascot eyes — nobody
+  inherits anyone else's look), device-code sign-in for both, model catalogs
+  from each CLI's own registry, reasoning-effort control (Grok), plan mode
+  (Grok `--permission-mode plan`, Copilot `--plan`), turn-state mirroring off
+  each CLI's own session files, and install/update via npm like the others.
 - **Approval modes are version-pinned and audited.** Every agent's
-  SAFE/AUTO/YOLO(/PLAN) flag mapping is recorded against the CLI version it was
-  tested on, installs pin that version (`@latest` only on an explicit Update
-  tap), and after every install the flags are replayed through the CLI's own
-  parser — a rejected mode is marked in the shield sheet instead of failing
-  silently at send time.
+  SAFE/AUTO/YOLO(/PLAN) flag mapping is recorded against the CLI version it
+  was tested on (`CliContract`), installs pin that version (`@latest` only on
+  an explicit Update tap), and after every install the flags are replayed
+  through the CLI's own parser — a mode the installed binary rejects is
+  marked in the shield sheet instead of failing silently at send time.
 
 ---
 
-## [0.4.3] — 2026-08-27
-
-Everything in 0.4.2, plus the one thing it was missing.
-
-### Changed
-- **About** links **conch-labs.com**, leading the row of marks at the bottom of
-  the screen. The X account left the row, and its logo left the resources with
-  it — no drawable kept around for a link nobody follows.
-
-### Note
-0.4.2 (versionCode 816) was live in Play production for about forty minutes
-before being pulled back to a draft: it went out without the About change, and
-a versionCode cannot go down, so the only way to supersede it on the devices
-that took it is a version above it. 0.4.3 is that version — same code as 816
-plus the site link. Anyone who never saw 816 loses nothing; the 0.4.2 section
-below is still the honest record of what changed.
-
----
-
-## [0.4.2] — 2026-08-27
-
-Four faults, one root each, all four measured on real devices and real servers
-rather than reasoned about.
-
-### Fixed
-- **The session list could spin forever.** The Claude listing shipped eight
-  whole user records per session as the "preview" for a two-line row: measured
-  at 7 871 379 bytes for 140 sessions, one session alone contributing 650 KB.
-  A second account on the same host with 6 sessions produced 132 605 bytes and
-  finished instantly — that 59× was the entire difference between "works" and
-  "hangs". Each candidate record is now cut to 600 bytes server-side (the JSON
-  prefix before `content` measures ≤163 B over 799 real records, so 600 leaves
-  more than the 140 characters the row displays), and the parser salvages the
-  text when the cut lands mid-JSON. Verified against the live server:
-  499 054 bytes, 139 rows, 9 seconds.
-- **Every remote read now has a deadline that wraps the read.** All 27 exec
-  sites were `copyTo(out)` followed by `join(15, SECONDS)` — and `join` only
-  starts counting once the read has already returned, so the read itself was
-  unbounded. With a phone link collapsed to a 1–4 segment congestion window
-  and 1509 retransmits, two listing pipelines were found alive on the server at
-  18 and 13 minutes, blocked writing output nobody could consume. On deadline
-  the channel is now closed, which is the only thing that unblocks a socket
-  read and also kills the remote command. Byte ceilings added alongside.
-- **`stdout` and `stderr` are drained concurrently.** Draining them in sequence
-  deadlocks as soon as a command fills the stderr pipe mid-run.
-- **A refresh no longer doubles the traffic.** Concurrent identical listings
-  collapse into one pass; the second pass never made the list arrive sooner, it
-  halved the speed of the one already in flight.
-- **"login expired" on a login that was fine.** An access token lives about
-  eight hours and the CLI renews it from the refresh token on its next run;
-  between those moments the probe took the expired token, got a 401, and
-  stamped a permanent block. Measured: the row said "login expired" while the
-  credential file had been refreshed 75 seconds earlier, its expiry was 7.7
-  hours in the future, and the refresh token was valid for another three weeks.
-  A 401 or non-scope 403 now consults the refresh token — refreshable means
-  "could not check", never a block — and the expiry is read before the request
-  is spent at all.
-- **A block that could not be cleared.** A run-state verdict preserved through
-  an inconclusive probe now expires after 30 minutes. Preservation was one-way:
-  only a concrete reading could clear a block, and on a server whose probes
-  cannot land there is never a concrete reading, so a single wrong verdict was
-  permanent.
-- **A message stopped before the CLI received it comes back.** An interrupt
-  that lands before the agent has taken the prompt hands the text back instead
-  of losing it — measured against a rollout with five turn-starts and only four
-  recorded prompts. Routed through the existing undelivered-prompt path, never
-  an automatic re-send.
-- **The cold start is visible.** Resuming a thread takes real seconds before the
-  agent has even received the prompt (measured: 7.85 s cold against 0.04–0.36 s
-  warm), and those seconds used to be indistinguishable from a working spinner —
-  which is exactly how long a person waits before pressing Stop.
-
-### Added
-- **The phone bridge refuses to waste a turn.** If Shizuku cannot execute
-  commands, a send into a phone-wired chat is stopped and the user is told
-  which state it is in — not installed, service stopped, or access revoked —
-  with one button that fixes it. The message is kept and goes out by itself
-  once Shizuku works. Previously the message reached the agent, the agent
-  believed the phone was attached, and the whole turn was spent on bridge calls
-  that came back as errors.
-- **Shizuku readiness is push-based**, using Shizuku's own binder-death
-  listener, so a service killed by an aggressive Android skin stops looking
-  like "phone connected" the moment it dies.
-- **Turn lifecycle logging.** Every send records who asked for it, and the
-  end-of-turn haptic records why it fired.
-
-### Changed
-- The phone-bridge setup prompt is never sent into a chat twice (two such turns
-  cost 96 508 input tokens in one session), and every handshake in a chat is
-  collapsed to a single status row rather than only the first — the raw setup
-  instructions no longer appear as if the user had typed them.
-
----
-
-## [0.4.1] — 2026-08-27
-
-### Removed
-- **Sentry, and with it every last piece of telemetry.** The crash-reporting
-  SDK, the Gradle plugin, the `SENTRY_DSN` build field, the `Telemetry` object
-  and all fifteen of its call sites, the breadcrumb half of `SilentlyTry`, the
-  two manifest provider overrides, the CI secrets, and the
-  **Settings → Privacy → Crash reporting** toggle are all gone. The
-  `ssh_ai_bootstrap_prefs` file that existed only to hold that toggle's value
-  is gone too, along with its entries in both backup-rules whitelists.
-
-  Conch now opens **no network connection to anything except the servers you
-  add yourself**. Not "anonymised", not "opt-out" — absent.
-
-  Two things follow. The store listing no longer has to declare *approximate
-  location*: that line existed because Sentry derived a country and city from
-  the request IP at ingestion, and there is no longer a request. And a crash on
-  your device is now invisible to us — Play's own Android vitals is the only
-  signal left, so if something breaks, please write to
-  <nikita@eight24family.ai>. That is the trade, and it was made deliberately.
-
-### Changed
-- Privacy policy, data-deletion page, store listing and the in-app About screen
-  all rewritten around "we collect nothing", with the history of what used to
-  be collected stated plainly rather than quietly dropped.
-- `SilentlyTry.logged` / `loggedOrElse` / `fired` keep working exactly as
-  before and still record every swallowed exception — now as a WARN logcat
-  line, which is the only place an eaten failure surfaces.
-
----
-
-## [0.4.0] — 2026-08-27
-
-Google Play's two new 2026 app-quality requirements, implemented in full.
-
-### Added
-- **Transfer to a new device.** Android backup and device-to-device migration
-  now carry the server list, settings and the crash-reporting opt-out. The
-  rules are whitelists: chat history and caches never leave the device, and
-  passwords / private keys are excluded *and* hardware-bound (undecryptable
-  anywhere else by construction). Cloud backup of the server list requires
-  end-to-end encryption; device-to-device transfer is a direct local channel.
-- **Self-healing secrets store.** A secrets blob copied from another device by
-  an OEM migration tool used to crash the app on every launch; it now retries
-  once (transient Keystore flakes wipe nothing), then resets just that store —
-  servers survive, credentials are re-entered once.
-- **Memory-pressure hooks.** Every rebuildable cache (decoded chat images,
-  parsed-markdown LRU) registers with a central trim registry fired from
-  `onTrimMemory`, matching the Android 17 per-app memory limiter's contract.
-- Live agent panel computes its layout as pure, tested data: one
-  character-budgeted line per agent, shared fields lifted to the header.
-
-### Changed
-- Decoded inline chat images live in a hard budget (8 at a time, oldest out)
-  instead of accumulating for the chat's lifetime; evicted images repaint
-  from the disk cache on scroll-back.
-- Every thumbnail decodes at display size (attachment chips at ≤256 px,
-  queued-message thumbs at ≤96 px, RGB_565) — a 12 MP photo is no longer a
-  ~48 MB ARGB bitmap behind a 64 dp chip.
-
-### Fixed
-- Stop no longer kills a prompt that was queued behind the stopped turn: the
-  queue holds until the turn actually dies, and a turn started after Stop can
-  never be its victim.
-
----
-
-## [0.3.9] — 2026-08-22
-
-### Added
-- Team and Enterprise subscriptions are recognised — an active organisation
-  account no longer reads as "no subscription".
-- Account cards show email, plan and expiry; live limits appear on the agent
-  list, known from the connection alone before a chat is opened.
-- Settings → Connection → fail2ban: a master auto-connect switch and a minimum
-  gap between automatic reconnects, so automatic dialing can be bounded or
-  turned off to suit a strict jail.
-- A [ retry ] control on a disconnected server with a live connect log.
-
-### Changed
-- Signing in runs the CLI's real full-scope login, so the server's own terminal
-  is logged in too and the plan/limits are readable everywhere.
-- Background probes and session discovery reuse one live SSH transport instead
-  of opening a fresh handshake per call — far fewer connections in the server's
-  auth log.
-
-### Fixed
-- A logged-out agent can no longer be sent to; logging out actually clears the
-  server-side session.
-- Dropped connections recover on their own; a sign-in error retries or explains
-  instead of hanging.
-- The usage bar shows the live account's limits or nothing, never a stale value
-  from a removed account.
-
----
-
-## [0.3.8] — 2026-08-20
-
-### Fixed
-- The collapsed limit indicator could read 100% off a limit that cannot block
-  the chat you are in: a per-model weekly cap belonging to a model the session
-  is not running. Per-model caps are now weighed only against the model actually
-  in force, the bar rests on the soonest-rolling aggregate window (the 5-hour
-  one), and it leaves that window only for a limit at 0.90+ utilisation — which
-  it then names ("Weekly 100%"), since an unnamed 100% reads as the whole plan
-  being gone. Model identity is matched on family, so an id, an alias and a
-  display label are the same model.
-
----
-
-## [0.3.7] — 2026-08-20
-
-### Added
-- Per-server accent colour: a random hex assigned on add, editable in the
-  server's settings, and used to draw that server's name everywhere in the app.
-  Servers saved before this release derive a stable colour from their id, so
-  nothing is grey while you wait to edit it. Randomness is confined to the hue,
-  and the drawn colour adapts to the active theme so a name always clears a
-  readable contrast against the background it is on.
-- Server filter for the sessions list: long-press an agent chip (or the title)
-  to tick which hosts appear. Each row shows how many of the listed sessions it
-  owns, and a filter that empties the list says so and offers a way back.
-
-### Fixed
-- A turn running on the server could be reported as finished — spinner out,
-  completion vibration fired — while it was still going. The app judged
-  liveness by the session file's timestamp, and a long tool writes nothing
-  while it runs; it now asks the server whether the agent process is alive.
-- A session being driven from a terminal or another device never showed as
-  working in the sessions list when the app happened to hold an idle session
-  object for it.
-- The collapsed limit indicator always showed the 5-hour window, so it could
-  read 15% while a different, exhausted window was refusing turns. It now shows
-  the window that actually constrains the account, and a limit the CLI reports
-  in the chat is believed at once.
-- The "the cache may have expired" note under the prompt bar now appears only
-  when re-sending would actually be expensive.
-- The sessions list kept a spinner going for up to 90 seconds after a turn had
-  visibly finished.
-
-### Changed
-- Freshness while the app is on screen: sessions that are moving are checked
-  every two seconds, the full list refresh runs every ten seconds instead of
-  thirty, returning to the app refreshes immediately, and servers are now
-  visited in parallel so one unreachable host cannot starve the others. Metered
-  links, data saver and a backgrounded app switch all of it off.
-
----
-
-## [0.3.6] — 2026-08-18
-
-### Fixed
-- The completion vibration could repeat at full amplitude every couple of seconds
-  until the app was force-stopped: it was keyed off the arrival of an
-  end-of-turn row, whose id was random, so every re-parse of the same record
-  looked like a new turn ending. Ids are content-stable now, and the buzz is
-  capped at once per turn by state.
-- The same vibration fired the instant you pressed send while the reply was still
-  coming — "working" is an OR of two signals that hand off to each other, and its
-  falling edge is a handoff gap, not an ending. It now waits for the state to
-  settle, and fires at once on the CLI's own end-of-turn record.
-- The agents' background tasks no longer fill the transcript. The CLI reports its
-  one session-wide task registry on the main stream, so a fan-out's shell commands
-  arrived looking exactly like the session's own; the chat now keeps only its own
-  task rows and the agents' are counted with the agents. The
-  `background_tasks_changed` snapshot — which fires on every change — is no longer
-  a chat row at all.
-- A queued message could be destroyed by being released into a session that had
-  already died: all three copies were dropped while the send was silently
-  swallowed. A drain now refuses a session that cannot accept it.
-- "+ new chat" opens a new chat when switching agent too, and no longer leaves the
-  abandoned brand-new session running with its CLI process and SSH channel.
-- A background shell command can no longer create an agent row in the panel, and
-  an agent's tokens can no longer be counted twice when the same turn arrives on
-  both the live stream and the file mirror.
-- Picture-in-Picture opens for a connecting session or an in-flight transfer as
-  well, not only a generating turn.
-- Subagent text is searchable from inside the chat again.
-
-## [0.3.5] — 2026-08-18
-
-### Added
-- The floating (Picture-in-Picture) window is a live status readout: the working
-  verb, the true elapsed time of the turn, the token count, the number of running
-  agents and of queued messages, following the tail of the current turn. It opens
-  only while a turn is actually in flight, and an idle chat's last reply is
-  labelled rather than shown as if it were live.
-- Per-agent telemetry in the agents panel — status (running / completed / failed
-  / killed / queued / paused), model, runtime, tool count and tokens, with the
-  result, the error or the currently-running tool on a second line, and the
-  fan-out's total tokens in the collapsed header.
-- A distinct three-pulse vibration when an answer finishes, felt through a pocket
-  without looking.
-
-### Changed
-- The Stop action was removed from the PiP window header: it sat under the same
-  tap that expands the window and fired with no confirmation, so a mis-tap
-  cancelled a running turn. Stop is in the prompt bar.
-- Turn vibrations moved out of the chat screen, so they no longer stop when the
-  app is backgrounded or floating.
-
-### Fixed
-- "+ new chat" always opens a new chat instead of re-opening the previous
-  never-used one — which also propagated that chat's connect-time hang to every
-  subsequent new chat. Abandoned brand-new chats are closed instead of leaking a
-  CLI process, an SSH channel and a connection reference.
-- The model shown in the top bar is the chat's, not whichever subagent last
-  spoke; subagent turns no longer appear in the transcript either.
-- Messages queued during a turn are always sent once the session is idle,
-  including after Stop.
-- One entry in the recent-apps list instead of a new one for every return from
-  the floating window.
-
-## [0.3.4] — 2026-08-17
-
-### Added
-- Mirrored-turn ownership: reopening a session running on the server restores
-  the Stop button, elapsed timer and token count from the session file, with
-  the reply painting straight from it — even after the app was closed mid-turn.
-  Stop kills a turn this process no longer owns; a read-only chat upgrades to a
-  live mirror when the transport returns.
-- Truthful usage bar without a live process — reads the CLI's own on-disk usage
-  cache so limits stay accurate in an idle chat.
-- Tail-first mirroring: the background caches only a session's recent tail
-  regardless of total size, so any chat opens instantly from cache with bounded
-  traffic.
-- Broad server portability (no-bash / BusyBox / BSD / macOS) at every remote
-  call, plus honest "Windows OpenSSH server — not supported yet" detection.
-
-### Fixed
-- On reopen, your prompt shows with the answer instead of a beat behind it.
-- Stop routes an owned turn through the stream, so it halts instead of
-  interrupting and cold-restarting the session.
-- A message sent into a running (mirrored) turn waits in the visible queue
-  instead of cutting the turn off.
-- A session's list order and "working" spinner use its last message time, not a
-  stray file-mtime touch, so idle sessions no longer fly to the top or spin
-  falsely.
-- The attach panel can be closed without attaching, and is more compact.
-
----
-
-## [0.3.3] — 2026-08-16
-
-### Fixed
-- **A dropped connection recovers instead of looping.** `retry()` evicted the
-  pooled transport by server id, so it destroyed the healthy connection the
-  silent reconnect had built a second earlier — including on the rescue path
-  whose entry condition is "the connection is live". And a chat could adopt a
-  session already parked in `Failed`, because "is the transport up" was being
-  asked instead of "can this session still carry a turn": the rebuilt chat
-  inherited a dead state every cycle and never reached Running, which is the
-  only moment a parked message is delivered. The app reconnected every few
-  seconds indefinitely, re-reading the whole session file each time, while the
-  message you typed sat there undeliverable.
-- **A prompt the CLI already took is never sent twice.** All three persistent
-  channels treated "the process died mid-turn" as "the prompt never arrived".
-  Once the CLI has it, it is in the rollout and comes back on resume — what
-  died is the answer. On a flapping link every reconnect used to re-run the
-  whole turn. Genuine silence after the write still redelivers.
-- **Servers remember their host key.** The pooled path accepted a "new" host
-  key on every connect and threw the fingerprint away, so nothing was ever
-  pinned and the fingerprint the app displayed was a check that never ran. It
-  now pins after the first successful auth, refuses a changed key with an
-  explanation instead of a library error, and never retries that state in a
-  loop. Server detail → fingerprint → **forget** is the way back after you
-  rebuild a machine yourself.
-- **A session keeps the model it was started on.** On resume the app sent no
-  `--model` at all and let the CLI decide, so changing the default on the server
-  quietly moved every old conversation to a different model — and a different
-  price per turn — without anyone being asked. The session's own model is named
-  explicitly now. It yields to a newer explicit pick, and to a model that no
-  longer exists (forcing a withdrawn model fails every send; there the provider's
-  own fallback is the right answer).
-- **A new chat records what it was actually born on.** The pin read the model we
-  asked for, which is nothing in the most common case — open a chat, type, send —
-  so those chats had no model to keep. And `+ new session` re-reads the default
-  first: the catalog is cached because the model list rarely changes, but the
-  default is changed by hand and decides what a new chat starts on.
-- **The unread badge counts messages, not lines.** Sessions untouched for weeks
-  showed "1 new": the badge counted every newline past a byte watermark into a
-  file the app rewrites itself, so a tool call, a system row or a compaction
-  merge all read as new messages. It counts user and assistant turns now, and a
-  full-body rewrite rebases the watermark when you had already read to the end.
-- Stop kills a turn running on the server, not just the local view.
-- The reconnect banner reflects the real connection state instead of counting
-  attempts over a live link.
-
-### Added
-- **Task board** — the CLI's own checklist, pinned above the prompt bar and
-  rendered the way the terminal renders it.
-- **Subagent roster** for the agents a turn spawns, and a live
-  `name · N/M agents · elapsed` line for a background workflow, read from the
-  run's own journal rather than guessed from the transcript.
-- **Terminal**: its own font, pinch to zoom, scrollable history.
-- **Restart the CLI from the chat** without leaving the session.
-- Queued messages combine into one prompt; ✕ on a queued row returns its text
-  to the composer instead of discarding it.
-
-### Changed
-- Attachments: the camera plus the full-screen system picker.
-- A turn's timer survives leaving and re-entering the chat.
-
----
-
-## [0.3.2] — 2026-08-03
-
-### Fixed
-- **Stopping a scheduled run really stops it.** 0.3.1 wired the button to the
-  protocol interrupt, which aborts the running turn and the queue — and nothing
-  else: the countdown vanished but the run still fired half an hour later. The
-  wakeups are timers inside the CLI process, so stopping now ends that process;
-  the session resumes on your next message over the same cached prefix.
-
----
-
-## [0.3.1] — 2026-08-03
-
-### Added
-- **Every command the CLI has.** Its built-in commands and skills are now listed
-  in the palette, and a `/name` the app has never heard of is sent to the CLI
-  instead of refused. Typing `/loop` used to answer "no such command" — the app
-  has no business vetting names the CLI owns.
-- **A loop you can see and stop.** When the agent schedules its own next run,
-  the prompt bar shows a countdown with the model's reason for the delay and a
-  one-tap stop. It is the one thing here that spends money while you do nothing,
-  so it does not get to be invisible. Stopping drops every pending wakeup.
-- **Compact the conversation** from the chat menu, with an upfront note on what
-  it costs.
-
-### Fixed
-- The effort shown in the topbar no longer flashes an invented default when a
-  chat opens: the sessions list carries the session's own value, and when
-  nothing is known yet the label stays empty rather than guessing.
-
----
-
-## [0.3.0] — 2026-08-02
-
-### Added
-- **Live model / effort / approval switching.** A pick is applied to the running
-  session instead of restarting its CLI process, so it takes effect at once and
-  the conversation is not re-read. A pick the protocol cannot express falls back
-  to the previous restart path, silently.
-- **Rewind.** A ⟲ handle beside each message you sent takes the conversation
-  back to just before it, returning its text to the composer. If that turn
-  changed files, the sheet lists them by name with the ± lines before offering
-  to restore them — a separate, explicit step. Long-press is untouched and still
-  selects and copies text.
-- **@-mentions.** Typing `@` searches files on the server the agent runs on.
-- **Session rename** from the chat menu, using the CLI's own title record.
-
-### Changed
-- **Plan limits and the context breakdown are read over the agent's own control
-  channel**, so they match what the CLI reports rather than a separate probe.
-- **The model catalog comes from the CLI's registry**, so new model families
-  appear with no code change. Catalog entries an authoritative registry has
-  never confirmed are kept for label resolution but no longer offered as picks.
-
-### Removed
-- The hand-written terminal emulator and `/model` menu scraper, the second CLI
-  process spawned to read `/context`, the `curl` that handled a raw OAuth token,
-  and the process restart behind every model switch.
-
-### Fixed
-- A fresh chat could launch on a different model than the one shown in its
-  header on a cold start.
-- A rewound turn could reappear from the session mirror moments after being
-  removed.
-- Percentages in the context breakdown rendered raw floats ("1.4557999%").
-- The public repository has been buildable again: a dependency added in 0.2.15
-  was missing from its build files.
-
----
-
-## [0.2.14] — 2026-07-30
-
-### Fixed
-- **Tapping the camera in the attachment sheet opens the camera.** It used to
-  fire the shutter the instant you touched the preview, so every tap read as
-  "open the camera" cost a 2.5 MB attachment nobody asked for. The viewfinder is
-  an affordance, not a shutter: the photo arrives after you press the shutter in
-  the camera, and no capture pipeline is bound to the preview at all.
-- **A photo attached from the camera renders as a photo.** The streaming
-  attachment path hardcoded `isImage = false`, so a JPEG handed over with
-  `image/jpeg` and a `.jpg` name still drew as a generic document tile.
-- **"SSH not connected" no longer appears while the connection is up.** The
-  transfer paths read an `SSHClient` captured once when the session started,
-  while the pool legitimately evicts and rebuilds transports underneath
-  (poisoned channel, dead cached client, the watchdog's silent reconnect after a
-  network change) — so an upload aborted against a corpse seconds after the app
-  had reconnected. They now ask for a live client.
-- **A failed upload says which file and why, and stops the send.** The failure
-  used to be a row in the transcript that named no file, blamed SSH, advised a
-  pull-to-refresh that cannot retry an upload, and stayed in history to be
-  replayed on every reopen — while `send()` quietly dropped the attachment and
-  posted the text anyway, so the model was asked about a photo it never
-  received.
-
-### Changed
-- Recent photos are **three to a row**, five once the window is at least 600dp
-  wide (an unfolded book foldable, a tablet, a DeX window). The height cap is
-  derived from the real tile size instead of a constant that silently encoded
-  four columns, and thumbnails are requested at 512px so the bigger tiles stay
-  sharp.
-- `androidx.fragment` is pinned to 1.8.9 (with appcompat 1.7.1): Play's SDK Index
-  flagged the 1.1.0 that arrived transitively through `camera-view`. The release
-  APK got 218 KB smaller.
-- The 16 KB alignment gate now fails on an archive it could not inspect — an
-  unreadable 64-bit ELF, or 32-bit libraries with no 64-bit ones — instead of
-  reporting success after checking nothing.
-
----
-
-## [0.2.13] — 2026-07-30
-
-Supersedes 0.2.12, which never reached anyone: its CameraX bump fixed the 16 KB
-page-size problem and introduced two runtime bugs in the same viewfinder. An
-adversarial review of the shipped commit found them before a user did.
-
-### Fixed
-- **ANR when the attachment sheet is dismissed while the camera is still
-  starting.** `onDispose` waited on the CameraX provider future on the main
-  thread. camera-core 1.3.4 stopped retrying provider init after 2.5 s, so the
-  wait was a stutter; 1.4.x replaced that with a retry policy whose timeout is
-  6 s (last attempt at ~5.5 s), which parks the UI past Android's 5 s
-  input-dispatch deadline. Emulators and devices that under-report their cameras
-  consume the whole window on every open. The release path no longer waits on
-  the future — it unbinds from the future's own callback.
-- **The camera could be left bound with nothing able to release it.** The bind
-  callback fired whenever the provider resolved, with no check that the cell was
-  still composed; because the old dispose path waited on that same future and
-  then unbound, a late resolution ordered itself after the unbind and left the
-  camera held against every other app — the exact outcome that code exists to
-  prevent. One `alive` flag, remembered inside the viewfinder branch, now gates
-  the bind and is flipped synchronously on dispose.
-- **The Korean store listing** for 0.2.12 shipped as corrupted Hangul: five
-  wrong code points from hand-written `\uXXXX` escapes. Store notes are written
-  as literal text now, and the other two CJK locales were re-checked.
-
----
-
-## [0.2.12] — 2026-07-30
-
-### Fixed
-- **16 KB memory pages.** One shipped native library — the image helper CameraX
-  loads for the attachment-sheet viewfinder — was built for 4 KB pages only. On a
-  device that uses 16 KB pages such a library does not load at all, so the
-  camera cell added in 0.2.11 could fail outright. The CameraX floor is now
-  1.4.0, the first release built for 16 KB pages; every other native library in
-  the bundle was already aligned.
-
-### Changed
-- `bundleRelease` now reads the ELF program headers out of the bundle it just
-  built and **fails** if any 64-bit library is aligned below 16 KB, and no
-  publish task can run without that check passing. The alignment is baked into a
-  prebuilt `.so`, so the only fix is the dependency version — which makes this
-  exactly the kind of mistake a build should refuse to repeat.
-
----
-
-## [0.2.11] — 2026-07-30
-
-### Added
-- **Voice messages.** Record from the composer; before sending, play the clip
-  back on a waveform you can scrub. The envelope is decoded from the file, so an
-  attached or received clip draws the same way a recorded one does.
-- **Live camera in the attachment sheet.** The first grid cell is a viewfinder —
-  tap it and the shot is attached in place, no app switch.
-- **Recent photos inline**, four to a row, scrolling down; a paperclip for files.
-- `conch-bridge audio` — a server-side agent can record the phone's microphone.
-  **Off by default** behind its own switch, unlike every other bridge verb: a
-  microphone records the room, not the screen.
-
-### Fixed
-- **The thinking indicator stops when the turn really ends.** Turn state is now
-  derived on the phone instead of asking the server to project it with `jq` — on
-  a host without a usable `jq` every signal read false, and the one safety net
-  that clears a wedged spinner could never fire.
-- **The model you pick is law.** It is read before anything is resolved and
-  re-applied continuously, so a background probe learning the server's default
-  can no longer move a running conversation onto a different model.
-- A question card no longer appears twice, and "waiting for your answer" no
-  longer stays up after the question is answered.
-- The model list never regresses to an older name, and shows when it is cached
-  rather than live.
-- Much less mobile data: session history is compressed in transit and a routine
-  file rewrite no longer re-downloads the session.
-
----
-
-## 0.2.10 — 2026-07-25
-
-### Added
-- Subagents are visible in chat: type, elapsed time, tokens.
-
-### Fixed
-- Large reductions in mobile data use; background downloads stop on a metered
-  connection.
-- The chat shows the model the CLI is really set to, and new model families are
-  picked up without a code change.
-- The weekly countdown keeps its hours ("2d16h", not "2d").
-
----
-
-## [0.2.9] — 2026-07-22
-
-### Changed
-- Targets Android 16 (API 36) for Google Play compliance.
-
----
-
-## [0.2.8] — 2026-07-16
-
-### Fixed
-- Long chats no longer get scrambled. After a lengthy session the first message
-  could jump to the bottom and the top bar could silently flip to "Sonnet 5". The
-  app now distinguishes its own harmless session-file housekeeping rewrites from a
-  real Claude compaction (by line-id containment), re-adopting the server history
-  verbatim on a benign shrink instead of running a lossy reorder — and it keeps
-  the reading position you left off at. The top-bar model label is never invented
-  when no model has been reported.
-- The usage-limit bar now shows the real reset time. When you hit a rate limit it
-  reads the reset straight from the CLI's own message ("resets 8:30pm") instead of
-  freezing on a stale "resets now". This works for `setup-token` logins whose
-  usage endpoint can't report the reset; a fresh sign-in or switched account
-  clears it automatically, and a past reset renders blank rather than a false
-  "now".
-
----
-
-## [0.2.7] — 2026-07-16
-
-### Changed
-- Signing in is one clean, animated flow: the pasted code is picked up
-  automatically, the window verifies your subscription inside and goes straight to
-  "ready" — no leftover refresh spinner and no account-name prompt (auto-captured
-  as "Account N", renamable later).
-- Claude reports its real status on every surface — ready, no subscription, or
-  sign-in expired — instead of a misleading "ready" on a dead login.
-- The usage/limit bar works for more sign-in types, including `setup-token`
-  logins, reading the limit from the account's own rate-limit signals.
-- The Agents tab supports pull-to-refresh.
-
-### Fixed
-- Updating a server-installed CLI works reliably even when a user `~/.npmrc`
-  prefix would otherwise misdirect the install out of its real location.
-
----
-
-## [0.2.6] — 2026-07-06
-
-### Changed
-- Session lists load much faster and from every agent at once: the background
-  prefetch now lists all authorised agents first (titles appear almost
-  immediately), then fetches bodies in a second pass. The slow OAuth-liveness
-  check runs off the critical path so it no longer delays the first listing on a
-  freshly-added server.
-- After submitting an OAuth code/callback URL, the agent row shows "signing in…"
-  while the exchange completes, instead of a stale "[ log in ]" that read as
-  "start over". Its tap is inert during that window.
-
-### Fixed
-- Codex ChatGPT logins were sometimes misreported as "not logged in": detection
-  now reads `codex login status` from stdout **and** stderr, always checks the
-  on-disk credential shape, and trusts the command's exit code.
-- Device-key lifetime honoured the selector: the key was minted for 30 days while
-  the picker showed 7 (enrollment and the UI disagreed on the default). They now
-  agree, and changing the lifetime re-mints the key immediately so the "expires
-  in…" countdown reflects the chosen value.
-- File-upload preparation now reports an honest, actionable message when the
-  server can't be reached, instead of a misleading "could not create directory".
-
----
-
-## [0.2.5] — 2026-07-05
-
-### Fixed
-- Fixed a hard crash on the sessions list. A Claude session can exist as more
-  than one rollout file on the server (after a resume or compaction), so a raw
-  listing repeated its id and the id-keyed lists crashed the app on draw
-  ("Key … was already used"). Sessions are now de-duplicated by id at every
-  cache read/write and at the list itself, so a duplicate can neither be stored
-  nor rendered.
-
-### Changed
-- The floating navigation bar now reads as frosted glass on every screen —
-  including Settings and short lists, not only long scrolling chats. Content
-  scrolls beneath it so the blur samples real content instead of blank
-  background, and the capsule no longer renders as a flat solid block.
-
----
-
-## [0.2.4] — 2026-07-03
-
-### Fixed / Changed
-- The plan-limit (5h / weekly) usage bar refreshes while the chat is on screen
-  (every 30s, turn or idle) and immediately on return to it — the windows are
-  account-wide, so it no longer freezes at a stale number while other sessions or
-  the CLI move the limit. Reset countdown shows hours + minutes ("2h40m").
-- Reasoning-effort shows the raw level the CLI uses (`xhigh`/`high`/`medium`/
-  `ultracode`), never an invented label. For Codex the "default" level follows
-  `config.toml` `model_reasoning_effort` (what codex actually runs) instead of the
-  model's catalog default.
-- The sessions list re-checks connected servers every 30s, so a chat started
-  directly on the server appears without reopening the app.
-
----
-
-## [0.2.3] — 2026-07-03
-
-### Fixed
-- When a Claude session is force-switched mid-turn (its safeguard fallback records
-  a different model in `message.model`), the chat top bar now shows the model that
-  is **actually running** — e.g. Opus 4.8 — instead of the model you originally
-  picked. Before a switch, and when the pick and the running model are the same,
-  your pick still shows (no flicker).
-
----
-
-## [0.2.2] — 2026-06-30
-
-Now live on Google Play.
-
-### Fixed
-- A phantom copy of a just-sent prompt could pin itself to the bottom of the
-  chat and survive re-entering the session — an offline/reconnect echo appended
-  *after* the reply instead of collapsing onto the optimistic message.
-- Sending a message no longer marks its own session "new" in the sessions list.
-- Codex and Gemini sessions created directly on the server now appear in the
-  list even when the live login check is momentarily unsure; an agent that has
-  sessions is never hidden (and keeps its filter chip). Starting a new chat is
-  still login-gated.
-
-### Changed
-- The working-status indicator is per-agent: Claude keeps its status vocabulary
-  and sparkle glyphs; Codex/Gemini show a plain spinner and "Working".
-- The welcome banner is pinned to the top of every chat.
-- Publisher shown in About is "Conch Labs".
-
-### Hidden noise
-- Codex's "could not find bubblewrap on PATH" degraded-sandbox warning, Claude
-  Code's "Ignoring N permissions.allow entries" startup notice, and Claude's
-  image coordinate-mapping annotation no longer appear as chat messages.
-
----
-
-## [0.2.1-beta] — 2026-06-29
-
-### Phone glyph
-- The phone glyph is now tri-state — lit when the bridge is live, dimmed when a
-  session was wired but is offline now, absent when never connected — and shows
-  the same state in the session list and the chat title (moved next to the
-  session name) so the two can't disagree.
-
-### Fixed
-- The chat could hang on "thinking…" forever after the agent used the on-device
-  `conch-bridge` tool, even though the reply had already arrived. Root cause was
-  an SSH receive-window starvation on the shared connection (the turn stream's
-  window was never replenished while bridge traffic shared the transport); the
-  turn stream now auto-expands its window, with a file-truth reconcile as a
-  backstop.
-- A message you sent could vanish from the chat while the agent still answered
-  it — a deduplication bug that surfaced on large sessions.
-- Stopping a turn yourself showed a red error; it now shows a calm "stopped".
-
-### Changed
-- Stop now interrupts the running turn **and** immediately sends the next queued
-  message, instead of discarding the queue. Use the ✕ on a queued message to
-  drop it instead.
-- The new-session button also appears under the "All" tab, not only on a
-  specific agent's tab.
-
----
-
-## [0.2.0-beta] — 2026-06-27
-
-### Performance
-- Sessions list reuses the pooled SSH connection for saved-key servers (no
-  fresh handshake on every refresh), and the listing no longer reads whole
-  multi-MB session files end to end.
-- Chat opens paint from the recent tail immediately while the full history
-  loads in the background — huge (90+ MB) sessions no longer block the UI.
-- Usage / limit bar fills as soon as the connection is up and re-checks after
-  a turn, instead of staying stale.
-
-### Changed
-- A chat with no explicit model pick now uses Claude's own recommended
-  available model (no hardcoded names), and never shows or runs a model the
-  plan has suspended.
-- Connecting the phone bridge is now invisible: hidden handshake, a quiet
-  "phone connected" state with a connecting-% indicator and a phone glyph that
-  appears only once the link is confirmed.
-
-### Fixed
-- Session deletes on the phone now propagate to the server even when no
-  connection was live at delete time (silent reconnect + reconcile on sync).
-- New-chat crash; tab corruption after navigating chat → Settings; duplicate
-  AskUserQuestion cards in mirrored sessions; typing over an open question now
-  cancels it cleanly instead of erroring.
-- conch's headless sessions appear in the native `claude --resume` picker.
-
-### Added
-- Codex `/review` slash command.
-
----
-
-## 1.0.9 — 2026-05-11
+## [1.0.9] — 2026-05-11
 
 ### Added
 - **One-tap, one-PIN security-key auth.** Touch the FIDO2 token once,
@@ -1624,7 +396,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.7 — 2026-05-01
+## [1.0.7] — 2026-05-01
 
 ### Added
 - **Inline file downloads in agent replies.** When the agent mentions
@@ -1653,7 +425,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.6 — 2026-05-01
+## [1.0.6] — 2026-05-01
 
 ### Added
 - **Mid-turn prompts** — type into the prompt bar while the agent is
@@ -1678,7 +450,7 @@ Now live on Google Play.
   mid-IO, sshj's transport-reader thread threw
   `TransportException("Broken transport; encountered EOF")` straight
   up an unmanaged thread — Android treated it as fatal and killed
-  the process. `SshAiApp` now installs a chained
+  the process. `ConchApp` now installs a chained
   `UncaughtExceptionHandler` that swallows exactly this benign
   shutdown race and forwards everything else to the previous handler
   (Sentry / system default).
@@ -1739,7 +511,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.5 — 2026-05-01
+## [1.0.5] — 2026-05-01
 
 ### Fixed
 - **Send button silently dropped messages on a "zombie" session.** When
@@ -1856,7 +628,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.4 — 2026-05-01
+## [1.0.4] — 2026-05-01
 
 ### Fixed
 - **`runOneShot` no longer silently returns when `sshClient` is null.**
@@ -1880,7 +652,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.3 — 2026-05-01
+## [1.0.3] — 2026-05-01
 
 ### Fixed
 
@@ -1942,7 +714,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.2 — 2026-04-30
+## [1.0.2] — 2026-04-30
 
 ### Added
 
@@ -1982,12 +754,12 @@ Now live on Google Play.
 
 - Sentry's auto-init ContentProviders crashed the app on launch when
   `BuildConfig.SENTRY_DSN` was blank (debug builds). Auto-init is now
-  disabled in `AndroidManifest.xml`; init lives in `SshAiApp.onCreate`
+  disabled in `AndroidManifest.xml`; init lives in `ConchApp.onCreate`
   guarded by DSN-not-blank and the user opt-out.
 
 ---
 
-## 1.0.1 — 2026-04-29
+## [1.0.1] — 2026-04-29
 
 ### Added
 
@@ -2004,7 +776,7 @@ Now live on Google Play.
 
 ---
 
-## 1.0.0 — 2026-04-29
+## [1.0.0] — 2026-04-29
 
 First public release.
 
@@ -2057,47 +829,13 @@ First public release.
 - 160 unit tests, no device required to run them.
 - Release builds use R8 + resource shrinking (~5.5 MiB APK vs ~24 MiB debug).
 
-[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v0.7.1...HEAD
-[0.6.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.0
-[0.5.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.2
-[0.5.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.5.0
-[0.4.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.9
-[0.4.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.8
-[0.4.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.7
-[0.4.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.4
-[0.4.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.3
-[0.4.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.2
-[0.4.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.1
-[0.4.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.4.0
-[0.2.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.8
-[0.2.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.7
-[0.2.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.6
-[0.2.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.5
-[0.2.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.4
-[0.2.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.3
-[0.3.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.9
-[0.3.8]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.8
-[0.3.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.7
-[0.3.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.6
-[0.3.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.5
-[0.3.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.4
-[0.3.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.3
-[0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
-[0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
-[0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
-[0.7.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.3
-[0.7.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.1
-[0.7.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.0
-[0.6.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.5
-[0.6.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.4
-[0.6.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.3
-[0.6.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.2
-[0.6.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.6.1
-[0.2.14]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.14
-[0.2.13]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.13
-[0.2.12]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.12
-[0.2.11]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.11
-[0.2.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.9
-[0.2.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.2
-[0.2.1-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.1-beta
-[0.2.0-beta]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.2.0-beta
+[Unreleased]: https://github.com/nikitaeight24family/Conch/compare/v1.0.9...HEAD
+[1.0.9]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.9
+[1.0.7]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.7
+[1.0.6]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.6
+[1.0.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.5
+[1.0.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.4
+[1.0.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.3
+[1.0.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.2
+[1.0.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.1
+[1.0.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v1.0.0

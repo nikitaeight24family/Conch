@@ -397,16 +397,49 @@ internal class ChatViewModelTailPoll(
         // case, costs nothing at all.
         val spec = AgentSpecRegistry[agent]
         val recWindow = ArrayDeque<List<String>>()
+        // ⛔ THE OPEN TURN MUST NOT SCROLL OUT OF THE WINDOW.
+        //
+        // The window is bounded for cost, and on a long turn the `task_started`
+        // that opened it fell off the front — leaving inferTurnState with no
+        // boundary and nothing but a staleness guess off the file's mtime. An
+        // image generation writes nothing for minutes, so the guess said the
+        // turn was over while the owner's terminal read `Working (16m 31s)`.
+        //
+        // The CLI does not guess: it opened a turn and has not closed it. Keep
+        // that one fact. The last UNCLOSED start marker is pinned and re-inserted
+        // at the head of every verdict, so the turn stays open for exactly as
+        // long as it is open, whatever the window forgets.
+        var pinnedStart: List<String>? = null
+        fun notePinned(rec: List<String>) {
+            when (spec.turnEdge(rec.firstOrNull().orEmpty())) {
+                ai.eight24family.conch.agent.spec.TurnEdge.START -> pinnedStart = rec
+                ai.eight24family.conch.agent.spec.TurnEdge.END -> pinnedStart = null
+                ai.eight24family.conch.agent.spec.TurnEdge.NONE -> Unit
+            }
+        }
         fun trimWindow() { while (recWindow.size > TURN_RECORD_WINDOW) recWindow.removeFirst() }
+        /** The window as the spec should see it — with the open turn restored. */
+        fun turnRecords(): List<List<String>> {
+            val w = recWindow.toList()
+            val pin = pinnedStart ?: return w
+            return if (w.any { it === pin }) w else listOf(pin) + w
+        }
         fun reseedWindow() {
             recWindow.clear()
-            recWindow.addAll(spec.projectTurnStateRecords(cache.tailLines(sessionId).asSequence()))
+            pinnedStart = null
+            val all = spec.projectTurnStateRecords(cache.tailLines(sessionId).asSequence())
+            // Read the boundaries over EVERYTHING the cache holds before trimming,
+            // so a turn opened thousands of records ago is known on the first tick.
+            all.forEach(::notePinned)
+            recWindow.addAll(all)
             trimWindow()
         }
         fun growWindow(newBytes: ByteArray) {
             if (newBytes.isEmpty()) return
             val lines = String(newBytes, Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }
-            recWindow.addAll(spec.projectTurnStateRecords(lines))
+            val fresh = spec.projectTurnStateRecords(lines)
+            fresh.forEach(::notePinned)
+            recWindow.addAll(fresh)
             trimWindow()
         }
         reseedWindow()
@@ -414,7 +447,7 @@ internal class ChatViewModelTailPoll(
         // the CLI (or another device) started while this chat was closed, the
         // instant it opens — the same thing the old remote projection did on its
         // pre-probe, minus the round trip.
-        val preSig = spec.inferTurnState(recWindow.toList(), preFrozenMs)
+        val preSig = spec.inferTurnState(turnRecords(), preFrozenMs)
         android.util.Log.i(
             "Conch-Tail",
             "turn-state window seeded sid=${sessionId.take(8)} agent=$agent records=${recWindow.size} " +
@@ -722,14 +755,37 @@ internal class ChatViewModelTailPoll(
             // its bytes land — not one poll interval later. `frozenForMs` still
             // comes from the server (its own clock at both ends, so it stays
             // skew-proof); everything else is derived from bytes we already hold.
-            val sig = spec.inferTurnState(recWindow.toList(), stat.frozenForMs)
+            val sig = spec.inferTurnState(turnRecords(), stat.frozenForMs)
+            // ⛔ "THE TURN IS OVER" IS UNKNOWABLE WHILE THE FILE HAS BYTES WE
+            // HAVE NOT READ.
+            //
+            // The window is seeded from the CACHE when a chat opens, and a cache
+            // that is behind ends at the PREVIOUS turn's `task_complete`. So the
+            // first verdict after opening a chat whose session is mid-turn said
+            // "complete" — with perfect confidence, off records minutes old —
+            // and that edge is what drives the completion buzz. The owner felt
+            // it on 2026-09-12: three pulses and "turn complete" on the phone
+            // while his terminal read `Working (16m 31s)`, because the app had
+            // just been restarted and had not yet read the turn that was running.
+            //
+            // A completion claim therefore requires having read to the end of
+            // the file at least once. `inFlight` is left alone — being behind is
+            // itself evidence something is writing, not evidence it stopped.
+            val readToEnd = size <= lastOffset
+            if (!readToEnd && sig.turnComplete) {
+                android.util.Log.i(
+                    "Conch-Tail",
+                    "withholding turn-complete sid=${sessionId.take(8)} — " +
+                        "$lastOffset of $size read; the verdict is from stale records",
+                )
+            }
             val probe = stat.copy(
-                inFlight = sig.inFlight,
+                inFlight = sig.inFlight || !readToEnd,
                 turnStartMs = sig.turnStartMs,
                 thinking = sig.thinking,
                 tokens = sig.tokens,
                 waitingForUser = sig.waitingForUser,
-                turnComplete = sig.turnComplete,
+                turnComplete = sig.turnComplete && readToEnd,
             )
             // Same heartbeat rule as the seed: no writes for a minute means the
             // turn is over, however unfinished the last record looks.
@@ -1732,10 +1788,23 @@ internal class ChatViewModelTailPoll(
         internal fun fileWorking(curWorking: Boolean, liveStuck: Boolean, inFlight: Boolean): Boolean =
             (curWorking && !liveStuck) || inFlight
 
-        /** A turn whose file has not been written for this long is not running.
-         *  Long enough that a slow tool call cannot trip it, short enough that a
-         *  dead writer's spinner does not outlive the turn by half an hour. */
-        internal const val STALE_TURN_MS = 60_000L
+        /**
+         * A turn whose file has not been written for this long is not running.
+         *
+         * ⛔ 60 s WAS EXACTLY THE FLOOR OF NORMAL OPERATION, WHICH IS WHY THE
+         * SPINNER DID NOT MATCH THE CLI. Measured on the owner's live rollout
+         * 2026-09-12: the largest quiet gaps between consecutive records were
+         * 61, 58, 56, 56, 47… seconds. A turn doing real work therefore crossed
+         * this threshold routinely, and the chat said "not running" while his
+         * terminal said `Working`. A guard set at the measured maximum is not a
+         * guard, it is a coin toss.
+         *
+         * Five minutes is five times the worst observed gap and still catches a
+         * writer that genuinely died. It is also only the FALLBACK: when the
+         * server can prove who holds the session ([PollProbe.writerAlive]) that
+         * proof wins outright — see [heartbeatInFlight].
+         */
+        internal const val STALE_TURN_MS = 5 * 60_000L
 
         /** How many projected turn-state records to keep. A long tool chain emits
          *  ~2 lines per round; 200 lost the turn-start at scale (audit

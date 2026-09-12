@@ -137,6 +137,8 @@ class AppPreferences(private val context: Context) {
     private val skNotificationVisibilityKey = stringPreferencesKey("sk_notification_visibility")
     private val oemAutoStartAcknowledgedKey = booleanPreferencesKey("oem_autostart_acknowledged")
     private val permissionGuardShownKey = booleanPreferencesKey("permission_guard_shown")
+    private val handoffAdviceSuppressedKey = booleanPreferencesKey("handoff_advice_suppressed")
+    private val codexAutoUpdatedKey = stringPreferencesKey("codex_auto_updated_servers")
 
     /**
      * Last-known display labels for the well-known model aliases
@@ -380,6 +382,81 @@ class AppPreferences(private val context: Context) {
     // A queued entry is NOT rendered as a chat bubble — the bubble only ever
     // appears when a turn actually starts — so restoring one can never double a
     // message on screen.
+    // ─────────────── AUTO-CONTINUE AFTER A USAGE LIMIT ───────────────
+
+    private fun autoResumeKey(chatId: String) = stringPreferencesKey("auto_resume_$chatId")
+
+    /**
+     * A turn that a usage limit cut short, and what to do when the limit lifts.
+     *
+     * @param resetAtMs the PROVIDER's own reset moment, never a projection —
+     *   see UsageProbe.codexReset. 0 when the provider gave none, in which case
+     *   nothing is scheduled and the row says so.
+     * @param prompt the user's own last words, captured at ARMING time. It must
+     *   be captured then and not re-derived later: the arming signals
+     *   (`_cliLimitReset` / `_cliLimitHit`) are cleared the moment any text
+     *   lands at the tail, so the state is gone by the time it is needed.
+     * @param enabled false once the user taps cancel. The row stays — it flips
+     *   to an offer — because silently forgetting is the thing that makes people
+     *   check their phone at 3am.
+     */
+    data class AutoResume(
+        val resetAtMs: Long,
+        val prompt: String,
+        val enabled: Boolean,
+        /** Where to send it. Persisted because the chat that armed this may be
+         *  closed when the moment comes — and then there is no ViewModel left
+         *  to remember which server and which CLI this belonged to. */
+        val serverId: String = "",
+        val agent: String = "",
+    )
+
+    suspend fun autoResumeOnce(chatId: String): AutoResume? {
+        val raw = context.dataStore.data.first()[autoResumeKey(chatId)] ?: return null
+        return parseAutoResume(raw)
+    }
+
+    fun autoResume(chatId: String): Flow<AutoResume?> =
+        context.dataStore.data.map { it[autoResumeKey(chatId)]?.let(::parseAutoResume) }
+
+    suspend fun setAutoResume(chatId: String, value: AutoResume?) {
+        context.dataStore.edit { prefs ->
+            if (value == null) prefs.remove(autoResumeKey(chatId))
+            else prefs[autoResumeKey(chatId)] = org.json.JSONObject()
+                .put("r", value.resetAtMs)
+                .put("p", value.prompt)
+                .put("e", value.enabled)
+                .put("s", value.serverId)
+                .put("a", value.agent)
+                .toString()
+        }
+    }
+
+    /** Every chat currently armed — what a background ticker iterates when the
+     *  chat itself is closed and no ViewModel exists to hold the schedule. */
+    suspend fun armedAutoResumes(): Map<String, AutoResume> {
+        val all = context.dataStore.data.first().asMap()
+        return all.entries.mapNotNull { (k, v) ->
+            val name = k.name
+            if (!name.startsWith("auto_resume_")) return@mapNotNull null
+            val parsed = (v as? String)?.let(::parseAutoResume) ?: return@mapNotNull null
+            if (!parsed.enabled) return@mapNotNull null
+            name.removePrefix("auto_resume_") to parsed
+        }.toMap()
+    }
+
+    private fun parseAutoResume(raw: String): AutoResume? =
+        SilentlyTry.loggedOrElse("Conch-Prefs", "parse auto-resume", null) {
+            val o = org.json.JSONObject(raw)
+            AutoResume(
+                resetAtMs = o.optLong("r", 0L),
+                prompt = o.optString("p"),
+                enabled = o.optBoolean("e", true),
+                serverId = o.optString("s"),
+                agent = o.optString("a"),
+            )
+        }
+
     private fun unsentQueueKey(chatId: String) = stringPreferencesKey("unsent_queue_$chatId")
 
     /** One parked message: the full prompt, the clean text to show in the strip,
@@ -1127,6 +1204,51 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setOemAutoStartAcknowledged(value: Boolean) {
         context.dataStore.edit { it[oemAutoStartAcknowledgedKey] = value }
+    }
+
+    /**
+     * Did the user tick "don't warn me again" on the session-handoff advice?
+     *
+     * The dialog explains what continuing on the phone does to a session a
+     * terminal holds, and how to start the terminal side so nothing has to be
+     * ended. It is worth saying once; saying it every handoff would be the he
+     * ruled out — hence a real switch, not a per-session flag.
+     */
+    val handoffAdviceSuppressed: Flow<Boolean> = context.dataStore.data.map { p ->
+        p[handoffAdviceSuppressedKey] ?: false
+    }
+
+    suspend fun setHandoffAdviceSuppressed(value: Boolean) {
+        context.dataStore.edit { it[handoffAdviceSuppressedKey] = value }
+    }
+
+    /**
+     * Servers whose codex Conch already tried to auto-update in pursuit of the
+     * shared app-server, as `<serverId>@<version it was tried against>`,
+     * newline-separated.
+     *
+     * ⛔ ONCE PER SERVER **PER VERSION**. The update is automatic (no button —
+     * the owner's rule is that the app does it), which makes a loop the real
+     * danger: a box whose codex cannot be updated from here would otherwise
+     * re-run the whole installer cascade on every handoff, forever. But a flat
+     * "tried once, never again" is its own trap: the user updates codex by hand
+     * six months later, and the app would still be sitting on a stamp from the
+     * old binary. Stamping the VERSION means a box that CHANGED is allowed one
+     * fresh attempt, and a box that did not is left alone.
+     */
+    val codexAutoUpdatedServers: Flow<Set<String>> = context.dataStore.data.map { p ->
+        p[codexAutoUpdatedKey].orEmpty().lineSequence().filter { it.isNotBlank() }.toSet()
+    }
+
+    suspend fun markCodexAutoUpdated(serverId: String, version: String) {
+        context.dataStore.edit { p ->
+            val cur = p[codexAutoUpdatedKey].orEmpty().lineSequence().filter { it.isNotBlank() }
+                // Drop any older stamp for this server — one line per server,
+                // holding the last version we attempted against.
+                .filterNot { it.substringBeforeLast('@') == serverId }
+                .toSet()
+            p[codexAutoUpdatedKey] = (cur + "$serverId@$version").joinToString("\n")
+        }
     }
 
     /** Have we ever shown the permission-guard sheet to the user? Used

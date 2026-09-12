@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Autorenew
@@ -135,6 +137,12 @@ internal fun ChatPromptHost(
     // reply finishes — then they're sent in order.
     if (queuedMessages.isNotEmpty()) {
         QueuedMessagesStrip(queued = queuedMessages, onCancel = { vm.cancelQueued(it) })
+    }
+    // Work a usage limit cut short, and when it will carry on by itself.
+    val autoResume by vm.autoResume.collectAsState()
+    val autoResumeIn by vm.autoResumeResetIn.collectAsState()
+    autoResume?.let {
+        AutoResumeStrip(armed = it, resetIn = autoResumeIn, onToggle = { vm.toggleAutoResume() })
     }
     PromptBar(
         input = input,
@@ -305,6 +313,83 @@ private fun LoopStrip(
  * a ✕ to take it back before it's sent. Drained one-per-turn by the VM once the
  * current reply finishes (see [ChatViewModel.drainOutbox]).
  */
+/**
+ * Auto-continue after a usage limit — CONCH'S OWN CHROME, not a chat row.
+ *
+ * ⛔ IT WAS AN EventNote IN THE TRANSCRIPT AND THAT WAS THE BUG. Rendered among
+ * the agent's rows it read as something the agent had said — and a line the app
+ * writes about its own future behaviour must never be mistakable for the
+ * session's content.
+ *
+ * So it lives where the app's other self-statements live: beside [LoopStrip] and
+ * [QueuedMessagesStrip], above the composer. Deliberately NOT identical to the
+ * queue strip — that one is about text you typed and can still take back, this
+ * one is about the app acting on its own later. Same family, different member:
+ * the tertiary accent rather than the primary, a squarer corner, and a leading
+ * rule down its left edge.
+ *
+ * The action is a WORD, not an icon. "Cancel" on an ✕ is fine for a message you
+ * queued a second ago; switching off an automatic action deserves to say what
+ * it does, and to be as easy to switch back on.
+ */
+@Composable
+private fun AutoResumeStrip(
+    armed: ai.eight24family.conch.data.prefs.AppPreferences.AutoResume,
+    resetIn: String,
+    onToggle: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.tertiary
+    val on = armed.enabled
+    val tint = if (on) accent else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(tint.copy(alpha = if (on) 0.10f else 0.05f))
+            .border(1.dp, tint.copy(alpha = if (on) 0.35f else 0.18f), RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The left rule is the whole visual difference at a glance: the queue
+        // strip has none, so the two never read as the same thing.
+        Box(
+            Modifier
+                .width(3.dp)
+                .height(34.dp)
+                .background(tint.copy(alpha = if (on) 0.8f else 0.35f)),
+        )
+        Icon(
+            Icons.Filled.Autorenew,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.padding(start = 8.dp).size(15.dp),
+        )
+        Text(
+            text = when {
+                on && resetIn.isNotBlank() -> "Continuing in $resetIn, when the limit resets"
+                on -> "Continuing when the limit resets"
+                resetIn.isNotBlank() -> "Auto-continue off · limit resets in $resetIn"
+                else -> "Auto-continue off"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 8.dp, top = 7.dp, bottom = 7.dp),
+        )
+        androidx.compose.material3.TextButton(
+            onClick = onToggle,
+            modifier = Modifier.padding(end = 2.dp),
+        ) {
+            Text(
+                if (on) "Cancel" else "Continue",
+                style = MaterialTheme.typography.labelLarge,
+                color = accent,
+            )
+        }
+    }
+}
+
 @Composable
 private fun QueuedMessagesStrip(
     queued: List<ChatViewModel.QueuedMessage>,

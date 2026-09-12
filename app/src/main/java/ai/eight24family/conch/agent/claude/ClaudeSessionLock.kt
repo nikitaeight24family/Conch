@@ -93,6 +93,11 @@ internal object ClaudeSessionLock {
             why = "a second writer would fork its history",
         )
 
+    /** The relay line — the app already continued the session here; this says
+     *  what it ended to do it. */
+    fun relayedNote(holders: List<SessionHolder.Holder>): String =
+        SessionHolder.relayedNote(holders, cli = "claude")
+
     fun takenOverNote(pids: List<Long>): String = SessionHolder.takenOverNote(pids)
 
     fun takeoverFailedNote(): String = SessionHolder.takeoverFailedNote("claude")

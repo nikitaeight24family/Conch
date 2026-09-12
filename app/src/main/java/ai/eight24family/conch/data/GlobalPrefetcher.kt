@@ -460,7 +460,9 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
                 // the guard costs nothing in coverage.
                 val locallyIdle = System.currentTimeMillis() -
                     historyCache.lastWriteMs(s.id) > RETAIL_MIN_LOCAL_IDLE_MS
-                if (allowRetail && locallyIdle && retailed < RETAILS_PER_SWEEP) {
+                if (allowRetail && locallyIdle && retailed < RETAILS_PER_SWEEP &&
+                    !projectedAlready(s.id)
+                ) {
                     val ok = tailFirstPreload(client, s, remote)
                     if (ok) retailed++
                     android.util.Log.d(
@@ -522,6 +524,18 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
      * first kept byte ([HistoryCache.saveTail] then owns atomicity + the seen
      * rebase). Never marks live activity. Returns success.
      */
+    /**
+     * ⛔ NEVER DOWNGRADE A PROJECTED SESSION TO A BYTE TAIL.
+     *
+     * A projected body holds EVERY record of the session; this preload holds the
+     * last N bytes, which on a real rollout is a dozen records. Both write the
+     * same cache file, so a background sweep could silently replace the whole
+     * session with a fragment and the chat would flip between them (owner,
+     * 2026-09-12). The better body wins, and it is never this one.
+     */
+    private fun projectedAlready(sessionId: String): Boolean =
+        historyCache.isProjected(sessionId)
+
     private fun tailFirstPreload(
         client: net.schmizz.sshj.SSHClient,
         s: ai.eight24family.conch.agent.RemoteSession,
@@ -862,7 +876,8 @@ val cmd = "stat -c '%s %n' " + quoted + " 2>/dev/null || " +
                         // the WHOLE rollout. Cache just the display tail instead:
                         // bounded bytes, instant open, and the open path knows
                         // the head is missing via the .base sidecar.
-                        val ok = tailFirstPreload(client, s, remoteBytes)
+                        val ok = !projectedAlready(s.id) &&
+                            tailFirstPreload(client, s, remoteBytes)
                         android.util.Log.d(
                             TAG,
                             "    tail-first ${s.id.take(8)} — ${remoteBytes}B over cap, " +

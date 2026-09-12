@@ -211,6 +211,16 @@ class AgentSessionManager(
         }
     }
 
+    /**
+     * A live session already resuming this CLI-side id, whatever chat opened it.
+     *
+     * Used by the auto-continue ticker: with the chat closed there is no
+     * ViewModel, and the only way to carry the work on without launching a new
+     * process is to hand the prompt to the session that is already up.
+     */
+    fun aliveByResumeId(resumeId: String): AgentSession? =
+        sessions.values.firstOrNull { it.isAlive() && it.agentSessionId == resumeId }
+
     fun findAnyAlive(serverId: String, agent: Agent): AgentSession? {
         val prefix = "$serverId:${agent.name}:"
         return sessions.entries.firstOrNull { (k, v) ->

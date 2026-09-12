@@ -411,6 +411,39 @@ object CodexMessageParser {
                 val args = payload.string("arguments").orEmpty()
                 listOf(AgentMessage.ToolUse(uuid(), name, args))
             }
+            // ⛔ THE TOOL CALLS THE CLI ACTUALLY PRINTS. 563 of these in the
+            // owner's session — every `Ran <command>` line the terminal shows —
+            // and NOTHING routed them: they fell to the generic label, which
+            // renders "custom tool call · exec" and stops, because `name` is in
+            // its key list and `input` is not. So the phone showed a column of
+            // identical empty rows where the CLI showed the commands.
+            //
+            // `input` is the harness's own JS call, e.g.
+            //   text(await tools.exec_command({cmd:"ls -l", "max_output_tokens":5000}));
+            // The command is the part a person reads; the wrapper is not.
+            "custom_tool_call" -> {
+                val name = payload.string("name") ?: "tool"
+                val input = payload.string("input").orEmpty()
+                val cmd = CMD_IN_INPUT.find(input)?.groupValues?.get(1)
+                    ?.replace("\\\"", "\"")?.replace("\\\\", "\\")
+                listOf(AgentMessage.ToolUse(uuid(), name, cmd ?: input))
+            }
+            // Its output. Same story, and this one carries what the command
+            // PRINTED — the `output` array of {type,text} parts that
+            // extractOutputText already knows how to flatten.
+            "custom_tool_call_output" -> {
+                val out = payload["output"]?.let { extractOutputText(it) }.orEmpty()
+                val isError = out.contains("exited with code", ignoreCase = true) &&
+                    !out.contains("exited with code 0")
+                listOf(
+                    AgentMessage.ToolResult(
+                        id = uuid(),
+                        toolUseId = payload.string("call_id").orEmpty(),
+                        output = out,
+                        isError = isError,
+                    )
+                )
+            }
             "function_call_output" -> {
                 val output = payload["output"]?.let { extractOutputText(it) }.orEmpty()
                 val isError = output.contains("exited with code", ignoreCase = true) &&
@@ -492,7 +525,36 @@ object CodexMessageParser {
                     ms?.let { "${it / 1000}s" },
                     cost?.let { "\$$it" }
                 )
-                listOf(note("turn complete${if (parts.isEmpty()) "" else " · " + parts.joinToString(" · ")}"))
+                // ⛔ A TURN THAT ENDED ON AN ERROR DID NOT "COMPLETE".
+                // The CLI prints the reason — the owner's session ended with
+                // "Your workspace is out of credits" — and this drew a calm grey
+                // "turn complete" over it, hiding why the work stopped.
+                val err = SilentlyTry.logged("Conch-CodexParse", "read task_complete error") {
+                    payload["error"]?.jsonObject?.string("message")
+                } ?: payload.string("error")
+                // ⛔ AND THE ROW NEEDS A STABLE ID. With uuid() a re-parse of the
+                // same record (a projected reload beside an incremental append)
+                // produced a SECOND identical row — two "turn complete · 3171s"
+                // lines on the owner's phone, 2026-09-12 — because dedup keys on
+                // the id.
+                val doneId = stableId(rawLine, "done")
+                if (!err.isNullOrBlank()) {
+                    listOf(
+                        note(
+                            "turn ended · ${err.take(140)}",
+                            tone = AgentMessage.EventNote.Tone.WARN,
+                            id = doneId,
+                            detail = err.takeIf { it.length > 140 },
+                        )
+                    )
+                } else {
+                    listOf(
+                        note(
+                            "turn complete${if (parts.isEmpty()) "" else " · " + parts.joinToString(" · ")}",
+                            id = doneId,
+                        )
+                    )
+                }
             }
             "turn_aborted" -> {
                 val reason = payload.string("reason") ?: "interrupted"
@@ -642,6 +704,10 @@ object CodexMessageParser {
     internal fun normalizeItemType(t: String): String =
         if (t.none { it.isUpperCase() }) t
         else t.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), "_").lowercase()
+
+    /** `cmd:"…"` inside a custom tool call's JS `input`, honouring backslash
+     *  escapes so a command containing a quote is not cut in half. */
+    private val CMD_IN_INPUT = Regex("""cmd:\s*"((?:[^"\\]|\\.)*)"""")
 
     private val NOISE_KEYS = setOf("type", "id", "session_id", "call_id", "timestamp")
 

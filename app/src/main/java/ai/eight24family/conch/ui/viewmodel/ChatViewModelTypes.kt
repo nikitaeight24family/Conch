@@ -12,7 +12,17 @@ sealed interface ChatModal {
     data object Memory : ChatModal
     data object ModelHint : ChatModal
     data class Unsupported(val name: String, val reason: String) : ChatModal
+
+    /**
+     * The relay ended a copy of this session running in a terminal on the
+     * server. Shown ONCE (the user can silence it for good) — what happened,
+     * why it had to, and how to start the terminal side so it never does.
+     */
+    data class SessionHandoff(
+        val advice: ai.eight24family.conch.agent.HandoffAdvice,
+    ) : ChatModal
 }
+
 
 enum class MemoryScope { GLOBAL, PROJECT }
 

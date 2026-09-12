@@ -727,6 +727,12 @@ esac
         "turn.started", "turn.completed", "turn.failed",
     )
 
+    override fun turnEdge(marker: String): ai.eight24family.conch.agent.spec.TurnEdge = when (marker) {
+        in CODEX_START_MARKERS -> ai.eight24family.conch.agent.spec.TurnEdge.START
+        in CODEX_DONE_MARKERS -> ai.eight24family.conch.agent.spec.TurnEdge.END
+        else -> ai.eight24family.conch.agent.spec.TurnEdge.NONE
+    }
+
     private val CODEX_START_MARKERS = setOf("task_started", "turn.started")
 
     /** Markers that CLOSE a turn (done / failed). */
