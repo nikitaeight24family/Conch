@@ -35,21 +35,6 @@ Gradleuser-home/
 # Python bytecode from the tools/ helpers (mirror scrub, ELF checks).
 __pycache__/
 *.pyc
-# Added by code-review-graph
-.code-review-graph/
 
-# Local tooling config for code-review-graph: absolute paths to THIS machine's
-# venv, plus generated skill docs. The instructions that matter live in
-# CLAUDE.md; these would only leak local paths into the public mirror.
-.mcp.json
-.claude/
-
-# Knowledge graph — derived artifact, rebuilt by the graphify PostToolUse hook.
-graphify-out/
-
-# Scratch tree for tools/build-ggml-backend-android.sh (llama.cpp clone +
-# cmake output, ~1 GB). Never committed; the recipe is the artefact.
-.ggml-backend-build/
-
-# byproduct of tools/mirror-deperson.py — a report, not source
-deperson-leftovers.txt
+# Native engine (llama.cpp) ships in the APK/Release, not the source mirror.
+app/src/main/jniLibs/
