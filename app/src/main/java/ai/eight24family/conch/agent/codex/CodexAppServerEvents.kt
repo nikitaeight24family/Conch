@@ -13,8 +13,24 @@ import kotlinx.serialization.json.jsonObject
 /**
  * `codex app-server` v2 notification → [AgentMessage] mapping — the
  * app-server twin of [CodexMessageParser] (which parses the `codex exec`
- * / rollout-file schema). Field names here are camelCase ThreadItem
- * shapes verified against the installed binary's TS bindings (0.139.0).
+ * / rollout-file schema).
+ *
+ * ⛔ THE ITEM SHAPE IS NOT STABLE ACROSS CODEX VERSIONS, AND A MISSED
+ * SHAPE READS AS "IT ANSWERED, THERE IS NOTHING THERE".
+ *
+ * These branches were written against 0.139.0's TS bindings: a camelCase
+ * variant tag with the text at the top level, `{type:"agentMessage",
+ * text:"…"}`. **0.152.0 serializes the Rust variant name and nests the
+ * text**: `{type:"AgentMessage", content:[{type:"Text", text:"…"}]}`
+ * (measured in the owner's own rollout, 2026-09-13 — `ThreadItem::
+ * AgentMessage` / `AgentMessageContent::Text` are both in the binary's
+ * symbol table). Neither half matched, so every answer fell through to
+ * the generic note: the turn completed, the usage line printed, and the
+ * bubble was empty. So: match the tag CASE-TOLERANTLY via [tagOf] and
+ * read text through [textOf], which accepts flat or nested. Add a
+ * fallback, never a replacement — both shapes stay live, because the
+ * phone and a server can run different codex builds against this same
+ * app.
  *
  * Same contract as everywhere since 2026-06-12: NOTHING is silently
  * swallowed — item types and notification methods without a tailored
@@ -33,14 +49,14 @@ internal object CodexAppServerEvents {
     fun mapItem(item: JsonObject, started: Boolean, turnId: String): List<AgentMessage> {
         val itemId = item.str("id") ?: ParserHelpers.uuid()
         val baseId = "codexapp_${turnId}_$itemId"
-        return when (val type = item.str("type")) {
+        return when (val type = tagOf(item)) {
             // Echo of our own send (or resume hydration handled by the
             // rollout-file path) — never re-render.
             "userMessage", "hookPrompt" -> emptyList()
 
             "agentMessage" -> {
                 if (started) return emptyList()
-                val text = item.str("text").orEmpty()
+                val text = textOf(item)
                 if (text.isBlank()) emptyList()
                 // Same id the delta accumulator streams under — the final
                 // authoritative text replaces the streamed bubble in place.
@@ -50,10 +66,13 @@ internal object CodexAppServerEvents {
             "reasoning" -> {
                 if (started) return emptyList()
                 val text = SilentlyTry.logged("Conch-CodexApp", "reasoning summary") {
-                    item["summary"]?.jsonArray
-                        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-                        ?.joinToString(" ")
-                }.orEmpty()
+                    item["summary"]?.jsonArray?.mapNotNull { el ->
+                        // 0.139: a plain string per summary part. Newer builds
+                        // wrap each part in an object, same as message content.
+                        (el as? JsonPrimitive)?.contentOrNull
+                            ?: (el as? JsonObject)?.str("text")
+                    }?.joinToString(" ")
+                }.orEmpty().ifBlank { textOf(item) }
                 if (text.isBlank()) emptyList()
                 else listOf(CodexMessageParser.note(
                     "thinking · ${text.take(120)}",
@@ -63,13 +82,13 @@ internal object CodexAppServerEvents {
             }
 
             "commandExecution" -> {
-                val command = item.str("command").orEmpty()
+                val command = item.strAny("command", "command_line", "commandLine").orEmpty()
                 if (started) {
                     listOf(CodexMessageParser.note("exec · ${command.take(120)}", id = "$baseId-exec"))
                 } else {
-                    val exit = item.str("exitCode")?.toLongOrNull()
+                    val exit = item.strAny("exitCode", "exit_code")?.toLongOrNull()
                     val status = item.str("status").orEmpty()
-                    val out = item.str("aggregatedOutput").orEmpty()
+                    val out = item.strAny("aggregatedOutput", "aggregated_output", "output").orEmpty()
                     listOf(
                         AgentMessage.ToolResult(
                             id = ParserHelpers.uuid(),
@@ -140,7 +159,7 @@ internal object CodexAppServerEvents {
 
             "plan" -> {
                 if (started) return emptyList()
-                val text = item.str("text").orEmpty()
+                val text = textOf(item)
                 if (text.isBlank()) emptyList()
                 else listOf(CodexMessageParser.note(
                     "plan · ${text.take(120)}",
@@ -260,4 +279,34 @@ internal object CodexAppServerEvents {
             tone = AgentMessage.EventNote.Tone.WARN,
         )
     )
+
+    /** The item's variant tag, normalized to the camelCase spelling these
+     *  branches are written in. 0.139 sent `agentMessage`, 0.152 sends the
+     *  Rust variant `AgentMessage`; lowering the first letter maps every
+     *  PascalCase variant onto its old name (`CommandExecution` →
+     *  `commandExecution`, `McpToolCall` → `mcpToolCall`) and leaves an
+     *  already-camelCase tag untouched. Null stays null — the caller
+     *  distinguishes "no tag" (drop) from "unknown tag" (generic note). */
+    private fun tagOf(item: JsonObject): String? =
+        item.str("type")?.replaceFirstChar { it.lowercaseChar() }
+
+    /** Text of an item, flat or nested. 0.139: `text` at the top level.
+     *  0.152: `content` (or `contentItems`) — a list of parts, each with
+     *  its own `text`, joined in order. Parts with no text (images, tool
+     *  payloads) contribute nothing rather than a placeholder. */
+    private fun textOf(item: JsonObject): String {
+        item.str("text")?.takeIf { it.isNotBlank() }?.let { return it }
+        val parts = SilentlyTry.logged("Conch-CodexApp", "item content") {
+            (item["content"] ?: item["contentItems"])?.jsonArray?.mapNotNull { el ->
+                (el as? JsonPrimitive)?.contentOrNull ?: (el as? JsonObject)?.str("text")
+            }
+        }.orEmpty()
+        return parts.joinToString("")
+    }
+
+    /** First of [keys] the item actually carries. Codex has renamed fields
+     *  between camelCase and snake_case more than once; asking for both
+     *  costs one map lookup and survives the next rename. */
+    private fun JsonObject.strAny(vararg keys: String): String? =
+        keys.firstNotNullOfOrNull { str(it) }
 }

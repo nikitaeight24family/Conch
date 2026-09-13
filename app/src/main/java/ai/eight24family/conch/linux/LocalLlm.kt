@@ -103,7 +103,9 @@ object LocalLlm {
          *  template, which is what makes a store download drive Codex out of the
          *  box: llama.cpp injects that family's tools and uses its matching tool
          *  parser (measured — Llama-3.2 fires real tool calls on its native
-         *  template). The engine overrides only for Qwen (agent.jinja) — see
+         *  template). The engine overrides where the family's own template
+         *  RAISES and so cannot even be rendered into a parser: Qwen
+         *  (agent.jinja) and Gemma (gemma.jinja) — see
          *  [LocalLlmEngine.agentTemplateAssetFor] for why. Set this by hand only
          *  after measuring a family needs it AND the substitute matches the
          *  model's trained tool format; a mismatch cancels the stream. */

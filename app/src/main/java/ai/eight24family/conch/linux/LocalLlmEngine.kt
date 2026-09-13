@@ -308,18 +308,41 @@ object LocalLlmEngine {
      *  `<tool_call>` template on Gemma makes llama.cpp build a peg parser for a
      *  format Gemma wasn't trained on, so the first plain reply fails to parse
      *  and the task is CANCELLED mid-stream ("stream disconnected"). A model
-     *  whose native template has NO tool section (Gemma) simply chats without
-     *  tool calls — clean, never a crash; that is the honest floor for it.
+     *  whose native template has NO tool section simply chats without tool
+     *  calls — clean, never a crash; that is the honest floor for it.
      *
-     *  The ONE override: Qwen. Its native template hard-raises on Codex's
-     *  non-first system message, and Qwen is trained on the Hermes `<tool_call>`
-     *  format, so agent.jinja (ChatML + Hermes, transcript-tolerant) is BOTH
-     *  what it needs and what it speaks — verified tool-calling. Add another
-     *  override only after measuring that a family needs one AND that the
-     *  substitute matches what the model was trained to emit. */
+     *  BUT the floor is only reachable if the template RENDERS. llama.cpp b10712
+     *  builds its chat parser by rendering the template against probe
+     *  transcripts, and a template that raises kills the request with 400
+     *  "Unable to generate parser for this template" before one token is
+     *  generated — Gemma's stock template raises `Conversation roles must
+     *  alternate user/assistant/...` on exactly the system+tool transcript Codex
+     *  sends (measured on the owner's phone 2026-09-13, gemma-3-4b: two 400s and
+     *  a dead session; upstream ggml-org/llama.cpp#20733 is the same bug, open).
+     *  So an override is needed wherever the family template raises — grep the
+     *  GGUF header for `raise_exception`: Qwen (8–9 sites) and Gemma (2) do,
+     *  LFM2 / Phi / SmolLM / Granite (0) do not, Llama's 2 are guarded branches
+     *  its own tool path never takes (measured firing a real `shell` call).
+     *
+     *  The two overrides, each matched to what the model SPEAKS, not to a taste
+     *  for one format:
+     *    • Qwen → agent.jinja. Trained on the Hermes `<tool_call>` format, so
+     *      ChatML + Hermes is both transcript-tolerant and native — verified
+     *      tool-calling.
+     *    • Gemma → gemma.jinja. Gemma's OWN turn tokens with the role-order
+     *      raise removed and NO tool section: it renders, it stops on Gemma's
+     *      real EOS, and llama.cpp derives a content parser instead of a peg
+     *      parser for a syntax Gemma cannot emit. Chats, never tool-calls,
+     *      never 400s — the floor, now actually reachable.
+     *  Add another override only after measuring that a family needs one AND
+     *  that the substitute matches what the model was trained to emit. */
     private fun agentTemplateAssetFor(m: LocalLlm.Model): String? {
         val hay = (m.id + " " + m.file + " " + m.label + " " + (m.brandOrg ?: "")).lowercase()
-        return if ("qwen" in hay) "llm/agent.jinja" else null
+        return when {
+            "qwen" in hay -> "llm/agent.jinja"
+            "gemma" in hay -> "llm/gemma.jinja"
+            else -> null
+        }
     }
 
     /** Materialize the chosen template (an APK asset) as a real file for

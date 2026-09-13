@@ -1,6 +1,4 @@
-Eine Sitzung, egal welcher Bildschirm.
+Antworten erscheinen wieder, lokale Gemma-Modelle starten.
 
-• Setze am Telefon fort, was im Terminal offen blieb: Die App übernimmt beim Senden, behält den Verlauf und antwortet hier. Ohne Tippen.
-• Codex hält eine Sitzung für beide Seiten zugleich — Telefon und Terminal am selben App-Server, keiner beendet den anderen.
-• Gilt für alle Agenten, nicht nur Claude und Codex.
-• Behoben: Gemini-Sitzungen ließen sich nicht fortsetzen.
+• Behoben: Turns, die beantwortet aussahen, aber eine leere Blase zeigten. Ein neueres Codex benennt die Teile einer Antwort anders, die App las die alten Namen. Die Antwort kam an, sie wurde nur nicht angezeigt. Betrifft jeden Agenten, lokal wie auf dem Server.
+• Lokales Gemma stirbt nicht mehr beim Agentenstart und endet sauber.

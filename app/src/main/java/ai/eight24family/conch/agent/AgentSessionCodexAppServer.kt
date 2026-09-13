@@ -1272,9 +1272,17 @@ internal class AgentSessionCodexAppServer(
     private fun handleNotification(method: String, params: JsonObject) {
         when (method) {
             "item/agentMessage/delta" -> {
-                val turnId = params.str("turnId") ?: return
-                val itemId = params.str("itemId") ?: return
-                val delta = params.str("delta") ?: return
+                // Same version drift as the item shape (see CodexAppServerEvents):
+                // a renamed param here means the bubble never streams and the
+                // answer only lands when the item completes. Accept both
+                // spellings; a `return` on a miss is a silently dropped answer.
+                val turnId = params.str("turnId") ?: params.str("turn_id") ?: return
+                val itemId = params.str("itemId") ?: params.str("item_id") ?: return
+                val delta = params.str("delta")
+                    ?: params["delta"]?.let { d ->
+                        SilentlyTry.logged(tag, "delta obj") { d.jsonObject.str("text") }
+                    }
+                    ?: return
                 val key = "codexapp_${turnId}_$itemId"
                 val buf = synchronized(deltaBuffers) {
                     deltaBuffers.getOrPut(key) { StringBuilder() }.append(delta)

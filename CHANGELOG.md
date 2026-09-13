@@ -15,6 +15,33 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.7.5] — 2026-09-13
+
+An answer the app had already received was not being shown. That is fixed, and
+a local Gemma model now starts instead of dying on the first request.
+
+### Fixed
+- **Turns that looked answered and showed nothing.** Codex 0.152 renames the
+  parts of a reply — the variant tag is the Rust name and the text moved into a
+  `content` list — and the app was still reading the 0.139 spelling. Every
+  answer fell through to a generic note while the turn completed and printed its
+  usage line, so the app claimed it had answered while dropping the answer. The
+  item tag is now matched case-tolerantly and text is read flat or nested; the
+  same tolerance covers the user echo, command rows, reasoning and plans, and
+  the streaming delta. Both shapes stay supported, because the phone and a
+  server can run different Codex builds against the same app. Affected every
+  agent on that Codex, local or remote.
+- **Local Gemma models failing the moment an agent started them.** Gemma's own
+  chat template raises on the system-plus-tool transcript Codex sends, and
+  llama.cpp builds its chat parser by rendering the template — so the request
+  died with `400 Unable to generate parser for this template` before a single
+  token. Gemma now launches under a template that keeps its own turn tokens
+  (replies stop cleanly instead of running on) with the role-order check
+  removed. Gemma chats; a model that drives the shell is still the pick for
+  agent work.
+
+---
+
 ## [0.7.4] — 2026-09-13
 
 Continuing on the phone a session left open in a terminal used to park behind a
@@ -2123,6 +2150,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.7.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.5
 [0.7.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.4
 [0.7.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.3
 [0.7.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.1

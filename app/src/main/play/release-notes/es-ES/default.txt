@@ -1,6 +1,4 @@
-Una sesión, en la pantalla que tengas.
+Las respuestas vuelven a verse y los Gemma locales arrancan.
 
-• Continúa en el teléfono lo que dejaste abierto en la terminal: la app lo toma al enviar, conserva el historial y responde aquí. Sin toques.
-• Codex sostiene una sesión para ambos lados: teléfono y terminal en el mismo app-server, nadie cierra al otro.
-• Funciona con todos los agentes, no solo Claude y Codex.
-• Corregido: las sesiones de Gemini no se reanudaban.
+• Corregidos los turnos que parecian respondidos con la burbuja vacia: un Codex mas nuevo nombra de otro modo las partes de una respuesta y la app leia los nombres antiguos. La respuesta llegaba, solo no se mostraba. Afecta a todos los agentes, locales o en servidor.
+• Un Gemma local ya no muere al iniciar un agente y termina limpiamente.

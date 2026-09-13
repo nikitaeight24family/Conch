@@ -1,0 +1,61 @@
+{#- Conch template — GEMMA family.
+
+    Gemma's OWN turn tokens (<start_of_turn>/<end_of_turn>), so generation stops
+    on Gemma's real EOS, and NO foreign tool format: llama.cpp derives its chat
+    parser by RENDERING the template, so whatever it builds is something Gemma
+    was trained to emit. The one thing removed from Gemma's stock template is
+    its hard `raise_exception` on role order — Codex over /v1/responses sends a
+    system turn plus tool turns that never alternate, and the stock template
+    kills the request with 400 "Unable to generate parser for this template ...
+    Conversation roles must alternate" before a single token is generated
+    (measured on the owner's phone 2026-09-13: gemma-3-4b, llama.cpp b10712).
+    Upstream has the same class of bug open and unfixed (ggml-org/llama.cpp
+    #20733), so the patched template is the lever.
+
+    Gemma has no system role: system/developer text is folded into the first
+    user turn. Tool results arrive as user turns, labelled. Content may be a
+    string or a list of parts — /v1/responses sends both. -#}
+{%- macro flatten(c) -%}
+    {%- if c is string -%}{{- c -}}
+    {%- elif c is iterable and c is not mapping -%}
+        {%- for part in c -%}
+            {%- if part is string -%}{{- part -}}
+            {%- elif part is mapping and part.text is defined -%}{{- part.text -}}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endmacro -%}
+{{- bos_token -}}
+{%- set ns = namespace(system='', opened=false) -%}
+{%- for message in messages -%}
+    {%- if message.role == 'system' or message.role == 'developer' -%}
+        {%- set text = flatten(message.content) | trim -%}
+        {%- if text -%}
+            {%- set ns.system = ns.system + ('\n\n' if ns.system else '') + text -%}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- for message in messages -%}
+    {%- if message.role != 'system' and message.role != 'developer' -%}
+        {%- set text = flatten(message.content) | trim -%}
+        {%- if message.role == 'assistant' or message.role == 'model' -%}
+            {{- '<start_of_turn>model\n' + text + '<end_of_turn>\n' -}}
+        {%- else -%}
+            {{- '<start_of_turn>user\n' -}}
+            {%- if not ns.opened and ns.system -%}
+                {{- ns.system + '\n\n' -}}
+                {%- set ns.opened = true -%}
+            {%- endif -%}
+            {%- if message.role == 'tool' or message.role == 'function' -%}
+                {{- 'Result of ' + (message.name | default('the tool', true)) + ':\n' -}}
+            {%- endif -%}
+            {{- text + '<end_of_turn>\n' -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- if not ns.opened and ns.system -%}
+    {{- '<start_of_turn>user\n' + ns.system + '<end_of_turn>\n' -}}
+{%- endif -%}
+{%- if add_generation_prompt -%}
+    {{- '<start_of_turn>model\n' -}}
+{%- endif -%}

@@ -206,6 +206,53 @@ class CodexAppServerWireTest {
         assertTrue(CodexAppServerEvents.mapItem(item("""{"type":"agentMessage","id":"item_3"}"""), true, "turn_9").isEmpty())
     }
 
+    /** ⛔ The 0.152.0 shape. A turn that completed with an empty bubble on
+     *  the owner's phone (2026-09-13) was this: the variant tag came back as
+     *  the Rust name and the text moved into `content`, so the old branch
+     *  matched nothing and the answer fell through to a generic note. */
+    @Test
+    fun `PascalCase AgentMessage with nested content still becomes AssistantText`() {
+        val out = CodexAppServerEvents.mapItem(
+            item(
+                """{"type":"AgentMessage","id":"msg_7",
+                     "content":[{"type":"Text","text":"hi "},{"type":"Text","text":"there"}]}""",
+            ),
+            started = false, turnId = "turn_9",
+        )
+        assertEquals(1, out.size)
+        val a = out.first() as AgentMessage.AssistantText
+        assertEquals("codexapp_turn_9_msg_7", a.id)
+        assertEquals("hi there", a.text)
+    }
+
+    /** The user's own echo must stay dropped under the new spelling too —
+     *  rendering it would double every prompt in the transcript. */
+    @Test
+    fun `PascalCase UserMessage is still dropped`() {
+        assertTrue(
+            CodexAppServerEvents.mapItem(
+                item("""{"type":"UserMessage","id":"u_1","content":[{"type":"Text","text":"hi"}]}"""),
+                started = false, turnId = "turn_9",
+            ).isEmpty(),
+        )
+    }
+
+    /** PascalCase tool rows keep their tailored rendering (a generic note
+     *  would lose the exit code, and with it the error colour). */
+    @Test
+    fun `PascalCase CommandExecution still maps to a ToolResult`() {
+        val done = CodexAppServerEvents.mapItem(
+            item(
+                """{"type":"CommandExecution","id":"c_1","command":"ls","exit_code":"1",
+                     "status":"failed","aggregated_output":"boom"}""",
+            ),
+            started = false, turnId = "turn_2",
+        )
+        val r = done.first() as AgentMessage.ToolResult
+        assertTrue(r.isError)
+        assertTrue(r.output.contains("boom"))
+    }
+
     @Test
     fun `commandExecution maps exec note then ToolResult with error flag`() {
         val started = CodexAppServerEvents.mapItem(

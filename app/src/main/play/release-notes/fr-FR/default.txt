@@ -1,6 +1,4 @@
-Une session, quel que soit l'écran.
+Les reponses reapparaissent et les Gemma locaux demarrent.
 
-• Reprenez au téléphone ce qui est resté ouvert dans un terminal : l'app récupère à l'envoi, garde l'historique et répond ici. Sans geste.
-• Codex tient une session pour les deux côtés : téléphone et terminal sur le même app-server, aucun ne coupe l'autre.
-• Fonctionne pour tous les agents, pas seulement Claude et Codex.
-• Corrigé : les sessions Gemini ne reprenaient pas.
+• Corrige : des tours qui semblaient repondus avec une bulle vide. Un Codex plus recent nomme autrement les parties d'une reponse, l'app lisait les anciens noms. La reponse arrivait, elle n'etait pas affichee. Concerne tous les agents, locaux ou sur serveur.
+• Un Gemma local ne meurt plus au lancement d'un agent et s'arrete proprement.
