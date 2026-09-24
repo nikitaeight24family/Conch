@@ -189,6 +189,85 @@ internal object CodexAppServerWire {
         }
     }.toString()
 
+    /**
+     * Fold more input into the turn that is RUNNING (`turn/steer`) — what
+     * pressing Enter mid-turn does in codex's own TUI. Shape from the 0.156.1
+     * bindings: `{threadId, input: UserInput[], expectedTurnId}`; the server
+     * refuses when [expectedTurnId] is no longer the active turn, so a steer can
+     * never land in a turn the user did not see running. Response: `{turnId}`.
+     */
+    fun encodeTurnSteer(
+        id: Long,
+        threadId: String,
+        expectedTurnId: String,
+        text: String,
+        imagePaths: List<String> = emptyList(),
+    ): String = buildJsonObject {
+        put("method", "turn/steer")
+        put("id", id)
+        putJsonObject("params") {
+            put("threadId", threadId)
+            put("expectedTurnId", expectedTurnId)
+            putJsonArray("input") {
+                add(buildJsonObject {
+                    put("type", "text")
+                    put("text", text)
+                    putJsonArray("text_elements") {}
+                })
+                imagePaths.forEach { p ->
+                    if (p.isNotBlank()) add(buildJsonObject {
+                        put("type", "localImage")
+                        put("path", p)
+                    })
+                }
+            }
+        }
+    }.toString()
+
+    /** Compact the thread's context NOW (`thread/compact/start`, `{threadId}` →
+     *  `{}`). Progress arrives as the usual `contextCompaction` item. */
+    fun encodeThreadCompactStart(id: Long, threadId: String): String = buildJsonObject {
+        put("method", "thread/compact/start")
+        put("id", id)
+        putJsonObject("params") { put("threadId", threadId) }
+    }.toString()
+
+    /** Name the thread (`thread/name/set`, `{threadId, name}`) — the title
+     *  codex's own `resume` picker shows. */
+    fun encodeThreadSetName(id: Long, threadId: String, name: String): String = buildJsonObject {
+        put("method", "thread/name/set")
+        put("id", id)
+        putJsonObject("params") {
+            put("threadId", threadId)
+            put("name", name)
+        }
+    }.toString()
+
+    /**
+     * Branch a thread into a NEW one (`thread/fork`) — the codex twin of
+     * Claude's `--fork-session`. The source thread is read from disk and left
+     * untouched; the response carries the new `thread.id`, which becomes this
+     * chat's own resume id. Same per-thread overrides as resume.
+     */
+    fun encodeThreadFork(
+        id: Long,
+        threadId: String,
+        model: String?,
+        cwd: String?,
+        approval: AgentApprovalMode,
+    ): String = buildJsonObject {
+        put("method", "thread/fork")
+        put("id", id)
+        putJsonObject("params") {
+            put("threadId", threadId)
+            model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
+            cwd?.takeIf { it.isNotBlank() }?.let { put("cwd", it) }
+            val (policy, sandbox) = approvalToPolicy(approval)
+            put("approvalPolicy", policy)
+            put("sandbox", sandbox)
+        }
+    }.toString()
+
     fun encodeTurnInterrupt(id: Long, threadId: String, turnId: String): String = buildJsonObject {
         put("method", "turn/interrupt")
         put("id", id)

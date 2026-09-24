@@ -58,6 +58,18 @@ enum class SlashCommandKind {
      * the terminal UI, with nothing behind them to call from here.
      */
     RUN_BACKGROUND,
+    /** `/compact` in a CODEX chat — `thread/compact/start` over app-server.
+     *  Claude's `/compact` is the CLI's own command and never lands here. */
+    COMPACT_THREAD,
+    /** `/rename <title>` in a CODEX chat — `thread/name/set`. */
+    RENAME_SESSION,
+    /**
+     * `/btw <question>` — Claude's side question: answered from the session's
+     * context over the control channel (`side_question`) and NOT added to it.
+     * In the TUI it is a `local-jsx` panel, so sending the text would only
+     * have asked the model a normal, context-growing question.
+     */
+    SIDE_QUESTION,
 }
 
 data class SlashCommand(
@@ -90,6 +102,19 @@ object SlashCommands {
             SlashCommandKind.BACKGROUND_RUNNING),
         SlashCommand("stoptask", "stop one background task · /stoptask <id>",
             SlashCommandKind.STOP_TASK, acceptsArgs = true),
+        SlashCommand("btw", "quick side question · not added to the chat (Claude)",
+            SlashCommandKind.SIDE_QUESTION, acceptsArgs = true),
+    )
+
+    /**
+     * Codex's own session commands. Its app-server does NOT parse slash
+     * commands — only the TUI does — so typed as a prompt these reached the
+     * MODEL as words. Offered in Codex chats only, where the app runs each over
+     * the matching RPC. (Claude reports its own commands in `initialize`.)
+     */
+    val CODEX_NATIVE: List<SlashCommand> = listOf(
+        SlashCommand("compact", "summarise the conversation to free context", SlashCommandKind.COMPACT_THREAD),
+        SlashCommand("rename", "name this session · /rename <title>", SlashCommandKind.RENAME_SESSION, acceptsArgs = true),
     )
 
     /**

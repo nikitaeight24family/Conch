@@ -221,7 +221,21 @@ class AgentSession(
         },
         onLoopCron = { input -> _loopArmed.value = LoopWatch.readCron(input) },
         onLoopNotArmed = { _loopNotArmed.value = System.currentTimeMillis() },
+        onPromptSuggestion = { s -> _promptSuggestion.value = s },
     )
+
+    /** The CLI's guess at the next prompt, offered as a one-tap chip above the
+     *  composer. Cleared the moment anything is sent — it answers the turn that
+     *  just ended, and is stale once another one starts. */
+    private val _promptSuggestion = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val promptSuggestion: kotlinx.coroutines.flow.StateFlow<String?> = _promptSuggestion
+
+    fun clearPromptSuggestion() { _promptSuggestion.value = null }
+
+    /** `/btw` over the control channel — answered from this session's context,
+     *  never added to it. Null when there is no live Claude channel. */
+    suspend fun sideQuestion(question: String): String? =
+        if (usePersistent()) persistentStream.sideQuestion(question) else null
 
     /** A `/loop` armed by the CLI in THIS live process — null when no loop is
      *  running. Live-only on purpose: pending wakeups die with the process, so
@@ -273,6 +287,7 @@ class AgentSession(
         getState = { _state.value },
         getResumeId = { resumeId },
         setResumeId = { newId -> val was = resumeId; resumeId = newId; forkOnce = false; onResumeIdAssigned(newId, was) },
+        getForkOnce = { forkOnce },
         cwdSnapshot = { cwdSnapshot },
         getModelOverride = { modelOverride },
         getReasoningOverride = { reasoningEffortOverride },
@@ -645,6 +660,7 @@ class AgentSession(
 
     suspend fun send(text: String, imagePaths: List<String> = emptyList()) {
         val tag = "Conch-Turn"
+        _promptSuggestion.value = null
         // A new turn supersedes any rewind: the mirror may speak freely again.
         rewindSuppressed = emptySet()
         // …and it retires the standing Stop. One Stop must never become a
@@ -1054,9 +1070,41 @@ class AgentSession(
         return if (hits.isEmpty()) fromCli else hits
     }
 
-    /** Rename this session's title on the server (shows in `claude --resume`). */
-    suspend fun renameSession(title: String): Boolean =
-        usePersistent() && persistentStream.renameSession(title)
+    /** Rename this session's title on the server — `rename_session` for
+     *  Claude (shows in `claude --resume`), `thread/name/set` for Codex (shows
+     *  in `codex resume`). */
+    suspend fun renameSession(title: String): Boolean = when {
+        // A chat with no thread yet has nothing to name — opening one just for
+        // the title would mint an empty session the user never started.
+        useCodexAppServer() -> resumeId != null && codexAppServer.renameThread(title)
+        else -> usePersistent() && persistentStream.renameSession(title)
+    }
+
+    /** Can [compactNow] compact without sending the word `/compact` as a
+     *  prompt? True for Codex's app-server, whose RPC is the only way in. */
+    val compactsOverRpc: Boolean get() = useCodexAppServer()
+
+    /** Compact Codex's thread context now (`thread/compact/start`). */
+    suspend fun compactNow(): Boolean =
+        useCodexAppServer() && resumeId != null && codexAppServer.runCompact()
+
+    /** Can a message sent right now be folded into the RUNNING turn? Codex
+     *  app-server only (`turn/steer`); every other path queues. */
+    val canSteer: Boolean get() = useCodexAppServer() && codexAppServer.turnRunning()
+
+    /**
+     * Fold [text] into the running turn (Codex `turn/steer`). On success the
+     * user row is emitted here — at the moment the model actually got it, the
+     * same place a queued prompt's row appears — and the JSONL echo is deduped.
+     * False = nothing was sent; the caller keeps the message queued.
+     */
+    suspend fun steer(text: String, imagePaths: List<String> = emptyList()): Boolean {
+        if (!useCodexAppServer()) return false
+        if (!codexAppServer.steer(text, imagePaths)) return false
+        promptQueue.markSent(text, resumeId)
+        historyMod.emitMsg(AgentMessage.UserText(UUID.randomUUID().toString(), text))
+        return true
+    }
 
     /**
      * Rewind the CONVERSATION to just before the user turn [recordUuid],

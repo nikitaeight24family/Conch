@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -136,7 +139,74 @@ internal fun ChatPromptHost(
     // Messages typed mid-turn wait here (visible, cancelable) until the current
     // reply finishes — then they're sent in order.
     if (queuedMessages.isNotEmpty()) {
-        QueuedMessagesStrip(queued = queuedMessages, onCancel = { vm.cancelQueued(it) })
+        // Codex can take a queued message INTO the running turn (`turn/steer`),
+        // the way Enter does mid-turn in its own TUI. Offered, never automatic:
+        // the queue stays the default, so a mid-turn message is still visible
+        // and cancelable until the owner chooses otherwise.
+        val canSteer by vm.canSteerQueued.collectAsState()
+        QueuedMessagesStrip(
+            queued = queuedMessages,
+            onCancel = { vm.cancelQueued(it) },
+            onSteer = if (canSteer) ({ id: String -> vm.steerQueued(id) }) else null,
+        )
+    }
+    // The CLI's own guess at the next prompt (Claude `prompt_suggestion`).
+    // Only on an idle, empty composer: it answers the turn that just ended,
+    // and must never sit on top of words the owner is typing. A tap FILLS the
+    // composer — sending stays a separate, deliberate tap.
+    val suggestion by vm.promptSuggestion.collectAsState()
+    val suggestionShown = suggestion?.takeIf {
+        input.isBlank() && state !is SessionState.Working && !remoteWorking && queuedMessages.isEmpty()
+    }
+    if (suggestionShown != null) {
+        PromptSuggestionChip(
+            text = suggestionShown,
+            onUse = {
+                onInputChange(suggestionShown)
+                vm.dismissPromptSuggestion()
+            },
+            onDismiss = { vm.dismissPromptSuggestion() },
+        )
+    }
+    // `/btw` answer — outside the conversation, so a sheet and not a row.
+    val sideAnswer by vm.sideAnswer.collectAsState()
+    sideAnswer?.let { sa ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { vm.dismissSideAnswer() },
+            title = {
+                Text(
+                    "btw · " + sa.question,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            text = {
+                if (sa.pending) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("asking — not added to the chat", style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(
+                            sa.answer.orEmpty(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.dismissSideAnswer() }) { Text("Close") }
+            },
+        )
     }
     // Work a usage limit cut short, and when it will carry on by itself.
     val autoResume by vm.autoResume.collectAsState()
@@ -394,6 +464,8 @@ private fun AutoResumeStrip(
 private fun QueuedMessagesStrip(
     queued: List<ChatViewModel.QueuedMessage>,
     onCancel: (String) -> Unit,
+    /** Non-null when the running turn can take a message now (Codex steer). */
+    onSteer: ((String) -> Unit)? = null,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     Column(
@@ -452,6 +524,15 @@ private fun QueuedMessagesStrip(
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
+                if (onSteer != null) {
+                    androidx.compose.material3.TextButton(
+                        onClick = { onSteer(q.id) },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp),
+                        modifier = Modifier.height(30.dp),
+                    ) {
+                        Text("Now", style = MaterialTheme.typography.labelMedium, color = accent)
+                    }
+                }
                 IconButton(onClick = { onCancel(q.id) }, modifier = Modifier.size(34.dp)) {
                     Icon(
                         Icons.Filled.Close,
@@ -461,6 +542,47 @@ private fun QueuedMessagesStrip(
                     )
                 }
             }
+        }
+    }
+}
+
+
+/** One-tap offer of the CLI's predicted next prompt. Tap = into the composer. */
+@Composable
+private fun PromptSuggestionChip(
+    text: String,
+    onUse: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(accent.copy(alpha = 0.06f))
+            .border(1.dp, accent.copy(alpha = 0.22f), RoundedCornerShape(10.dp))
+            .clickable(onClick = onUse)
+            .padding(start = 10.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("↳", style = MaterialTheme.typography.labelLarge, color = accent)
+        Text(
+            text.replace('\n', ' '),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(vertical = 7.dp),
+        )
+        IconButton(onClick = onDismiss, modifier = Modifier.size(34.dp)) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "Dismiss suggestion",
+                tint = accent.copy(alpha = 0.7f),
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }

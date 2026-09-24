@@ -63,6 +63,9 @@ internal class AgentSessionCodexAppServer(
     private val getState: () -> SessionState,
     private val getResumeId: () -> String?,
     private val setResumeId: (String) -> Unit,
+    /** True while this chat was opened as a FORK and has not branched yet —
+     *  the next thread open is `thread/fork`, not `thread/resume`. */
+    private val getForkOnce: () -> Boolean = { false },
     private val cwdSnapshot: () -> String?,
     private val getModelOverride: () -> String?,
     private val getReasoningOverride: () -> String?,
@@ -435,11 +438,52 @@ internal class AgentSessionCodexAppServer(
      *  turn completes via turn/completed. [baseBranch] null/blank → uncommitted
      *  changes. Separate from [runTurn] on purpose — it's a distinct operation,
      *  not a chat prompt, and reusing the (tested) turn body would entangle the
-     *  two; the lifecycle (ensureReady → rpc → await turnDone) is mirrored. */
-    suspend fun runReview(baseBranch: String?): Boolean = withContext(Dispatchers.IO) {
+     *  two; the lifecycle lives in [runThreadOp]. */
+    suspend fun runReview(baseBranch: String?): Boolean =
+        runThreadOp("review", detail = "base=${baseBranch ?: "<uncommitted>"}") { id, tid ->
+            CodexAppServerWire.encodeReviewStart(id, tid, baseBranch, "inline")
+        }
+
+    /**
+     * Compact this thread's context now (`thread/compact/start`) — the codex
+     * twin of Claude's `/compact`. Before this the chat menu had no compact
+     * for Codex at all, and typing `/compact` sent the word to the MODEL: the
+     * app-server does not parse slash commands, only codex's own TUI does.
+     *
+     * The compaction runs as a turn on the server, so it rides the same
+     * lifecycle as a review; the familiar CompactingRow is driven by the
+     * `contextCompaction` item it emits. [compactInFlight] lets the end of the
+     * compaction itself release the wait, in case a build of codex reports it
+     * without a turn/completed.
+     */
+    suspend fun runCompact(): Boolean {
+        compactInFlight = true
+        return try {
+            runThreadOp("compact", timeoutMs = COMPACT_TIMEOUT_MS) { id, tid ->
+                CodexAppServerWire.encodeThreadCompactStart(id, tid)
+            }
+        } finally {
+            compactInFlight = false
+        }
+    }
+
+    @Volatile private var compactInFlight = false
+
+    /**
+     * One operation that runs like a turn but is not a chat prompt (a review, a
+     * compaction): claim the thread → send [encode] → await turn completion.
+     * Same contract as [runTurn]: false ONLY when the channel could not be
+     * opened at all (caller may fall back); every other outcome is handled here.
+     */
+    private suspend fun runThreadOp(
+        label: String,
+        detail: String = "",
+        timeoutMs: Long = TURN_TIMEOUT_MS,
+        encode: (id: Long, threadId: String) -> String,
+    ): Boolean = withContext(Dispatchers.IO) {
         val client = sshLifecycle.liveClient()
         if (client == null || !client.isConnected) {
-            android.util.Log.w(tag, "runReview ABORT: transport down")
+            android.util.Log.w(tag, "$label ABORT: transport down")
             onStateChange(SessionState.Failed("disconnected"))
             return@withContext true
         }
@@ -447,8 +491,8 @@ internal class AgentSessionCodexAppServer(
         // Same stale-cancel re-arm as runTurn.
         sshLifecycle.userCancelled = false
         try {
-            // A review is an operation the owner just asked for, so it claims
-            // the thread the same way a turn does.
+            // An operation the owner just asked for claims the thread the same
+            // way a turn does.
             if (!ensureReady(userInitiated = true)) {
                 threadBusy?.let { holders ->
                     threadBusy = null
@@ -460,8 +504,8 @@ internal class AgentSessionCodexAppServer(
                         ),
                     )
                     // Held, not Failed — see the matching branch in runTurn:
-                    // Failed loops through the VM's reconnect rescue. A review
-                    // has no prompt to hand back, but the state rule is the same.
+                    // Failed loops through the VM's reconnect rescue. There is
+                    // no prompt to hand back, but the state rule is the same.
                     onStateChange(SessionState.Running)
                     return@withContext true
                 }
@@ -472,28 +516,31 @@ internal class AgentSessionCodexAppServer(
             turnDone = done
             turnIn = 0; turnOut = 0; turnCached = 0; turnReasoning = 0; turnDurationMs = null
             val reqId = reqCounter.incrementAndGet()
-            val resp = rpc(
-                reqId,
-                CodexAppServerWire.encodeReviewStart(reqId, tid, baseBranch, "inline"),
-                timeoutMs = 30_000,
-            )
+            val (resp, err) = rpcDetailed(reqId, encode(reqId, tid), timeoutMs = 30_000)
             if (resp == null) {
-                android.util.Log.w(tag, "review/start failed or timed out — marking disconnected")
+                if (err != null) {
+                    // The server ANSWERED and refused — the channel is fine.
+                    // Say what it said instead of tearing a healthy process down.
+                    android.util.Log.w(tag, "$label refused: ${err.take(200)}")
+                    history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "codex $label: ${err.take(200)}"))
+                    return@withContext true
+                }
+                android.util.Log.w(tag, "$label failed or timed out — marking disconnected")
                 teardownProcess()
                 onStateChange(SessionState.Failed("disconnected"))
                 return@withContext true
             }
-            SilentlyTry.fired(tag, "read review turn id") {
+            SilentlyTry.fired(tag, "read $label turn id") {
                 activeTurnId = resp["turn"]?.jsonObject?.str("id") ?: activeTurnId
             }
-            android.util.Log.d(tag, "review started thread=$tid base=${baseBranch ?: "<uncommitted>"} turn=$activeTurnId")
-            val completed = withTimeoutOrNull(TURN_TIMEOUT_MS) { done.await() }
+            android.util.Log.d(tag, "$label started thread=$tid $detail turn=$activeTurnId")
+            val completed = withTimeoutOrNull(timeoutMs) { done.await() }
             if (completed == null && !sshLifecycle.userCancelled) {
-                android.util.Log.w(tag, "review timed out — interrupting")
+                android.util.Log.w(tag, "$label timed out — interrupting")
                 interrupt()
-                history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "codex review timed out"))
+                history.emitMsg(AgentMessage.Error(UUID.randomUUID().toString(), "codex $label timed out"))
             } else if (completed != null && !completed && !sshLifecycle.userCancelled) {
-                android.util.Log.w(tag, "app-server died mid-review — marking disconnected")
+                android.util.Log.w(tag, "app-server died mid-$label — marking disconnected")
                 onStateChange(SessionState.Failed("disconnected"))
                 return@withContext true
             }
@@ -509,6 +556,60 @@ internal class AgentSessionCodexAppServer(
             // thread back, so the next client anywhere can take it.
             armIdleRelease()
         }
+    }
+
+    /**
+     * Fold [text] into the turn that is running RIGHT NOW (`turn/steer`) — what
+     * Enter does mid-turn in codex's own TUI. The model reads it at its next
+     * step instead of after the whole turn, which is the point of a correction
+     * ("no, the other file").
+     *
+     * True only when the server accepted it; anything else (no live turn, the
+     * turn just ended, an old codex without `turn/steer`) is false, and the
+     * caller keeps the message in the visible queue exactly as before — a
+     * steer that failed must never lose the words.
+     */
+    suspend fun steer(text: String, imagePaths: List<String> = emptyList()): Boolean =
+        withContext(Dispatchers.IO) {
+            if (broken || !procAlive) return@withContext false
+            val tid = threadId ?: return@withContext false
+            val turn = activeTurnId ?: return@withContext false
+            if (turnDone == null) return@withContext false
+            val id = reqCounter.incrementAndGet()
+            val (resp, err) = rpcDetailed(
+                id,
+                CodexAppServerWire.encodeTurnSteer(id, tid, turn, text, imagePaths),
+                timeoutMs = 15_000,
+            )
+            if (resp == null) {
+                android.util.Log.w(tag, "turn/steer not accepted: ${err?.take(200) ?: "no answer"}")
+                return@withContext false
+            }
+            android.util.Log.d(tag, "steered ${text.length}B into turn $turn")
+            true
+        }
+
+    /** Is a turn of ours running on this channel right now (the only time a
+     *  steer can land)? */
+    fun turnRunning(): Boolean = procAlive && !broken && activeTurnId != null && turnDone != null
+
+    /**
+     * Name this thread (`thread/name/set`) — the title codex's own resume
+     * picker shows. Opening the thread for it is hands-off (userInitiated =
+     * false): a rename is not a claim on a session a terminal is using.
+     */
+    suspend fun renameThread(name: String): Boolean = withContext(Dispatchers.IO) {
+        if (broken) return@withContext false
+        if (!ensureReady(userInitiated = false)) return@withContext false
+        val tid = threadId ?: return@withContext false
+        val id = reqCounter.incrementAndGet()
+        val (resp, err) = rpcDetailed(
+            id,
+            CodexAppServerWire.encodeThreadSetName(id, tid, name),
+            timeoutMs = 15_000,
+        )
+        if (resp == null) android.util.Log.w(tag, "thread/name/set refused: ${err?.take(200) ?: "no answer"}")
+        resp != null
     }
 
     /** Cached per channel process: does the phone's codex have its own cloud
@@ -886,7 +987,10 @@ internal class AgentSessionCodexAppServer(
             return false
         }
         threadId = newThreadId
-        if (rid == null) setResumeId(newThreadId!!)
+        // A fork answers with a thread id of its own — adopting it is what
+        // turns the next launch into an ordinary resume of the FORK (and
+        // clears forkOnce), so the source is branched exactly once.
+        if (rid == null || newThreadId != rid) setResumeId(newThreadId)
         android.util.Log.d(tag, "thread ready id=$newThreadId resumed=${rid != null}")
         return true
     }
@@ -898,7 +1002,17 @@ internal class AgentSessionCodexAppServer(
         val reqId = reqCounter.incrementAndGet()
         val (resp, err) = rpcDetailed(
             reqId,
-            if (rid != null) {
+            if (rid != null && getForkOnce()) {
+                // Opened as a fork: branch into a NEW thread instead of
+                // resuming the source, which is left exactly as it was.
+                CodexAppServerWire.encodeThreadFork(
+                    reqId, rid,
+                    model = getModelOverride()?.takeIf { it.isNotBlank() }
+                        ?.let(ai.eight24family.conch.linux.LocalLlm::cliModelName),
+                    cwd = cwdSnapshot(),
+                    approval = getApprovalMode(),
+                )
+            } else if (rid != null) {
                 CodexAppServerWire.encodeThreadResume(
                     reqId, rid,
                     model = getModelOverride()?.takeIf { it.isNotBlank() }
@@ -1300,6 +1414,10 @@ internal class AgentSessionCodexAppServer(
                 for (m in CodexAppServerEvents.mapItem(item, started = method == "item/started", turnId = turnId)) {
                     history.emitMsg(m)
                 }
+                // A requested compaction is over the moment its item completes.
+                if (method == "item/completed" && compactInFlight &&
+                    CodexAppServerEvents.isCompactionItem(item)
+                ) turnDone?.complete(true)
             }
             "turn/started" -> {
                 SilentlyTry.fired(tag, "turn/started id") {
@@ -1378,13 +1496,16 @@ internal class AgentSessionCodexAppServer(
             "error" -> for (m in CodexAppServerEvents.mapError(params)) history.emitMsg(m)
             "model/rerouted" -> for (m in CodexAppServerEvents.mapModelRerouted(params)) history.emitMsg(m)
             // Deprecated duplicate of the contextCompaction item lifecycle.
-            "thread/compacted" -> history.emitMsg(
-                AgentMessage.System(
-                    id = "codexapp-compact-${params.str("turnId") ?: "x"}",
-                    subtype = "compact_done",
-                    raw = "✻ Context compacted",
+            "thread/compacted" -> {
+                history.emitMsg(
+                    AgentMessage.System(
+                        id = "codexapp-compact-${params.str("turnId") ?: "x"}",
+                        subtype = "compact_done",
+                        raw = "✻ Context compacted",
+                    )
                 )
-            )
+                if (compactInFlight) turnDone?.complete(true)
+            }
             // The server resolved one of its own requests elsewhere (e.g.
             // turn aborted) — freeze the card so taps don't write into a void.
             "serverRequest/resolved" -> params.str("requestId")?.let { retireServerReq(it) }
@@ -1861,6 +1982,9 @@ internal class AgentSessionCodexAppServer(
 
     companion object {
         private const val TURN_TIMEOUT_MS = 15L * 60 * 1000
+        /** A compaction is one summarising call — minutes at worst, never a
+         *  whole turn budget of waiting on a signal that did not come. */
+        private const val COMPACT_TIMEOUT_MS = 5L * 60 * 1000
 
         /**
          * Ceiling on the live rate-limit read. It is a CEILING, not a wait —

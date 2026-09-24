@@ -165,9 +165,14 @@ class SlashCommandsTest {
         //              so a long build stops holding the turn open. NOT /bg, which
         //              spawns a new detached agent;
         //   stoptask   stop_task, so a runaway task dies from the phone.
+        //
+        // "btw" joined deliberately (2026-09-24): side_question answers from the
+        // session's context WITHOUT adding to it. In the TUI it is a local-jsx
+        // panel, so sending "/btw …" as text asked an ordinary, context-growing
+        // question instead.
         val expected = setOf(
             "clear", "new", "diff", "init", "memory", "agents", "model", "review", "bg",
-            "cost", "plan", "version", "background", "stoptask",
+            "cost", "plan", "version", "background", "stoptask", "btw",
         )
         assertEquals(expected, names)
     }

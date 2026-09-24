@@ -429,8 +429,40 @@ internal object ClaudeControlWire {
                 add("can_use_tool")
                 add("ask_user_question")
             })
+            // After each turn the CLI predicts the next prompt and emits it as
+            // `{"type":"prompt_suggestion","suggestion":…}` (2.1.281 schema:
+            // `promptSuggestions: boolean`, a "preference" option). On a phone
+            // that is one tap instead of a typed sentence. The user's own
+            // Claude setting still gates it — this only says we render it.
+            put("promptSuggestions", true)
         }
     }.toString()
+
+    /**
+     * The predicted next prompt, from a `prompt_suggestion` line — null for any
+     * other line. Shape (2.1.281): `{type:"prompt_suggestion", suggestion,
+     * uuid, session_id}`. Never a transcript row: it is an offer, not history.
+     */
+    fun parsePromptSuggestion(line: String): String? {
+        if (!line.startsWith("{") || !line.contains("\"prompt_suggestion\"")) return null
+        val obj = SilentlyTry.logged("Conch-Control", "parse prompt suggestion") {
+            json.parseToJsonElement(line).jsonObject
+        } ?: return null
+        if (obj["type"]?.jsonPrimitive?.contentOrNull != "prompt_suggestion") return null
+        return obj["suggestion"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * `/btw` — a side question answered from the session's context WITHOUT
+     * becoming part of it: `{subtype:"side_question", question}` →
+     * `{response: string|null, synthetic?}` (2.1.281 SDK `askSideQuestion`).
+     * Nothing is appended to the transcript, so asking costs the conversation
+     * nothing.
+     */
+    fun encodeSideQuestion(requestId: String, question: String): String =
+        clientRequest(requestId, "side_question", buildJsonObject {
+            put("question", question)
+        })
 
     /** `{"type":"control_cancel_request","request_id":...}` — the CLI
      *  retires an outstanding can_use_tool/dialog when a turn aborts.

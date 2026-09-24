@@ -986,6 +986,50 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             if (id == null) null else byId[id]
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** The CLI's predicted next prompt for the CURRENT chat (Claude's
+     *  `prompt_suggestion`), or null. Offered as a chip; tapping it only fills
+     *  the composer — sending stays the owner's own tap. */
+    private val _suggestionBySession = MutableStateFlow<Map<String, String?>>(emptyMap())
+    val promptSuggestion: StateFlow<String?> =
+        combine(_localSessionId, _suggestionBySession) { id, byId ->
+            if (id == null) null else byId[id]
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** The chip was used or waved away — do not offer it again for this turn. */
+    fun dismissPromptSuggestion() {
+        val sid = _localSessionId.value ?: return
+        activeSessions[sid]?.clearPromptSuggestion()
+        _suggestionBySession.update { it + (sid to null) }
+    }
+
+    /**
+     * `/btw <question>` — ask from this chat's context WITHOUT adding to it
+     * (Claude `side_question`). The answer is shown as a sheet, not a row: it is
+     * not part of the conversation, and replaying it on reopen would claim it
+     * was.
+     */
+    data class SideAnswer(val question: String, val answer: String?, val pending: Boolean)
+    private val _sideAnswer = MutableStateFlow<SideAnswer?>(null)
+    val sideAnswer: StateFlow<SideAnswer?> = _sideAnswer.asStateFlow()
+    fun dismissSideAnswer() { _sideAnswer.value = null }
+
+    fun askSideQuestion(question: String) {
+        val q = question.trim()
+        if (q.isBlank()) { _chatNotice.value = "/btw needs a question — e.g. `/btw what does this flag do?`"; return }
+        val sess = _localSessionId.value?.let { activeSessions[it] }
+        if (sess == null || _currentAgent.value != Agent.CLAUDE) {
+            _chatNotice.value = "/btw is Claude Code only — it needs a live Claude session."
+            return
+        }
+        _sideAnswer.value = SideAnswer(q, null, pending = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val a = SilentlyTry.logged("Conch-Chat", "side question") { sess.sideQuestion(q) }
+            // Dismissed while it ran — do not pop it back up.
+            if (_sideAnswer.value?.question != q) return@launch
+            _sideAnswer.value = SideAnswer(q, a ?: "No answer — the session has not started yet, or the CLI declined.", pending = false)
+        }
+    }
+
     private val _activeAgents = MutableStateFlow<Set<Agent>>(emptySet())
     val activeAgents: StateFlow<Set<Agent>> = _activeAgents.asStateFlow()
 
@@ -2317,6 +2361,34 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         }
     }
 
+    /** A Codex turn is running — the queue row may offer "Now" (`turn/steer`).
+     *  The session re-checks at tap time; this only decides what is drawn. */
+    val canSteerQueued: StateFlow<Boolean> =
+        combine(state, _currentAgent) { st, agent -> agent == Agent.CODEX && st is SessionState.Working }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Fold ONE queued message into the running Codex turn instead of waiting
+     * for it to end. The row leaves the queue only once codex accepted it; on a
+     * refusal (the turn ended in between, an older codex) it stays exactly where
+     * it was and drains normally — the words are never at risk.
+     */
+    fun steerQueued(id: String) {
+        val row = _outbox.value.firstOrNull { it.id == id } ?: return
+        val sess = _localSessionId.value?.let { activeSessions[it] } ?: return
+        viewModelScope.launch {
+            val ok = sess.canSteer && sess.steer(row.text, row.imagePaths)
+            if (ok) {
+                _outbox.update { lst -> lst.filterNot { it.id == id } }
+                SilentlyTry.fired("Conch-Chat", "remove steered row draft") {
+                    ServiceLocator.historyCache.removeDraft(serverId, _currentAgent.value, row.text)
+                }
+            } else {
+                _chatNotice.value = "The turn could not take it now — it will go when the turn ends."
+            }
+        }
+    }
+
     /** Turn finished (or the link returned) → send EVERYTHING queued as ONE
      * prompt. Combining the whole outbox into a single turn — instead of one
      * turn per row — is what the user wants: several follow-ups they typed
@@ -2873,6 +2945,9 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 }
             },
             newSession = { newSession() },
+            compact = { confirmCompact() },
+            rename = { title -> renameSession(title) },
+            sideQuestion = { q -> askSideQuestion(q) },
         )
     }
 
@@ -2983,6 +3058,17 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         // A Stop is owed until the machine confirms it - including one given
         // before this process existed.
         armStopOrderWatcher()
+        // Codex has no `initialize` command list to adopt; its session commands
+        // are ours to offer (each runs over app-server RPC). Other agents start
+        // clean and fill the list from their own handshake.
+        viewModelScope.launch {
+            _currentAgent.collect { agent ->
+                slashCoord.setAgentCommands(
+                    if (agent == Agent.CODEX) ai.eight24family.conch.agent.SlashCommands.CODEX_NATIVE
+                    else emptyList(),
+                )
+            }
+        }
         // The CLI PUSHES its command list when it changes (a skill discovered as
         // the agent moves into a subdirectory, a plugin loaded). Its schema says
         // to REPLACE the cached list; the app used to render the push as a count
@@ -4097,6 +4183,11 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
                 launch {
                     s.loopArmed.collect { armed ->
                         _loopBySession.update { it + (localId to armed) }
+                    }
+                }
+                launch {
+                    s.promptSuggestion.collect { sug ->
+                        _suggestionBySession.update { it + (localId to sug) }
                     }
                 }
                 launch {
@@ -5359,12 +5450,12 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
     private val _renamedTitle = MutableStateFlow<String?>(null)
     val renamedTitle: StateFlow<String?> = _renamedTitle.asStateFlow()
 
-    /** Rename the current session on the server. Claude-only (the CLI
-     *  persists it as a custom-title transcript record; shows in
-     *  `claude --resume` and our sessions list). */
+    /** Rename the current session on the server. Claude persists it as a
+     *  custom-title transcript record (`claude --resume`, our sessions list);
+     *  Codex names the thread (`codex resume`). */
     fun renameSession(title: String) {
         val trimmed = title.trim().take(140)
-        if (trimmed.isBlank() || _currentAgent.value != Agent.CLAUDE) return
+        if (trimmed.isBlank() || _currentAgent.value !in RENAMEABLE_AGENTS) return
         viewModelScope.launch(Dispatchers.IO) {
             val sess = _localSessionId.value?.let { activeSessions[it] } ?: return@launch
             if (sess.renameSession(trimmed)) {
@@ -5493,7 +5584,7 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
         _costWarning.value = null
         costWarningAcknowledged = true
         pendingAfterCompact = held
-        send("/compact", allowSlash = false)
+        if (!compactOverRpc()) send("/compact", allowSlash = false)
     }
 
     /** Set once the user has answered for this chat — the warning is a heads-up,
@@ -5517,7 +5608,32 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
      */
     fun confirmCompact() {
         _pendingCompact.value = null
-        viewModelScope.launch { send("/compact") }
+        viewModelScope.launch { if (!compactOverRpc()) send("/compact") }
+    }
+
+    /**
+     * Codex compacts over its app-server RPC (`thread/compact/start`) — there
+     * `/compact` typed as a prompt would reach the MODEL as the word, because
+     * only codex's own TUI parses slash commands. True when it went that way
+     * (and anything held for after the compact has been released).
+     */
+    private fun compactOverRpc(): Boolean {
+        if (_currentAgent.value != Agent.CODEX) return false
+        // ⛔ A CODEX CHAT NEVER FALLS THROUGH TO SENDING "/compact". Without the
+        // app-server (no live session yet, or codex too old and riding `exec`)
+        // there is nothing that can compact, and the word would go to the model.
+        val sess = _localSessionId.value?.let { activeSessions[it] }
+        if (sess == null || !sess.compactsOverRpc || sess.agentSessionId == null) {
+            _chatNotice.value = "Nothing to compact yet — this chat has no live Codex session."
+            releaseAfterCompact()
+            return true
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { sess.compactNow() }
+            // Back on Main: the held message goes through the ordinary send.
+            releaseAfterCompact()
+        }
+        return true
     }
 
     // ── Rewind (/rewind) ──────────────────────────────────────────────────
@@ -6744,6 +6860,10 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
 
         /** Public constant — referenced by ChatPromptBar / ChatScreenPromptHost. */
         const val MAX_ATTACHMENTS: Int = 10
+
+        /** Agents whose live channel can rename, fork and compact a session:
+         *  Claude (control protocol) and Codex (app-server RPC). */
+        val RENAMEABLE_AGENTS: Set<Agent> = setOf(Agent.CLAUDE, Agent.CODEX)
 
         /**
          * How often the plan-limit bar re-reads the account while the chat is ON

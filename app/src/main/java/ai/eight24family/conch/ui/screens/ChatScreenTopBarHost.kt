@@ -326,14 +326,16 @@ internal fun ChatTopBarHost(
         showSubagentsIcon = currentAgent.supportsSubagents,
         showMemoryIcon = currentAgent.supportsMemory,
         onRestartCli = { vm.restartCli() },
-        showRenameItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
-        // Forking needs a session to inherit: `--fork-session` is meaningless
-        // without `--resume`, so a chat that has never been assigned an id has
-        // nothing to branch from.
-        showForkItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE && resumeId != null,
+        // Claude over its control channel, Codex over app-server RPC
+        // (`thread/name/set`, `thread/fork`, `thread/compact/start`).
+        showRenameItem = currentAgent in ChatViewModel.RENAMEABLE_AGENTS,
+        // Forking needs a session to inherit: `--fork-session` / `thread/fork`
+        // is meaningless without one, so a chat that has never been assigned
+        // an id has nothing to branch from.
+        showForkItem = currentAgent in ChatViewModel.RENAMEABLE_AGENTS && resumeId != null,
         onForkChat = { resumeId?.let { onForkChat(it) } },
         onRenameSession = { renameDialogOpen = true },
-        showCompactItem = currentAgent == ai.eight24family.conch.agent.Agent.CLAUDE,
+        showCompactItem = currentAgent in ChatViewModel.RENAMEABLE_AGENTS,
         onCompact = { vm.requestCompact() },
         approvalMode = approvalMode,
         approvalMenuOpen = approvalMenuOpen,

@@ -15,6 +15,45 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.8.0] — 2026-09-24
+
+Caught up with what the current CLIs can do and the app could not, checked
+against the binaries themselves (claude 2.1.281, codex 0.156.1) rather than
+their docs.
+
+### Added
+- **Codex: steer a running turn.** A message typed mid-turn still waits in the
+  visible queue, as before — but the row now has a **Now** button that folds it
+  into the running turn (`turn/steer`), the way Enter does mid-turn in codex's
+  own TUI. The row leaves the queue only once codex accepts it; a refusal (the
+  turn just ended, an older codex) leaves it where it was.
+- **Codex: compact, rename and fork** from the chat menu, and as `/compact` and
+  `/rename` in the palette — over the app-server RPCs `thread/compact/start`,
+  `thread/name/set` and `thread/fork`. A fork branches into a new thread and
+  leaves the source untouched, exactly like Claude's fork.
+- **Claude: next-prompt suggestions.** After a reply, the CLI's own guess at
+  your next prompt (`prompt_suggestion`) appears above the composer. A tap puts
+  it in the composer; sending stays a separate tap. Your Claude setting for
+  suggestions still applies.
+- **Claude: `/btw`.** A quick side question answered from the session's context
+  (`side_question`) and shown in a dialog — it is never added to the
+  conversation, so it costs the conversation nothing.
+
+### Fixed
+- **`/compact` in a Codex chat reached the model as a word.** Codex's
+  app-server does not parse slash commands (only its terminal UI does), so the
+  menu hid compact for Codex and a typed `/compact` became a prompt. It now runs
+  over RPC, and a Codex chat never falls back to sending the text.
+
+### Verified
+- 1235 unit tests; the new request shapes are pinned in
+  `ModernCliParityWireTest`. The four new codex requests were sent to a real
+  codex 0.156.1 app-server and accepted (a misspelled field was rejected, so it
+  does validate). A live steer and a live suggestion need a signed-in model turn
+  and were not exercised; nothing was run on a device.
+
+---
+
 ## [0.7.5] — 2026-09-13
 
 An answer the app had already received was not being shown. That is fixed, and
@@ -2150,6 +2189,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.8.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.0
 [0.7.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.5
 [0.7.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.4
 [0.7.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.3

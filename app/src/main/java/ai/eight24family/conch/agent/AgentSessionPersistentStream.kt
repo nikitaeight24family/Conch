@@ -96,6 +96,9 @@ internal class AgentSessionPersistentStream(
     /** A turn that was dispatched as `/loop …` ended without scheduling
      *  anything. The user asked for a loop and does not have one; say so. */
     private val onLoopNotArmed: () -> Unit = {},
+    /** The CLI's predicted next prompt (`prompt_suggestion`), offered as a
+     *  one-tap chip. Not history. */
+    private val onPromptSuggestion: (String) -> Unit = {},
 ) {
     private val tag = "Conch-Persist"
 
@@ -800,6 +803,12 @@ internal class AgentSessionPersistentStream(
                             retireControl(cancelled)
                             continue
                         }
+                        // An offer for the NEXT prompt, never a chat row. Gen-gated:
+                        // a torn-down process must not suggest over a newer one.
+                        ClaudeControlWire.parsePromptSuggestion(line)?.let { suggestion ->
+                            if (myGen == turnSeq) onPromptSuggestion(suggestion)
+                            continue
+                        }
                         if (line.startsWith("{") && line.contains("\"control_response\"")) {
                             // Response to a request WE sent — route to its awaiter
                             // (set_model ack, get_usage payload, initialize state).
@@ -1416,6 +1425,21 @@ internal class AgentSessionPersistentStream(
         }
     }
 
+    /**
+     * `/btw` — ask [question] from the session's context without adding it to
+     * the conversation. The CLI answers with a forked call over the cached
+     * prefix, so it runs even while a turn is working. Null = channel down,
+     * refused, or no answer.
+     */
+    suspend fun sideQuestion(question: String): String? {
+        val payload = sendControlRequest(
+            { id -> ClaudeControlWire.encodeSideQuestion(id, question) },
+            timeoutMs = SIDE_QUESTION_TIMEOUT_MS,
+        )?.takeIf { it.ok }?.payload ?: return null
+        return (payload["response"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.contentOrNull?.takeIf { it.isNotBlank() }
+    }
+
     /** Rename this session's title (persists to the transcript; shows in
      *  `claude --resume`). */
     suspend fun renameSession(title: String): Boolean =
@@ -1778,6 +1802,9 @@ internal class AgentSessionPersistentStream(
         /** get_context_usage / get_usage do real work (token counting over
          *  the whole conversation; a network fetch on a cold usage cache). */
         private const val HEAVY_RESPONSE_TIMEOUT_MS = 30_000L
+        /** A side question is a real model call — seconds usually, a minute on
+         *  a long context. Past two, the answer is not coming. */
+        private const val SIDE_QUESTION_TIMEOUT_MS = 120_000L
         /** initialize response — arrives right after launch; generous for
          *  node cold start on a small VPS. */
         private const val INIT_RESPONSE_TIMEOUT_MS = 45_000L

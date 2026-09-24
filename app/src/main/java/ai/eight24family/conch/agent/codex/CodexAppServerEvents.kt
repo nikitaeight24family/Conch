@@ -290,6 +290,9 @@ internal object CodexAppServerEvents {
     private fun tagOf(item: JsonObject): String? =
         item.str("type")?.replaceFirstChar { it.lowercaseChar() }
 
+    /** The `contextCompaction` item, in either casing codex has shipped. */
+    fun isCompactionItem(item: JsonObject): Boolean = tagOf(item) == "contextCompaction"
+
     /** Text of an item, flat or nested. 0.139: `text` at the top level.
      *  0.152: `content` (or `contentItems`) — a list of parts, each with
      *  its own `text`, joined in order. Parts with no text (images, tool

@@ -58,6 +58,12 @@ internal class ChatViewModelSlash(
      *  assistant-style text - which is how the CLI itself renders the output of a
      *  local command, and the only place long content can be read on a phone. */
     private val emitLocal: (String) -> Unit = {},
+    /** Compact the conversation through the chat's own compact path. */
+    private val compact: () -> Unit = {},
+    /** Rename the session through the chat's own rename path. */
+    private val rename: (String) -> Unit = {},
+    /** `/btw` — ask outside the conversation. */
+    private val sideQuestion: (String) -> Unit = {},
 ) {
     private val _customCommands = MutableStateFlow<List<SlashCommand>>(emptyList())
     val customCommands: StateFlow<List<SlashCommand>> = _customCommands.asStateFlow()
@@ -158,6 +164,13 @@ internal class ChatViewModelSlash(
             // Forking stays where it belongs: the explicit menu item.
             SlashCommandKind.AGENT_BUILTIN -> sendAgentBuiltin(cmd, args)
             SlashCommandKind.RUN_BACKGROUND -> runInBackground(args)
+            SlashCommandKind.COMPACT_THREAD -> compact()
+            SlashCommandKind.SIDE_QUESTION -> sideQuestion(args)
+            SlashCommandKind.RENAME_SESSION -> {
+                val title = args.trim()
+                if (title.isBlank()) notice("/rename needs a title — e.g. `/rename auth refactor`")
+                else rename(title)
+            }
         }
     }
 

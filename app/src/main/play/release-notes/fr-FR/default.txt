@@ -1,4 +1,6 @@
-Les reponses reapparaissent et les Gemma locaux demarrent.
+À jour avec les derniers Claude Code et Codex.
 
-• Corrige : des tours qui semblaient repondus avec une bulle vide. Un Codex plus recent nomme autrement les parties d'une reponse, l'app lisait les anciens noms. La reponse arrivait, elle n'etait pas affichee. Concerne tous les agents, locaux ou sur serveur.
-• Un Gemma local ne meurt plus au lancement d'un agent et s'arrete proprement.
+• Codex : « Now » sur un message en file l'injecte dans le tour en cours.
+• Codex : compacter, renommer et bifurquer la conversation depuis le menu, ou /compact et /rename.
+• Claude : après une réponse, la suggestion du CLI pour votre prochain prompt s'affiche — un appui.
+• Claude : /btw pose une question à part sans l'ajouter à la conversation.

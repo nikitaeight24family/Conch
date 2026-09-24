@@ -1,4 +1,6 @@
-Answers show up again, and local Gemma models start.
+Catching up with the newest Claude Code and Codex.
 
-• Fixed turns that ended looking answered with an empty bubble: a newer Codex names the parts of a reply differently, and the app was reading the old names. Your answer had arrived — it just was not being shown. Affects every agent, local or on a server.
-• A local Gemma model no longer dies the moment an agent starts it, and its replies stop cleanly instead of running on.
+• Codex: tap "Now" on a queued message to fold it into the running turn instead of waiting for it to end.
+• Codex: compact, rename and fork a conversation from the chat menu, or type /compact and /rename.
+• Claude: after a reply, the CLI's own guess at your next prompt appears above the keyboard — one tap to use it.
+• Claude: /btw asks a quick side question without adding it to the conversation.
