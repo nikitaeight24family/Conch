@@ -1,6 +1,4 @@
-Aufholen mit den neuesten Claude Code und Codex.
+Claudes Vorschläge für den nächsten Prompt erscheinen jetzt wirklich.
 
-• Codex: „Now“ auf einer wartenden Nachricht schickt sie in den laufenden Zug.
-• Codex: Unterhaltung komprimieren, umbenennen und abzweigen im Chatmenü, oder /compact und /rename.
-• Claude: Nach einer Antwort erscheint der Vorschlag des CLI für den nächsten Prompt – ein Tipp genügt.
-• Claude: /btw stellt eine Nebenfrage, ohne sie der Unterhaltung hinzuzufügen.
+• 0.8.0 hat sie auf eine Weise angefordert, die Claude Code ignoriert; jetzt werden sie so eingeschaltet, wie die CLI es erwartet (Claude Code 2.1.220+). Ab der zweiten Antwort steht der Vorschlag über der Tastatur – ein Tipp übernimmt ihn.
+• Claude Code pausiert Vorschläge, wenn das Limit fast erreicht ist.

@@ -609,6 +609,8 @@ internal class AgentSessionPersistentStream(
                 cwdSnapshot = params.cwd,
                 reasoningEffort = params.reasoning,
                 forkSession = getForkOnce(),
+                promptSuggestions = ai.eight24family.conch.agent.claude.ClaudeSpec
+                    .acceptsPromptSuggestions(claudeVersionOnServer()),
             )
         ) ?: run {
             broken = true
@@ -673,6 +675,13 @@ internal class AgentSessionPersistentStream(
             teardownProcess()
             false
         }
+    }
+
+    /** The Claude version this server last reported to the agent probe, or
+     *  null when it has not been probed (then no version-gated flag is sent). */
+    private fun claudeVersionOnServer(): String? = SilentlyTry.logged(tag, "cached claude version") {
+        ai.eight24family.conch.di.ServiceLocator.agentStatusCache.peek(server.id)
+            ?.statuses?.get(ai.eight24family.conch.agent.Agent.CLAUDE)?.installedVersion
     }
 
     /** Rolling tail of the last raw stdout lines — dumped on EOF so a

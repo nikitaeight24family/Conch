@@ -197,6 +197,13 @@ object ClaudeSpec : AgentCliSpec {
         return "${sandboxEnv}${CHECKPOINT_ENV}${thinkingEnv}${extraStreamEnv}$STDBUF claude" +
             " --output-format stream-json --input-format stream-json" +
             " --include-partial-messages --verbose --include-hook-events" +
+            // ⛔ THE FLAG, NOT THE initialize FIELD. Measured on a real server
+            // (2.1.278, 2026-09-25): with only `promptSuggestions:true` in
+            // initialize no suggestion ever arrives — print mode starts with
+            // suggestions OFF (source "non_interactive") and only this launch
+            // option turns them on. The user's own setting and the CLI's
+            // near-limit pause still apply on top of it.
+            (if (input.promptSuggestions) " --prompt-suggestions" else "") +
             permissionToolArg +
             "$approvalArg$resume$modelArg$effortArg 2>&1"
     }
@@ -866,6 +873,18 @@ esac
      * set, and the effort ladder. Called from BOTH sources — the live
      * persistent channel's handshake and [probeAvailableModels].
      */
+    /** Oldest CLI the `--prompt-suggestions` launch flag is verified on. The
+     *  flag is absent from 2.1.100 and present in 2.1.220; everything in
+     *  between is unmeasured, and a CLI that rejects it refuses to start at
+     *  all — so below this (or with the version unknown) it is not sent. */
+    const val PROMPT_SUGGESTIONS_MIN_VERSION = "2.1.220"
+
+    fun acceptsPromptSuggestions(installedVersion: String?): Boolean {
+        val v = installedVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        if (v.none { it.isDigit() }) return false
+        return !ai.eight24family.conch.agent.isVersionLessThan(v, PROMPT_SUGGESTIONS_MIN_VERSION)
+    }
+
     internal fun adoptInitState(st: ClaudeInitState, serverId: String?) {
         val (label, key) = ClaudeInitState.defaultModel(st)
         // Filed under the server that answered — see [claudeDefaultByServer].

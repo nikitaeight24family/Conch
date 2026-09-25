@@ -1,6 +1,4 @@
-Catching up with the newest Claude Code and Codex.
+Claude's next-prompt suggestions now actually appear.
 
-• Codex: tap "Now" on a queued message to fold it into the running turn instead of waiting for it to end.
-• Codex: compact, rename and fork a conversation from the chat menu, or type /compact and /rename.
-• Claude: after a reply, the CLI's own guess at your next prompt appears above the keyboard — one tap to use it.
-• Claude: /btw asks a quick side question without adding it to the conversation.
+• 0.8.0 asked Claude Code for suggestions in a way it ignores; the app now turns them on the way the CLI expects (Claude Code 2.1.220 or newer). From the second reply on, the CLI's guess at your next prompt shows above the keyboard — one tap puts it in the composer.
+• Claude Code itself pauses suggestions while your plan is close to its limit.

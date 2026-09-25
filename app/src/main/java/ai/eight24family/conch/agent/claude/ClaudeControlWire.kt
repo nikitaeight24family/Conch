@@ -429,11 +429,10 @@ internal object ClaudeControlWire {
                 add("can_use_tool")
                 add("ask_user_question")
             })
-            // After each turn the CLI predicts the next prompt and emits it as
-            // `{"type":"prompt_suggestion","suggestion":…}` (2.1.281 schema:
-            // `promptSuggestions: boolean`, a "preference" option). On a phone
-            // that is one tap instead of a typed sentence. The user's own
-            // Claude setting still gates it — this only says we render it.
+            // Declares that we render `prompt_suggestion` (2.1.281 schema:
+            // `promptSuggestions: boolean`, a "preference" option). ⚠ It does
+            // NOT turn suggestions on by itself — measured 2026-09-25, print
+            // mode needs the `--prompt-suggestions` launch flag (ClaudeSpec).
             put("promptSuggestions", true)
         }
     }.toString()

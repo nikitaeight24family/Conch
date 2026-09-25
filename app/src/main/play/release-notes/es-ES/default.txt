@@ -1,6 +1,4 @@
-Al día con los últimos Claude Code y Codex.
+Las sugerencias de Claude para tu siguiente prompt ya aparecen de verdad.
 
-• Codex: «Now» en un mensaje en cola lo mete en el turno en curso sin esperar a que termine.
-• Codex: compacta, renombra y bifurca la conversación desde el menú, o escribe /compact y /rename.
-• Claude: tras una respuesta aparece la sugerencia del CLI para tu siguiente prompt: un toque.
-• Claude: /btw hace una pregunta aparte sin añadirla a la conversación.
+• 0.8.0 las pedía de una forma que Claude Code ignora; ahora se activan como espera la CLI (Claude Code 2.1.220 o posterior). Desde la segunda respuesta la sugerencia aparece sobre el teclado: un toque la pone en el campo.
+• Claude Code las pausa cuando tu plan está cerca del límite.

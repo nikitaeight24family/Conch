@@ -1,6 +1,4 @@
-À jour avec les derniers Claude Code et Codex.
+Les suggestions de Claude pour votre prochain prompt s'affichent enfin.
 
-• Codex : « Now » sur un message en file l'injecte dans le tour en cours.
-• Codex : compacter, renommer et bifurquer la conversation depuis le menu, ou /compact et /rename.
-• Claude : après une réponse, la suggestion du CLI pour votre prochain prompt s'affiche — un appui.
-• Claude : /btw pose une question à part sans l'ajouter à la conversation.
+• 0.8.0 les demandait d'une façon que Claude Code ignore ; elles sont maintenant activées comme la CLI l'attend (Claude Code 2.1.220+). Dès la deuxième réponse, la suggestion apparaît au-dessus du clavier — un appui la place dans le champ.
+• Claude Code les suspend quand votre forfait approche de sa limite.

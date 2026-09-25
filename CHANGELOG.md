@@ -15,6 +15,26 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.8.1] — 2026-09-25
+
+### Fixed
+- **Claude's next-prompt suggestions never appeared in 0.8.0.** Measured on a
+  real server (Claude Code 2.1.278): the `initialize` field 0.8.0 relied on does
+  not turn suggestions on — print mode starts with them off, and only the
+  `--prompt-suggestions` launch flag enables them. The app now passes the flag,
+  but only when the server's CLI is known to be 2.1.220 or newer: the flag is
+  absent in 2.1.100, and an unknown option would stop the whole session from
+  starting. Suggestions still follow the CLI's own rules on top: they start from
+  the second reply, respect your `promptSuggestionEnabled` setting, and pause
+  while your plan is close to its limit.
+
+### Verified
+- On the same server: a suggestion arrived and parsed end to end; `/btw`
+  answered live; and a message written to Claude mid-turn did not interrupt the
+  turn (one result, prompt cache warm).
+
+---
+
 ## [0.8.0] — 2026-09-24
 
 Caught up with what the current CLIs can do and the app could not, checked
@@ -2189,6 +2209,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.8.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.1
 [0.8.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.0
 [0.7.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.5
 [0.7.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.4

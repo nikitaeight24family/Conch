@@ -3,6 +3,8 @@ package ai.eight24family.conch
 import ai.eight24family.conch.agent.SlashCommandKind
 import ai.eight24family.conch.agent.SlashCommands
 import ai.eight24family.conch.agent.claude.ClaudeControlWire
+import ai.eight24family.conch.agent.claude.ClaudeSpec
+import ai.eight24family.conch.agent.spec.ExecInput
 import ai.eight24family.conch.agent.codex.CodexAppServerEvents
 import ai.eight24family.conch.agent.codex.CodexAppServerWire
 import ai.eight24family.conch.data.prefs.AgentApprovalMode
@@ -120,6 +122,30 @@ class ModernCliParityWireTest {
         val req = o["request"]!!.jsonObject
         assertEquals("side_question", req.s("subtype"))
         assertEquals("what does -p do?", req.s("question"))
+    }
+
+    @Test
+    fun `prompt suggestions flag is sent only to a CLI known to accept it`() {
+        // Present in 2.1.220, absent in 2.1.100; an unknown option kills the
+        // launch, so unknown or older versions get nothing.
+        assertTrue(ClaudeSpec.acceptsPromptSuggestions("2.1.220"))
+        assertTrue(ClaudeSpec.acceptsPromptSuggestions("2.1.278 (Claude Code)"))
+        assertTrue(ClaudeSpec.acceptsPromptSuggestions("2.2.0"))
+        assertFalse(ClaudeSpec.acceptsPromptSuggestions("2.1.219"))
+        assertFalse(ClaudeSpec.acceptsPromptSuggestions("2.1.100"))
+        assertFalse(ClaudeSpec.acceptsPromptSuggestions(null))
+        assertFalse(ClaudeSpec.acceptsPromptSuggestions(""))
+        assertFalse(ClaudeSpec.acceptsPromptSuggestions("unknown"))
+    }
+
+    @Test
+    fun `persistent launch carries the flag only when asked`() {
+        fun cmd(on: Boolean) = ClaudeSpec.buildPersistentCommand(
+            ExecInput(text = "", resumeId = null, model = null, approvalMode = AgentApprovalMode.SAFE,
+                cwdSnapshot = null, promptSuggestions = on),
+        )!!
+        assertTrue(cmd(true).contains(" --prompt-suggestions"))
+        assertFalse(cmd(false).contains("--prompt-suggestions"))
     }
 
     // ── palette ────────────────────────────────────────────────────────────

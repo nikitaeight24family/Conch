@@ -657,6 +657,12 @@ data class ExecInput(
      * id of its own and is an ordinary session.
      */
     val forkSession: Boolean = false,
+    /**
+     * Ask the CLI for next-prompt suggestions (Claude's `--prompt-suggestions`).
+     * Only set when the server's CLI is known to accept the flag — an older
+     * one rejects an unknown option and the whole launch would die with it.
+     */
+    val promptSuggestions: Boolean = false,
 )
 
 /**
