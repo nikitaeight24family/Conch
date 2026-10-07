@@ -403,9 +403,9 @@ object LinuxEnv {
      * "contacts nothing but the servers you add" claim literally true.
      */
     suspend fun install(
-        prootPath: String,
-        loaderPath: String,
-        rootfsArchive: String,
+        prootBytes: ByteArray,
+        loaderBytes: ByteArray,
+        rootfsBytes: ByteArray,
         onStep: (String) -> Unit,
     ): String? {
         onStep("preparing")
@@ -413,15 +413,19 @@ object LinuxEnv {
             ?: return "no shell access on this phone"
 
         onStep("installing the runtime")
-        val moved = LocalAdbShell.exec(
-            "cp '$prootPath' $ROOT/proot && cp '$loaderPath' $LOADER && " +
-                "chmod 755 $ROOT/proot $LOADER && echo ok",
-        )
-        if (moved?.stdout?.trim() != "ok") return "could not place the runtime: ${moved?.stderr?.trim().orEmpty()}"
+        // Streamed over stdin directly into place (the Android 16 fix): the shell
+        // can no longer read the app's external-files dir, and pushing bytes over
+        // our own channel needs no shared storage at all.
+        val prootPushed = LocalAdbShell.push("cat > $ROOT/proot", prootBytes)
+        if (prootPushed == null || prootPushed.exitCode != 0) return "could not place the runtime (proot)"
+        val loaderPushed = LocalAdbShell.push("cat > $LOADER", loaderBytes)
+        if (loaderPushed == null || loaderPushed.exitCode != 0) return "could not place the runtime (loader)"
+        LocalAdbShell.exec("chmod 755 $ROOT/proot $LOADER")
 
         onStep("unpacking the system")
-        val untar = LocalAdbShell.exec("tar -xzf '$rootfsArchive' -C $ROOTFS 2>&1 | head -3; echo done")
-        if (untar == null || !untar.stdout.contains("done")) return "could not unpack the system"
+        // Piped straight into tar: the archive is never written to the phone's disk.
+        val untar = LocalAdbShell.push("tar -xzf - -C $ROOTFS", rootfsBytes)
+        if (untar == null || untar.exitCode != 0) return "could not unpack the system: ${untar?.stderr?.take(200)}"
 
         // A resolver, so the package manager can reach its mirrors when the user
         // asks it to. Nothing in Conch contacts them; `apk` is the user's own

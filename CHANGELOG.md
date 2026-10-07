@@ -15,6 +15,19 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.8.2] — 2026-10-07
+
+### Fixed
+- **The agent answered the same prompt twice.** Codex and Gemini sessions
+  streamed every reply through the live JSON-RPC channel AND re-read it from the
+  JSONL log file, producing a duplicate bubble. The tail poller is now suppressed
+  whenever the live channel is the content source — not just for the phone's
+  local model (which was already fixed in 0.7.0), but for remote servers too.
+- **Linux installation failed on Android 16** with "Permission denied". Android
+  16 revokes shell-user access to `/storage/emulated/0/Android/data/`, breaking
+  the `adb push` + `cp` path. The installer now streams bytes directly through
+  the ADB shell v2 stdin protocol, bypassing the filesystem ACL.
+
 ## [0.8.1] — 2026-09-25
 
 ### Fixed
@@ -2209,6 +2222,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.8.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.2
 [0.8.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.1
 [0.8.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.0
 [0.7.5]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.7.5

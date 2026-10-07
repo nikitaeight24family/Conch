@@ -1,4 +1,4 @@
-Les suggestions de Claude pour votre prochain prompt s'affichent enfin.
+Corrigé : l'agent ne répond plus deux fois au même message.
 
-• 0.8.0 les demandait d'une façon que Claude Code ignore ; elles sont maintenant activées comme la CLI l'attend (Claude Code 2.1.220+). Dès la deuxième réponse, la suggestion apparaît au-dessus du clavier — un appui la place dans le champ.
-• Claude Code les suspend quand votre forfait approche de sa limite.
+• Les sessions Codex et Gemini recevaient chaque réponse par le canal direct ET la relisaient dans le fichier journal, créant un doublon. Le sondage est désormais désactivé quand le canal direct est la source du contenu.
+• L'installation Linux fonctionne sous Android 16, qui révoque l'accès du shell au stockage de l'application. L'installateur envoie les données directement via le protocole ADB.

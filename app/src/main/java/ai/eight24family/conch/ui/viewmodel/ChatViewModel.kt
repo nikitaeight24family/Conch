@@ -4380,13 +4380,14 @@ class ChatViewModel(savedStateHandle: SavedStateHandle) : ViewModel() {
             // Tail-poll the remote JSONL: catch up since the snapshot, then
             // listen for external growth (e.g. the user typed on their PC).
             //
-            // ⛔ NOT FOR THE PHONE'S OWN LOCAL MODEL. That chat is driven by
-            // the live app-server stream (AgentSessionCodexAppServer), which
-            // is the single source of truth — there is no "other machine"
-            // editing the rollout. Running the poller too made codex's JSONL
-            // re-emit the SAME answer (a second identical bubble) and render
-            // its turn/item bookkeeping as chat rows — (owner, 2026-09-01).
-            if (serverId == ai.eight24family.conch.linux.LinuxSsh.SERVER_ID) {
+            // ⛔ NOT when the live channel IS the content source (Codex
+            // app-server, Gemini ACP). The stream delivers every item and
+            // message through JSON-RPC notifications — the JSONL is just
+            // the durable log of the same events. Running the poller too
+            // re-emits every bubble a second time and renders bookkeeping
+            // rows as chat lines. Measured on local models 2026-09-01,
+            // on remote servers 2026-10-07.
+            if (s.liveChannelStreamsContent()) {
                 // live stream only; no mirror
             } else if (resumeIdParam != null && resumeFilePath != null) {
                 // The poller speaks REMOTE offsets; a tail-first cache's local

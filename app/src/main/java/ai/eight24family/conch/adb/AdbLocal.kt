@@ -66,6 +66,27 @@ object AdbLocal {
             return AdbShellV2.demux(stream.readAll(limit), limit)
         }
 
+
+        /**
+         * Stream a file directly to the device over a v2 shell's stdin.
+         *
+         * Avoids `cp` from the app's external files dir, because Android 16
+         * revokes the shell's permission to read `/storage/emulated/0/Android/data/`.
+         */
+        fun push(command: String, bytes: ByteArray): AdbShellV2.Result {
+            val stream = connection.open("shell,v2,raw:$command")
+            val chunkSize = 32 * 1024
+            var offset = 0
+            while (offset < bytes.size) {
+                val end = minOf(offset + chunkSize, bytes.size)
+                val chunk = bytes.copyOfRange(offset, end)
+                stream.write(AdbShellV2.packet(AdbShellV2.ID_STDIN, chunk))
+                offset = end
+            }
+            stream.write(AdbShellV2.packet(AdbShellV2.ID_CLOSE_STDIN, ByteArray(0)))
+            return AdbShellV2.demux(stream.readAll(), 4 * 1024 * 1024)
+        }
+
         override fun close() {
             closeables.asReversed().forEach { runCatching { it.close() } }
         }

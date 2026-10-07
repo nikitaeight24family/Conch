@@ -142,6 +142,32 @@ object LocalAdbShell {
             }
         }
 
+
+    /** Stream a file to the device over a v2 shell's stdin. */
+    suspend fun push(command: String, bytes: ByteArray): AdbShellV2.Result? =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                repeat(2) { attempt ->
+                    val live = session ?: openLocked() ?: return@withContext null
+                    val result = try {
+                        live.push(command, bytes)
+                    } catch (e: AdbConnection.NeedsTls) {
+                        unauthorized = true
+                        android.util.Log.w("Conch-LocalAdb", "adbd refuses our key on this device - pairing needed")
+                        null
+                    } catch (t: Throwable) {
+                        android.util.Log.w("Conch-LocalAdb", "push over own adb - swallowed: ${t.javaClass.simpleName}: ${t.message}")
+                        null
+                    }
+                    if (result != null) return@withContext result
+                    android.util.Log.w("Conch-LocalAdb", "session died (attempt ${attempt + 1}); reconnecting")
+                    closeLocked()
+                    retryNow()
+                }
+                null
+            }
+        }
+
     /**
      * Can a command run on this phone right now?
      *

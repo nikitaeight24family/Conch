@@ -1,4 +1,4 @@
-Claudes Vorschläge für den nächsten Prompt erscheinen jetzt wirklich.
+Behoben: Der Agent antwortet nicht mehr doppelt auf dieselbe Eingabe.
 
-• 0.8.0 hat sie auf eine Weise angefordert, die Claude Code ignoriert; jetzt werden sie so eingeschaltet, wie die CLI es erwartet (Claude Code 2.1.220+). Ab der zweiten Antwort steht der Vorschlag über der Tastatur – ein Tipp übernimmt ihn.
-• Claude Code pausiert Vorschläge, wenn das Limit fast erreicht ist.
+• Codex- und Gemini-Sitzungen empfingen jede Antwort per Live-Kanal UND lasen sie erneut aus der Logdatei — eine doppelte Blase entstand. Der Poller wird nun deaktiviert, wenn der Live-Kanal die Inhaltsquelle ist.
+• Linux-Installation funktioniert unter Android 16, das Shell-Zugriff auf App-Speicher entzieht. Der Installer streamt Bytes direkt per ADB-Protokoll.

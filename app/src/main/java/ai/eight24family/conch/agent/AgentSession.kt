@@ -398,6 +398,14 @@ class AgentSession(
     fun usesPersistentChannel(): Boolean =
         usePersistent() || useCodexAppServer() || useGeminiAcp()
 
+    /** True when the live channel IS the content source — Codex app-server
+     *  and Gemini ACP stream every item/message through the channel. Running
+     *  the JSONL tail poller alongside doubles every bubble (measured on
+     *  local models 2026-09-01, on remote servers 2026-10-07). Claude's
+     *  control protocol is lifecycle-only; content comes from the poller. */
+    fun liveChannelStreamsContent(): Boolean =
+        useCodexAppServer() || useGeminiAcp()
+
     private val promptQueue = AgentSessionPromptQueue(
         scope = scope,
         runOneShot = { text, imagePaths ->

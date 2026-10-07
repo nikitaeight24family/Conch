@@ -1,4 +1,4 @@
-Claude's next-prompt suggestions now actually appear.
+Fixed: the agent no longer answers the same prompt twice.
 
-• 0.8.0 asked Claude Code for suggestions in a way it ignores; the app now turns them on the way the CLI expects (Claude Code 2.1.220 or newer). From the second reply on, the CLI's guess at your next prompt shows above the keyboard — one tap puts it in the composer.
-• Claude Code itself pauses suggestions while your plan is close to its limit.
+• Codex and Gemini sessions streamed every reply through the live channel AND re-read it from the log file, producing a duplicate bubble. The poller is now suppressed whenever the live channel is the content source.
+• Linux installation works on Android 16, which revokes shell access to app storage. The installer now streams bytes through the ADB protocol directly.

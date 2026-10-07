@@ -83,29 +83,19 @@ object LinuxInstaller {
         }
 
         onStep("unpacking from the app")
-        val handoff = File(ServiceLocator.appContext.getExternalFilesDir(null), "linux").apply { mkdirs() }
-        val prootFile = File(handoff, "proot")
-        val loaderFile = File(handoff, "loader")
-        val rootfsFile = File(handoff, "rootfs.tar.gz")
-        val copied = SilentlyTry.logged("Conch-Linux", "copy bundled pieces out") {
-            copyAsset(ASSET_PROOT, prootFile)
-            copyAsset(ASSET_LOADER, loaderFile)
-            copyAsset(ASSET_ROOTFS, rootfsFile)
-            true
+        val prootBytes = SilentlyTry.logged("Conch-Linux", "read proot") { readAsset(ASSET_PROOT) }
+        val loaderBytes = SilentlyTry.logged("Conch-Linux", "read loader") { readAsset(ASSET_LOADER) }
+        val rootfsBytes = SilentlyTry.logged("Conch-Linux", "read rootfs") { readAsset(ASSET_ROOTFS) }
+        if (prootBytes == null || loaderBytes == null || rootfsBytes == null) {
+            return@withContext "Could not unpack the bundled Linux from the app."
         }
-        if (copied != true) return@withContext "Could not unpack the bundled Linux from the app."
 
-        val err = LinuxEnv.install(
-            prootPath = prootFile.absolutePath,
-            loaderPath = loaderFile.absolutePath,
-            rootfsArchive = rootfsFile.absolutePath,
+        LinuxEnv.install(
+            prootBytes = prootBytes,
+            loaderBytes = loaderBytes,
+            rootfsBytes = rootfsBytes,
             onStep = onStep,
         )
-        // 4.7 MB of duplicate once the shell has its own copies.
-        SilentlyTry.fired("Conch-Linux", "clear hand-off copies") {
-            prootFile.delete(); loaderFile.delete(); rootfsFile.delete()
-        }
-        err
     }
 
     /**
@@ -147,6 +137,9 @@ object LinuxInstaller {
         }
         ok
     }
+
+    private fun readAsset(path: String): ByteArray =
+        ServiceLocator.appContext.assets.open(path).use { it.readBytes() }
 
     private fun copyAsset(name: String, dest: File) {
         ServiceLocator.appContext.assets.open(name).use { input ->
