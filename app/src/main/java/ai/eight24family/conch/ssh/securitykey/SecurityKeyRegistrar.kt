@@ -134,6 +134,13 @@ class SecurityKeyRegistrar {
                     return@runOnSession Outcome.PinNotSet
                 }
                 throw e
+            } catch (e: Exception) {
+                if (e is java.io.IOException || e.javaClass.simpleName == "ApduException") {
+                    android.util.Log.w(tag, "pinRetries threw ${e.javaClass.simpleName} — ignoring to try getPinToken")
+                    null
+                } else {
+                    throw e
+                }
             }
             android.util.Log.d(tag, "pin retries=$retries; requesting pin token")
 

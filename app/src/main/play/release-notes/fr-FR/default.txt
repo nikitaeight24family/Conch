@@ -1,4 +1,4 @@
-Corrigé : l'agent ne répond plus deux fois au même message.
+Corrigé : « APDU error: 0x6d00 » lors de l'importation depuis une clé NFC nécessitant un code PIN.
 
-• Les sessions Codex et Gemini recevaient chaque réponse par le canal direct ET la relisaient dans le fichier journal, créant un doublon. Le sondage est désormais désactivé quand le canal direct est la source du contenu.
-• L'installation Linux fonctionne sous Android 16, qui révoque l'accès du shell au stockage de l'application. L'installateur envoie les données directement via le protocole ADB.
+• Saisir le code PIN tout en maintenant la clé contre le téléphone provoquait souvent une perte de connexion.
+• Le processus est mis à jour : si votre clé nécessite un code PIN, l'application vous demandera de le saisir d'abord, puis de présenter la clé une seconde fois.

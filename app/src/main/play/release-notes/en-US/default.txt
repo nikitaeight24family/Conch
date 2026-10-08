@@ -1,4 +1,4 @@
-Fixed: the agent no longer answers the same prompt twice.
+Fixed: "APDU error: 0x6d00" when importing from an NFC security key that requires a PIN.
 
-• Codex and Gemini sessions streamed every reply through the live channel AND re-read it from the log file, producing a duplicate bubble. The poller is now suppressed whenever the live channel is the content source.
-• Linux installation works on Android 16, which revokes shell access to app storage. The installer now streams bytes through the ADB protocol directly.
+• Typing the PIN while holding the key against the phone often caused the NFC connection to drop or reset, resulting in technical APDU errors.
+• The flow has been updated: if your key requires a PIN, the app will ask you to enter it first, and then prompt you to tap the key again. The PIN is sent instantly on the second tap.

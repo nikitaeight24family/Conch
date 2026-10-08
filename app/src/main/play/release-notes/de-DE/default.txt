@@ -1,4 +1,4 @@
-Behoben: Der Agent antwortet nicht mehr doppelt auf dieselbe Eingabe.
+Behoben: "APDU error: 0x6d00" beim Importieren von einem NFC-Sicherheitsschlüssel mit PIN.
 
-• Codex- und Gemini-Sitzungen empfingen jede Antwort per Live-Kanal UND lasen sie erneut aus der Logdatei — eine doppelte Blase entstand. Der Poller wird nun deaktiviert, wenn der Live-Kanal die Inhaltsquelle ist.
-• Linux-Installation funktioniert unter Android 16, das Shell-Zugriff auf App-Speicher entzieht. Der Installer streamt Bytes direkt per ADB-Protokoll.
+• Die PIN-Eingabe, während der Schlüssel an das Telefon gehalten wurde, führte oft zu Verbindungsabbrüchen.
+• Der Ablauf wurde aktualisiert: Wenn Ihr Schlüssel eine PIN erfordert, geben Sie diese zuerst ein und tippen den Schlüssel danach ein zweites Mal an. Die PIN wird dann beim zweiten Tippen sofort übertragen.

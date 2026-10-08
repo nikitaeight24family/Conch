@@ -108,8 +108,10 @@ class KeychainViewModel : ViewModel() {
 
     @Volatile private var activeAddSkJob: kotlinx.coroutines.Job? = null
 
-    private val _pendingPin =
-        kotlinx.coroutines.flow.MutableStateFlow<kotlinx.coroutines.CompletableDeferred<CharArray?>?>(null)
+    private var cachedPin: CharArray? = null
+    private var pendingDeviceRun: (() -> Unit)? = null
+
+    private class NeedsPinException : Exception("Needs PIN")
 
     /** Discover (enumerate) every resident SSH credential on the
      *  presented token and import each into the keychain. Used by the
@@ -152,6 +154,11 @@ class KeychainViewModel : ViewModel() {
     ) {
         activeAddSkJob?.cancel()
         android.util.Log.d("Conch-SK-VM", "runOnDevice transport=$transport reason=$notifierReason")
+
+        pendingDeviceRun = {
+            runOnDevice(transport, activity, notifierReason, op)
+        }
+
         _addSkState.value = AddSkState.AwaitingTap(transport)
         SecurityKeyNotifier.post(
             context = ServiceLocator.appContext,
@@ -160,13 +167,12 @@ class KeychainViewModel : ViewModel() {
         )
         activeAddSkJob = viewModelScope.launch {
             val pinProvider: () -> CharArray? = pp@{
-                val deferred = kotlinx.coroutines.CompletableDeferred<CharArray?>()
-                _pendingPin.value = deferred
-                _addSkState.value = AddSkState.AwaitingPin(transport)
-                val chars = kotlinx.coroutines.runBlocking { deferred.await() }
-                _pendingPin.value = null
-                _addSkState.value = AddSkState.Importing(transport)
-                chars
+                val cached = cachedPin
+                if (cached != null) return@pp cached
+
+                // No cached PIN. Throw to abort the NFC/USB wait, show the PIN UI,
+                // and let the user type the PIN without holding the key against the phone.
+                throw NeedsPinException()
             }
             val outcome: SecurityKeyRegistrar.Outcome = withContext(Dispatchers.IO) {
                 runCatching {
@@ -219,12 +225,30 @@ class KeychainViewModel : ViewModel() {
                     }
                 }.getOrElse {
                     if (it is kotlinx.coroutines.CancellationException) throw it
+                    if (it is NeedsPinException) return@withContext null
                     android.util.Log.e("Conch-SK-VM", "import threw", it)
-                    SecurityKeyRegistrar.Outcome.Failed(it.message ?: "import failed: ${it.javaClass.simpleName}")
+                    val msg = if (it is java.io.IOException || it.javaClass.simpleName == "ApduException") {
+                        "Connection dropped. If using NFC, keep the key tapped against the phone until finished."
+                    } else {
+                        it.message ?: "import failed: ${it.javaClass.simpleName}"
+                    }
+                    SecurityKeyRegistrar.Outcome.Failed(msg)
                 }
+            } ?: run {
+                _addSkState.value = AddSkState.AwaitingPin(transport)
+                return@launch
             }
+
             android.util.Log.d("Conch-SK-VM", "outcome=${outcome::class.simpleName}")
             SecurityKeyNotifier.cancel(ServiceLocator.appContext)
+
+            // Clear cached PIN unless it's a connection failure (Failed), so they
+            // can just "Try again" without retyping if the connection drops.
+            if (outcome !is SecurityKeyRegistrar.Outcome.Failed) {
+                cachedPin = null
+            }
+            pendingDeviceRun = null
+
             _addSkState.value = when (outcome) {
                 is SecurityKeyRegistrar.Outcome.Ok -> {
                     val saved = outcome.imported.map { cred ->
@@ -247,16 +271,19 @@ class KeychainViewModel : ViewModel() {
     }
 
     fun submitPin(pin: String) {
-        val deferred = _pendingPin.value ?: return
-        deferred.complete(pin.toCharArray())
+        cachedPin = pin.toCharArray()
+        pendingDeviceRun?.invoke()
     }
 
     fun cancelPin() {
-        _pendingPin.value?.complete(null)
+        cachedPin = null
+        pendingDeviceRun = null
+        clearAddSkState()
     }
 
     fun clearAddSkState() {
-        _pendingPin.value?.complete(null)
+        cachedPin = null
+        pendingDeviceRun = null
         activeAddSkJob?.cancel()
         activeAddSkJob = null
         SecurityKeyNotifier.cancel(ServiceLocator.appContext)

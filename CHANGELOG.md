@@ -15,6 +15,15 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.8.3] — 2026-10-08
+
+### Fixed
+- **"APDU error: 0x6d00" when importing from an NFC security key.** Typing the
+  PIN while holding the key against the phone often caused the NFC connection to
+  drop or reset, resulting in technical APDU errors. The flow has been updated:
+  if your key requires a PIN, the app will ask you to enter it first, and then
+  prompt you to tap the key again. The PIN is sent instantly on the second tap.
+
 ## [0.8.2] — 2026-10-07
 
 ### Fixed
@@ -2222,6 +2231,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.8.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.3
 [0.8.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.2
 [0.8.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.1
 [0.8.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.0

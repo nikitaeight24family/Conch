@@ -1,4 +1,4 @@
-Corregido: el agente ya no responde dos veces al mismo mensaje.
+Corregido: "APDU error: 0x6d00" al importar desde una llave de seguridad NFC con PIN.
 
-• Las sesiones de Codex y Gemini recibían cada respuesta por el canal en vivo Y la releían del archivo de registro, generando un duplicado. Ahora el sondeo se desactiva cuando el canal en vivo es la fuente de contenido.
-• La instalación de Linux funciona en Android 16, que revoca el acceso del shell al almacenamiento de la app. El instalador envía los datos directamente por el protocolo ADB.
+• Escribir el PIN mientras se sostenía la llave contra el teléfono solía causar cortes de conexión.
+• Flujo actualizado: si tu llave requiere un PIN, la app te pedirá que lo ingreses primero y luego que acerques la llave por segunda vez. El PIN se envía instantáneamente en el segundo toque.
