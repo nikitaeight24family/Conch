@@ -15,6 +15,15 @@ _Nothing yet — see ROADMAP for what's next._
 
 ---
 
+## [0.8.4] — 2026-10-09
+
+### Fixed
+- **Agents failing to install on the phone's local server.** Tapping "install"
+  for Codex or Claude on `this device` would silently fail and abort. The
+  bundled local Linux environment uses Alpine, whose base rootfs lacks `bash`
+  and `curl`, but the vendor installation scripts require both. The app now
+  installs them automatically when initializing the local server.
+
 ## [0.8.3] — 2026-10-08
 
 ### Fixed
@@ -2231,6 +2240,7 @@ First public release.
 [0.3.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.2
 [0.3.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.1
 [0.3.0]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.3.0
+[0.8.4]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.4
 [0.8.3]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.3
 [0.8.2]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.2
 [0.8.1]: https://github.com/nikitaeight24family/Conch/releases/tag/v0.8.1

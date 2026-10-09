@@ -1,4 +1,4 @@
-Fixed: "APDU error: 0x6d00" when importing from an NFC security key that requires a PIN.
+Fixed: Agents failing to install on the phone's local server.
 
-• Typing the PIN while holding the key against the phone often caused the NFC connection to drop or reset, resulting in technical APDU errors.
-• The flow has been updated: if your key requires a PIN, the app will ask you to enter it first, and then prompt you to tap the key again. The PIN is sent instantly on the second tap.
+• When you tapped "install" for Codex or Claude on "this device", the installation would silently fail.
+• The local Linux environment bundled inside the app was missing 'bash' and 'curl', which the vendor installation scripts require. The app now installs these tools automatically when initializing the local server.

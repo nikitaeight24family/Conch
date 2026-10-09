@@ -1,4 +1,4 @@
-Behoben: "APDU error: 0x6d00" beim Importieren von einem NFC-Sicherheitsschlüssel mit PIN.
+Behoben: Fehler bei der Agenten-Installation auf dem lokalen Telefon-Server.
 
-• Die PIN-Eingabe, während der Schlüssel an das Telefon gehalten wurde, führte oft zu Verbindungsabbrüchen.
-• Der Ablauf wurde aktualisiert: Wenn Ihr Schlüssel eine PIN erfordert, geben Sie diese zuerst ein und tippen den Schlüssel danach ein zweites Mal an. Die PIN wird dann beim zweiten Tippen sofort übertragen.
+• Wenn Sie für Codex oder Claude auf "this device" auf "installieren" tippten, schlug die Installation stillschweigend fehl.
+• Der integrierten Linux-Umgebung fehlten 'bash' und 'curl', die von den Installationsskripten benötigt werden. Die App installiert diese Werkzeuge nun automatisch beim Initialisieren des lokalen Servers.

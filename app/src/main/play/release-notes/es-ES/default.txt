@@ -1,4 +1,4 @@
-Corregido: "APDU error: 0x6d00" al importar desde una llave de seguridad NFC con PIN.
+Corregido: fallo al instalar agentes en el servidor local del teléfono.
 
-• Escribir el PIN mientras se sostenía la llave contra el teléfono solía causar cortes de conexión.
-• Flujo actualizado: si tu llave requiere un PIN, la app te pedirá que lo ingreses primero y luego que acerques la llave por segunda vez. El PIN se envía instantáneamente en el segundo toque.
+• Al pulsar "instalar" para Codex o Claude en "this device", la instalación fallaba silenciosamente.
+• Al entorno Linux integrado le faltaban 'bash' y 'curl', requeridos por los scripts de instalación. La aplicación ahora instala estas herramientas automáticamente al iniciar el servidor local.

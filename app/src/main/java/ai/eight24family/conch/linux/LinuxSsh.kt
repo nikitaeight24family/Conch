@@ -367,9 +367,9 @@ object LinuxSsh {
         set -u
         export PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         export HOME=/root TMPDIR=/tmp
-        if [ ! -x /usr/sbin/sshd ]; then
-          echo 'installing the ssh daemon'
-          apk add --no-cache openssh-server openssh-sftp-server 2>&1 | tail -3
+        if [ ! -x /usr/sbin/sshd ] || ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+          echo 'installing the ssh daemon and base tools'
+          apk add --no-cache openssh-server openssh-sftp-server bash curl 2>&1 | tail -3
         fi
         mkdir -p /var/empty /run /root/.ssh
         chmod 700 /root/.ssh
